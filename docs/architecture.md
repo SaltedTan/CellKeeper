@@ -375,7 +375,9 @@ The controller adds, independent of the backend:
 - a request answered `unchanged` does not count toward the restricting
   budget, because nothing was written;
 - will-sleep precautions that last until wake (bounded to 2 minutes of
-  monotonic time if no wake notification arrives);
+  monotonic time if no wake notification arrives). The re-read 35 s after a
+  wake is its own trigger and never ends them, and a sleep announcement
+  cancels a pending re-read;
 - `shutdown(reason:)` on quit: restore `.normal`, then turn every later
   command, including ones already queued, into a no-op;
 - a bounded in-memory activity log mirrored to unified logging.

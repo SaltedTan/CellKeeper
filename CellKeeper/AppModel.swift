@@ -100,6 +100,9 @@ final class AppModel {
     @ObservationIgnored private let commands: AsyncStream<Command>
     @ObservationIgnored private let commandSink: AsyncStream<Command>.Continuation
     @ObservationIgnored private var tasks: [Task<Void, Never>] = []
+    /// The pending re-read after a wake; cancelled if the Mac announces
+    /// sleep again first.
+    @ObservationIgnored private var postWakeReread: Task<Void, Never>?
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     /// Outside changes to the Charge Limit already reflected in the settings.
     @ObservationIgnored private var handledAdoptionCount = 0
@@ -160,14 +163,10 @@ final class AppModel {
 
         let center = NSWorkspace.shared.notificationCenter
         observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in
-                self?.send(.evaluate(.didWake))
-                try? await Task.sleep(for: Self.postWakeRereadDelay)
-                self?.send(.evaluate(.didWake))
-            }
+            Task { @MainActor in self?.didWake() }
         })
         observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.send(.evaluate(.willSleep)) }
+            Task { @MainActor in self?.willSleep() }
         })
 
         if let startupSwitch {
@@ -177,12 +176,29 @@ final class AppModel {
         send(.evaluate(.launch))
     }
 
+    private func didWake() {
+        send(.evaluate(.didWake))
+        postWakeReread?.cancel()
+        postWakeReread = Task { [weak self] in
+            try? await Task.sleep(for: Self.postWakeRereadDelay)
+            guard !Task.isCancelled else { return }
+            self?.send(.evaluate(.postWakeReread))
+        }
+    }
+
+    private func willSleep() {
+        postWakeReread?.cancel()
+        postWakeReread = nil
+        send(.evaluate(.willSleep))
+    }
+
     /// Stops monitoring and command processing, returning the controller so
     /// the caller can restore defaults without involving the main actor.
     func stopForTermination() -> ChargeController {
         commandSink.finish()
         for task in tasks { task.cancel() }
         tasks.removeAll()
+        postWakeReread?.cancel()
         return controller
     }
 
