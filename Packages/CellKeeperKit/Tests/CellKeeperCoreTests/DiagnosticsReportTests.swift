@@ -55,6 +55,25 @@ struct DiagnosticsReportTests {
         }
     }
 
+    @Test("Paths in error messages do not name the macOS account")
+    func redactsAccountNames() async {
+        struct FileError: Error, CustomStringConvertible {
+            var description: String {
+                #"Error Domain=NSCocoaErrorDomain Code=513 "You don’t have permission to save the file “record.json” in the folder “CellKeeper”." UserInfo={NSFilePath=/Users/alice.smith/Library/Containers/io.github.saltedtan.CellKeeper/Data/Library/Application Support/CellKeeper/record.json, NSURL=file:///Users/alice.smith/Library/Containers/x}"#
+            }
+        }
+        let telemetry = StubTelemetry(snapshot(percent: 78), clock: clock)
+        await telemetry.fail(with: FileError())
+        let controller = ChargeController(telemetry: telemetry, backend: MockChargingBackend(), settings: .default, now: { clock.now }, uptime: { clock.uptime })
+        let status = await controller.evaluate(.launch)
+        #expect(status.telemetryError?.contains("alice.smith") == true)
+        let report = DiagnosticsReport.text(status: status, environment: environment, generatedAt: referenceDate)
+
+        #expect(!report.contains("alice"))
+        #expect(report.contains("NSFilePath=/Users/<user>/Library/Containers/io.github.saltedtan.CellKeeper/Data/Library/Application Support/CellKeeper/record.json"))
+        #expect(report.contains("NSURL=file:///Users/<user>/Library/Containers/x"))
+    }
+
     @Test("Missing telemetry and an unknown model are stated, not omitted")
     func missingValues() async {
         let telemetry = StubTelemetry(snapshot(percent: 78), clock: clock)
