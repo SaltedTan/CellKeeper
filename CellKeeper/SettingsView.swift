@@ -186,31 +186,46 @@ private struct ControlSettingsTab: View {
                 Text("Simulated records what CellKeeper would do without changing your Mac. Read-only performs no control. macOS Charge Limit lets macOS enforce the limit you choose here; it is the only real control in this version.")
             }
 
-            if model.backendChoice == .nativeLimit || model.status?.capabilities.isEnforcedByMacOS == true {
-                NativeLimitSetupSection(model: model)
-            }
-
             if let status = model.status {
                 Section("Status") {
-                    LabeledContent("Backend", value: status.backend.displayName)
-                    LabeledContent("Availability") {
-                        StatusBadge(title: status.capabilities.availability.badgeTitle, color: status.capabilities.availability.badgeColor)
+                    LabeledContent("Backend") {
+                        HStack(spacing: 6) {
+                            if status.backend.displayName != status.capabilities.availability.badgeTitle {
+                                Text(status.backend.displayName)
+                            }
+                            StatusBadge(title: status.capabilities.availability.badgeTitle, color: status.capabilities.availability.badgeColor)
+                        }
                     }
                     Text(status.capabilities.explanation)
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text(status.backend.summary)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    LabeledContent("Reported mode", value: status.currentMode?.intentTitle(nativeLimit: status.capabilities.isEnforcedByMacOS) ?? "Unknown")
-                    LabeledContent("Recent failures", value: "\(status.consecutiveFailures)")
+                        .fixedSize(horizontal: false, vertical: true)
                     if status.isBackendFaulted {
+                        Label(isNative
+                              ? "The control backend failed repeatedly. Until you clear the fault, CellKeeper only gives back your own Charge Limit."
+                              : "The control backend failed repeatedly. Until you clear the fault, only normal charging will be requested.",
+                              systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
                         Button("Clear fault and retry") { model.resetBackendFault() }
                     }
                 }
             }
+
+            if isNative {
+                NativeLimitSetupSection(model: model)
+            }
+
+            if let status = model.status {
+                ControlDetailsSection(status: status, isNative: isNative)
+            }
         }
         .formStyle(.grouped)
+    }
+
+    private var isNative: Bool {
+        model.backendChoice == .nativeLimit || model.status?.capabilities.isEnforcedByMacOS == true
     }
 
     private func choose(_ choice: ControlBackendChoice) {
@@ -252,9 +267,6 @@ private struct NativeLimitSetupSection: View {
                 }
             }
             LabeledContent("Charge Limit reported by macOS", value: native?.reportedLimit.map(Format.chargeLimit) ?? "Unknown")
-            if let readAt = native?.readAt {
-                LabeledContent("Read at", value: readAt.formatted(date: .omitted, time: .standard))
-            }
             if let problem = native?.readProblem {
                 Label("Could not read the Charge Limit: \(problem)", systemImage: "exclamationmark.triangle")
                     .font(.caption)
@@ -303,10 +315,9 @@ private struct NativeLimitSetupSection: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
-            Text("CellKeeper reads the limit with “pmset -g battlimit”, an undocumented, read-only report that a macOS update could change. If CellKeeper cannot read or recognise it, it sets no new limit; it still tries to give back your own recorded limit, and reports that as unconfirmed until it reads it back. You can always set the limit yourself in System Settings › Battery › Charging.")
+            Text("You can always set the limit yourself in System Settings › Battery › Charging.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             Button("Check again") { model.recheckBackend() }
         }
     }
@@ -317,6 +328,39 @@ private struct NativeLimitSetupSection: View {
             get: { isSetupExpanded ?? (model.status?.nativeLimit?.isShortcutFound != true) },
             set: { isSetupExpanded = $0 }
         )
+    }
+}
+
+/// What CellKeeper reads from the backend, for diagnosis. Collapsed by
+/// default; nothing here needs the user to act.
+private struct ControlDetailsSection: View {
+    let status: ControllerStatus
+    let isNative: Bool
+    @State private var isExpanded = false
+
+    var body: some View {
+        Section {
+            DisclosureGroup("Details", isExpanded: $isExpanded) {
+                VStack(alignment: .leading, spacing: 8) {
+                    LabeledContent("Reported mode", value: status.currentMode?.intentTitle(nativeLimit: status.capabilities.isEnforcedByMacOS) ?? "Unknown")
+                    LabeledContent("Recent failures", value: "\(status.consecutiveFailures)")
+                    if let readAt = status.nativeLimit?.readAt {
+                        LabeledContent("Charge Limit read at", value: readAt.formatted(date: .omitted, time: .standard))
+                    }
+                    Divider()
+                    Group {
+                        Text(status.backend.summary)
+                        if isNative {
+                            Text("CellKeeper reads the limit with “pmset -g battlimit”, an undocumented, read-only report that a macOS update could change. If CellKeeper cannot read or recognise it, it sets no new limit; it still tries to give back your own recorded limit, and reports that as unconfirmed until it reads it back.")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.top, 6)
+            }
+        }
     }
 }
 
