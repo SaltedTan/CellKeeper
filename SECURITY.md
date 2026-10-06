@@ -22,14 +22,31 @@ disclosure timeline with you.
 
 ## Scope and threat model
 
-CellKeeper currently runs as an ordinary, App-Sandboxed user application. It
-only reads battery telemetry through public, read-only interfaces and performs
-no hardware control, so its attack surface is small.
+CellKeeper runs as an ordinary, App-Sandboxed user application with no
+privileged helper. It reads battery telemetry through public and allowlisted
+read-only interfaces, and never writes to hardware itself.
+
+Its only control is opt-in and experimental. With the **macOS Charge Limit**
+backend selected, it changes macOS's own Charge Limit (80–100%) by running
+the user's "CellKeeper Set Charge Limit" shortcut with Apple's `shortcuts`
+command-line tool. It confirms each change with `pmset -g battlimit`, which is
+read-only and always run with those fixed arguments. It keeps a record of the
+user's own limit in a file in its container, so that it can restore that
+limit. The other backends change nothing.
 
 Issues we especially want to hear about:
 
-- anything that lets CellKeeper change charging or hardware state in this
-  version, or report a simulated action as a real one;
+- anything that lets CellKeeper change charging or hardware state other than
+  macOS's Charge Limit through the user's shortcut, or set any Charge Limit
+  other than the user's own while another backend is selected (restoring the
+  user's own limit at launch is intended);
+- anything that makes CellKeeper run a command other than `shortcuts list`,
+  `shortcuts run` with the user's shortcut and a number from 80 to 100 as
+  input, and `pmset -g battlimit`, or pass them other arguments;
+- reporting a simulated or unconfirmed change as applied, or not giving back
+  the user's own Charge Limit when CellKeeper says it has;
+- a malformed or tampered record file that makes CellKeeper set a limit the
+  user did not choose, or crash;
 - leaks of device identifiers (serial numbers etc.) into logs, files, or the
   UI;
 - weaknesses in the build or CI configuration (for example, workflow

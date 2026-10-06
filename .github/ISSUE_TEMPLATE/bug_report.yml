@@ -53,8 +53,15 @@ body:
       options:
         - Simulated
         - Read-only
+        - macOS Charge Limit (through Shortcuts)
     validations:
       required: true
+  - type: textarea
+    id: battlimit
+    attributes:
+      label: Charge Limit report (macOS Charge Limit backend only)
+      description: Output of `pmset -g battlimit`, which only reads the setting. Leave empty for other backends.
+      render: text
   - type: dropdown
     id: other-tools
     attributes:
