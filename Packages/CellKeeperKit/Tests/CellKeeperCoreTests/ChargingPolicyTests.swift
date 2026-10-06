@@ -91,6 +91,41 @@ struct ChargeLimitTests {
         #expect(raised.action == .enableCharging)
     }
 
+    @Test("Raising the limit above the charge resumes charging, without waiting for the resume threshold")
+    func raisingLimitResumesCharging() {
+        let held = ChargingPolicy.evaluate(input(snapshot(percent: 80), settings: ChargingSettings(chargeLimit: 80, resumeThreshold: 75)))
+        #expect(held.state == .holding)
+        #expect(held.memory.latchedLimit == 80)
+
+        // The UI keeps the resume threshold at 75% when the limit goes up.
+        let raisedSettings = ChargingSettings(chargeLimit: 80, resumeThreshold: 75).withChargeLimit(90)
+        #expect(raisedSettings.resumeThreshold == 75)
+        let raised = ChargingPolicy.evaluate(input(snapshot(percent: 80), settings: raisedSettings, currentMode: .inhibitCharging, memory: held.memory))
+        #expect(raised.state == .charging)
+        #expect(raised.action == .enableCharging)
+        #expect(!raised.memory.limitReached)
+        #expect(raised.memory.latchedLimit == nil)
+
+        let reached = ChargingPolicy.evaluate(input(snapshot(percent: 90), settings: raisedSettings, memory: raised.memory))
+        #expect(reached.state == .holding)
+        #expect(reached.memory.latchedLimit == 90)
+    }
+
+    @Test("Lowering the limit, or raising it to a charge already reached, keeps holding")
+    func limitChangesThatKeepHolding() {
+        let held = ChargingPolicy.evaluate(input(snapshot(percent: 86), settings: ChargingSettings(chargeLimit: 80, resumeThreshold: 75)))
+        #expect(held.state == .holding)
+
+        let lowered = ChargingPolicy.evaluate(input(snapshot(percent: 86), settings: ChargingSettings(chargeLimit: 70, resumeThreshold: 65), currentMode: .inhibitCharging, memory: held.memory))
+        #expect(lowered.state == .holding)
+        #expect(lowered.memory.latchedLimit == 70)
+
+        let raisedToCharge = ChargingPolicy.evaluate(input(snapshot(percent: 86), settings: ChargingSettings(chargeLimit: 85, resumeThreshold: 75), currentMode: .inhibitCharging, memory: lowered.memory))
+        #expect(raisedToCharge.state == .holding)
+        #expect(raisedToCharge.action == .noAction)
+        #expect(raisedToCharge.memory.latchedLimit == 85)
+    }
+
     @Test("The same input always produces the same decision")
     func deterministic() {
         let value = input(snapshot(percent: 77), memory: PolicyMemory(limitReached: true))

@@ -24,7 +24,7 @@ import Foundation
 /// 9. Discharge session active → run from the battery down to the confirmed
 ///    target (never below it, never below the current limit).
 /// 10. Charge limit of 100% → charging allowed.
-/// 11. Limit latch set → hold.
+/// 11. Limit latch set → hold (raising the limit releases it).
 /// 12. Sleep imminent at or above the resume threshold → hold, so a software
 ///     limit cannot overshoot while the Mac sleeps.
 /// 13. Otherwise → charge toward the limit.
@@ -124,7 +124,12 @@ public enum ChargingPolicy {
         }
 
         var memory = input.memory
-        memory.limitReached = nextLimitLatch(current: memory.limitReached, percent: percent, settings: settings)
+        // A limit raised above the one the latch was set at ends the hold:
+        // the user asked for more charge. The latch sets again at once if
+        // the charge has already reached the new limit.
+        let wasLimitReached = memory.limitReached && settings.chargeLimit <= (memory.latchedLimit ?? settings.chargeLimit)
+        memory.limitReached = nextLimitLatch(current: wasLimitReached, percent: percent, settings: settings)
+        memory.latchedLimit = memory.limitReached ? settings.chargeLimit : nil
         memory.temperatureTripped = nextTemperatureLatch(current: memory.temperatureTripped, celsius: temperature, protection: protection)
         memory.belowSafetyFloor = nextFloorLatch(current: memory.belowSafetyFloor, percent: percent)
 
