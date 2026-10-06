@@ -583,8 +583,9 @@ unavailable.
 
 `SettingsStore` stores `ChargingSettings` as versioned JSON in `UserDefaults`.
 Decoding tolerates missing keys; decoded values are validated, and invalid or
-corrupt data falls back to defaults with a visible notice. Invalid settings
-are never saved. The selected backend is stored separately.
+corrupt data falls back to defaults with Manage charging off (failing toward
+macOS defaults), with a visible notice. A first launch with nothing stored
+uses the defaults as they are. Invalid settings are never saved. The selected backend is stored separately.
 
 ## Logging
 

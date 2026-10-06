@@ -190,21 +190,30 @@ struct SettingsStoreTests {
         #expect(defaults.data(forKey: SettingsStore.chargingSettingsKey) == nil)
     }
 
-    @Test("Invalid stored settings fall back to defaults")
+    @Test("Invalid stored settings fall back to defaults, with management off")
     func invalidStored() {
         let (store, defaults) = makeStore()
-        defaults.set(Data(#"{"chargeLimit": 5, "resumeThreshold": 90}"#.utf8), forKey: SettingsStore.chargingSettingsKey)
+        defaults.set(Data(#"{"isManagementEnabled": false, "chargeLimit": 5, "resumeThreshold": 90}"#.utf8), forKey: SettingsStore.chargingSettingsKey)
         let result = store.loadChargingSettings()
-        #expect(result.settings == .default)
-        #expect(result.recoveryReason != nil)
+        #expect(result.settings == SettingsStore.recoverySettings)
+        #expect(!result.settings.isManagementEnabled)
+        #expect(result.settings.chargeLimit == ChargingSettings.default.chargeLimit)
+        #expect(result.recoveryReason?.contains("Manage charging off") == true)
     }
 
-    @Test("Corrupt stored data falls back to defaults")
+    @Test("Corrupt stored data falls back to defaults, with management off")
     func corruptStored() {
         let (store, defaults) = makeStore()
         defaults.set(Data("not json".utf8), forKey: SettingsStore.chargingSettingsKey)
         let result = store.loadChargingSettings()
-        #expect(result.settings == .default)
-        #expect(result.recoveryReason != nil)
+        #expect(result.settings == SettingsStore.recoverySettings)
+        #expect(!result.settings.isManagementEnabled)
+        #expect(result.recoveryReason?.contains("Manage charging off") == true)
+    }
+
+    @Test("A first launch, with nothing stored, still starts with management on")
+    func firstLaunchManages() {
+        let (store, _) = makeStore()
+        #expect(store.loadChargingSettings().settings.isManagementEnabled)
     }
 }
