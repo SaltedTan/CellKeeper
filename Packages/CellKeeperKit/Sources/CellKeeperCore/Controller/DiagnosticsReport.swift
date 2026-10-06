@@ -22,7 +22,9 @@ public struct DiagnosticsEnvironment: Sendable, Equatable {
 /// It is built only from a ``ControllerStatus`` and a
 /// ``DiagnosticsEnvironment``. Those carry no serial numbers, power source
 /// IDs or other device identifiers, because telemetry is read through an
-/// allowlist and the activity log never records them.
+/// allowlist and the activity log never records them. Error messages can
+/// contain file paths, which name the macOS account under `/Users`; the
+/// report replaces that name.
 public enum DiagnosticsReport {
     public static func text(status: ControllerStatus, environment: DiagnosticsEnvironment, generatedAt: Date) -> String {
         var lines: [String] = []
@@ -129,7 +131,14 @@ public enum DiagnosticsReport {
         for event in status.events {
             lines.append("\(timestamp(event.date)) [\(event.kind.rawValue)] \(event.message)")
         }
-        return lines.joined(separator: "\n") + "\n"
+        return redactingAccountNames(lines.joined(separator: "\n") + "\n")
+    }
+
+    /// Replaces the account name in paths such as
+    /// `/Users/<name>/Library/Containers/…`, which Foundation's file errors
+    /// include.
+    static func redactingAccountNames(_ text: String) -> String {
+        text.replacingOccurrences(of: #"/Users/[^/\s"'“”‘’,;:()\[\]{}<>]+"#, with: "/Users/<user>", options: .regularExpression)
     }
 
     private static func appendBattery(_ snapshot: BatterySnapshot, to lines: inout [String]) {
