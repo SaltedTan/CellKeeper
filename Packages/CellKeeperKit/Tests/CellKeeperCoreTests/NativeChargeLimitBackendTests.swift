@@ -63,6 +63,43 @@ struct NativeChargeLimitBackendTests {
         #expect(system.listCalls == 3)
     }
 
+    @Test("The status says whether the shortcut was found")
+    func shortcutFoundStatus() async {
+        let backend = makeBackend()
+        #expect(await backend.nativeLimitStatus()?.isShortcutFound == nil)
+
+        system.names = ["Something else"]
+        _ = await backend.capabilities()
+        #expect(await backend.nativeLimitStatus()?.isShortcutFound == false)
+
+        system.names = [NativeChargeLimitBackend.defaultShortcutName]
+        _ = await backend.capabilities()
+        #expect(await backend.nativeLimitStatus()?.isShortcutFound == true)
+
+        // A failed listing says nothing new about the shortcut.
+        await backend.recheckAvailability()
+        system.listFails = true
+        _ = await backend.capabilities()
+        #expect(await backend.nativeLimitStatus()?.isShortcutFound == true)
+    }
+
+    @Test("Running the shortcut shows whether it is there, even when it is not listed first")
+    func shortcutFoundByRunning() async throws {
+        storeOwnershipRecord(owner: 80, target: 85, in: store)
+        system.reading = .limit(85)
+        let backend = makeBackend()
+        // With a record, availability does not list shortcuts.
+        _ = await backend.capabilities()
+        #expect(await backend.nativeLimitStatus()?.isShortcutFound == nil)
+
+        #expect(try await backend.setMode(.nativeLimit(percent: 90)) == .applied)
+        #expect(await backend.nativeLimitStatus()?.isShortcutFound == true)
+
+        system.runBehaviour = .fails
+        await #expect(throws: BackendError.self) { try await backend.setMode(.nativeLimit(percent: 95)) }
+        #expect(await backend.nativeLimitStatus()?.isShortcutFound == nil)
+    }
+
     @Test("An unrecognised report without a recorded limit makes the backend unavailable")
     func unrecognisedReportUnavailable() async {
         system.reading = .unrecognized("test")

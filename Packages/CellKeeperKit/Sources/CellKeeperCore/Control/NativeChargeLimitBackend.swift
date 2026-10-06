@@ -171,6 +171,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     private var hasReconciledRecord = false
     private var isNoLimitConfirmed = false
     private var shortcutConfirmedAtUptime: TimeInterval?
+    private var isShortcutFound: Bool?
     private var lastReading: NativeChargeLimitReading?
     private var lastReadAt: Date?
     private var lastReadProblem: String?
@@ -269,6 +270,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         } catch {
             return .unavailable("Could not list your shortcuts: \(error)", style: style)
         }
+        isShortcutFound = names.contains(shortcutName)
         guard names.contains(shortcutName) else {
             return .unavailable("No shortcut named “\(shortcutName)” was found. Create it as described in Settings › Control.", style: style)
         }
@@ -363,6 +365,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         }
         status.isReportedStateOwn = isLastReportedStateOwn
         status.isAdoptionUnsaved = unsavedMarker != nil
+        status.isShortcutFound = isShortcutFound
         return status
     }
 
@@ -524,9 +527,11 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         } catch {
             // The shortcut may have gone; look for it again next time.
             shortcutConfirmedAtUptime = nil
+            isShortcutFound = nil
             CellKeeperLog.backend.error("Shortcut run for \(percent)% failed after \(self.uptime() - started, format: .fixed(precision: 2)) s: \(String(describing: error), privacy: .public)")
             throw BackendError.operationFailed("The “\(shortcutName)” shortcut failed: \(error)")
         }
+        isShortcutFound = true
         CellKeeperLog.backend.notice("Shortcut run for \(percent)% finished in \(self.uptime() - started, format: .fixed(precision: 2)) s; reading the setting back")
     }
 
