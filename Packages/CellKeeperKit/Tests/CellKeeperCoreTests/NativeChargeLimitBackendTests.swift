@@ -100,6 +100,30 @@ struct NativeChargeLimitBackendTests {
         #expect(await backend.nativeLimitStatus()?.isShortcutFound == nil)
     }
 
+    @Test("A limit CellKeeper cannot record as the user's own makes the backend unavailable")
+    func unsupportedOwnLimitUnavailable() async {
+        system.reading = .limit(70)
+        guard case .unavailable(let reason) = await makeBackend().capabilities().availability else {
+            Issue.record("expected unavailable")
+            return
+        }
+        #expect(reason.contains("70%"))
+    }
+
+    @Test("Without a record, the user's limit is checked every time, even while the shortcut listing is cached")
+    func ownLimitCheckedDespiteCache() async {
+        let backend = makeBackend()
+        #expect(await backend.capabilities().availability == .experimental)
+        system.reading = .noLimit
+        guard case .unavailable = await backend.capabilities().availability else {
+            Issue.record("expected unavailable once macOS reports no limit")
+            return
+        }
+        system.reading = .limit(85)
+        #expect(await backend.capabilities().availability == .experimental)
+        #expect(system.listCalls == 1)
+    }
+
     @Test("An unrecognised report without a recorded limit makes the backend unavailable")
     func unrecognisedReportUnavailable() async {
         system.reading = .unrecognized("test")

@@ -78,7 +78,8 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     public static let defaultShortcutName = "CellKeeper Set Charge Limit"
     /// The values Apple's Charge Limit accepts: 80–100% in 5% steps.
     public static let supportedLimits = [80, 85, 90, 95, 100]
-    /// How long a successful check that the shortcut exists is trusted.
+    /// How long a successful check that the shortcut exists is trusted. Only
+    /// the shortcut listing is cached; the user's limit is checked every time.
     public static let shortcutCheckValidity: TimeInterval = 5 * 60
 
     /// The persisted record of the user's own limit.
@@ -261,36 +262,39 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         case .none:
             break
         }
-        if let checked = shortcutConfirmedAtUptime, uptime() - checked < Self.shortcutCheckValidity {
-            return .nativeLimit(availability: .experimental, steps: Self.supportedLimits)
-        }
-        let names: [String]
-        do {
-            names = try await runner.shortcutNames()
-        } catch {
-            return .unavailable("Could not list your shortcuts: \(error)", style: style)
-        }
-        isShortcutFound = names.contains(shortcutName)
-        guard names.contains(shortcutName) else {
-            return .unavailable("No shortcut named “\(shortcutName)” was found. Create it as described in Settings › Control.", style: style)
-        }
-        if case .none = record {
-            // Without a record CellKeeper must be able to read and recognise
-            // the user's limit before it may change it.
-            switch try? await read() {
-            case .limit:
-                break
-            case .noLimit:
-                if !isNoLimitConfirmed {
-                    return .unavailable("macOS reports no Charge Limit. That usually means 100%, but could be a temporary full charge. If your limit is 100%, confirm it in Settings › Control.", style: style)
-                }
-            case .unrecognized(let detail):
-                return .unavailable("macOS reported its Charge Limit in a form CellKeeper does not recognise (\(detail)).", style: style)
-            case nil:
-                return .unavailable("Could not read macOS's current Charge Limit\(lastReadProblem.map { ": \($0)" } ?? ".")", style: style)
+        let isListingCurrent = shortcutConfirmedAtUptime.map { uptime() - $0 < Self.shortcutCheckValidity } ?? false
+        if !isListingCurrent {
+            let names: [String]
+            do {
+                names = try await runner.shortcutNames()
+            } catch {
+                return .unavailable("Could not list your shortcuts: \(error)", style: style)
             }
+            isShortcutFound = names.contains(shortcutName)
+            guard names.contains(shortcutName) else {
+                return .unavailable("No shortcut named “\(shortcutName)” was found. Create it as described in Settings › Control.", style: style)
+            }
+            shortcutConfirmedAtUptime = uptime()
         }
-        shortcutConfirmedAtUptime = uptime()
+        // Without a record CellKeeper must be able to read and recognise the
+        // user's limit before it may change it; otherwise `setLimit` would
+        // refuse at every evaluation, and those refusals would count as
+        // backend failures. Checked every time: the limit can change at any
+        // moment, unlike the shortcut.
+        switch try? await read() {
+        case .limit(let percent):
+            guard Self.supportedLimits.contains(percent) else {
+                return .unavailable("macOS's Charge Limit is \(percent)%, which CellKeeper cannot record as your own: it works with 80–100% in 5% steps. Set your limit in System Settings › Battery › Charging to use this backend.", style: style)
+            }
+        case .noLimit:
+            if !isNoLimitConfirmed {
+                return .unavailable("macOS reports no Charge Limit. That usually means 100%, but could be a temporary full charge. If your limit is 100%, confirm it in Settings › Control.", style: style)
+            }
+        case .unrecognized(let detail):
+            return .unavailable("macOS reported its Charge Limit in a form CellKeeper does not recognise (\(detail)).", style: style)
+        case nil:
+            return .unavailable("Could not read macOS's current Charge Limit\(lastReadProblem.map { ": \($0)" } ?? ".")", style: style)
+        }
         return .nativeLimit(availability: .experimental, steps: Self.supportedLimits)
     }
 

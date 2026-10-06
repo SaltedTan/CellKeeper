@@ -311,6 +311,50 @@ struct NativeLimitControllerTests {
         #expect(system.runInputs == ["90", "95"])
     }
 
+    @Test("A limit CellKeeper cannot record is refused, not counted as a backend failure")
+    func unsupportedOwnLimitNeverFaults() async {
+        system.reading = .limit(70)
+        let (controller, _) = makeController(limit: 80)
+        for trigger in [EvaluationTrigger.launch, .periodic, .periodic, .periodic, .periodic] {
+            let status = await controller.evaluate(trigger)
+            #expect(status.consecutiveFailures == 0)
+            #expect(!status.isBackendFaulted)
+            guard case .refuse(.controlUnavailable)? = status.decision?.action else {
+                Issue.record("expected a refusal, got \(String(describing: status.decision?.action))")
+                return
+            }
+            clock.advance(by: ChargingPolicy.minimumRestrictingInterval + 1)
+        }
+        #expect(system.runInputs.isEmpty)
+        #expect(system.reading == .limit(70))
+    }
+
+    @Test("\"No limit\" set just before management is turned on waits for confirmation without faulting")
+    func noLimitBeforeManagingNeverFaults() async throws {
+        let (controller, _) = makeController(limit: 80, managed: false)
+        let unmanaged = await controller.evaluate(.launch)
+        #expect(unmanaged.capabilities.availability == .experimental)
+
+        // Within the shortcut check's validity, the user sets 100% in System
+        // Settings and then turns management on.
+        system.changeExternally(to: 100)
+        clock.advance(by: 10)
+        var managing = try await controller.apply(settings: settings(limit: 80))
+        for _ in 0..<3 {
+            #expect(!managing.isBackendFaulted)
+            #expect(managing.consecutiveFailures == 0)
+            #expect(managing.nativeLimit?.needsNoLimitConfirmation == true)
+            clock.advance(by: ChargingPolicy.minimumRestrictingInterval + 1)
+            managing = await controller.evaluate(.periodic)
+        }
+        #expect(system.runInputs.isEmpty)
+
+        // Confirming is all it takes; there is no fault to clear.
+        let confirmed = await controller.confirmNoLimitIsOwnerLimit()
+        #expect(confirmed.nativeLimit?.ownerLimit == 100)
+        #expect(system.reading == .limit(80))
+    }
+
     @Test("Settings made before CellKeeper kept an outside change cannot turn management back on")
     func staleSettingsKeepManagementOff() async throws {
         let (controller, _) = makeController(limit: 90)
