@@ -1,0 +1,27 @@
+// Project-wide build settings for CellKeeper.
+//
+// To use your own signing identity or bundle identifier, copy
+// Config/Local.xcconfig.example to Config/Local.xcconfig (git-ignored) and
+// edit it there. Do not commit team IDs or personal identifiers.
+
+// Placeholder reverse-DNS prefix. Replace before distributing builds.
+CELLKEEPER_BUNDLE_ID_PREFIX = com.example
+
+MACOSX_DEPLOYMENT_TARGET = 14.0
+SDKROOT = macosx
+SWIFT_VERSION = 6.0
+
+// Contributors can build without an Apple Developer account: binaries are
+// ad-hoc signed ("Sign to Run Locally"). Maintainers override these in
+// Local.xcconfig.
+CODE_SIGN_STYLE = Automatic
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+ENABLE_HARDENED_RUNTIME = YES
+
+ENABLE_USER_SCRIPT_SANDBOXING = YES
+ENABLE_MODULE_VERIFIER = NO
+DEAD_CODE_STRIPPING = YES
+LOCALIZATION_PREFERS_STRING_CATALOGS = YES
+
+#include? "Local.xcconfig"

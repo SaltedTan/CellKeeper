@@ -1,0 +1,328 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		C311E0000000000000000101 /* CellKeeperCore in Frameworks */ = {isa = PBXBuildFile; productRef = C311E0000000000000000201 /* CellKeeperCore */; };
+		C311E0000000000000000102 /* CellKeeperKit in Frameworks */ = {isa = PBXBuildFile; productRef = C311E0000000000000000202 /* CellKeeperKit */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		C311E0000000000000000301 /* CellKeeper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CellKeeper.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		C311E0000000000000000302 /* Shared.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Shared.xcconfig; sourceTree = "<group>"; };
+		C311E0000000000000000303 /* CellKeeper.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = CellKeeper.xcconfig; sourceTree = "<group>"; };
+		C311E0000000000000000304 /* CellKeeperKit */ = {isa = PBXFileReference; lastKnownFileType = wrapper; path = CellKeeperKit; sourceTree = "<group>"; };
+		C311E0000000000000000305 /* CellKeeper.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = CellKeeper.entitlements; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		C311E0000000000000000401 /* CellKeeper */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = CellKeeper;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		C311E0000000000000000501 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C311E0000000000000000101 /* CellKeeperCore in Frameworks */,
+				C311E0000000000000000102 /* CellKeeperKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		C311E0000000000000000601 = {
+			isa = PBXGroup;
+			children = (
+				C311E0000000000000000401 /* CellKeeper */,
+				C311E0000000000000000604 /* Packages */,
+				C311E0000000000000000602 /* Config */,
+				C311E0000000000000000603 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		C311E0000000000000000602 /* Config */ = {
+			isa = PBXGroup;
+			children = (
+				C311E0000000000000000302 /* Shared.xcconfig */,
+				C311E0000000000000000303 /* CellKeeper.xcconfig */,
+				C311E0000000000000000305 /* CellKeeper.entitlements */,
+			);
+			path = Config;
+			sourceTree = "<group>";
+		};
+		C311E0000000000000000603 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				C311E0000000000000000301 /* CellKeeper.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		C311E0000000000000000604 /* Packages */ = {
+			isa = PBXGroup;
+			children = (
+				C311E0000000000000000304 /* CellKeeperKit */,
+			);
+			path = Packages;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		C311E0000000000000000701 /* CellKeeper */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C311E0000000000000000901 /* Build configuration list for PBXNativeTarget "CellKeeper" */;
+			buildPhases = (
+				C311E0000000000000000801 /* Sources */,
+				C311E0000000000000000501 /* Frameworks */,
+				C311E0000000000000000802 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				C311E0000000000000000401 /* CellKeeper */,
+			);
+			name = CellKeeper;
+			packageProductDependencies = (
+				C311E0000000000000000201 /* CellKeeperCore */,
+				C311E0000000000000000202 /* CellKeeperKit */,
+			);
+			productName = CellKeeper;
+			productReference = C311E0000000000000000301 /* CellKeeper.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		C311E0000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					C311E0000000000000000701 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = C311E0000000000000000902 /* Build configuration list for PBXProject "CellKeeper" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = C311E0000000000000000601;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				C311E0000000000000000B01 /* XCLocalSwiftPackageReference "Packages/CellKeeperKit" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = C311E0000000000000000603 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				C311E0000000000000000701 /* CellKeeper */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		C311E0000000000000000802 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		C311E0000000000000000801 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		C311E0000000000000000A01 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = C311E0000000000000000302 /* Shared.xcconfig */;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		C311E0000000000000000A02 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = C311E0000000000000000302 /* Shared.xcconfig */;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
+		C311E0000000000000000A03 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = C311E0000000000000000303 /* CellKeeper.xcconfig */;
+			buildSettings = {
+			};
+			name = Debug;
+		};
+		C311E0000000000000000A04 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = C311E0000000000000000303 /* CellKeeper.xcconfig */;
+			buildSettings = {
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		C311E0000000000000000901 /* Build configuration list for PBXNativeTarget "CellKeeper" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C311E0000000000000000A03 /* Debug */,
+				C311E0000000000000000A04 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		C311E0000000000000000902 /* Build configuration list for PBXProject "CellKeeper" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C311E0000000000000000A01 /* Debug */,
+				C311E0000000000000000A02 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		C311E0000000000000000B01 /* XCLocalSwiftPackageReference "Packages/CellKeeperKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/CellKeeperKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		C311E0000000000000000201 /* CellKeeperCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C311E0000000000000000B01 /* XCLocalSwiftPackageReference "Packages/CellKeeperKit" */;
+			productName = CellKeeperCore;
+		};
+		C311E0000000000000000202 /* CellKeeperKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C311E0000000000000000B01 /* XCLocalSwiftPackageReference "Packages/CellKeeperKit" */;
+			productName = CellKeeperKit;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = C311E0000000000000000001 /* Project object */;
+}
