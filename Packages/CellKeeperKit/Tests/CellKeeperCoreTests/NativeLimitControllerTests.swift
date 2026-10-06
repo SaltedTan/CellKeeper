@@ -332,7 +332,7 @@ struct NativeLimitControllerTests {
         #expect(system.reading == .limit(80))
         #expect(system.runInputs == ["80"])
         #expect(store.data == nil)
-        #expect(status.events.contains { $0.message.contains("finish that first") })
+        #expect(status.events.contains { $0.message.contains("finish restoring your own limit of 80% first") })
     }
 
     @Test("A restore that took effect without confirmation is not mistaken for an outside change")
@@ -360,8 +360,10 @@ struct NativeLimitControllerTests {
         let (controller, _) = makeController(limit: 90)
         let status = await controller.evaluate(.launch)
         #expect(!status.isBackendFaulted)
-        #expect(status.decision?.action == .noAction)
-        #expect(system.runInputs.isEmpty)
+        #expect(!status.events.contains { $0.message.contains("changed outside CellKeeper") })
+        // The unfinished session is still wound up: the user's limit first.
+        #expect(system.reading == .limit(80))
+        #expect(system.runInputs == ["80"])
     }
 
     @Test("If CellKeeper cannot read back the limit it set, it restores the user's limit")
@@ -389,7 +391,7 @@ struct NativeLimitControllerTests {
 
     // MARK: - Relaunch
 
-    @Test("After a crash, the next session knows it set the limit and restores the recorded one")
+    @Test("After a crash, the next session restores the recorded limit before managing again")
     func relaunchAfterCrash() async {
         let (first, _) = makeController(limit: 90)
         await first.evaluate(.launch)
@@ -397,12 +399,54 @@ struct NativeLimitControllerTests {
 
         let (second, _) = makeController(limit: 90)
         let status = await second.evaluate(.launch)
-        #expect(status.decision?.action == .noAction)
-        #expect(status.nativeLimit?.ownerLimit == 80)
+        #expect(status.decision?.reason == .releaseRequired(.restoreUnfinished))
         #expect(status.events.contains { $0.message.contains("earlier CellKeeper session") })
+        #expect(system.reading == .limit(80))
+        #expect(store.data == nil)
+
+        clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
+        let managing = await second.evaluate(.periodic)
+        #expect(managing.decision?.state == .osEnforcedLimit)
+        #expect(managing.nativeLimit?.ownerLimit == 80)
         await second.shutdown(reason: "quit")
         #expect(system.reading == .limit(80))
-        #expect(system.runInputs == ["90", "80"])
+        #expect(system.runInputs == ["90", "80", "90", "80"])
+    }
+
+    @Test("If the restore marker could not be stored, the next launch still restores first")
+    func relaunchWithStaleMarker() async {
+        let (first, _) = makeController(limit: 90)
+        await first.evaluate(.launch)
+        store.saveFails = true
+        system.runBehaviour = .fails
+        let stopped = await first.shutdown(reason: "quit")
+        #expect(stopped.nativeLimit?.isRestoreUnfinished == true)
+        #expect(String(data: store.data ?? Data(), encoding: .utf8)?.contains(#""isRestoring":true"#) == false)
+
+        store.saveFails = false
+        system.runBehaviour = .applies
+        let (second, _) = makeController(limit: 90)
+        await second.evaluate(.launch)
+        #expect(system.reading == .limit(80))
+        #expect(store.data == nil)
+    }
+
+    @Test("A stale record never lets a new limit be set before the owed restore")
+    func relaunchRestoresBeforeNewLimit() async throws {
+        let (first, _) = makeController(limit: 90)
+        await first.evaluate(.launch)
+        clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
+        store.saveFails = true
+        system.runBehaviour = .fails
+        try await first.apply(settings: settings(limit: 95))
+
+        store.saveFails = false
+        system.runBehaviour = .applies
+        let (second, _) = makeController(limit: 95)
+        await second.evaluate(.launch)
+        let afterRelaunch = Array(system.runInputs.dropFirst(2))
+        #expect(afterRelaunch.first == "80")
+        #expect(system.reading == .limit(80))
     }
 
     @Test("A change made while CellKeeper was not running is treated as an outside change")

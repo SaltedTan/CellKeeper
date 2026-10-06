@@ -319,7 +319,9 @@ The controller adds, independent of the backend:
 - on the first read from a backend, ownership that the backend remembers from
   an earlier session (`nativeLimitStatus().target`) is adopted as
   CellKeeper's own. A change made while CellKeeper was not running is then
-  detected like any other outside change;
+  detected like any other outside change. Because a normal quit never
+  leaves such a record, its presence also makes the restore owed: the
+  user's limit is restored before anything else;
 - after a failed restore of `.normal`, automatic evaluations wait 60 s
   before retrying it (see the action table);
 - a request answered `unchanged` does not count toward the restricting
@@ -385,8 +387,10 @@ Lifecycle:
    - macOS showing the recorded own limit means a restore completed late
      (or the user restored it), so the record is cleared.
    - macOS showing the target, or a pending target (which is then
-     confirmed), means CellKeeper is still responsible and continues as
-     before.
+     confirmed), means the limit is still CellKeeper's: it restores the
+     user's limit first (a normal quit never leaves a record, so the earlier
+     session did not finish, and its markers may be stale), then resumes
+     management, setting its limit again subject to the rate limit.
    - Anything else is an outside change: fault, then restore.
    - The app checks for a record regardless of which backend is selected.
      If one exists while another backend is selected, it starts on the
@@ -565,4 +569,4 @@ decisions.
 | D22 | The ownership record is a fsync'd file, written and read back before any change | `UserDefaults` persists asynchronously; losing the record after a change would lose the user's limit |
 | D23 | "No limit" is recorded as 100% only after the user confirms it | The report cannot distinguish a 100% limit from temporary states; the owner's rule is never to assume 100% |
 | D24 | Invalid settings are rejected before use, never applied | The UI only offers valid values; a rejected change keeps the previous valid settings, so there is no "invalid settings" state to restore from at run time. The policy still fails safe if handed invalid settings directly |
-| D25 | An attempted restore stays owed until confirmed, across relaunches | Otherwise recognising an earlier change, or a relaunch, could quietly abandon giving the user's limit back |
+| D25 | An attempted restore stays owed until confirmed, across relaunches; any record found at launch makes it owed | Otherwise recognising an earlier change, a relaunch, or a marker that could not be saved could quietly abandon giving the user's limit back. The cost is one restore and re-apply after a crash |

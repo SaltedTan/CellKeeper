@@ -37,9 +37,11 @@ import os
 ///   ``ChargingPolicy/minimumRestoreRetryInterval`` before retrying it.
 /// - With a native-limit backend, `.normal` means the user's own macOS Charge
 ///   Limit, so every path above restores exactly that value. If the backend
-///   remembers a limit it set in an earlier session, that limit counts as
-///   CellKeeper's own, so a change made while CellKeeper was not running is
-///   detected like any other external change.
+///   remembers a limit it set in an earlier session (which a normal quit
+///   never leaves behind), that limit counts as CellKeeper's own, so a change
+///   made while CellKeeper was not running is detected like any other
+///   external change, and the user's limit is restored before anything
+///   else.
 public actor ChargeController {
     public static let maximumConsecutiveFailures = 3
     /// A failure-free period of this length resets the failure count.
@@ -450,11 +452,14 @@ public actor ChargeController {
             hasSeededOwnership = true
             if ownedMode == nil, let target = nativeLimit?.target {
                 ownedMode = .nativeLimit(percent: target)
-                record(.safety, "macOS's Charge Limit was left at \(target)% by an earlier CellKeeper session; your own limit (\(nativeLimit?.ownerLimit.map { "\($0)%" } ?? "unknown")) is still recorded and will be restored.")
             }
-            if nativeLimit?.isRestoreUnfinished == true {
+            if let ownerLimit = nativeLimit?.ownerLimit {
+                // A normal quit restores the limit and deletes the record, so
+                // a record here means an earlier session did not finish. Its
+                // markers may be stale, so restore before anything else.
                 isRestoreOutstanding = true
-                record(.safety, "An earlier session could not confirm restoring your own Charge Limit; CellKeeper will finish that first.")
+                let left = nativeLimit?.target.map { " at \($0)%" } ?? ""
+                record(.safety, "An earlier CellKeeper session left macOS's Charge Limit changed\(left); CellKeeper will finish restoring your own limit of \(ownerLimit)% first.")
             }
         }
         guard capabilities.availability.acceptsRequests else { return }
