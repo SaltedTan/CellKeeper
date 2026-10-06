@@ -10,7 +10,7 @@ public struct ReadOnlyChargingBackend: ChargingBackend {
 
     public let reason: String
 
-    public init(reason: String = "No hardware control backend is implemented for this Mac yet.") {
+    public init(reason: String = "Read-only is selected, so CellKeeper changes nothing.") {
         self.reason = reason
     }
 
