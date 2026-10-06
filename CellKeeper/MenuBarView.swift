@@ -159,7 +159,10 @@ private struct NativeLimitSummary: View {
                     Text("CellKeeper's record of your own limit cannot be read, so it will not change or restore the limit. Set your limit in System Settings › Battery › Charging, then discard the record in Settings › Control.")
                         .foregroundStyle(.red)
                 } else if let owner = native?.ownerLimit, status.isOwnLimitRestorePending {
-                    Text("CellKeeper could not confirm yet that your own limit, \(Format.chargeLimit(owner)), is back. It keeps trying; you can also set it in System Settings › Battery › Charging.")
+                    // A backend that accepts no requests is never asked to restore.
+                    Text(status.capabilities.availability.acceptsRequests
+                         ? "CellKeeper could not confirm yet that your own limit, \(Format.chargeLimit(owner)), is back. It keeps trying; you can also set it in System Settings › Battery › Charging."
+                         : "CellKeeper cannot give back your own limit, \(Format.chargeLimit(owner)), right now. Set it in System Settings › Battery › Charging.")
                         .foregroundStyle(.red)
                 } else if let owner = native?.ownerLimit {
                     Text("Set by CellKeeper. Your own limit, \(Format.chargeLimit(owner)), is restored when CellKeeper stops managing it, quits, or fails.")

@@ -278,8 +278,10 @@ private struct NativeLimitSetupSection: View {
                 if native?.isRecordUnreadable == true {
                     Text("Unknown: the record cannot be read")
                         .foregroundStyle(.red)
-                } else if let owner = native?.ownerLimit, model.status?.isOwnLimitRestorePending == true {
-                    Text("\(Format.chargeLimit(owner)), recorded; restoring it is not confirmed yet, CellKeeper keeps trying")
+                } else if let owner = native?.ownerLimit, let status = model.status, status.isOwnLimitRestorePending {
+                    Text(status.capabilities.availability.acceptsRequests
+                         ? "\(Format.chargeLimit(owner)), recorded; restoring it is not confirmed yet, CellKeeper keeps trying"
+                         : "\(Format.chargeLimit(owner)), recorded; CellKeeper cannot restore it right now, set it in System Settings")
                         .multilineTextAlignment(.trailing)
                         .foregroundStyle(.red)
                 } else if let owner = native?.ownerLimit {
