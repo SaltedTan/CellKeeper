@@ -32,6 +32,15 @@ hardware state. Dates are deliberately omitted.
 Decided 2026-10-06: CellKeeper's first real control builds on Apple's
 native Charge Limit.
 
+Status: implemented as an experimental, opt-in backend
+(`NativeChargeLimitBackend`; [research note 08](research/08-native-charge-limit.md)).
+Done: the policy computes the native limit; ownership with restore on quit,
+management off, backend switch and failure; Shortcuts write path verified
+from the App Sandbox with no new entitlements; read-back through
+`pmset -g battlimit` (read-only); rate limiting and logging; UI for
+80/85/90/95/100 with unsupported features disabled. Still open: sleep,
+restart and shutdown observations, and schedules (below).
+
 - Model "OS-managed limit" as a backend capability: the policy computes a
   desired native limit (80/85/90/95/100) instead of toggling charging.
 - Ownership: record the user's own native limit before changing it, and

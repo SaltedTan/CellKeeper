@@ -3,11 +3,14 @@ import CellKeeperCore
 import CellKeeperKit
 import Observation
 
-/// The control backends selectable in this build. Real hardware backends will
-/// be added here only once implemented, verified, and opt-in.
+/// The control backends selectable in this build. Real control backends are
+/// added here only once implemented and verified, and are opt-in.
 enum ControlBackendChoice: String, CaseIterable, Identifiable {
     case simulated
     case readOnly
+    /// macOS's own Charge Limit, set through the user's shortcut. Experimental
+    /// and opt-in: the UI asks for confirmation before selecting it.
+    case nativeLimit
 
     var id: String { rawValue }
 
@@ -16,6 +19,7 @@ enum ControlBackendChoice: String, CaseIterable, Identifiable {
         switch backendIdentifier {
         case MockChargingBackend().descriptor.identifier: self = .simulated
         case ReadOnlyChargingBackend().descriptor.identifier: self = .readOnly
+        case NativeChargeLimitBackend.identifier: self = .nativeLimit
         default: return nil
         }
     }
@@ -24,6 +28,7 @@ enum ControlBackendChoice: String, CaseIterable, Identifiable {
         switch self {
         case .simulated: "Simulated"
         case .readOnly: "Read-only"
+        case .nativeLimit: "macOS Charge Limit (through Shortcuts)"
         }
     }
 
@@ -31,6 +36,7 @@ enum ControlBackendChoice: String, CaseIterable, Identifiable {
         switch self {
         case .simulated: MockChargingBackend()
         case .readOnly: ReadOnlyChargingBackend()
+        case .nativeLimit: NativeChargeLimitBackend.system()
         }
     }
 }
@@ -56,6 +62,7 @@ final class AppModel {
         case cancelOverride
         case switchBackend(ControlBackendChoice)
         case resetFault
+        case recheckBackend
     }
 
     static let backendChoiceKey = "controlBackend"
@@ -68,6 +75,8 @@ final class AppModel {
     @ObservationIgnored private let store: SettingsStore
     @ObservationIgnored private let telemetry: any TelemetryProvider
     @ObservationIgnored private let controller: ChargeController
+    /// The native-limit backend in use, if any, for availability re-checks.
+    @ObservationIgnored private var nativeBackend: NativeChargeLimitBackend?
     @ObservationIgnored private let commands: AsyncStream<Command>
     @ObservationIgnored private let commandSink: AsyncStream<Command>.Continuation
     @ObservationIgnored private var tasks: [Task<Void, Never>] = []
@@ -81,7 +90,9 @@ final class AppModel {
         self.settings = loaded.settings
         self.settingsRecoveryMessage = loaded.recoveryReason
         self.backendChoice = choice
-        self.controller = ChargeController(telemetry: telemetry, backend: choice.makeBackend(), settings: loaded.settings)
+        let backend = choice.makeBackend()
+        self.nativeBackend = backend as? NativeChargeLimitBackend
+        self.controller = ChargeController(telemetry: telemetry, backend: backend, settings: loaded.settings)
         (commands, commandSink) = AsyncStream.makeStream(of: Command.self)
     }
 
@@ -208,6 +219,24 @@ final class AppModel {
         send(.resetFault)
     }
 
+    /// Looks for the shortcut again (for example after the user created it)
+    /// and re-evaluates.
+    func recheckBackend() {
+        send(.recheckBackend)
+    }
+
+    /// True when the selected backend sets macOS's own Charge Limit, so the
+    /// UI should offer only what that limit can express.
+    var usesNativeLimit: Bool {
+        status?.capabilities.isEnforcedByMacOS ?? (backendChoice == .nativeLimit)
+    }
+
+    /// The charge limits the UI should offer with the native backend.
+    var nativeLimitSteps: [Int] {
+        let steps = status?.capabilities.nativeLimitSteps ?? []
+        return steps.isEmpty ? NativeChargeLimitBackend.supportedLimits : steps
+    }
+
     // MARK: - Command queue
 
     private func send(_ command: Command) {
@@ -231,7 +260,11 @@ final class AppModel {
         case .cancelOverride:
             status = await controller.cancelOverride()
         case .switchBackend(let choice):
-            let newStatus = await controller.switchBackend(to: choice.makeBackend())
+            let backend = choice.makeBackend()
+            let newStatus = await controller.switchBackend(to: backend)
+            if newStatus.backend.identifier == backend.descriptor.identifier {
+                nativeBackend = backend as? NativeChargeLimitBackend
+            }
             status = newStatus
             // The controller refuses a switch it cannot make safely; reflect
             // the backend actually in use.
@@ -241,6 +274,9 @@ final class AppModel {
             }
         case .resetFault:
             status = await controller.resetBackendFault()
+        case .recheckBackend:
+            await nativeBackend?.recheckAvailability()
+            status = await controller.evaluate(.manual)
         }
     }
 
@@ -256,6 +292,7 @@ final class AppModel {
         case .holding, .onBattery: return "batteryblock"
         case .discharging: return "minus.plus.batteryblock"
         case .charging, .fullChargeOverride, .safetyFloor: return "bolt.batteryblock"
+        case .osEnforcedLimit: return status.snapshot?.isCharging == true ? "bolt.batteryblock" : "batteryblock"
         }
     }
 }

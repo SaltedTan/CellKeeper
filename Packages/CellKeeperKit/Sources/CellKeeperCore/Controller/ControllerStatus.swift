@@ -13,6 +13,15 @@ public enum EvaluationTrigger: String, Sendable {
     case willSleep
     case didWake
     case manual
+
+    /// True for evaluations the system started, as opposed to a user action.
+    /// Only automatic evaluations wait before retrying a failed restore.
+    public var isAutomatic: Bool {
+        switch self {
+        case .launch, .powerSourceChanged, .periodic, .willSleep, .didWake: true
+        case .settingsChanged, .overrideChanged, .backendChanged, .manual: false
+        }
+    }
 }
 
 /// The result of the most recent attempt to act on a decision.
@@ -20,6 +29,8 @@ public struct ExecutionRecord: Sendable, Equatable {
     public enum Result: Sendable, Equatable {
         /// Real hardware state changed and was confirmed.
         case applied
+        /// The requested state was already in effect; nothing was changed.
+        case unchanged
         /// Recorded by a simulated backend; hardware unchanged.
         case simulated
         case failed(String)
@@ -71,6 +82,8 @@ public struct ControllerStatus: Sendable, Equatable {
     public var capabilities: ControlCapabilities
     /// The backend's reported mode, or nil if unknown.
     public var currentMode: ChargeControlMode?
+    /// macOS's Charge Limit as seen by a native-limit backend; nil otherwise.
+    public var nativeLimit: NativeLimitStatus?
     public var decision: PolicyDecision?
     public var lastExecution: ExecutionRecord?
     public var consecutiveFailures: Int

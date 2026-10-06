@@ -28,6 +28,13 @@ import os
 /// - Switching backends requires a confirmed restore of `.normal` first;
 ///   otherwise the switch is refused and the old backend is kept.
 /// - Restricting requests are recorded on a monotonic clock for rate limiting.
+///   After a failed restore of `.normal`, automatic evaluations wait
+///   ``ChargingPolicy/minimumRestoreRetryInterval`` before retrying it.
+/// - With a native-limit backend, `.normal` means the user's own macOS Charge
+///   Limit, so every path above restores exactly that value. If the backend
+///   remembers a limit it set in an earlier session, that limit counts as
+///   CellKeeper's own, so a change made while CellKeeper was not running is
+///   detected like any other external change.
 public actor ChargeController {
     public static let maximumConsecutiveFailures = 3
     /// A failure-free period of this length resets the failure count.
@@ -52,6 +59,12 @@ public actor ChargeController {
     private var currentMode: ChargeControlMode?
     /// The mode CellKeeper last requested and confirmed on this backend.
     private var ownedMode: ChargeControlMode?
+    /// Whether ``ownedMode`` has been seeded from what the current backend
+    /// remembers from an earlier session.
+    private var hasSeededOwnership = false
+    private var nativeLimit: NativeLimitStatus?
+    /// When a request for `.normal` last failed, for retry spacing.
+    private var lastFailedRestoreUptime: TimeInterval?
     private var decision: PolicyDecision?
     private var lastExecution: ExecutionRecord?
     private var consecutiveFailures = 0
@@ -106,6 +119,7 @@ public actor ChargeController {
             backend: backend.descriptor,
             capabilities: capabilities,
             currentMode: currentMode,
+            nativeLimit: nativeLimit,
             decision: decision,
             lastExecution: lastExecution,
             consecutiveFailures: consecutiveFailures,
@@ -209,8 +223,11 @@ public actor ChargeController {
             backend = newBackend
             consecutiveFailures = 0
             lastFailureUptime = nil
+            lastFailedRestoreUptime = nil
             currentMode = nil
             ownedMode = nil
+            hasSeededOwnership = false
+            nativeLimit = nil
             lastExecution = nil
             record(.settings, "Control backend changed from \(previousName) to \(newBackend.descriptor.displayName).")
             await performEvaluation(.backendChanged)
@@ -299,7 +316,10 @@ public actor ChargeController {
             memory: memory,
             isBackendFaulted: isBackendFaulted,
             recentRestrictingRequests: restrictingRequestTimes,
-            isSleepImminent: sleepAnnouncedAtUptime != nil
+            isSleepImminent: sleepAnnouncedAtUptime != nil,
+            restoreRetryNotBefore: trigger.isAutomatic
+                ? lastFailedRestoreUptime.map { $0 + ChargingPolicy.minimumRestoreRetryInterval }
+                : nil
         )
         restrictingRequestTimes.removeAll { input.uptime - $0 >= 60 * 60 }
         let newDecision = ChargingPolicy.evaluate(input)
@@ -311,7 +331,7 @@ public actor ChargeController {
             record(.override, "\(Self.describe(override.kind)) \(ended).")
         }
         if Self.isMeaningfulChange(from: decision, to: newDecision) {
-            record(.decision, "[\(trigger.rawValue)] \(newDecision.state.rawValue): want \(newDecision.desiredMode.rawValue), action \(Self.describe(newDecision.action)). \(newDecision.reason)")
+            record(.decision, "[\(trigger.rawValue)] \(newDecision.state.rawValue): want \(newDecision.desiredMode), action \(Self.describe(newDecision.action, nativeLimit: capabilities.isEnforcedByMacOS)). \(newDecision.reason)")
         }
         for note in newDecision.notes where !(decision?.notes.contains(note) ?? false) {
             record(.decision, "Note: \(note)")
@@ -319,6 +339,7 @@ public actor ChargeController {
         decision = newDecision
 
         await execute(newDecision.action)
+        nativeLimit = await backend.nativeLimitStatus()
     }
 
     /// Reads the backend's mode, counting failures and detecting changes that
@@ -330,10 +351,19 @@ public actor ChargeController {
         } catch {
             currentMode = nil
             ownedMode = nil
+            nativeLimit = await backend.nativeLimitStatus()
             registerFailure("Could not read the backend's mode: \(error)")
             return
         }
         currentMode = observed
+        nativeLimit = await backend.nativeLimitStatus()
+        if !hasSeededOwnership {
+            hasSeededOwnership = true
+            if ownedMode == nil, let target = nativeLimit?.target {
+                ownedMode = .nativeLimit(percent: target)
+                record(.safety, "macOS's Charge Limit was left at \(target)% by an earlier CellKeeper session; your own limit (\(nativeLimit?.ownerLimit.map { "\($0)%" } ?? "unknown")) is still recorded and will be restored.")
+            }
+        }
         guard capabilities.availability.acceptsRequests else { return }
         guard let observed else {
             ownedMode = nil
@@ -343,7 +373,11 @@ public actor ChargeController {
         if let owned = ownedMode, owned != observed {
             ownedMode = nil
             consecutiveFailures = max(consecutiveFailures, Self.maximumConsecutiveFailures)
-            record(.safety, "Charging mode changed outside CellKeeper (expected \(owned.rawValue), found \(observed.rawValue)); another tool may be controlling charging. Backend faulted; restoring normal charging.", level: .fault)
+            if capabilities.isEnforcedByMacOS {
+                record(.safety, "macOS's Charge Limit changed outside CellKeeper (expected \(owned), found \(observed)); it may have been changed in System Settings or by another tool. Backend faulted; restoring your own limit.", level: .fault)
+            } else {
+                record(.safety, "Charging mode changed outside CellKeeper (expected \(owned), found \(observed)); another tool may be controlling charging. Backend faulted; restoring normal charging.", level: .fault)
+            }
         }
     }
 
@@ -363,19 +397,21 @@ public actor ChargeController {
             if !isRepeat {
                 record(.request, "Refused: \(reason)")
             }
-        case .enableCharging, .disableCharging, .requestDischarge:
+        case .enableCharging, .disableCharging, .requestDischarge, .setNativeLimit:
             guard let mode = action.requestedMode else { return }
             await request(mode, for: action)
         }
     }
 
     private func request(_ mode: ChargeControlMode, for action: ChargingAction) async {
-        if mode.restrictionLevel > (currentMode?.restrictionLevel ?? 0) {
+        let isRestricting = mode.isRestricting(from: currentMode)
+        if isRestricting {
             // Attempts count, not just successes, so failures cannot cause
             // a burst of writes.
             restrictingRequestTimes.append(uptime())
         }
-        record(.request, "Requesting \(mode.rawValue) from \(backend.descriptor.displayName) backend.")
+        let target = describeTarget(mode)
+        record(.request, "Requesting \(target) from \(backend.descriptor.displayName) backend.")
         do {
             var outcome = try await setAndConfirm(mode)
             // A fault persists until the user clears it, even if restoring
@@ -384,26 +420,52 @@ public actor ChargeController {
                 consecutiveFailures = 0
                 lastFailureUptime = nil
             }
-            if outcome == .applied, !capabilities.availability.affectsHardware {
+            if outcome != .simulated, !capabilities.availability.affectsHardware {
                 record(.safety, "\(backend.descriptor.displayName) backend reported a hardware change but is not a hardware backend; treating it as simulated.", level: .error)
                 outcome = .simulated
             }
             switch outcome {
             case .applied:
                 lastExecution = ExecutionRecord(date: now(), action: action, result: .applied)
-                record(.result, "Applied \(mode.rawValue) to hardware (confirmed by read-back).")
+                record(.result, "Applied \(target) (confirmed by read-back\(confirmationDetail(mode))).")
+            case .unchanged:
+                // Nothing was written, so it does not count toward the limit.
+                if isRestricting, !restrictingRequestTimes.isEmpty {
+                    restrictingRequestTimes.removeLast()
+                }
+                lastExecution = ExecutionRecord(date: now(), action: action, result: .unchanged)
+                record(.result, "Already in effect: \(target); nothing changed (confirmed by read-back\(confirmationDetail(mode))).")
             case .simulated:
                 lastExecution = ExecutionRecord(date: now(), action: action, result: .simulated)
-                record(.result, "Simulated \(mode.rawValue); hardware unchanged.")
+                record(.result, "Simulated \(mode); hardware unchanged.")
             }
         } catch {
             let message = String(describing: error)
             lastExecution = ExecutionRecord(date: now(), action: action, result: .failed(message))
-            registerFailure("Backend failed to apply \(mode.rawValue): \(message)")
+            registerFailure("Backend failed to apply \(target): \(message)")
             if mode != .normal {
-                _ = await restoreNormal(reason: "safety fallback after failed \(mode.rawValue) request")
+                _ = await restoreNormal(reason: "safety fallback after failed \(mode) request")
             }
         }
+    }
+
+    /// How a requested mode is described in the activity log.
+    private func describeTarget(_ mode: ChargeControlMode) -> String {
+        guard capabilities.isEnforcedByMacOS else { return mode.description }
+        switch mode {
+        case .normal:
+            return "your own macOS Charge Limit" + (nativeLimit?.ownerLimit.map { " of \($0)%" } ?? "")
+        case .nativeLimit(let percent):
+            return "a macOS Charge Limit of \(percent)%"
+        case .inhibitCharging, .forceDischarge:
+            return mode.description
+        }
+    }
+
+    /// For native limits, the value macOS reported when confirming.
+    private func confirmationDetail(_ mode: ChargeControlMode) -> String {
+        guard capabilities.isEnforcedByMacOS, let reported = nativeLimit?.reportedLimit else { return "" }
+        return ": macOS reports \(reported)%"
     }
 
     /// Sets a mode and confirms it by read-back. On success the mode is
@@ -417,15 +479,23 @@ public actor ChargeController {
             } catch {
                 throw BackendError.verificationFailed(expected: mode, actual: nil)
             }
+            nativeLimit = await backend.nativeLimitStatus()
             guard readBack == mode else {
                 throw BackendError.verificationFailed(expected: mode, actual: readBack)
             }
             currentMode = mode
             ownedMode = mode
+            if mode == .normal {
+                lastFailedRestoreUptime = nil
+            }
             return outcome
         } catch {
             currentMode = nil
             ownedMode = nil
+            if mode == .normal {
+                lastFailedRestoreUptime = uptime()
+            }
+            nativeLimit = await backend.nativeLimitStatus()
             throw error
         }
     }
@@ -435,22 +505,41 @@ public actor ChargeController {
     /// other mode. Caller must hold the lock.
     private func restoreNormal(reason: String) async -> Bool {
         let capabilities = await backend.capabilities()
+        let ownerLimit = await backend.nativeLimitStatus()?.ownerLimit
+        let isNative = capabilities.isEnforcedByMacOS
         guard capabilities.availability.acceptsRequests else {
             let observed = try? await backend.currentMode()
-            if observed == nil || observed == .normal {
+            nativeLimit = await backend.nativeLimitStatus()
+            if observed == nil || observed == .normal, !(nativeLimit?.isOwnedByCellKeeper ?? false) {
                 record(.safety, "Restore normal charging (\(reason)): the backend controls nothing; nothing to restore.")
                 return true
             }
-            record(.safety, "Could not restore normal charging (\(reason)): the backend accepts no requests but reports \(observed?.rawValue ?? "unknown").", level: .fault)
+            if isNative, let ownerLimit {
+                record(.safety, "Could not restore your own macOS Charge Limit of \(ownerLimit)% (\(reason)): the backend cannot make changes right now. Set it in System Settings › Battery › Charging.", level: .fault)
+            } else {
+                record(.safety, "Could not restore normal charging (\(reason)): the backend accepts no requests but reports \(observed.map(String.init(describing:)) ?? "unknown").", level: .fault)
+            }
             return false
         }
         do {
             let outcome = try await setAndConfirm(.normal)
-            let suffix = outcome == .simulated ? " (simulated; hardware unchanged)" : ""
-            record(.safety, "Restored normal charging (\(reason))\(suffix).")
+            if isNative {
+                let suffix = outcome == .unchanged ? " (already in effect)" : ""
+                let what = ownerLimit.map { "Restored your own macOS Charge Limit of \($0)%" }
+                    ?? "Nothing to restore: CellKeeper had not changed macOS's Charge Limit"
+                let reported = nativeLimit?.reportedLimit.map { "; macOS reports \($0)%" } ?? ""
+                record(.safety, "\(what) (\(reason))\(suffix)\(reported).")
+            } else {
+                let suffix = outcome == .simulated ? " (simulated; hardware unchanged)" : ""
+                record(.safety, "Restored normal charging (\(reason))\(suffix).")
+            }
             return true
         } catch {
-            registerFailure("Could not restore normal charging (\(reason)): \(error)", level: .fault)
+            if isNative, let ownerLimit {
+                registerFailure("Could not restore your own macOS Charge Limit of \(ownerLimit)% (\(reason)): \(error)", level: .fault)
+            } else {
+                registerFailure("Could not restore normal charging (\(reason)): \(error)", level: .fault)
+            }
             return false
         }
     }
@@ -540,11 +629,12 @@ public actor ChargeController {
         return "Battery \(percent), \(snapshot.powerSource.rawValue), \(snapshot.chargingStatus.rawValue), \(temperature)."
     }
 
-    static func describe(_ action: ChargingAction) -> String {
+    static func describe(_ action: ChargingAction, nativeLimit: Bool = false) -> String {
         switch action {
-        case .enableCharging: "enable charging"
+        case .enableCharging: nativeLimit ? "restore your own limit" : "enable charging"
         case .disableCharging: "disable charging"
         case .requestDischarge: "request discharge"
+        case .setNativeLimit(let percent): "set macOS Charge Limit to \(percent)%"
         case .noAction: "none"
         case .refuse(let reason): "refused (\(reason))"
         }

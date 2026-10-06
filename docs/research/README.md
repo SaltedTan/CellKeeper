@@ -15,6 +15,7 @@ before being committed. Architecture decisions based on them live in
 | 05 | [Distribution and signing](05-distribution-and-signing.md) | Sandbox, Hardened Runtime, signing, notarization, App Store |
 | 06 | [Safety analysis](06-safety-analysis.md) | Battery ageing, hazards (FMEA), safety rules R1–R33, defaults |
 | 07 | [Repository and CI](07-repository-and-ci.md) | Layout, toolchains, GitHub Actions |
+| 08 | [Native Charge Limit through Shortcuts](08-native-charge-limit.md) | Can CellKeeper set, read back and restore macOS's Charge Limit from the sandbox? |
 
 ## Classification legend
 
@@ -74,8 +75,8 @@ Some notes use their own evidence labels alongside these tags:
 | Design cycle count, mAh capacities | `AppleSmartBattery` registry (`DesignCycleCount9C`, `BatteryData`) | PRIVATE/UNDOCUMENTED keys, IOKIT, verified | Used, all optional |
 | Battery temperature | None public on macOS 27 (IOPS key documented but absent; registry key gone, units unverified on older macOS) | — | Shown as unavailable; protection cannot trigger |
 | Health / condition / "Maximum Capacity" | Gated by a private entitlement; only undocumented `system_profiler` output | PRIVILEGED / PRIVATE | Not shown; CellKeeper shows its own computed full-charge ÷ design ratio, labelled as such |
-| Native Charge Limit (80–100%) | System Settings; Shortcuts action | PUBLIC (user setting), ARCH-SPECIFIC (Apple silicon, macOS 26.4+) | Not integrated yet (milestone 3) |
-| Read native limit state | `pmset -g battlimit` | PRIVATE/UNDOCUMENTED, verified read-only | Not used |
+| Native Charge Limit (80–100%) | System Settings; “Set Battery Charge Limit” Shortcuts action run with the `shortcuts` CLI | PUBLIC (user setting, CLI), ARCH-SPECIFIC (Apple silicon, macOS 26.4+), verified from the App Sandbox (08) | Used by the opt-in macOS Charge Limit backend |
+| Read native limit state | `pmset -g battlimit` | PRIVATE/UNDOCUMENTED, verified read-only (08) | Used read-only to confirm every change; unrecognised output blocks changes |
 | Inhibit charging / force discharge | Only private: SMC keys (largely gated on macOS 27 firmware), private `ChargeInhibit`/`DisableInflow` assertions (root) | PRIVATE, PRIVILEGED, SMC/HW, unverified | Not implemented; simulated |
 | Privileged helper | `SMAppService` daemon + XPC with code-signing requirements | PUBLIC-API | Designed only |
 | Mac App Store with control | Incompatible (sandbox, no root, no helpers) | — | Not a goal |

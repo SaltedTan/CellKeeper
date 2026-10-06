@@ -6,14 +6,23 @@ required before any real control backend may be enabled. The underlying
 analysis, sources, and full rule set (R1–R33) are in
 [research/06-safety-analysis.md](research/06-safety-analysis.md).
 
-## Current status (milestone 1)
+## Current status (milestone 2)
 
-**CellKeeper does not change how your Mac charges.** It reads battery
-telemetry through public, read-only interfaces and computes what it *would*
-do. The default control backend is simulated: requests are recorded and
-labelled "Simulated — hardware unchanged". The read-only backend performs no
-control at all. There is no privileged helper, no SMC access, and no code that
-writes to hardware.
+**By default, CellKeeper does not change how your Mac charges.** It reads
+battery telemetry through public, read-only interfaces and computes what it
+*would* do.
+- The default control backend is simulated: requests are recorded and
+  labelled "Simulated — hardware unchanged".
+- The read-only backend performs no control at all.
+
+**The one real control is opt-in:** the **macOS Charge Limit** backend. It
+changes a single, user-level macOS setting, the Charge Limit (80–100%), and
+only through a shortcut you create and the documented `shortcuts`
+command-line tool. macOS, not CellKeeper, enforces that limit.
+
+There is no privileged helper, no SMC access, no `sudo`, no `pmset` setting
+change, and no private API on the write path. CellKeeper opens no
+IOUserClient itself.
 
 Your Mac's own protections — the battery pack's management system, firmware
 charge termination and thermal limits, and macOS battery health management —
@@ -23,7 +32,10 @@ are always in effect and cannot be overridden by CellKeeper.
 
 The **safe state** is `ChargeControlMode.normal`: CellKeeper has no
 restriction in effect and macOS/firmware decide charging. Every failure path
-converges on it. CellKeeper only ever *restricts* charging relative to macOS
+converges on it. With the macOS Charge Limit backend, the safe state is
+**your own Charge Limit, exactly as it was before CellKeeper changed it**:
+CellKeeper records that value before its first change and restores it. It
+never substitutes a default such as 100%. CellKeeper only ever *restricts* charging relative to macOS
 defaults (inhibit charging, or run from the battery while plugged in); it never
 commands charging that macOS would withhold and never writes charge voltage,
 current, or protection settings.
@@ -55,6 +67,24 @@ All of these are enforced in `CellKeeperCore` and covered by unit tests.
 | Slider changes applied on release (no request bursts) | R13 | `MenuBarView` |
 | Simulated actions never reported as hardware actions; UI shows available / experimental / simulated / unavailable | R30 | `ControlOutcome`, `ControlAvailability`, UI |
 | Decisions, requests, results, and safety fallbacks logged (unified logging + in-app activity log); no device identifiers read or logged | R32 | `ChargeController.record`, allowlists in `BatteryTelemetryParser` |
+| An automatic retry of a failed restore waits 60 s; user actions retry at once | R13 | `ChargingPolicy.restoreRetryRefusal`, `ChargeController` |
+
+### macOS Charge Limit backend
+
+| Safeguard | Where |
+|---|---|
+| Opt-in only, marked experimental, with a confirmation that explains what will change and what will be restored | `ControlSettingsTab` |
+| Before the first change, your own limit is read from macOS and persisted. If it cannot be read or recognised, nothing is changed: no value is ever assumed, in particular not 100% | `NativeChargeLimitBackend.setLimit` |
+| Your recorded limit is restored exactly, and confirmed, when you quit, turn off management, switch backend, when settings become invalid, after any failed request, and when the backend is faulted. The record is deleted only after the restore is read back | `ChargeController.restoreNormal`, `NativeChargeLimitBackend.restoreOwnerLimit` |
+| The record survives crashes. At the next launch CellKeeper recognises whether it still owns the limit, whether the limit was already restored, or whether someone else changed it (outside change: fault, then restore) | `NativeChargeLimitBackend.currentMode`, `ChargeController.observeBackendMode` |
+| Every change is confirmed by reading the setting back from macOS; a shortcut exiting successfully never counts | `NativeChargeLimitBackend.confirm`, `ChargeController.setAndConfirm` |
+| Only the values the Charge Limit accepts (80, 85, 90, 95, 100) are ever requested; others are refused, and a limit outside them makes the policy keep your own limit | `NativeChargeLimitBackend.setLimit`, `ChargingPolicy.evaluateNativeLimit` |
+| A change made outside CellKeeper (System Settings, another tool) faults the backend; your recorded limit is restored once and nothing more is changed until you clear the fault | `ChargeController.observeBackendMode` |
+| Changes are rate-limited (≥ 60 s apart, ≤ 20 per hour); a take-over that needs no change runs nothing | `ChargingPolicy.rateLimitRetryTime`, `ChargeController.request` |
+| The read-back uses `pmset -g battlimit` with fixed arguments, read-only, through a strict parser; anything unrecognised is never guessed | `PmsetChargeLimitReader`, `ChargeLimitReportParser` |
+| Tools are run directly (no shell), with standard input closed, a deadline (shortcut 20 s, pmset 5 s), and bounded output | `ProcessRunner` |
+| Features the Charge Limit cannot express are disabled with an explanation: custom resume threshold, temperature pause, discharge | `SettingsView`, `MenuBarView`, `ChargingPolicy.evaluateNativeLimit` |
+| The menu shows that macOS is enforcing the limit, the value macOS reports, and the limit that will be restored | `NativeLimitSummary` |
 
 ### Validation ranges
 
@@ -69,12 +99,14 @@ All of these are enforced in `CellKeeperCore` and covered by unit tests.
 | Safety floor exit | 15% | floor + 5 |
 | Telemetry age | — | read ≤ 60 s ago; driver update ≤ 180 s ago (≈ 3 refresh periods); ≤ 60 s clock skew |
 | Restricting changes | — | ≥ 60 s apart, ≤ 20 per rolling hour |
+| Native Charge Limit | — | 80, 85, 90, 95, 100% (Apple's steps); resume threshold and temperature settings are not used |
 
-## Required before any real control backend
+## Required before any privileged control backend
 
-These are **not** implemented, because no real backend exists. Each is a
-precondition for enabling one, and a reviewer should block any PR that adds
-hardware writes without them.
+These are **not** implemented, because no backend that writes to hardware
+itself exists. Each is a precondition for enabling one, and a reviewer should
+block any PR that adds hardware writes without them. How the macOS Charge
+Limit backend relates to them is described after the list.
 
 1. **Verified mechanism per model.** Run the verification protocol in research
    note 02 §7 (a read-only, allowlisted capability probe, then single
@@ -131,6 +163,30 @@ hardware writes without them.
     sleep notifications and time-limited operations; the app's own will-sleep
     and quit handling cannot guarantee completion.
 
+### How the macOS Charge Limit backend meets the applicable preconditions
+
+The native backend writes nothing to hardware itself. It changes a
+supported user setting that you could equally change in System Settings, and
+macOS enforces it. Preconditions 2–4, 9, 12 and 13 concern privileged
+hardware writes and a helper, and do not apply. For the rest:
+
+- **1, verified mechanism:** verified on the maintainer's Mac (M4,
+  macOS 27.0.1), including from inside the App Sandbox
+  ([research note 08](research/08-native-charge-limit.md)). Sleep and restart
+  observations are recorded there.
+- **5, behavioural verification:** the setting itself is read back after
+  every change. Charging behaviour is macOS's and is not used as
+  confirmation.
+- **6, debounce and dwell:** macOS applies its own hysteresis; CellKeeper's
+  rate limit bounds how often the setting changes.
+- **7, external-writer detection:** implemented. An outside change faults
+  the backend.
+- **8, monotonic time:** used for rate limits, retries and overrides.
+- **10, opt-in:** off by default, marked experimental, with a confirmation.
+- **11, independent recovery:** System Settings › Battery › Charging can
+  always set the limit, with or without CellKeeper. The value to set is the
+  one CellKeeper shows as "your own limit" (also in the activity log).
+
 ### Deliberate deviations from research note 06
 
 - **Rate budget (R13).** Only restricting changes are counted; relaxing
@@ -149,6 +205,12 @@ hardware writes without them.
   would trip on normal refresh jitter. After wake, a stale driver time puts the
   policy in fail-safe until the driver refreshes.
 - **Floor and resume.** The floor is fixed at 10% (R5 allows 5–20%).
+- **Telemetry loss with the native Charge Limit (R1, R9).** Missing or stale
+  telemetry does not release a native limit: macOS enforces it from its own
+  measurements, so CellKeeper's view of the battery cannot make it unsafe.
+  Releasing would only restore and re-apply the setting after every wake.
+- **Restore retries.** An automatic retry of a failed restore waits 60 s
+  (user actions retry at once), so a broken backend is not run in a loop.
 
 ## What CellKeeper will never do
 
@@ -156,18 +218,39 @@ hardware writes without them.
 - Change charge voltage, charge current, gauge configuration, or protection
   thresholds.
 - Provide a general-purpose privileged command or key-write interface.
-- Counteract a charging hold that macOS or firmware imposed.
+- Counteract a charging hold that macOS or firmware imposed. (Setting
+  macOS's own Charge Limit is not counteracting it: it is the setting that
+  configures that hold.)
 - Claim a simulated or unverified action changed the hardware.
 
 ## If charging does not resume
 
-Milestone 1 cannot affect charging, so CellKeeper cannot be the cause of a
-charging problem today. If your Mac shows "Not Charging", macOS's own Charge
-Limit, Optimized Battery Charging, battery health management, a weak adapter,
-or another battery tool may be responsible; see Apple's guidance on the
-"Not Charging" status. A recovery procedure for future real backends
-(restore normal charging, uninstall the helper, restart) will be documented
-before such a backend ships (R31).
+With the simulated or read-only backend, CellKeeper cannot affect charging.
+With the macOS Charge Limit backend, the only thing CellKeeper changes is
+macOS's Charge Limit, which never goes below 80%. If your Mac shows "Not
+Charging", macOS's own Charge Limit, Optimized Battery Charging, battery
+health management, a weak adapter, or another battery tool may be
+responsible; see Apple's guidance on the "Not Charging" status.
+
+### Getting your own Charge Limit back
+
+1. In CellKeeper, turn off **Manage charging**, or quit CellKeeper.
+   CellKeeper restores the limit it recorded and reads it back. The activity
+   log shows "Restored your own macOS Charge Limit of N%".
+2. If CellKeeper cannot do that (for example because the shortcut was
+   deleted, or CellKeeper is no longer installed), set the limit in **System
+   Settings › Battery › ⓘ next to Charging**. The value CellKeeper recorded
+   is shown in its menu and settings as "your own limit".
+3. If CellKeeper reports that its record of your limit is unreadable, it
+   will not change the limit at all. Set your limit in System Settings, quit
+   CellKeeper, delete the record with
+   `defaults delete ~/Library/Containers/io.github.saltedtan.CellKeeper/Data/Library/Preferences/io.github.saltedtan.CellKeeper nativeChargeLimit.ownership.v1`,
+   and start CellKeeper again. (Builds with another bundle identifier use
+   their own container path.)
+
+A recovery procedure for future privileged backends (restore normal
+charging, uninstall the helper, restart) will be documented before such a
+backend ships (R31).
 
 ## Disclaimer
 

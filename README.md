@@ -10,12 +10,13 @@ exactly what it would do — and whether it can actually do it.
 > **CellKeeper is an independent open-source project and is not affiliated
 > with Apple, AppHouseKitchen, AlDente, or their respective developers.**
 
-## Status: early development (milestone 1)
+## Status: early development (milestone 2)
 
 CellKeeper is **pre-alpha**. The architecture, telemetry, and charging policy
-engine work. **Real charging control does not exist yet**: the app runs
-with a *simulated* control backend that records decisions without changing
-your Mac's charging.
+engine work. By default the app runs with a *simulated* control backend that
+records decisions without changing your Mac's charging. The first real
+control is opt-in and experimental: CellKeeper can set **macOS's own Charge
+Limit** (80–100%) through a shortcut you create, and macOS enforces it.
 
 | Feature | State |
 |---|---|
@@ -24,30 +25,63 @@ your Mac's charging.
 | Adapter wattage | **Real** — public API |
 | Battery temperature | **Not available** on macOS 27 through any public interface; shown as unavailable |
 | Battery health / condition as shown by macOS | **Not available** to third-party apps; CellKeeper shows its own computed capacity ratio, labelled as such |
-| Charge limit + resume threshold (hysteresis) | **Policy real, control simulated** |
-| Temporary charge to 100% | **Policy real, control simulated** |
-| Temperature protection | **Policy real**; cannot trigger without a temperature reading |
-| Discharge to limit while plugged in | **Policy real, control simulated**; a confirmed one-shot session, never automatic |
-| Hardware charging control | **Not implemented** — see [roadmap](docs/roadmap.md) |
+| Charge limit 80/85/90/95/100% via macOS's Charge Limit | **Real, experimental, opt-in** (macOS 26.4+, Apple silicon); enforced by macOS; verified on one Mac |
+| Charge limit + custom resume threshold (hysteresis) | **Policy real, control simulated** |
+| Temporary charge to 100% | **Real** with macOS's Charge Limit; otherwise simulated |
+| Temperature protection | **Policy real**; cannot trigger without a temperature reading; not available with macOS's Charge Limit |
+| Discharge to limit while plugged in | **Policy real, control simulated**; a confirmed one-shot session, never automatic; not available with macOS's Charge Limit |
+| Limits below 80%, or CellKeeper switching charging itself | **Not implemented** — see [roadmap](docs/roadmap.md) and [issue #1](https://github.com/SaltedTan/CellKeeper/issues/1) |
 | Scheduling, calibration, notifications, Shortcuts, launch at login | Planned |
 
 The menu bar always shows which kind of control is in effect: **Available**,
 **Experimental**, **Simulated**, or **Unavailable**.
 
-### Why no real control yet?
+### Why only macOS's Charge Limit?
 
 Apple provides no public API to stop or limit charging. macOS 26.4 and later
 on Apple silicon include a built-in **Charge Limit** (80–100%, System
 Settings › Battery), which is the only supported mechanism. Older approaches
 used by other tools rely on undocumented hardware keys that Apple has
-progressively locked down. CellKeeper will add control only through verified,
+progressively locked down. CellKeeper adds control only through verified,
 documented-as-far-as-possible mechanisms, with the fail-safe rules in
 [docs/safety.md](docs/safety.md). The details are in
 [docs/research/](docs/research/README.md).
 
-The next milestone builds on macOS's native Charge Limit (80–100%). Limits
-below 80% need private, privileged mechanisms and are a separate, gated step
-on the [roadmap](docs/roadmap.md).
+Limits below 80% need private, privileged mechanisms and are a separate,
+gated step on the [roadmap](docs/roadmap.md).
+
+## Using macOS's Charge Limit (experimental)
+
+Requirements: macOS Tahoe 26.4 or later on a Mac with Apple silicon.
+
+1. In the **Shortcuts** app, create a shortcut named exactly
+   **CellKeeper Set Charge Limit**.
+2. Add the **Set Battery Charge Limit** action and set its limit to the
+   **Shortcut Input**, so CellKeeper can pass a value from 80 to 100. Leave
+   **Set Until Tomorrow** off.
+3. In CellKeeper, open **Settings… › Control**, choose **macOS Charge Limit
+   (through Shortcuts)**, and confirm.
+4. Pick a limit (80, 85, 90, 95 or 100%) in the menu bar.
+
+What happens:
+- **Before its first change**, CellKeeper reads your current Charge Limit
+  and records it.
+- **It restores exactly that value** when you turn off **Manage charging**,
+  switch backend, quit, or if anything fails.
+- **Every change is confirmed** by reading the setting back from macOS.
+  The read uses `pmset -g battlimit`, an undocumented, read-only report;
+  CellKeeper changes nothing if it cannot read or recognise it.
+- **Features macOS's Charge Limit cannot express are disabled:** a custom
+  resume threshold (macOS resumes after a drop of more than 5%), the
+  temperature pause, and discharging.
+- **While CellKeeper manages the limit**, change it in CellKeeper, not in
+  System Settings. A change made elsewhere makes CellKeeper restore your
+  recorded limit and stop.
+
+You can always set the limit yourself in **System Settings › Battery › ⓘ
+next to Charging**. See [docs/safety.md](docs/safety.md#getting-your-own-charge-limit-back).
+The research behind this backend is in
+[docs/research/08-native-charge-limit.md](docs/research/08-native-charge-limit.md).
 
 ## Requirements
 
@@ -110,10 +144,12 @@ CellKeeper.app (SwiftUI menu bar, settings)
 - The **charging policy** is a pure, deterministic function: telemetry +
   settings + backend capabilities → desired mode + explicit action
   (enable charging, disable charging, request discharge, no action, or
-  refuse with a reason). It never touches hardware.
+  refuse with a reason). It never touches hardware. With macOS's Charge
+  Limit it computes the limit macOS should enforce.
 - All control goes through the **`ChargingBackend`** protocol. Simulated
   backends report actions as *simulated*, never as applied.
-- Every failure path returns to **macOS default charging**.
+- Every failure path returns to **macOS default charging**. With macOS's
+  Charge Limit, that means your own limit, exactly as recorded.
 
 See [docs/architecture.md](docs/architecture.md) for the full design.
 
@@ -121,8 +157,9 @@ See [docs/architecture.md](docs/architecture.md) for the full design.
 
 Battery charging is hardware-adjacent. CellKeeper is designed to fail toward
 macOS's default behaviour, validates every setting, logs every change in its
-decisions and every control request, and
-never writes to hardware in this version. Your Mac's built-in battery
+decisions and every control request, and never writes to hardware itself in
+this version. Its only real control, opt-in, is macOS's own Charge Limit,
+which macOS enforces. Your Mac's built-in battery
 protections always remain in effect. Read [docs/safety.md](docs/safety.md)
 before contributing anything that could change charging behaviour.
 
