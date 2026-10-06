@@ -53,7 +53,7 @@ app (`AppModel`, `AppDelegate` and the views) are checked by hand.
 
 | Safeguard | Rule (06) | Where |
 |---|---|---|
-| Invalid settings → fail safe; never saved or applied | R24 | `ChargingSettings.validationIssues`, `ChargingPolicy`, `SettingsStore`, `ChargeController.apply` |
+| Invalid settings → fail safe; never saved or applied. Unusable stored settings are replaced by the defaults with Manage charging off | R24 | `ChargingSettings.validationIssues`, `ChargingPolicy`, `SettingsStore`, `ChargeController.apply` |
 | Missing, stale (read > 60 s ago, or the driver's own update time > 180 s old), future-dated telemetry, unknown power source, no battery → fail safe | R1, R9, R10 | `ChargingPolicy.staleness`, `BatteryTelemetryParser` |
 | Implausible telemetry values discarded (percent, temperature −20…80 °C, voltage, current, overflow-safe parsing) | R10 | `BatteryTelemetryParser` |
 | Safety floor: at ≤ 10% charging is always allowed, overriding temperature protection and every other rule, until the charge recovers to 15% | R5 | `ChargingPolicy.nextFloorLatch` |
