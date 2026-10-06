@@ -35,14 +35,21 @@ restriction in effect and macOS/firmware decide charging. Every failure path
 converges on it. With the macOS Charge Limit backend, the safe state is
 **your own Charge Limit, exactly as it was before CellKeeper changed it**:
 CellKeeper records that value before its first change and restores it. It
-never substitutes a default such as 100%. CellKeeper only ever *restricts* charging relative to macOS
-defaults (inhibit charging, or run from the battery while plugged in); it never
-commands charging that macOS would withhold and never writes charge voltage,
-current, or protection settings.
+never substitutes a default such as 100%.
+
+Backends that switch charging themselves only ever *restrict* charging
+relative to macOS defaults (inhibit charging, or run from the battery while
+plugged in); they never command charging that macOS would withhold. With
+macOS's Charge Limit, CellKeeper only sets one of the values macOS itself
+offers (80–100%). That can be above your own limit, for example for a
+temporary full charge, and macOS still enforces it. CellKeeper never writes
+charge voltage, current, or protection settings.
 
 ## Safeguards implemented today
 
-All of these are enforced in `CellKeeperCore` and covered by unit tests.
+The "Where" column names the code that enforces each safeguard. Those in
+`CellKeeperCore` and `CellKeeperKit` are covered by unit tests; those in the
+app (`AppModel`, `AppDelegate` and the views) are checked by hand.
 
 | Safeguard | Rule (06) | Where |
 |---|---|---|
@@ -80,7 +87,7 @@ All of these are enforced in `CellKeeperCore` and covered by unit tests.
 | The record survives crashes, and is checked at every launch whichever backend is selected. A record found at launch means an earlier session did not finish, so CellKeeper first restores your own limit once it can read the current one (or, if someone else changed the limit meanwhile, keeps that value as yours and turns management off), and only then resumes. An unreadable record blocks all changes and is never treated as "nothing to restore" | `NativeChargeLimitBackend`, `ChargeController.observeBackendMode`, `AppModel` |
 | Every change is confirmed by reading the setting back from macOS; a shortcut exiting successfully never counts | `NativeChargeLimitBackend.confirm`, `ChargeController.setAndConfirm` |
 | Only the values the Charge Limit accepts (80, 85, 90, 95, 100) are ever requested; others are refused, and a limit outside them makes the policy keep your own limit | `NativeChargeLimitBackend.setLimit`, `ChargingPolicy.evaluateNativeLimit` |
-| A change made outside CellKeeper (System Settings, another tool) is kept as your own limit, whether CellKeeper notices it when reading, just before writing, or just before restoring: nothing is written, the old record is deleted, and Manage charging is turned off and saved, so CellKeeper changes nothing more until you turn it on again. A marker in place of the record keeps management off at every launch until you turn it on again, because settings reach the disk asynchronously; if the marker cannot be stored, the old record is kept, which has the same effect, a backend switch waits until the marker is stored, and turning management on removes the old record first (or stays off if it cannot). A settings change you made before CellKeeper kept your value cannot turn management back on. The menu and the log say what was kept; if macOS reported "no limit", they also name your earlier limit in case it was a temporary full charge | `ChargeController.adopt`, `NativeChargeLimitBackend.adopt`, `AppModel` |
+| A change made outside CellKeeper (System Settings, another tool) is kept as your own limit, whether CellKeeper notices it when reading, just before writing, or just before restoring: nothing is written, the old record is replaced by a marker that holds nothing to restore, and Manage charging is turned off and saved, so CellKeeper changes nothing more until you turn it on again. The marker keeps management off at every launch until you turn it on again, because settings reach the disk asynchronously; if the marker cannot be stored, the old record is kept, which has the same effect, a backend switch waits until the marker is stored, and turning management on removes the old record first (or stays off if it cannot). A settings change you made before CellKeeper kept your value cannot turn management back on. The menu and the log say what was kept; if macOS reported "no limit", they also name your earlier limit in case it was a temporary full charge | `ChargeController.adopt`, `NativeChargeLimitBackend.adopt`, `AppModel` |
 | Changes are rate-limited (≥ 60 s apart, ≤ 20 per hour), and real changes still count after a switch to Simulated and back; simulated requests are dropped when the backend changes; a take-over that needs no change runs nothing | `ChargingPolicy.rateLimitRetryTime`, `ChargeController.request`, `ChargeController.completePendingSwitch` |
 | The read-back uses `pmset -g battlimit` with fixed arguments, read-only, through a strict parser; anything unrecognised is never guessed | `PmsetChargeLimitReader`, `ChargeLimitReportParser` |
 | Tools are run directly (no shell), with standard input closed, a deadline (shortcut 20 s, pmset 5 s), bounded output, and cancellation; incomplete output is never parsed | `ProcessRunner` |

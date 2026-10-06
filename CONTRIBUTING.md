@@ -61,8 +61,8 @@ provisioning profiles, or other credentials.
 | Path | Contents |
 |---|---|
 | `CellKeeper/` | SwiftUI app (menu bar, settings, app model) |
-| `Packages/CellKeeperKit/Sources/CellKeeperCore/` | Pure domain logic: policy, controller, settings, backend protocol |
-| `Packages/CellKeeperKit/Sources/CellKeeperKit/` | macOS adapters (read-only telemetry, notifications) |
+| `Packages/CellKeeperKit/Sources/CellKeeperCore/` | Pure domain logic: policy, controller, settings, backend protocol and backends (simulated, read-only, native Charge Limit) |
+| `Packages/CellKeeperKit/Sources/CellKeeperKit/` | macOS adapters (read-only telemetry, notifications, the `shortcuts` and `pmset` runners, the Charge Limit record file) |
 | `Packages/CellKeeperKit/Tests/` | Swift Testing tests |
 | `Config/` | xcconfig files and entitlements |
 | `docs/` | Architecture, safety, roadmap, research |

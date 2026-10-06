@@ -31,7 +31,7 @@ Limit** (80–100%) through a shortcut you create, and macOS enforces it.
 | Temperature protection | **Policy real**; cannot trigger without a temperature reading; not available with macOS's Charge Limit |
 | Discharge to limit while plugged in | **Policy real, control simulated**; a confirmed one-shot session, never automatic; not available with macOS's Charge Limit |
 | Limits below 80%, or CellKeeper switching charging itself | **Not implemented** — see [roadmap](docs/roadmap.md) and [issue #1](https://github.com/SaltedTan/CellKeeper/issues/1) |
-| Scheduling, calibration, notifications, Shortcuts, launch at login | Planned |
+| Scheduling, calibration, notifications, Shortcuts actions for CellKeeper's own controls, launch at login | Planned |
 
 The menu bar always shows which kind of control is in effect: **Available**,
 **Experimental**, **Simulated**, or **Unavailable**.
@@ -149,10 +149,13 @@ log stream --level info --predicate 'subsystem == "io.github.saltedtan.CellKeepe
 
 ```
 CellKeeper.app (SwiftUI menu bar, settings)
-  └── CellKeeperKit   macOS adapters: read-only IOKit telemetry, power notifications
+  └── CellKeeperKit   macOS adapters: read-only IOKit telemetry, power
+                      notifications, the shortcuts and pmset runners, and the
+                      record of your own Charge Limit
         └── CellKeeperCore   pure Swift: settings validation, charging policy
                              state machine, controller, backend protocol,
-                             simulated and read-only backends
+                             simulated, read-only and native Charge Limit
+                             backends
 ```
 
 - The **charging policy** is a pure, deterministic function: telemetry +

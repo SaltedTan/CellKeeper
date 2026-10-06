@@ -125,7 +125,7 @@ A missing shortcut exits 1 with `Error: The operation couldn’t be completed. C
 
 ### O9 — The CellKeeper app end to end `[VERIFIED-EXPERIMENTALLY]`
 
-**Setup:** the App-Sandboxed Debug build of this branch (ad-hoc signed), with the native backend preselected and a CellKeeper limit of 85%. The owner's own limit was 80%. Each run was observed with `pmset -g battlimit` and CellKeeper's unified log.
+**Setup:** the App-Sandboxed Debug build of the milestone 2 branch (ad-hoc signed; merged as PR #3), with the native backend preselected and a CellKeeper limit of 85%. The owner's own limit was 80%. Each run was observed with `pmset -g battlimit` and CellKeeper's unified log.
 
 | Run | What happened |
 |---|---|
@@ -218,7 +218,7 @@ From the owner's screenshot of the Shortcuts editor (Shortcuts 10.0), the shortc
 ### O15 — A change made outside CellKeeper is kept `[VERIFIED-EXPERIMENTALLY]`
 
 **Setup:**
-- The Debug build of this branch, after the owner's decision to adopt outside changes (decision 5).
+- The Debug build of the milestone 2 branch (merged as PR #3), after the owner's decision to adopt outside changes (decision 5).
 - The owner's saved settings: native backend, CellKeeper limit 85%, management on.
 - The owner's own limit was 80%.
 - A change in System Settings was stood in for by running the owner's shortcut from Terminal with 90.
