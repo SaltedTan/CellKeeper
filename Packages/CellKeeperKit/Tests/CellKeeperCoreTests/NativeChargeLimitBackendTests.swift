@@ -540,6 +540,20 @@ struct NativeChargeLimitBackendTests {
         #expect(await backend.takeAdoptedLimitChange()?.expectedLimit == 90)
     }
 
+    @Test("A record from an earlier session is restored only after the limit has been read")
+    func earlierRecordNeedsRead() async throws {
+        storeOwnershipRecord(owner: 80, target: 90, in: store)
+        system.reading = .limit(90)
+        let backend = makeBackend()
+        system.failNextReads(1)
+        await #expect(throws: BackendError.self) {
+            try await backend.setMode(.normal)
+        }
+        #expect(system.runInputs.isEmpty)
+        #expect(try await backend.setMode(.normal) == .applied)
+        #expect(system.reading == .limit(80))
+    }
+
     @Test("The restore runs even if the setting cannot be read first")
     func restoreWithoutPreRead() async throws {
         let backend = makeBackend()

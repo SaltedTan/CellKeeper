@@ -288,10 +288,13 @@ The native-limit extension of the contract:
       reach the disk asynchronously, so at launch the marker, not the saved
       settings, decides that management stays off.
     - Turning management on again removes it, whichever backend is in use;
-      so does a new record of the user's limit.
+      so does a new record of the user's limit. If it cannot be removed,
+      management stays off.
     - If the marker cannot be stored, whatever is on disk is left alone and
       saving is retried at every read. An old record left in place makes
-      the next launch adopt the change again.
+      the next launch adopt the change again. Until the marker is stored, a
+      backend switch waits; turning management on removes the old record
+      (it is no longer owed), or stays off if it cannot.
     - Removing a marker never deletes a record of the user's limit.
 - **Confirmation.** Only a fresh read of the setting from macOS confirms a
   change. A shortcut or command exiting successfully does not: one did so
@@ -413,8 +416,11 @@ Lifecycle:
    backend switch (pending until confirmed), any failed request, a state
    that could not be read back, or a fault.
    - The backend marks the restore as in progress, runs the shortcut with
-     the recorded value (even if it could not read the setting first), and
-     reads it back.
+     the recorded value, and reads it back. Within a session it does so even
+     if it could not read the setting first. A record from an earlier
+     session is restored only after the limit has been read, because
+     someone may have changed it since and a blind write could overwrite
+     their choice.
    - Only then does it delete the record. If the read-back failed but a
      later read shows the user's limit, the restore counts as done.
    - If macOS already shows that value, nothing runs.

@@ -331,7 +331,16 @@ final class AppModel {
             status = await controller.evaluate(trigger)
         case .apply(let newSettings, let adoptionsSeen):
             do {
-                status = try await controller.apply(settings: newSettings, adoptionsSeen: adoptionsSeen)
+                let newStatus = try await controller.apply(settings: newSettings, adoptionsSeen: adoptionsSeen)
+                status = newStatus
+                // The controller keeps management off if the user had not seen
+                // a kept outside change yet, or the change cannot be retired;
+                // show and save what is actually in effect, unless a newer
+                // change is already on its way.
+                if newSettings.isManagementEnabled, !newStatus.settings.isManagementEnabled, settings == newSettings {
+                    settings.isManagementEnabled = false
+                    try? store.save(settings)
+                }
             } catch {
                 settingsError = "Settings were rejected: \(error)"
             }

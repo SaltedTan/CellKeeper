@@ -157,6 +157,7 @@ final class InMemoryRecordStore: OwnershipRecordStore, @unchecked Sendable {
     private var stored: Data?
     private var _saveFails = false
     private var _loadFails = false
+    private var _removeFails = false
 
     var data: Data? {
         get { lock.withLock { stored } }
@@ -171,6 +172,11 @@ final class InMemoryRecordStore: OwnershipRecordStore, @unchecked Sendable {
     var loadFails: Bool {
         get { lock.withLock { _loadFails } }
         set { lock.withLock { _loadFails = newValue } }
+    }
+
+    var removeFails: Bool {
+        get { lock.withLock { _removeFails } }
+        set { lock.withLock { _removeFails = newValue } }
     }
 
     func load() throws -> Data? {
@@ -188,7 +194,10 @@ final class InMemoryRecordStore: OwnershipRecordStore, @unchecked Sendable {
     }
 
     func remove() throws {
-        lock.withLock { stored = nil }
+        try lock.withLock {
+            if _removeFails { throw StoreError() }
+            stored = nil
+        }
     }
 }
 

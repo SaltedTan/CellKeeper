@@ -256,6 +256,10 @@ public struct NativeLimitStatus: Sendable, Equatable {
     /// The state last reported by `currentMode()` is one CellKeeper set or
     /// restored, even if it could not confirm it at the time.
     public var isReportedStateOwn: Bool
+    /// An outside change was adopted but its marker could not be stored
+    /// yet, so the record it replaced may still be on disk. Until it is
+    /// stored, CellKeeper does not switch backend or turn management on.
+    public var isAdoptionUnsaved: Bool
 
     public init(
         reportedLimit: Int? = nil,
@@ -266,7 +270,8 @@ public struct NativeLimitStatus: Sendable, Equatable {
         isRecordUnreadable: Bool = false,
         needsNoLimitConfirmation: Bool = false,
         isRestoreUnfinished: Bool = false,
-        isReportedStateOwn: Bool = false
+        isReportedStateOwn: Bool = false,
+        isAdoptionUnsaved: Bool = false
     ) {
         self.reportedLimit = reportedLimit
         self.readAt = readAt
@@ -277,6 +282,7 @@ public struct NativeLimitStatus: Sendable, Equatable {
         self.needsNoLimitConfirmation = needsNoLimitConfirmation
         self.isRestoreUnfinished = isRestoreUnfinished
         self.isReportedStateOwn = isReportedStateOwn
+        self.isAdoptionUnsaved = isAdoptionUnsaved
     }
 
     /// True while CellKeeper has changed the setting and must restore it.

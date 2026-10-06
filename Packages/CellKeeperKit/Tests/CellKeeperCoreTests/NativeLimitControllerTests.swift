@@ -480,6 +480,141 @@ struct NativeLimitControllerTests {
         #expect(system.runInputs == ["90"])
     }
 
+    @Test("A record from an earlier session is not restored blind over a change CellKeeper kept")
+    func noBlindRestoreOfEarlierRecord() async {
+        let (first, _) = makeController(limit: 90)
+        await first.evaluate(.launch)
+        store.saveFails = true
+        system.changeExternally(to: 95)
+        await first.evaluate(.periodic)
+        await first.shutdown(reason: "quit")
+        // The marker never reached the disk, so the old record is still there.
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store)?.ownerLimit == 80)
+
+        store.saveFails = false
+        system.failNextReads(2)
+        let (second, _) = makeController(limit: 90)
+        let blind = await second.evaluate(.launch)
+        #expect(system.runInputs == ["90"])
+        #expect(system.reading == .limit(95))
+        #expect(blind.nativeLimit?.ownerLimit == 80)
+
+        clock.advance(by: ChargingPolicy.minimumRestoreRetryInterval)
+        let checked = await second.evaluate(.periodic)
+        #expect(system.runInputs == ["90"])
+        #expect(checked.adoptedChange?.limit == 95)
+        #expect(!checked.settings.isManagementEnabled)
+    }
+
+    @Test("While the marker is unsaved, a backend switch waits and turning management on retires the old record")
+    func unsavedMarkerBlocksSwitchAndIsRetired() async throws {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        store.saveFails = true
+        system.changeExternally(to: 95)
+        await controller.evaluate(.periodic)
+
+        let waiting = await controller.switchBackend(to: MockChargingBackend())
+        #expect(waiting.backend.identifier == NativeChargeLimitBackend.identifier)
+        #expect(waiting.pendingBackend?.identifier == "simulated")
+        #expect(waiting.nativeLimit?.isAdoptionUnsaved == true)
+
+        // Choosing the native backend again cancels the switch; turning
+        // management on then removes the old record before recording 95%.
+        await controller.switchBackend(to: makeNativeBackend(system: system, store: store, clock: clock))
+        store.saveFails = false
+        clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
+        let managing = try await controller.apply(settings: settings(limit: 90), adoptionsSeen: 1)
+        #expect(managing.settings.isManagementEnabled)
+        #expect(managing.nativeLimit?.ownerLimit == 95)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store)?.ownerLimit == 95)
+        #expect(system.reading == .limit(90))
+    }
+
+    @Test("Turning management on while the store still fails removes the old record, so quitting has nothing owed")
+    func reEnableRetiresRecordWhileSavesFail() async throws {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        store.saveFails = true
+        system.changeExternally(to: 95)
+        await controller.evaluate(.periodic)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store)?.ownerLimit == 80)
+
+        clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
+        let managing = try await controller.apply(settings: settings(limit: 90), adoptionsSeen: 1)
+        #expect(managing.settings.isManagementEnabled)
+        // Nothing can be recorded, so nothing is changed, and the old record
+        // of 80% (no longer owed) is gone.
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store) == nil)
+        #expect(system.runInputs == ["90"])
+        #expect(system.reading == .limit(95))
+    }
+
+    @Test("If the old record left by an unsaved marker cannot be removed, management stays off")
+    func reEnableRefusedWhenOldRecordStays() async throws {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        store.saveFails = true
+        system.changeExternally(to: 95)
+        await controller.evaluate(.periodic)
+        store.removeFails = true
+        let refused = try await controller.apply(settings: settings(limit: 90), adoptionsSeen: 1)
+        #expect(!refused.settings.isManagementEnabled)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store)?.ownerLimit == 80)
+        #expect(system.runInputs == ["90"])
+    }
+
+    @Test("An unsaved marker that is stored later lets the waiting switch complete")
+    func unsavedMarkerSwitchCompletes() async {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        store.saveFails = true
+        system.changeExternally(to: 95)
+        await controller.evaluate(.periodic)
+        await controller.switchBackend(to: MockChargingBackend())
+        store.saveFails = false
+        let switched = await controller.evaluate(.periodic)
+        #expect(switched.backend.identifier == "simulated")
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store)?.limit == 95)
+        #expect(system.runInputs == ["90"])
+    }
+
+    @Test("If what kept management off cannot be removed, management stays off")
+    func reEnableRefusedWhenMarkerStays() async throws {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        system.changeExternally(to: 95)
+        await controller.evaluate(.periodic)
+        store.removeFails = true
+        let refused = try await controller.apply(settings: settings(limit: 90), adoptionsSeen: 1)
+        #expect(!refused.settings.isManagementEnabled)
+        #expect(refused.adoptedChange?.limit == 95)
+        #expect(refused.events.contains { $0.message.hasPrefix("Manage charging stays off: CellKeeper could not remove") })
+        #expect(system.runInputs == ["90"])
+
+        store.removeFails = false
+        clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
+        let managing = try await controller.apply(settings: settings(limit: 90), adoptionsSeen: 1)
+        #expect(managing.settings.isManagementEnabled)
+        #expect(system.reading == .limit(90))
+    }
+
+    @Test("Turning management on before the first evaluation drops a marker's report from launch")
+    func reEnableBeforeFirstEvaluation() async throws {
+        let (first, _) = makeController(limit: 90)
+        await first.evaluate(.launch)
+        system.changeExternally(to: 95)
+        await first.evaluate(.periodic)
+
+        let (second, _) = makeController(limit: 90, managed: false)
+        try await second.apply(settings: settings(limit: 90), adoptionsSeen: 0)
+        let status = await second.evaluate(.launch)
+        #expect(status.settings.isManagementEnabled)
+        #expect(status.adoptionCount == 0)
+        #expect(status.nativeLimit?.ownerLimit == 95)
+        #expect(system.reading == .limit(90))
+    }
+
     @Test("A marker that could not be stored at first is stored at the next read")
     func markerSaveRetried() async {
         let (controller, _) = makeController(limit: 90)

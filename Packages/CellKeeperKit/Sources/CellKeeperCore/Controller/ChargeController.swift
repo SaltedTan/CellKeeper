@@ -203,19 +203,15 @@ public actor ChargeController {
                 validSettings.isManagementEnabled = false
                 record(.settings, "Manage charging stays off: this change was made before CellKeeper kept a Charge Limit changed outside it.")
             }
+            if validSettings.isManagementEnabled, !settings.isManagementEnabled, await !retireAdoption() {
+                validSettings.isManagementEnabled = false
+                record(.safety, "Manage charging stays off: CellKeeper could not remove what records the Charge Limit it kept, so it leaves the limit as it is. Try again later.", level: .error)
+            }
             guard validSettings != settings else { return }
             let previous = settings
             settings = validSettings
             if validSettings.isManagementEnabled {
                 adoptedChange = nil
-            }
-            if validSettings.isManagementEnabled, !previous.isManagementEnabled {
-                // The user wants CellKeeper to manage again, so a change it
-                // kept earlier no longer needs to keep management off.
-                await (backend as? NativeChargeLimitBackend)?.clearAdoptionMarker()
-                if let adoptionMarkerStore {
-                    try? NativeChargeLimitBackend.removeAdoptionMarker(in: adoptionMarkerStore)
-                }
             }
             record(.settings, Self.describeChange(from: previous, to: validSettings))
             if !validSettings.isManagementEnabled, let ended = activeOverride {
@@ -292,6 +288,10 @@ public actor ChargeController {
                 record(.safety, "Backend switch to \(newBackend.descriptor.displayName) refused for now: normal charging could not be confirmed on \(backend.descriptor.displayName). CellKeeper keeps trying and switches once it is confirmed.", level: .fault)
                 return
             }
+            guard !isAdoptionUnsaved else {
+                record(.safety, "Backend switch to \(newBackend.descriptor.displayName) waits: CellKeeper could not yet store its record of the Charge Limit it kept. It keeps trying and switches once it has.", level: .error)
+                return
+            }
             await completePendingSwitch()
         }
     }
@@ -352,6 +352,29 @@ public actor ChargeController {
         lastExecution = nil
         record(.settings, "Control backend changed from \(previousName) to \(newBackend.descriptor.displayName).")
         await performEvaluation(.backendChanged)
+    }
+
+    /// True while an adopted change's marker could not be stored yet.
+    private var isAdoptionUnsaved: Bool {
+        nativeLimit?.isAdoptionUnsaved ?? false
+    }
+
+    /// Before management is turned on again, removes what kept it off after
+    /// an adoption (the marker, or a record the marker could not replace).
+    /// Returns false if that could not be done; management must stay off.
+    private func retireAdoption() async -> Bool {
+        if let native = backend as? NativeChargeLimitBackend {
+            guard await native.clearAdoptionMarker() else { return false }
+            nativeLimit = await native.nativeLimitStatus()
+        }
+        if let adoptionMarkerStore {
+            do {
+                try NativeChargeLimitBackend.removeAdoptionMarker(in: adoptionMarkerStore)
+            } catch {
+                return false
+            }
+        }
+        return true
     }
 
     /// Clears the faulted state so non-normal modes may be requested again.
@@ -466,7 +489,7 @@ public actor ChargeController {
         await execute(newDecision.action)
         nativeLimit = await backend.nativeLimitStatus()
 
-        if pendingBackend != nil, currentMode == .normal, !(nativeLimit?.hasUnresolvedOwnership ?? false) {
+        if pendingBackend != nil, currentMode == .normal, !(nativeLimit?.hasUnresolvedOwnership ?? false), !isAdoptionUnsaved {
             await completePendingSwitch()
         }
     }

@@ -339,11 +339,9 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     }
 
     public func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome {
-        let isFirstContact = !hasReconciledRecord
-        hasReconciledRecord = true
         switch mode {
         case .normal:
-            return try await restoreOwnerLimit(isFirstContact: isFirstContact)
+            return try await restoreOwnerLimit()
         case .nativeLimit(let percent):
             return try await setLimit(percent)
         case .inhibitCharging, .forceDischarge:
@@ -364,6 +362,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             status.isRecordUnreadable = true
         }
         status.isReportedStateOwn = isLastReportedStateOwn
+        status.isAdoptionUnsaved = unsavedMarker != nil
         return status
     }
 
@@ -385,14 +384,25 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         shortcutConfirmedAtUptime = nil
     }
 
-    /// The user turned "Manage charging" on again after an adoption: the
-    /// marker is no longer needed.
-    public func clearAdoptionMarker() {
-        unsavedMarker = nil
+    /// The user turned "Manage charging" on again: whatever kept it off
+    /// after an adoption is no longer needed. Returns false if it could not
+    /// be removed; management must then stay off.
+    public func clearAdoptionMarker() -> Bool {
+        // A report loaded at launch and not yet taken is no longer relevant.
+        adoptedChange = nil
         do {
-            try Self.removeAdoptionMarker(in: store)
+            if unsavedMarker != nil {
+                // The marker was never stored, so the record it was to
+                // replace may still be on disk. Nothing in it is owed now.
+                try store.remove()
+                unsavedMarker = nil
+            } else {
+                try Self.removeAdoptionMarker(in: store)
+            }
+            return true
         } catch {
-            CellKeeperLog.backend.error("Could not remove the adoption marker: \(String(describing: error), privacy: .public)")
+            CellKeeperLog.backend.error("Could not remove what kept management off after an adoption: \(String(describing: error), privacy: .public)")
+            return false
         }
     }
 
@@ -422,6 +432,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         guard let currentPercent = current.percent else {
             throw BackendError.operationFailed("macOS's current Charge Limit could not be recognised, so CellKeeper will not change it.")
         }
+        hasReconciledRecord = true
 
         var owned: OwnershipRecord
         switch record {
@@ -462,20 +473,19 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         return .applied
     }
 
-    /// - Parameter isFirstContact: true if no earlier read in this session
-    ///   could have reconciled the record with macOS.
-    private func restoreOwnerLimit(isFirstContact: Bool) async throws -> ControlOutcome {
+    private func restoreOwnerLimit() async throws -> ControlOutcome {
         switch record {
         case .none:
             return .unchanged
         case .unreadable:
             throw BackendError.unavailable("CellKeeper's record of your own Charge Limit cannot be read, so it does not know what to restore.")
         case .owned(var owned):
-            // Restoring is attempted even if the setting cannot be read first;
-            // only the read-back afterwards can confirm it.
             if let current = try? await read(), let percent = current.percent {
-                // At first contact the user's limit may be back because a
-                // restore finished after an earlier session stopped waiting.
+                // At first contact with a record from an earlier session, the
+                // user's limit may be back because a restore finished after
+                // that session stopped waiting.
+                let isFirstContact = !hasReconciledRecord
+                hasReconciledRecord = true
                 if percent == owned.ownerLimit, owned.accepts(percent) || isFirstContact {
                     clearRecord(reason: "\(owned.ownerLimit)% already in effect")
                     return .unchanged
@@ -487,6 +497,13 @@ public actor NativeChargeLimitBackend: ChargingBackend {
                     adopt(current, replacing: owned)
                     return .adoptedOutsideChange
                 }
+            } else if !hasReconciledRecord {
+                // A record from an earlier session is restored only once the
+                // limit has been read: someone may have changed it since, and
+                // writing blind could overwrite their choice. In this session
+                // the restore goes ahead without a read; only the read-back
+                // afterwards can confirm it.
+                throw BackendError.operationFailed("macOS's Charge Limit could not be read, so CellKeeper waits to restore the limit recorded in an earlier session until it can check it first.")
             }
             // Mark the restore as in progress, so a later reading of the
             // user's limit is recognised as CellKeeper's own doing. Restoring
