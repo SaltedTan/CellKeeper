@@ -340,6 +340,13 @@ final class AppModel {
         send(.discardUnreadableRecord)
     }
 
+    /// A plain-text report of what CellKeeper sees and does, for bug reports.
+    /// It contains no serial numbers or other device identifiers.
+    func diagnosticsReport() -> String? {
+        guard let status else { return nil }
+        return DiagnosticsReport.text(status: status, environment: .current(), generatedAt: Date())
+    }
+
     /// True when the selected backend sets macOS's own Charge Limit, so the
     /// UI should offer only what that limit can express.
     var usesNativeLimit: Bool {

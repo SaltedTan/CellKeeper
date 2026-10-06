@@ -90,5 +90,25 @@ struct DiagnosticsReportTests {
         #expect(report.contains("CellKeeper's limit: 85%"))
         #expect(report.contains("Shortcut found: yes"))
         #expect(report.contains("Flags: none"))
+        #expect(!report.contains("Management refused"))
+    }
+
+    @Test("A refused attempt to turn management on is in the report, with the kept change")
+    func managementRefused() async throws {
+        let system = FakeChargeLimitSystem(reading: .limit(80))
+        let store = InMemoryRecordStore()
+        let backend = makeNativeBackend(system: system, store: store, clock: clock)
+        let telemetry = StubTelemetry(snapshot(percent: 78, charging: true), clock: clock)
+        let controller = ChargeController(telemetry: telemetry, backend: backend, settings: ChargingSettings.default.withChargeLimit(90), now: { clock.now }, uptime: { clock.uptime })
+        await controller.evaluate(.launch)
+        system.changeExternally(to: 95)
+        await controller.evaluate(.periodic)
+        store.removeFails = true
+        let refused = try await controller.apply(settings: ChargingSettings.default.withChargeLimit(90), adoptionsSeen: 1)
+        let report = DiagnosticsReport.text(status: refused, environment: environment, generatedAt: referenceDate)
+
+        #expect(report.contains("Management refused: Manage charging stays off: CellKeeper could not remove its record"))
+        #expect(report.contains("Kept outside change: 95% at"))
+        #expect(report.contains("Manage charging: off"))
     }
 }
