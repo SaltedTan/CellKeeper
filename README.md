@@ -81,9 +81,10 @@ What happens:
   If CellKeeper cannot read or recognise it, it sets no new limit; it still
   tries to give back your recorded limit, and treats that as unconfirmed
   until it reads it back.
-- **Features macOS's Charge Limit cannot express are disabled:** a custom
-  resume threshold (macOS resumes after a drop of more than 5%), the
-  temperature pause, and discharging.
+- **Features macOS's Charge Limit cannot express are not offered:** a
+  custom resume threshold (macOS resumes after a drop of more than 5%), the
+  temperature pause, and discharging. Settings hides them and says so in
+  one note.
 - **If you change the limit in System Settings** while CellKeeper manages
   it, CellKeeper keeps your new value as your own limit, changes nothing,
   and turns off **Manage charging**. Turn it on again to let CellKeeper

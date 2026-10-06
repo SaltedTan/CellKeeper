@@ -38,7 +38,7 @@ Done: the policy computes the native limit; ownership with restore on quit,
 management off, backend switch and failure; Shortcuts write path verified
 from the App Sandbox with no new entitlements; read-back through
 `pmset -g battlimit` (read-only); rate limiting and logging; UI for
-80/85/90/95/100 with unsupported features disabled; a limit changed in
+80/85/90/95/100 with unsupported features hidden; a limit changed in
 System Settings is kept as the user's own and management turns off (owner
 decision). Observed on the maintainer's Mac: the walk-through, one sleep run
 and one restart. Still open: shutdown observations, and schedules (below).
