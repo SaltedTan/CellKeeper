@@ -23,6 +23,7 @@ Limit** (80–100%) through a shortcut you create, and macOS enforces it.
 | Battery %, power source, charging state | **Real** — public IOPowerSources API |
 | Cycle count, voltage, current, mAh capacities | **Real** — read-only IORegistry properties (some undocumented) |
 | Adapter wattage | **Real** — public API |
+| Mac thermal state and Low Power Mode | **Real** — public `ProcessInfo` API; system-wide, not battery temperature; shown only |
 | Battery temperature | **Not available** on macOS 27 through any public interface; shown as unavailable |
 | Battery health / condition as shown by macOS | **Not available** to third-party apps; CellKeeper shows its own computed capacity ratio, labelled as such |
 | Charge limit 80/85/90/95/100% via macOS's Charge Limit | **Real, experimental, opt-in** (macOS 26.4+, Apple silicon); enforced by macOS; verified on one Mac |

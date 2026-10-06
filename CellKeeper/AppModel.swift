@@ -53,6 +53,11 @@ final class AppModel {
     private(set) var settingsError: String?
     /// Set when stored settings were unusable and defaults were loaded.
     private(set) var settingsRecoveryMessage: String?
+    /// macOS's system-wide thermal state and Low Power Mode, shown for
+    /// context. Not battery temperature; the charging policy does not use
+    /// them.
+    private(set) var thermalState = ProcessInfo.processInfo.thermalState
+    private(set) var isLowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
 
     private enum Command: Sendable {
         case evaluate(EvaluationTrigger)
@@ -169,6 +174,13 @@ final class AppModel {
             Task { @MainActor in self?.willSleep() }
         })
 
+        let defaultCenter = NotificationCenter.default
+        for name in [ProcessInfo.thermalStateDidChangeNotification, Notification.Name.NSProcessInfoPowerStateDidChange] {
+            observers.append(defaultCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.readSystemConditions() }
+            })
+        }
+
         if let startupSwitch {
             CellKeeperLog.app.notice("An earlier session left macOS's Charge Limit changed; restoring it before switching to the \(startupSwitch.rawValue, privacy: .public) backend")
             send(.switchBackend(startupSwitch))
@@ -190,6 +202,11 @@ final class AppModel {
         postWakeReread?.cancel()
         postWakeReread = nil
         send(.evaluate(.willSleep))
+    }
+
+    private func readSystemConditions() {
+        thermalState = ProcessInfo.processInfo.thermalState
+        isLowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
     }
 
     /// Stops monitoring and command processing, returning the controller so

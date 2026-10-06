@@ -66,7 +66,7 @@ charge limit" action instead of `pmset -g battlimit` (note 08, O18).
 - Diagnostics view and exportable report (no identifiers): telemetry,
   decisions, OS build, model identifier.
 - `ProcessInfo` thermal and Low Power Mode state in the UI (system-wide, not
-  battery temperature).
+  battery temperature). Done: shown in the menu's Battery details (#19).
 - Unplug/replug and sleep/wake observation runs on real hardware to measure
   notification cadence (research 01, open question 1).
 
