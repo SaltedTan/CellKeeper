@@ -372,6 +372,7 @@ private struct ControlDetailsSection: View {
 
 private struct ActivityTab: View {
     let model: AppModel
+    @State private var isCopied = false
 
     var body: some View {
         let events = (model.status?.events ?? []).reversed()
@@ -400,9 +401,23 @@ private struct ActivityTab: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
+                Button(isCopied ? "Copied" : "Copy Diagnostics") { copyDiagnostics() }
+                    .disabled(model.status == nil)
+                    .help("Copies a plain-text report of what CellKeeper sees and does, for a bug report. It contains no serial numbers or other identifiers.")
                 Button("Refresh now") { model.refresh() }
             }
             .padding([.horizontal, .bottom])
+        }
+    }
+
+    private func copyDiagnostics() {
+        guard let report = model.diagnosticsReport() else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(report, forType: .string)
+        isCopied = true
+        Task {
+            try? await Task.sleep(for: .seconds(2))
+            isCopied = false
         }
     }
 }

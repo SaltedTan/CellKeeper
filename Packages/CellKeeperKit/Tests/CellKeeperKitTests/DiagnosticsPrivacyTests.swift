@@ -43,3 +43,18 @@ struct DiagnosticsPrivacyTests {
         #expect(!report.contains("876543219"))
     }
 }
+
+@Suite("Diagnostics environment")
+struct DiagnosticsEnvironmentTests {
+    @Test("The model identifier is a model name, not a serial number")
+    func modelIdentifier() throws {
+        let model = try #require(DiagnosticsEnvironment.current().modelIdentifier)
+        // For example "Mac16,1", "MacBookPro18,3" or "VirtualMac2,1".
+        #expect(model.wholeMatch(of: /[A-Za-z]+[0-9]+,[0-9]+/) != nil)
+    }
+
+    @Test("The macOS version is reported")
+    func systemVersion() {
+        #expect(DiagnosticsEnvironment.current().systemVersion.contains("Version"))
+    }
+}

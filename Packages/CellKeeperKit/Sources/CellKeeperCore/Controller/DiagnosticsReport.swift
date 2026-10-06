@@ -52,6 +52,9 @@ public enum DiagnosticsReport {
         field("Reported mode", status.currentMode.map(\.description) ?? "unknown")
         field("Pending switch", status.pendingBackend.map(\.displayName) ?? "none")
         field("Consecutive failures", "\(status.consecutiveFailures)\(status.isBackendFaulted ? " (faulted)" : "")")
+        if let refusal = status.managementRefusal {
+            field("Management refused", refusal)
+        }
 
         section("Settings")
         let settings = status.settings

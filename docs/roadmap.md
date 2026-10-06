@@ -64,7 +64,9 @@ charge limit" action instead of `pmset -g battlimit` (note 08, O18).
 ## Milestone 3 — Diagnostics and observability
 
 - Diagnostics view and exportable report (no identifiers): telemetry,
-  decisions, OS build, model identifier.
+  decisions, OS build, model identifier. Done: Settings › Activity › Copy
+  Diagnostics copies a plain-text report (#20). Still open: a dedicated
+  diagnostics view and saving the report to a file.
 - `ProcessInfo` thermal and Low Power Mode state in the UI (system-wide, not
   battery temperature). Done: shown in the menu's Battery details (#19).
 - Unplug/replug and sleep/wake observation runs on real hardware to measure

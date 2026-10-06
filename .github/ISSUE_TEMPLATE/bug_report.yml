@@ -76,6 +76,6 @@ body:
   - type: textarea
     id: logs
     attributes:
-      label: Activity log or unified log excerpt
-      description: Settings › Activity, or `log show --last 30m --predicate 'subsystem == "io.github.saltedtan.CellKeeper"'`. Remove anything you consider private.
+      label: Diagnostics report or log excerpt
+      description: Settings › Activity › Copy Diagnostics (a plain-text report without serial numbers or other identifiers), or `log show --last 30m --predicate 'subsystem == "io.github.saltedtan.CellKeeper"'`. Remove anything you consider private.
       render: text
