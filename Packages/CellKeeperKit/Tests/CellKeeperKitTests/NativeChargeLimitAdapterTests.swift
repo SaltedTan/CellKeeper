@@ -52,6 +52,28 @@ struct ChargeLimitReportParserTests {
         #expect(ChargeLimitReportParser.parse(Self.report(85, secondTerminated: 1, secondLimit: 95)) == .limit(85))
     }
 
+    @Test("Limits outside the Charge Limit's steps are read as reported, for the backend to judge", arguments: [60, 82, 99])
+    func outOfStepLimits(limit: Int) {
+        // The backend never records such a value as the user's own, and
+        // keeps it as an adopted outside change (#12).
+        #expect(ChargeLimitReportParser.parse(Self.report(limit)) == .limit(limit))
+    }
+
+    @Test("A report whose entries are all terminated has no active limit")
+    func allTerminated() {
+        let text = Self.report(80, secondTerminated: 1).replacingOccurrences(of: "Terminated = 0;", with: "Terminated = 1;")
+        #expect(ChargeLimitReportParser.parse(text) == .unrecognized("no active limit"))
+    }
+
+    @Test("Keys other than those CellKeeper checks are ignored today")
+    func extraKeysIgnored() {
+        // Pins the current behaviour; whether unexpected flags should make the
+        // report unrecognised is an open question (#14).
+        let text = Self.report(85).replacingOccurrences(of: "chargeSocLimitOwner = 0;", with: "chargeSocLimitOwner = 0;\n        chargeSocLimitSomethingNew = 1;")
+        #expect(text.contains("chargeSocLimitSomethingNew"))
+        #expect(ChargeLimitReportParser.parse(text) == .limit(85))
+    }
+
     @Test("Anything else is unrecognised, never guessed", arguments: [
         "",
         "Battery level limits:\n()\n",
@@ -119,6 +141,18 @@ struct CommandLineAdapterTests {
         await #expect(throws: ProcessRunnerError.timedOut(seconds: 1)) {
             try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"], timeout: 0.3)
         }
+    }
+
+    @Test("A tool that ignores SIGTERM is killed after the grace period")
+    func ignoresTerminate() async {
+        let started = Date()
+        await #expect(throws: ProcessRunnerError.timedOut(seconds: 1)) {
+            // An ignored signal stays ignored across exec, so sleep ignores SIGTERM.
+            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "trap '' TERM; exec /bin/sleep 30"], timeout: 0.3)
+        }
+        let elapsed = Date().timeIntervalSince(started)
+        #expect(elapsed >= 0.3 + ProcessRunner.stopGracePeriod)
+        #expect(elapsed < 0.3 + 3 * ProcessRunner.stopGracePeriod)
     }
 
     @Test("A missing tool is a launch failure")
@@ -265,6 +299,15 @@ struct CommandLineAdapterTests {
         #expect(!FileManager.default.fileExists(atPath: parts.last ?? ""))
     }
 
+    @Test("An incomplete shortcut list is an error, not a shorter list")
+    func incompleteShortcutList() async throws {
+        let tools = try FakeTools()
+        let executable = try tools.script("shortcuts", "head -c 300000 /dev/zero | tr '\\0' x")
+        await #expect(throws: ShortcutsCommandError.failed(command: "list", message: "incomplete output")) {
+            try await ShortcutsCommandRunner(executable: executable).shortcutNames()
+        }
+    }
+
     @Test("A shortcut error is reported with the tool's message")
     func runFailure() async throws {
         let tools = try FakeTools()
@@ -285,6 +328,15 @@ struct CommandLineAdapterTests {
         let reading = try await PmsetChargeLimitReader(executable: executable).readChargeLimit()
         #expect(reading == .limit(85))
         #expect(try String(contentsOfFile: log, encoding: .utf8) == "-g battlimit ")
+    }
+
+    @Test("Incomplete pmset output is an error, never parsed")
+    func pmsetIncompleteOutput() async throws {
+        let tools = try FakeTools()
+        let executable = try tools.script("pmset", "head -c 300000 /dev/zero | tr '\\0' x")
+        await #expect(throws: PmsetChargeLimitError.failed("incomplete output")) {
+            try await PmsetChargeLimitReader(executable: executable).readChargeLimit()
+        }
     }
 
     @Test("A failing pmset is an error, not a reading")
