@@ -59,7 +59,7 @@ native Charge Limit.
 
 ## Milestone 4 — Charge limits below 80% (gated)
 
-Tracked in the GitHub issue "Support charge limits below 80%". No public
+Tracked in [issue #1](https://github.com/SaltedTan/CellKeeper/issues/1). No public
 mechanism exists; every candidate is private and needs root. This milestone
 is **blocked** until all of the following are available:
 
