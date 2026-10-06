@@ -260,6 +260,9 @@ public struct NativeLimitStatus: Sendable, Equatable {
     /// yet, so the record it replaced may still be on disk. Until it is
     /// stored, CellKeeper does not switch backend or turn management on.
     public var isAdoptionUnsaved: Bool
+    /// Whether the user's shortcut was found when CellKeeper last looked for
+    /// it or ran it; nil if it has not checked yet, or the last run failed.
+    public var isShortcutFound: Bool?
 
     public init(
         reportedLimit: Int? = nil,
@@ -271,7 +274,8 @@ public struct NativeLimitStatus: Sendable, Equatable {
         needsNoLimitConfirmation: Bool = false,
         isRestoreUnfinished: Bool = false,
         isReportedStateOwn: Bool = false,
-        isAdoptionUnsaved: Bool = false
+        isAdoptionUnsaved: Bool = false,
+        isShortcutFound: Bool? = nil
     ) {
         self.reportedLimit = reportedLimit
         self.readAt = readAt
@@ -283,6 +287,7 @@ public struct NativeLimitStatus: Sendable, Equatable {
         self.isRestoreUnfinished = isRestoreUnfinished
         self.isReportedStateOwn = isReportedStateOwn
         self.isAdoptionUnsaved = isAdoptionUnsaved
+        self.isShortcutFound = isShortcutFound
     }
 
     /// True while CellKeeper has changed the setting and must restore it.

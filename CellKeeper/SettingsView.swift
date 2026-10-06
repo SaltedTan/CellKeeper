@@ -227,20 +227,30 @@ private struct NativeLimitSetupSection: View {
     let model: AppModel
     @State private var isConfirmingNoLimit = false
     @State private var isConfirmingDiscard = false
+    /// Nil until the user opens or closes the setup steps themselves.
+    @State private var isSetupExpanded: Bool?
 
     var body: some View {
         let native = model.status?.nativeLimit
         Section("macOS Charge Limit") {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Requires macOS Tahoe 26.4 or later on a Mac with Apple silicon, and a shortcut you create once:")
-                Text("1. In Shortcuts, create a shortcut named exactly “\(NativeChargeLimitBackend.defaultShortcutName)”.")
-                Text("2. Search the actions for “charge limit” and add the one that reads “Set charge limit to …”. Set its value to Shortcut Input, so CellKeeper can pass 80–100.")
-                Text("3. Shortcuts then adds “Receive … from Nowhere” at the top; leave it as it is. Leave “Set Until Tomorrow” off.")
-                Text("CellKeeper runs it with the shortcuts command-line tool, then reads the setting back to confirm the change.")
-                    .foregroundStyle(.secondary)
+            DisclosureGroup(isExpanded: setupExpanded) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Requires macOS Tahoe 26.4 or later on a Mac with Apple silicon, and a shortcut you create once:")
+                    Text("1. In Shortcuts, create a shortcut named exactly “\(NativeChargeLimitBackend.defaultShortcutName)”.")
+                    Text("2. Search the actions for “charge limit” and add the one that reads “Set charge limit to …”. Set its value to Shortcut Input, so CellKeeper can pass 80–100.")
+                    Text("3. Shortcuts then adds “Receive … from Nowhere” at the top; leave it as it is. Leave “Set Until Tomorrow” off.")
+                    Text("CellKeeper runs it with the shortcuts command-line tool, then reads the setting back to confirm the change.")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+            } label: {
+                if native?.isShortcutFound == true {
+                    Label("Shortcut “\(NativeChargeLimitBackend.defaultShortcutName)” found", systemImage: "checkmark.circle")
+                } else {
+                    Text("Shortcut setup")
+                }
             }
-            .font(.caption)
-            .fixedSize(horizontal: false, vertical: true)
             LabeledContent("Charge Limit reported by macOS", value: native?.reportedLimit.map(Format.chargeLimit) ?? "Unknown")
             if let readAt = native?.readAt {
                 LabeledContent("Read at", value: readAt.formatted(date: .omitted, time: .standard))
@@ -299,6 +309,14 @@ private struct NativeLimitSetupSection: View {
                 .fixedSize(horizontal: false, vertical: true)
             Button("Check again") { model.recheckBackend() }
         }
+    }
+
+    /// The setup steps start open until CellKeeper has found the shortcut.
+    private var setupExpanded: Binding<Bool> {
+        Binding(
+            get: { isSetupExpanded ?? (model.status?.nativeLimit?.isShortcutFound != true) },
+            set: { isSetupExpanded = $0 }
+        )
     }
 }
 
