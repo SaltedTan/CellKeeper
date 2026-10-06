@@ -20,6 +20,7 @@ struct NativeLimitControllerTests {
             telemetry: telemetry,
             backend: makeNativeBackend(system: system, store: store, clock: clock),
             settings: settings,
+            adoptionMarkerStore: store,
             now: { clock.now },
             uptime: { clock.uptime }
         )
@@ -404,13 +405,13 @@ struct NativeLimitControllerTests {
         #expect(store.data == nil)
     }
 
-    @Test("An adoption whose marker survived a crash is reported again at the next launch")
-    func adoptionMarkerSurvivesCrash() async {
+    @Test("The adoption marker keeps management off across launches until the user turns it on")
+    func adoptionMarkerSurvivesCrash() async throws {
         let (first, _) = makeController(limit: 90)
         await first.evaluate(.launch)
         system.changeExternally(to: 95)
         await first.evaluate(.periodic)
-        // The app crashes before saving "Manage charging" as off.
+        // The app stops before its "Manage charging" off reaches the disk.
 
         let (second, _) = makeController(limit: 90)
         let status = await second.evaluate(.launch)
@@ -419,10 +420,78 @@ struct NativeLimitControllerTests {
         #expect(status.events.contains { $0.message.hasPrefix("Before CellKeeper last stopped, macOS's Charge Limit was changed") })
         #expect(system.reading == .limit(95))
         #expect(system.runInputs == ["90"])
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store)?.limit == 95)
 
-        // Once the app has saved management off, it removes the marker.
-        try? NativeChargeLimitBackend.removeAdoptionMarker(in: store)
-        #expect(store.data == nil)
+        // With management already off, a later launch has nothing to report.
+        let (third, _) = makeController(limit: 90, managed: false)
+        let quiet = await third.evaluate(.launch)
+        #expect(quiet.adoptionCount == 0)
+        #expect(!quiet.events.contains { $0.message.contains("changed outside CellKeeper") })
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store) != nil)
+
+        // Turning management on removes the marker and records 95% as the
+        // user's own limit.
+        let managing = try await third.apply(settings: settings(limit: 90), adoptionsSeen: 0)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store) == nil)
+        #expect(managing.nativeLimit?.ownerLimit == 95)
+        #expect(system.reading == .limit(90))
+    }
+
+    @Test("Turning management on removes the adoption marker even on another backend")
+    func markerRemovedOnOtherBackend() async throws {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        system.changeExternally(to: 95)
+        await controller.evaluate(.periodic)
+        await controller.switchBackend(to: MockChargingBackend())
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store) != nil)
+
+        // A settings change from before the adoption leaves it in place.
+        try await controller.apply(settings: settings(limit: 85), adoptionsSeen: 0)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store) != nil)
+
+        try await controller.apply(settings: settings(limit: 85), adoptionsSeen: 1)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store) == nil)
+    }
+
+    @Test("If the adoption marker cannot be stored, the old record is kept and the marker is retried")
+    func markerSaveFailureKeepsEvidence() async {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        store.saveFails = true
+        system.changeExternally(to: 95)
+        let adopted = await controller.evaluate(.periodic)
+        #expect(adopted.adoptedChange?.limit == 95)
+        #expect(!adopted.settings.isManagementEnabled)
+        // The old record stays: at a relaunch it makes CellKeeper keep 95% again.
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store)?.ownerLimit == 80)
+
+        // Nothing is restored over the change in the meantime.
+        let stopped = await controller.shutdown(reason: "quit")
+        #expect(system.runInputs == ["90"])
+        #expect(stopped.adoptedChange?.limit == 95)
+
+        let (relaunched, _) = makeController(limit: 90)
+        store.saveFails = false
+        let again = await relaunched.evaluate(.launch)
+        #expect(again.adoptedChange?.limit == 95)
+        #expect(!again.settings.isManagementEnabled)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store)?.limit == 95)
+        #expect(system.runInputs == ["90"])
+    }
+
+    @Test("A marker that could not be stored at first is stored at the next read")
+    func markerSaveRetried() async {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        store.saveFails = true
+        system.changeExternally(to: 95)
+        await controller.evaluate(.periodic)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store) == nil)
+        store.saveFails = false
+        await controller.evaluate(.periodic)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store)?.limit == 95)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store) == nil)
     }
 
     @Test("A change made just before quitting is kept, not overwritten by the restore")

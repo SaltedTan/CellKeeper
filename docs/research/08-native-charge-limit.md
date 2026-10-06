@@ -236,10 +236,16 @@ From the owner's screenshot of the Shortcuts editor (Shortcuts 10.0), the shortc
 
 **Repeated after the review fixes (22:37–22:38), with the same setup:**
 - CellKeeper again kept 90% about a second after the shortcut ran, and wrote nothing.
-- The adoption marker that replaced the record had already been removed when it was checked.
 - The saved settings had management off once the preferences were written to disk; a read about a second after adoption still showed the old value.
 - Quitting wrote nothing.
-- Afterwards the owner's 80% and saved settings were put back, as before.
+- That build removed the adoption marker as soon as management off had been saved. The next review pointed out that settings reach the disk asynchronously, so the marker now stays until the user turns management on again.
+
+**Run with the final design (22:46–22:48):**
+- CellKeeper kept 90%, wrote nothing, and left the marker in place after quitting.
+- To stand in for settings that never reached the disk, the owner's earlier saved settings (management on) were put back while the marker stayed.
+- On relaunch CellKeeper logged "CellKeeper kept a Charge Limit of 90% set outside it; Manage charging stays off until you turn it on". It changed nothing, and the limit stayed at 90% through launch and quit.
+- The saved settings showed management off a few seconds later. A read right after quitting still showed the old value, which is the lag the marker covers.
+- Afterwards the test marker was removed, and the owner's 80% and saved settings were put back.
 
 ---
 

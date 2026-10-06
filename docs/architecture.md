@@ -283,10 +283,16 @@ The native-limit extension of the contract:
     case cannot be told apart from a restore that finished late, so the
     record is cleared quietly.
   - **The record becomes an adoption marker.** The record file is replaced
-    by a marker (nothing to restore) until the app has saved "Manage
-    charging" as off; only then does the app remove it. If the app stops in
-    between, the next launch finds the marker and turns management off
-    first. Removing a marker never deletes a record of the user's limit.
+    by a marker (nothing to restore).
+    - It stays while management is off because of the adoption. Settings
+      reach the disk asynchronously, so at launch the marker, not the saved
+      settings, decides that management stays off.
+    - Turning management on again removes it, whichever backend is in use;
+      so does a new record of the user's limit.
+    - If the marker cannot be stored, whatever is on disk is left alone and
+      saving is retried at every read. An old record left in place makes
+      the next launch adopt the change again.
+    - Removing a marker never deletes a record of the user's limit.
 - **Confirmation.** Only a fresh read of the setting from macOS confirms a
   change. A shortcut or command exiting successfully does not: one did so
   while changing nothing (research note 08, O2).

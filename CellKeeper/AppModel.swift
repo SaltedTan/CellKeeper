@@ -106,17 +106,15 @@ final class AppModel {
 
     init(store: SettingsStore = SettingsStore(), telemetry: any TelemetryProvider = SystemTelemetryProvider()) {
         var loaded = store.loadChargingSettings()
-        // An earlier session kept a Charge Limit changed outside CellKeeper
-        // but may have stopped before saving "Manage charging" as off.
-        if let adopted = NativeChargeLimitBackend.pendingAdoption(in: FileOwnershipRecordStore.default) {
-            CellKeeperLog.safety.notice("An earlier session kept a Charge Limit of \(adopted.limit)% set outside CellKeeper; Manage charging stays off")
-            if loaded.settings.isManagementEnabled {
-                loaded.settings.isManagementEnabled = false
-                try? store.save(loaded.settings)
-            }
-            if store.loadChargingSettings().settings.isManagementEnabled == false {
-                try? NativeChargeLimitBackend.removeAdoptionMarker(in: FileOwnershipRecordStore.default)
-            }
+        // While an adoption marker exists, CellKeeper kept a Charge Limit
+        // changed outside it and the user has not turned management on
+        // since. Settings are saved asynchronously, so they may not show
+        // that yet: the marker decides.
+        if let adopted = NativeChargeLimitBackend.pendingAdoption(in: FileOwnershipRecordStore.default),
+           loaded.settings.isManagementEnabled {
+            CellKeeperLog.safety.notice("CellKeeper kept a Charge Limit of \(adopted.limit)% set outside it; Manage charging stays off until you turn it on")
+            loaded.settings.isManagementEnabled = false
+            try? store.save(loaded.settings)
         }
         let choice = store.string(forKey: Self.backendChoiceKey).flatMap(ControlBackendChoice.init(rawValue:)) ?? .simulated
         self.store = store
@@ -130,7 +128,7 @@ final class AppModel {
         let needsRecovery = choice != .nativeLimit && NativeChargeLimitBackend.hasOutstandingRecord(in: FileOwnershipRecordStore.default)
         self.startupSwitch = needsRecovery ? choice : nil
         let backend = needsRecovery ? ControlBackendChoice.nativeLimit.makeBackend() : choice.makeBackend()
-        self.controller = ChargeController(telemetry: telemetry, backend: backend, settings: loaded.settings)
+        self.controller = ChargeController(telemetry: telemetry, backend: backend, settings: loaded.settings, adoptionMarkerStore: FileOwnershipRecordStore.default)
         (commands, commandSink) = AsyncStream.makeStream(of: Command.self)
     }
 
@@ -209,28 +207,25 @@ final class AppModel {
                 gate.resume(returning: ())
             }
         }
+        // A change kept in this session leaves nothing to restore, even if an
+        // old record is still on disk because its marker could not be stored
+        // (the next launch then keeps the change again).
+        let status = await controller.status
+        if status.adoptedChange != nil, !status.settings.isManagementEnabled {
+            return .restored(keptOutsideChange: true)
+        }
         guard let outstanding = NativeChargeLimitBackend.outstandingRecord(in: FileOwnershipRecordStore.default) else {
-            let status = await controller.status
-            return .restored(keptOutsideChange: status.adoptedChange != nil && !status.settings.isManagementEnabled)
+            return .restored(keptOutsideChange: false)
         }
         return .unresolved(ownerLimit: outstanding.ownerLimit)
     }
 
     /// Saves "Manage charging" as off after CellKeeper kept a Charge Limit
-    /// set outside it, so the next launch does not override it either. Only
-    /// then is the backend's adoption marker removed; until it is, the next
-    /// launch turns management off again.
-    ///
-    /// The marker is removed from here, outside the backend. That is safe
-    /// because this runs between controller commands, and removal only ever
-    /// deletes a marker, never a record of the user's limit.
+    /// set outside it. The backend's adoption marker also keeps it off at
+    /// the next launch until the user turns management on again, because
+    /// settings reach the disk asynchronously.
     func keepManagementOffAfterOutsideChange() {
-        guard updateSettings({ $0.isManagementEnabled = false }) else { return }
-        do {
-            try NativeChargeLimitBackend.removeAdoptionMarker(in: FileOwnershipRecordStore.default)
-        } catch {
-            CellKeeperLog.app.error("Could not remove the adoption marker: \(String(describing: error), privacy: .public)")
-        }
+        updateSettings { $0.isManagementEnabled = false }
     }
 
     // MARK: - User intents

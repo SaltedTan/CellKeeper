@@ -134,10 +134,11 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         }
     }
 
-    /// Stored in place of the record after an outside change was adopted,
-    /// until the app has saved "Manage charging" as off. A crash in between
-    /// then cannot let a relaunch override the adopted limit. Holds nothing
-    /// to restore.
+    /// Stored in place of the record after an outside change was adopted.
+    /// It holds nothing to restore, and stays until the user turns
+    /// "Manage charging" on again (or CellKeeper records the user's limit
+    /// afresh), so even a crash before the app's settings reach the disk
+    /// cannot let a relaunch override the adopted limit.
     struct AdoptionMarker: Codable, Equatable {
         var adoptedLimit: Int
         var isNoLimit: Bool
@@ -175,6 +176,9 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     private var lastReadProblem: String?
     private var isLastReportedStateOwn = false
     private var adoptedChange: AdoptedLimitChange?
+    /// An adoption marker that could not be stored yet; retried at every
+    /// read. Until it is stored, whatever is on disk stays as it is.
+    private var unsavedMarker: AdoptionMarker?
 
     /// - Parameters:
     ///   - store: where the user's own limit is recorded.
@@ -205,14 +209,13 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     }
 
     /// A change adopted in an earlier session whose marker is still stored,
-    /// read without a backend. The app turns management off and then
-    /// removes the marker with ``removeAdoptionMarker(in:)``.
+    /// read without a backend. While it exists, management must stay off.
     public static func pendingAdoption(in store: any OwnershipRecordStore) -> AdoptedLimitChange? {
         loadAdoptionMarker(from: store)?.change(fromEarlierSession: true)
     }
 
-    /// Removes an adoption marker once "Manage charging" has been saved as
-    /// off. Does nothing unless the store holds a marker, so it can never
+    /// Removes an adoption marker when the user turns "Manage charging" on
+    /// again. Does nothing unless the store holds a marker, so it can never
     /// delete a record of the user's own limit.
     public static func removeAdoptionMarker(in store: any OwnershipRecordStore) throws {
         guard loadAdoptionMarker(from: store) != nil else { return }
@@ -290,6 +293,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     }
 
     public func currentMode() async throws -> ChargeControlMode? {
+        saveUnsavedMarker()
         isLastReportedStateOwn = false
         switch record {
         case .unreadable:
@@ -379,6 +383,17 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     public func confirmNoLimitIsOwnerLimit() {
         isNoLimitConfirmed = true
         shortcutConfirmedAtUptime = nil
+    }
+
+    /// The user turned "Manage charging" on again after an adoption: the
+    /// marker is no longer needed.
+    public func clearAdoptionMarker() {
+        unsavedMarker = nil
+        do {
+            try Self.removeAdoptionMarker(in: store)
+        } catch {
+            CellKeeperLog.backend.error("Could not remove the adoption marker: \(String(describing: error), privacy: .public)")
+        }
     }
 
     /// Discards a record that cannot be read, after the user has set their
@@ -575,6 +590,8 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         } catch {
             throw BackendError.operationFailed("Could not record your own Charge Limit durably, so nothing was changed: \(error)")
         }
+        // A new record of the user's limit replaces any adoption marker.
+        unsavedMarker = nil
         record = .owned(owned)
     }
 
@@ -603,17 +620,25 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         )
         adoptedChange = marker.change(fromEarlierSession: false)
         isLastReportedStateOwn = false
-        let reason = "adopted \(percent)%, set outside CellKeeper, as the user's own limit (CellKeeper had set \(owned.target)%; the recorded limit was \(owned.ownerLimit)%)"
+        // Nothing to restore from now on, even if the marker cannot be
+        // stored: never write over the change in this session.
+        record = .none
+        unsavedMarker = marker
+        saveUnsavedMarker()
+        CellKeeperLog.backend.notice("Released the Charge Limit: adopted \(percent)%, set outside CellKeeper, as the user's own limit (CellKeeper had set \(owned.target)%; the recorded limit was \(owned.ownerLimit)%)")
+    }
+
+    /// Stores a pending adoption marker. If that fails, whatever is on disk
+    /// is left alone: the old record makes the next launch adopt the change
+    /// again, and a marker that was written keeps management off.
+    private func saveUnsavedMarker() {
+        guard let marker = unsavedMarker else { return }
         do {
             try store.save(try JSONEncoder().encode(marker))
+            unsavedMarker = nil
         } catch {
-            // Without the marker, at least never restore over the change.
-            CellKeeperLog.backend.error("Could not store the adoption marker: \(String(describing: error), privacy: .public)")
-            clearRecord(reason: reason)
-            return
+            CellKeeperLog.backend.error("Could not store the adoption marker; will retry: \(String(describing: error), privacy: .public)")
         }
-        record = .none
-        CellKeeperLog.backend.notice("Released the Charge Limit: \(reason, privacy: .public)")
     }
 
     private func clearRecord(reason: String) {

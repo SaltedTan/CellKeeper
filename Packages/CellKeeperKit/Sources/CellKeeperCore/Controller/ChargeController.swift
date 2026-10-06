@@ -58,6 +58,9 @@ public actor ChargeController {
 
     private let telemetry: any TelemetryProvider
     private var backend: any ChargingBackend
+    /// Where a native backend keeps its adoption marker, so turning
+    /// management on can remove it whichever backend is in use.
+    private let adoptionMarkerStore: (any OwnershipRecordStore)?
     private let now: @Sendable () -> Date
     private let uptime: @Sendable () -> TimeInterval
 
@@ -111,6 +114,7 @@ public actor ChargeController {
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     /// - Parameters:
+    ///   - adoptionMarkerStore: the native backend's record store, if any.
     ///   - now: wall-clock time, for telemetry age and display.
     ///   - uptime: monotonic seconds that keep counting during sleep, for
     ///     override expiry and rate limiting. Defaults to `ContinuousClock`.
@@ -118,11 +122,13 @@ public actor ChargeController {
         telemetry: any TelemetryProvider,
         backend: any ChargingBackend,
         settings: ChargingSettings,
+        adoptionMarkerStore: (any OwnershipRecordStore)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
         uptime: (@Sendable () -> TimeInterval)? = nil
     ) {
         self.telemetry = telemetry
         self.backend = backend
+        self.adoptionMarkerStore = adoptionMarkerStore
         self.settings = settings
         self.now = now
         self.uptime = uptime ?? Self.continuousUptime()
@@ -202,6 +208,14 @@ public actor ChargeController {
             settings = validSettings
             if validSettings.isManagementEnabled {
                 adoptedChange = nil
+            }
+            if validSettings.isManagementEnabled, !previous.isManagementEnabled {
+                // The user wants CellKeeper to manage again, so a change it
+                // kept earlier no longer needs to keep management off.
+                await (backend as? NativeChargeLimitBackend)?.clearAdoptionMarker()
+                if let adoptionMarkerStore {
+                    try? NativeChargeLimitBackend.removeAdoptionMarker(in: adoptionMarkerStore)
+                }
             }
             record(.settings, Self.describeChange(from: previous, to: validSettings))
             if !validSettings.isManagementEnabled, let ended = activeOverride {
@@ -645,7 +659,11 @@ public actor ChargeController {
         let mode = try await backend.currentMode()
         if let change = await backend.takeAdoptedLimitChange() {
             nativeLimit = await backend.nativeLimitStatus()
-            adopt(change)
+            // A marker from an earlier session needs nothing more if
+            // management already stayed off.
+            if !change.isFromEarlierSession || settings.isManagementEnabled {
+                adopt(change)
+            }
         }
         return mode
     }
