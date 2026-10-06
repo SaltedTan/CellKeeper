@@ -1,0 +1,51 @@
+name: Hardware / telemetry observation
+description: Report how battery telemetry or charging behaves on a specific Mac and macOS version.
+labels: [hardware-observation]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Observations from real hardware help decide what CellKeeper can safely support.
+        **Read-only observations only.** Do not write SMC keys or change system settings to produce a report,
+        and never include serial numbers, lot codes, or other identifiers.
+  - type: input
+    id: model
+    attributes:
+      label: Mac model identifier
+      placeholder: Mac16,1
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and build
+      placeholder: macOS 27.0.1 (26A434)
+    validations:
+      required: true
+  - type: input
+    id: firmware
+    attributes:
+      label: System firmware version
+      description: From `system_profiler SPHardwareDataType`.
+  - type: textarea
+    id: observation
+    attributes:
+      label: What did you observe?
+      description: Which values are present or missing, units, when notifications fire, and so on. Separate what you saw from what you infer.
+    validations:
+      required: true
+  - type: textarea
+    id: method
+    attributes:
+      label: How was it observed?
+      description: Commands or APIs used (for example `ioreg -rn AppleSmartBattery`, `pmset -g batt`), with identifiers removed.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Other battery tools or macOS charging features active
+      description: Other battery managers installed, macOS Charge Limit, Optimized Battery Charging.
+    validations:
+      required: true

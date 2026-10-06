@@ -1,0 +1,43 @@
+# macOS
+.DS_Store
+
+# Xcode user state (shared schemes in xcshareddata/ ARE committed)
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+*.xccheckout
+
+# Build products
+build/
+DerivedData/
+*.xcarchive
+*.dSYM
+*.dSYM.zip
+*.app
+*.dmg
+*.pkg
+*.zip
+*.hmap
+*.ipa
+*.xcresult
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Local, per-developer configuration (see Config/Local.xcconfig.example)
+Config/Local.xcconfig
+
+# Signing material and secrets — never commit these
+*.p12
+*.pfx
+*.p8
+*.cer
+*.certSigningRequest
+*.mobileprovision
+*.provisionprofile
+*.keychain
+*.keychain-db
+.env
+.env.*
+!.env.example

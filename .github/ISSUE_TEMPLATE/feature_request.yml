@@ -1,0 +1,31 @@
+name: Feature request
+description: Suggest an improvement or new capability.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        CellKeeper is an independent project. Please describe the problem you want solved in your own words,
+        not another application's implementation. See docs/roadmap.md for what is already planned.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and why is it hard today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety considerations
+      description: Could this leave the Mac in an unexpected charging state, drain the battery, or require privileged access? See docs/safety.md.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

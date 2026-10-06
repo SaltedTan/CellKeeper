@@ -1,0 +1,74 @@
+name: Bug report
+description: Something in CellKeeper does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Please do **not** include serial numbers or other device identifiers.
+        Security issues: follow SECURITY.md instead of filing a public issue.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Set the charge limit to …
+        2. Plug in the adapter …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: CellKeeper version or commit
+      placeholder: 0.1.0 / abc1234
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version and build
+      description: From  › About This Mac, or `sw_vers`.
+      placeholder: macOS 27.0.1 (26A434)
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Mac model
+      description: Model identifier, e.g. from `sysctl hw.model`. Not the serial number.
+      placeholder: Mac16,1
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Control backend
+      options:
+        - Simulated
+        - Read-only
+    validations:
+      required: true
+  - type: dropdown
+    id: other-tools
+    attributes:
+      label: Other battery or charging tools installed?
+      description: Other battery managers, and macOS Charge Limit / Optimized Battery Charging, affect what CellKeeper observes.
+      options:
+        - "No"
+        - "Yes (please name them below)"
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Activity log or unified log excerpt
+      description: Settings › Activity, or `log show --last 30m --predicate 'subsystem == "<bundle id>"'`. Remove anything you consider private.
+      render: text
