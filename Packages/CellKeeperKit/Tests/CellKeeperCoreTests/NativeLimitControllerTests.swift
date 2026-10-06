@@ -431,6 +431,47 @@ struct NativeLimitControllerTests {
         #expect(store.data == nil)
     }
 
+    @Test("If the first read at launch fails, the earlier session's limit is still restored")
+    func relaunchWithFailedFirstRead() async {
+        storeOwnershipRecord(owner: 80, target: 90, in: store)
+        system.reading = .limit(90)
+        system.failNextReads(1)
+        system.runBehaviour = .fails
+        let (controller, _) = makeController(limit: 90)
+        let first = await controller.evaluate(.launch)
+        #expect(first.decision?.reason == .releaseRequired(.stateUnverified))
+        #expect(system.reading == .limit(90))
+
+        system.runBehaviour = .applies
+        clock.advance(by: ChargingPolicy.minimumRestoreRetryInterval)
+        let later = await controller.evaluate(.periodic)
+        #expect(later.decision?.reason == .releaseRequired(.restoreUnfinished))
+        #expect(system.reading == .limit(80))
+        #expect(store.data == nil)
+    }
+
+    @Test("A startup switch whose restore fails waits, retries, and then switches")
+    func failedStartupSwitchRecovers() async {
+        storeOwnershipRecord(owner: 80, target: 90, in: store)
+        system.reading = .limit(90)
+        system.runBehaviour = .fails
+        let (controller, _) = makeController(limit: 90)
+        let pending = await controller.switchBackend(to: MockChargingBackend())
+        #expect(pending.pendingBackend?.identifier == "simulated")
+        let attempts = system.runInputs.count
+
+        clock.advance(by: 10)
+        await controller.evaluate(.launch)
+        #expect(system.runInputs.count == attempts)
+
+        system.runBehaviour = .applies
+        clock.advance(by: ChargingPolicy.minimumRestoreRetryInterval)
+        let switched = await controller.evaluate(.periodic)
+        #expect(switched.backend.identifier == "simulated")
+        #expect(system.reading == .limit(80))
+        #expect(store.data == nil)
+    }
+
     @Test("A stale record never lets a new limit be set before the owed restore")
     func relaunchRestoresBeforeNewLimit() async throws {
         let (first, _) = makeController(limit: 90)

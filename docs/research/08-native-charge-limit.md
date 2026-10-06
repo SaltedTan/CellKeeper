@@ -123,6 +123,19 @@ A missing shortcut exits 1 with `Error: The operation couldn’t be completed. C
 - `/usr/bin/shortcuts` and `/usr/bin/pmset` are present and executable.
 - pmset(1) documents `-g log` (the history of sleeps and wakes), which is usable read-only for the sleep test.
 
+### O9 — The CellKeeper app end to end `[VERIFIED-EXPERIMENTALLY]`
+
+**Setup:** the App-Sandboxed Debug build of this branch (ad-hoc signed), with the native backend preselected and a CellKeeper limit of 85%. The owner's own limit was 80%. Each run was observed with `pmset -g battlimit` and CellKeeper's unified log.
+
+| Run | What happened |
+|---|---|
+| Launch | Recorded the owner's 80% in the record file, ran the shortcut (0.15–0.23 s), and confirmed 85% by read-back. |
+| Quit (Apple event) | Restored 80%, confirmed by read-back, and deleted the record. No warning was shown. |
+| `kill -9`, then relaunch on the native backend | 85% stayed in effect and the record survived the kill. On relaunch, CellKeeper restored 80% first, then set 85% again on a later evaluation; quitting restored 80%. |
+| `kill -9`, select Simulated while not running, relaunch | CellKeeper started on the native backend, restored 80%, confirmed it, and then switched to Simulated. |
+
+All runs ended with the owner's 80% in effect and no record left behind. The CellKeeper preferences used for these runs were deleted afterwards.
+
 ---
 
 ## Inferences `[INFERRED/UNVERIFIED]`
