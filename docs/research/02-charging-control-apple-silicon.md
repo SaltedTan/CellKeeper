@@ -33,7 +33,7 @@
    - **Current state (macOS 27 beta 4+ firmware 20457.x, also shipped in the macOS 15.8 / 26.7 security updates):**
      - The legacy inhibit keys are zero-size or absent.
      - The `bf*` keys return `kIOReturnNotPrivileged` **even to root**.
-     - The reporter attributes this to a private entitlement (`com.apple.private.iokit.soc-limit`).
+     - The reporter attributes this to a private entitlement. Its name was obtained by inspecting an Apple binary, so it is not recorded here.
    - All of this is `[PRIVATE/UNDOCUMENTED][SMC/HW]` and unverified.
 5. **The only SMC control still reported to work on macOS 27 is the adapter cut (`CHIE`).**
    - It runs the Mac from battery while plugged in, as root.
@@ -97,13 +97,13 @@ Source IDs refer to the **Sources** section.
 | 9 | **Root-owned defaults domain** `com.apple.smartcharging.topoffprotection` (`MCLFeatureState`, `mclLimitValue`) | Claimed to allow limits below 80% | `[PRIVATE/UNDOCUMENTED][PRIVILEGED]` | Root | Unknown | macOS 27 (claimed) | E (described, deliberately not implemented) | S27 |
 | 10 | **Private IOPM assertions** `ChargeInhibit` / `DisableInflow` | Inhibit charging / disable AC inflow | `[PRIVATE/UNDOCUMENTED][IOKIT][PRIVILEGED]` | Root ("requires root to initiate"); admin check in the user client | **Released automatically when the owning process exits** (powerd OSS) | Defined in current IOKitUser. Effect on AS unknown. | B (existence, privilege, release-on-exit); unknown effect | S10, S11 |
 | 11 | **SMC `CH0B` / `CH0C`** | Inhibit charging (legacy) | `[PRIVATE/UNDOCUMENTED][SMC/HW][PRIVILEGED][ARCH-SPECIFIC: AS]` | Root (write) | SMC runtime state. Software must re-apply after wake/reboot. Reset after hibernation (claim). | Older AS firmware up to Tahoe-era. **Zero-size or "no data" on 20457.x.** | C, D | S16, S18, S19, S22–S27 |
-| 12 | **SMC `CHTE`** (4 bytes) | Inhibit charging ("modern firmware") | same as #11 | Root (write) | As #11 | Sequoia/Tahoe-era firmware. **Gone on 20457.x / macOS 27.** | C, D | S16, S17, S18, S25, S26 |
+| 12 | **SMC `CHTE`** | Inhibit charging ("modern firmware") | same as #11 | Root (write) | As #11 | Sequoia/Tahoe-era firmware. **Gone on 20457.x / macOS 27.** | C, D | S16, S17, S18, S25, S26 |
 | 13 | **SMC `CH0I` / `CH0J` / `CH0K`** | Force discharge / adapter disable (older firmware). Linux treats `CH0K`/`CH0B` as OBC flags. | same as #11 | Root (write) | As #11 | Older firmware. **"No data" or e00002c1 on 20457.x.** | C, D | S16, S17, S24–S27 |
 | 14 | **SMC `CHIE`** | Cut adapter input (run from battery while plugged in) | `[PRIVATE/UNDOCUMENTED][SMC/HW][PRIVILEGED][ARCH-SPECIFIC: AS]` | Root (write) | Only while set by a running daemon. Unplug/reboot behaviour unknown. | Tahoe-era → macOS 27.0 (claimed still writable on 20457.1.29). Ignored while native limit active. | D/E | S18, S19, S24–S27 |
 | 15 | **SMC `CHWA`** | Fixed 80% limit flag | `[PRIVATE/UNDOCUMENTED][SMC/HW][PRIVILEGED][ARCH-SPECIFIC: AS]` | Root (write) | SMC state, re-applied by daemon | Older AS firmware. **`keyNotFound` from macOS 15.0 beta 5.** | C, D | S16, S20, S21 |
 | 16 | **SMC `BCLM` on AS** | Charge-level max (80 or 100 only on AS) | same as #15 | Root (write); read unprivileged | SMC state. A launch daemon re-applies it. Cleared by SMC reset. | AS "firmware ≥ 13.0". Not working on macOS 15+. | D | S20 |
 | 17 | **SMC `CHLS`** | Percentage end-threshold with a force-discharge bit ("newer SMC firmware") | `[PRIVATE/UNDOCUMENTED][SMC/HW][ARCH-SPECIFIC: AS]` | n/a (Linux driver; under macOS unknown) | Unknown | Documented only from Linux macsmc-power v2. Status under macOS unknown. | C | S16 |
-| 18 | **SMC `bfF0` / `bfD0` / `bfE0`** | Firmware-managed upper/lower limit; firmware holds it in sleep | `[PRIVATE/UNDOCUMENTED][SMC/HW][PRIVILEGED][ARCH-SPECIFIC: AS]` | Root, **and now reportedly a private entitlement** (`com.apple.private.iokit.soc-limit`) | Claimed to hold across sleep and across processes | Worked in macOS 27 beta 1–3 firmware. **Gated from 20457.0.125+** (also 15.8/26.7 updates). One conflicting report says it works on 15.8 + 20457.1.29 (M3). | D/E | S18, S19, S23, S24, S27, S28 |
+| 18 | **SMC `bfF0` / `bfD0` / `bfE0`** | Firmware-managed upper/lower limit; firmware holds it in sleep | `[PRIVATE/UNDOCUMENTED][SMC/HW][PRIVILEGED][ARCH-SPECIFIC: AS]` | Root, **and now reportedly a private entitlement** (name not recorded; see §3.6) | Claimed to hold across sleep and across processes | Worked in macOS 27 beta 1–3 firmware. **Gated from 20457.0.125+** (also 15.8/26.7 updates). One conflicting report says it works on 15.8 + 20457.1.29 (M3). | D/E | S18, S19, S23, S24, S27, S28 |
 | 19 | **SMC `ACLC`** | MagSafe LED override (cosmetic, but useful as a UI hint) | `[PRIVATE/UNDOCUMENTED][SMC/HW][PRIVILEGED]` | Root (write) | Unknown | Loss of control reported on 26.7 / firmware mode | D/E | S18, S22, S24 |
 | 20 | **AppleSmartBattery registry property writes** (`SetChargingEnabled`, `SetPowerMode`, `SetChargeLimitEnabled`, `ExternalChargeCapable`) | Driver-level charge control | `[PRIVATE/UNDOCUMENTED][IOKIT][PRIVILEGED]` | Reportedly `kIOReturnNotPrivileged` on macOS 27 b8 | Unknown | Gated on macOS 27 | E | S19 |
 | 21 | **Sleep mitigations:** `IORegisterForSystemPower` (`kIOMessageCanSystemSleep` / `kIOMessageSystemWillSleep`), `kIOPMAssertionTypePreventUserIdleSystemSleep` | Disable charging before sleep / veto idle sleep while charging | `[PUBLIC-API][IOKIT]` | None | Per process. Lid-close and manual sleep cannot be blocked by the idle assertion. | All | A | S8 |
@@ -252,10 +252,10 @@ Everything in this section is **third-party claim — unverified**.
 The Apple silicon SMC (S29):
 - **What it is:** a coprocessor reached over an RTKit mailbox.
 - **Interface:** a key-value store. Keys are FourCC codes with metadata for size, a type code (`flag`, `ui8/16/32`, `hex`, `flt`, `ioft`, `ch8*`) and readable/writable/function flags.
-- **Payloads:** values of 4 bytes or less return inline; larger values go via shared SRAM.
+- **Payloads:** small values return inline; larger values go via shared memory.
 - **Notifications:** the SMC can send asynchronous notifications.
 
-**Implication for CellKeeper:** every key has a discoverable size and type. A wrong-width write is a real hazard. The macOS 27 firmware already changed `BCF0` from 4 bytes to 1 byte (S17).
+**Implication for CellKeeper:** every key has a discoverable size and type. A wrong-width write is a real hazard, and the Linux driver reports that macOS 27 firmware changed the size of at least one key (S17).
 
 ### 3.2 Reported timeline (Apple silicon)
 
@@ -271,13 +271,13 @@ Sources: S16–S28. The exact firmware boundaries where `CHTE`/`CHIE` replaced `
 
 ### 3.3 (a) Inhibiting charging
 
-- **`CH0B` / `CH0C`** (legacy) and **`CHTE`** (4-byte, "modern firmware") are the reported charge-inhibit keys (S16, S17, S22, S25).
+- **`CH0B` / `CH0C`** (legacy) and **`CHTE`** ("modern firmware") are the reported charge-inhibit keys (S16, S17, S22, S25).
 - Linux `macsmc-power` (grade C):
   - It offers `charge_behaviour = inhibit-charge` only if `CHTE` or `CH0C` exists.
   - At probe it zeroes `CH0K`/`CH0B` (and, per the v3 context, `CHTE`) with the comment "Reset 'Optimised Battery Charging' flags to default state" (S16, S17).
   - **Inference:** macOS's own OBC/hold logic may use the same keys, so a third-party writer would contend with macOS.
 - **On 20457.x firmware** these keys are zero-size or "no data" (S19, S24–S27).
-- **Value formats:** reported write values come only from tool internals and help text. They are not recorded here, by design, and they vary (1-byte vs 4-byte).
+- **Value formats:** reported write values come only from tool internals and help text. They are not recorded here, by design; reportedly they differ in size between keys and firmware versions.
 
 ### 3.4 (b) Disabling the adapter / forcing discharge while plugged in
 
@@ -305,8 +305,8 @@ Sources: S16–S28. The exact firmware boundaries where `CHTE`/`CHIE` replaced `
   - `bf*` KeyInfo, read and write all return `kIOReturnNotPrivileged` (0xe00002c1) "even when running as root".
   - AppleSmartBattery registry writes are refused too.
   - "Apple now filters these keys inside the AppleSMC user client itself, most likely by an entitlement check."
-- **Provenance:** the entitlement name `com.apple.private.iokit.soc-limit` and the related `IOPSCopyBatteryLevelLimits()` / `pmset -g battlimit` were found by the reporter **inspecting Apple's `powerd` binary**.
-  - CellKeeper's clean-room rules forbid repeating that method. This note only records the claim.
+- **Provenance:** the reporter found the entitlement name and a related private function by **inspecting an Apple binary**.
+  - CellKeeper's clean-room rules forbid that method and the use of anything learned from it, so neither name is recorded here. This note only records that the claim exists.
   - The existence of `pmset -g battlimit` is independently confirmed here (read-only).
 - **Corroboration:**
   - PR #469 comments: an M5 on 20457.1.29 is "privileged"; M4/M1 on 27.0 are blocked or absent; Sequoia 15.8.1 on 20457.1.29 is "not working" (S24).
@@ -402,9 +402,9 @@ Sources: S16–S28. The exact firmware boundaries where `CHTE`/`CHIE` replaced `
 | Charging left **inhibited** after the app/helper crashes or is uninstalled | `CH0B`/`CH0C`/`CHTE` | Battery never charges. The user discovers it unplugged at a low %. | Restore-on-exit. Startup reconciliation from a persisted journal. Uninstaller restores. Prefer assertion-based inhibit, which auto-releases. |
 | **Adapter left disabled** | `CH0I`/`CHIE` | Mac runs from battery while "plugged in", can drain to 0% and shut down. Clamshell or bagged Macs can overheat or deplete (S18). | Hard battery floor. Maximum duration. Re-enable on sleep, unplug, exit, launch and error. Never combine with `disablesleep` by default. |
 | `pmset disablesleep 1` left stuck | Clamshell + adapter-cut workaround | Mac never sleeps, even in a bag | Avoid entirely. If ever used, journal it and revert with high priority. |
-| **Writing unknown keys or wrong widths** | All SMC | Undefined firmware behaviour. Key sizes do change (`BCF0` 4→1 byte in macOS 27, S17). | Allowlist with expected type and size. Refuse on mismatch. Never enumerate-and-write. |
+| **Writing unknown keys or wrong widths** | All SMC | Undefined firmware behaviour. Key sizes reportedly change between firmware versions (S17). | Allowlist with expected type and size. Refuse on mismatch. Never enumerate-and-write. |
 | **Firmware/OS update silently breaks keys** | All SMC | Limit stops working: keys become zero-size, `keyNotFound` or `kIOReturnNotPrivileged`. Tools have reported "unknown" state and silently charged to 100% (S25, S26). | Probe at every launch and after every update. Show honest "unsupported" state. Fall back to the native limit. |
-| **Value-format ambiguity** | `bf*` (reportedly non-standard encodings), 1-byte vs 4-byte inhibit keys, undocumented magic values | Wrong value → no effect or a different effect | Read the key's type and size first. Write only known-good values per (key, size, type). Read back immediately. |
+| **Value-format ambiguity** | `bf*` (reportedly non-standard encodings), inhibit keys of differing sizes, undocumented magic values | Wrong value → no effect or a different effect | Read the key's type and size first. Write only known-good values per (key, size, type). Read back immediately. |
 | Contention with macOS OBC / Charge Limit | Inhibit and adapter keys | macOS rewrites the keys. The two controllers oscillate. Writes are ignored when the native limit is active (S27). | Detect native-limit state. Disable one controller. Never run two at once. |
 | Wear from micro-cycling | Adapter-cut limiting | Shallow cycles on battery instead of a passive hold (S26) | Wide hysteresis band. Opt-in only. Explain the trade-off. |
 | Overshoot during sleep or shutdown | Software loops; native limit when off | Battery reaches 100% | Pre-sleep disable (software loop). User education for shutdown. Measure it. |
@@ -530,7 +530,7 @@ All URLs below were fetched during this research, or the files were read locally
 
 **Third-party projects (claims — unverified)**
 - **S16** — Linux `macsmc-power` driver, PATCH v2 (Michael Reeves / Asahi Linux, 2026-01-08; GPL-2.0-only OR MIT): https://ratatoskr.run/lkml/2026/01/3358555/t. Supports: key roles (`CH0I`, `CHTE`, `CH0C`, `CH0K`/`CH0B` "OBC flags", `CHWA`, `CHLS`); "macOS 15.4+ firmware dropped legacy AC keys".
-- **S17** — "[PATCH v3] power: supply: macsmc: Support macOS 27 SMC firmware" (Sasha Finkelstein, 2026-06-29): https://ratatoskr.run/lkml/2026/06/17187069. Supports: `BCF0` 4→1 byte change; older vs modern key labels.
+- **S17** — "[PATCH v3] power: supply: macsmc: Support macOS 27 SMC firmware" (Sasha Finkelstein, 2026-06-29): https://ratatoskr.run/lkml/2026/06/17187069. Supports: a key-size change in macOS 27 firmware; older vs modern key labels.
 - **S18** — charlie0129/batt README (GPL-2.0): https://github.com/charlie0129/batt and https://raw.githubusercontent.com/charlie0129/batt/master/README.md. Supports: firmware table; legacy, firmware, adapter and native backends; sleep options; hibernation reset claim; exit behaviour; native-limit advice. Also issue #101: https://github.com/charlie0129/batt/issues/101 (charged to 100% with lid closed, Tahoe 26.1).
 - **S19** — charlie0129/batt issue #152 (2026-09-02): https://github.com/charlie0129/batt/issues/152. Supports: macOS 27 b4+ gating, `kIOReturnNotPrivileged` even as root, the entitlement claim and its provenance, `CHIE` still writable.
 - **S20** — zackelia/bclm README (MIT): https://github.com/zackelia/bclm, and issue #57: https://github.com/zackelia/bclm/issues/57. Supports: AS BCLM 80/100 only; reads unprivileged, writes root; macOS 15 entitlement statement; persistence via launch daemon; SMC reset caveat.

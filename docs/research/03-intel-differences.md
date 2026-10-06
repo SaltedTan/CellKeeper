@@ -110,7 +110,7 @@ Evidence grades: A = Apple documentation; B = Apple open source; C = reviewed ke
 
 ## 2. Third-party claims (unverified)
 
-Licences: zackelia/bclm **MIT**; itsjoshpark/charge-limiter **GPL-3.0**; charlie0129/batt **GPL-2.0**; t2linux/linux-t2-patches and omacom/omarchy: licence not checked on the pages fetched. No code was copied.
+Licences: zackelia/bclm **MIT**; itsjoshpark/charge-limiter **GPL-3.0**; charlie0129/batt **GPL-2.0**; t2linux/linux-t2-patches and omacom/omarchy: licence not checked on the pages fetched, so they are cited only for behavioural claims. No code, values, or implementation details were copied.
 
 ### 2.1 `BCLM` / `BFCL`
 
@@ -122,7 +122,7 @@ Licences: zackelia/bclm **MIT**; itsjoshpark/charge-limiter **GPL-3.0**; charlie
   - **macOS 15+:** "BCLM does not work on macOS >= 15.0 due to new entitlement enforcement from the kernel …" This is not architecture-qualified. The linked failure reports are `keyNotFound(code: "CHWA")`, which is an Apple-silicon key (I9b). **Status on Intel + macOS 15/26 is unknown.**
 - **itsjoshpark/charge-limiter** (I11; Intel-only):
   - `BCLM` "limits the charge of the battery to a set value". `BFCL` "controls the MagSafe LED indicator light".
-  - It re-applies the value after restart, and setting 100 removes the persistence.
+  - It re-applies the value after restart, and documents a way to remove that persistence.
   - No macOS 15/26 claim is made.
 - **batt** (I13) says Intel is not supported. Its README answer to "Will there be an Intel version?" notes that Intel can set `BCLM` with other tools.
   - Its unused `consts_amd64.go` lists `ACLC`, `AC-W`, `CH0B`, `CH0C`, `CHTE` and `bf*` as Intel keys, all marked "Not verified yet."
@@ -133,8 +133,8 @@ Licences: zackelia/bclm **MIT**; itsjoshpark/charge-limiter **GPL-3.0**; charlie
   - Apple's AppleSMC driver abstracts the transport, so no third-party source fetched describes a macOS-side BCLM difference between T2 and non-T2. On T2 Macs the SMC is reportedly hosted by the T2. That claim comes from a search summary only, so it is not cited.
   - Apple documents different SMC reset procedures for the two (I16).
 - **Under Linux (context only):**
-  - **Pre-T2:** pre-T2 SMCs expose `BCLM`/`BFCL` "over the legacy 0x300 I/O port". On a 2015 MacBookPro11,5 the 80% limit "lives in SMC firmware, not in a daemon" and persisted across reboots (I12b). The same issue claims T2 is "unreachable … (no SMC transport)" with stock kernels.
-  - **T2 with t2linux patches:** a t2linux PR read `BCLM = 80` and accepted a write of 75 on a MacBookPro15,1, rejecting 0 and 101 (I12). It also called the inhibit/force-discharge keys `CHCE`/`CHNC` "unvalidated".
+  - **Pre-T2:** pre-T2 SMCs expose `BCLM`/`BFCL` over a legacy I/O port. On a 2015 MacBookPro11,5 the 80% limit "lives in SMC firmware, not in a daemon" and persisted across reboots (I12b). The same issue claims T2 is "unreachable … (no SMC transport)" with stock kernels.
+  - **T2 with t2linux patches:** a t2linux PR reports reading `BCLM` and writing an in-range percentage on a MacBookPro15,1, with out-of-range values rejected (I12). It also called the inhibit/force-discharge keys `CHCE`/`CHNC` "unvalidated".
 - **Inference:** `BCLM` exists on T2 MacBook Pros and accepts percentage values. Whether macOS 26 lets a root process write it is unverified.
 
 ---
@@ -209,5 +209,5 @@ All URLs were fetched during this research, unless marked as a local file.
 - **I9** / **I9b** — zackelia/bclm issues #57 (https://github.com/zackelia/bclm/issues/57) and #49 (https://github.com/zackelia/bclm/issues/49). Supports: macOS 15 failures are `CHWA` (Apple-silicon) errors; Intel is not shown.
 - **I11** — itsjoshpark/charge-limiter README (GPL-3.0): https://github.com/itsjoshpark/charge-limiter. Supports: `BCLM`/`BFCL` roles on Intel; re-apply on restart.
 - **I12** — t2linux/linux-t2-patches PR #63 (2026-09-19, closed): https://github.com/t2linux/linux-t2-patches/pull/63. Supports: `BCLM` readable and writable as a percentage on a T2 MacBookPro15,1 under patched Linux; `CHCE`/`CHNC` "unvalidated".
-- **I12b** — omacom/omarchy issue #11593 (2026-09-13): https://github.com/omacom/omarchy/issues/11593. Supports: pre-T2 `BCLM`/`BFCL` via I/O port 0x300; persistence across reboots; the claim that T2 is unreachable on a stock kernel.
+- **I12b** — omacom/omarchy issue #11593 (2026-09-13): https://github.com/omacom/omarchy/issues/11593. Supports: pre-T2 `BCLM`/`BFCL` via a legacy I/O port; persistence across reboots; the claim that T2 is unreachable on a stock kernel.
 - **I13** — charlie0129/batt README (GPL-2.0): https://github.com/charlie0129/batt, and the pkg.go.dev listing: https://pkg.go.dev/github.com/charlie0129/batt/pkg/smc. Supports: no Intel support; unverified Intel key constants.

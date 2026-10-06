@@ -31,8 +31,18 @@ Every mechanism is classified with one or more tags:
 | `[VERIFIED-EXPERIMENTALLY]` | Observed on the research machine using read-only methods |
 | `[INFERRED/UNVERIFIED]` | Reasoned from sources or third-party claims; not observed |
 
-Note 07 uses a compact variant (`[F]` fetched source, `[V]` verified locally,
-`[I]` inference).
+Some notes use their own evidence labels alongside these tags:
+
+| Notes | Label | Meaning |
+|---|---|---|
+| 02, 03 | Grades A–E, X | A = Apple documentation … E = single anecdote; X = read-only observation here |
+| 04, 05 | `[Doc]`, `[DTS]`, `[WWDC]`, `[man]` | Apple documentation, Apple engineer forum post, WWDC session, man page |
+| 04, 05 | `[Exp]` | Experiment performed during research (read-only or sandbox-probe only) |
+| 04, 05, 06 | `[Inference]`, `[I]` | Reasoning, not stated by a source |
+| 04, 05 | `[3P]` | Third-party secondary source |
+| 06 | `[S]`, numbered `[n]` | Sourced statement / source number in that note |
+| 06 | `[O]` | Open question |
+| 07 | `[F]`, `[V]`, `[I]` | Fetched source, verified locally, inference |
 
 ## Research environment and confound
 

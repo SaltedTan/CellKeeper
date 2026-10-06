@@ -383,7 +383,7 @@ These run independently of the app:
 All values are compile-time constants [Inference]:
 
 - **Per-connection request budget.** Token bucket of about 10 requests/s burst and 2/s sustained. Excess requests get `.rateLimited`. Repeated abuse invalidates the connection.
-- **Hardware dwell time.** A given control may change state at most once every 10 s and at most about 60 times per hour. Idempotent requests don't count.
+- **Hardware dwell time.** A given control may change state at most once every 60 s and at most 20 times per hour (research 06, rule R13; this note originally proposed 10 s and about 60 per hour, superseded by the lead). Idempotent requests and restores to the safe state don't count.
 - **Single writer.** All hardware access goes through one serial queue or actor. NSXPC delivers each connection's messages on its own queue, so serialisation must be explicit.
 
 ### 3.7 Logging and audit

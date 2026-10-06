@@ -41,15 +41,16 @@ All of these are enforced in `CellKeeperCore` and covered by unit tests.
 | On battery power, CellKeeper's restrictions are cleared, so a later plug-in charges normally even if CellKeeper has stopped | R18 | `ChargingPolicy` (`onBattery`) |
 | Overrides always expire, on a monotonic clock that wall-clock changes cannot affect: a temporary full charge at 100%/fully charged, on unplug, or after 1–48 h (default 12 h); expiry and unplug are processed even when the charge reading is unusable | R22, R23 | `ChargeOverride`, `ChargingPolicy` |
 | Temperature protection with hysteresis; an unknown temperature can never hold charging off | R21 | `ChargingPolicy.nextTemperatureLatch` |
-| Discharge is a confirmed, one-shot session (target 20–95%), never a setting. It ends at the limit, on unplug, before sleep, on temperature pause, on lost telemetry, or if unsupported, and never restarts by itself | R6, R16, R20 | `ChargeOverride.dischargeToLimit`, `ChargingPolicy`, `SettingsView` |
-| Before sleep, charging is held at or above the resume threshold so a software limit cannot overshoot while asleep | R16 | `ChargingPolicy` (`sleepPrecaution`) |
+| Discharge is a confirmed, one-shot session, never a setting. Its target (20–95%) is captured when confirmed; it never goes below that target or the current limit. It ends at the target, on unplug, before sleep, on temperature pause, on lost telemetry, on a backend fault, or if unsupported, and never restarts by itself | R6, R16, R20 | `ChargeOverride.dischargeToLimit`, `ChargingPolicy`, `SettingsView` |
+| Before sleep, charging is held at or above the resume threshold so a software limit cannot overshoot while asleep; the precaution lasts until wake (bounded to 2 min of monotonic time if no wake notification arrives) | R16 | `ChargingPolicy` (`sleepPrecaution`), `ChargeController` |
 | Restricting changes rate-limited (≥ 60 s apart, ≤ 20 per hour, monotonic clock); relaxing changes toward normal never limited | R13 | `ChargingPolicy.rateLimitRetryTime` |
 | Every request read back; an error, unknown mode, or mismatch is a failure, and nothing unconfirmed is reported as applied | R11, R30 | `ChargeController.setAndConfirm` |
 | After a failed restricting request, normal charging is requested immediately and confirmed | R1 | `ChargeController` |
-| Mode-read failures count as failures; 3 consecutive failures fault the backend. While faulted, normal charging is actively requested until confirmed, nothing else is requested, and the fault persists until the user clears it | R11 | `ChargeController`, `ChargingPolicy.action` |
+| Mode-read failures count as failures; 3 failures fault the backend (a successful request or a failure-free hour resets the count). While faulted, normal charging is actively requested until confirmed, nothing else is requested, and the fault persists until the user clears it | R11 | `ChargeController`, `ChargingPolicy.action` |
+| A backend that does not affect hardware can never report an action as applied to hardware | R30 | `ChargeController.request` |
 | A mode change CellKeeper did not make faults the backend at once and restores normal charging | R27 | `ChargeController.observeBackendMode` |
 | Backend switch only after normal charging is confirmed on the old backend; otherwise refused | R4 | `ChargeController.switchBackend` |
-| Normal charging requested on quit (deadlock-free) | R19 | `ChargeController.restoreSystemDefaults`, `AppDelegate` |
+| On quit the controller restores normal charging and then shuts down; commands still queued become no-ops (deadlock-free) | R19 | `ChargeController.shutdown`, `AppDelegate` |
 | All commands serialized under one FIFO lock; user commands applied in order | — | `ChargeController`, `AppModel` command queue |
 | Slider changes applied on release (no request bursts) | R13 | `MenuBarView` |
 | Simulated actions never reported as hardware actions; UI shows available / experimental / simulated / unavailable | R30 | `ControlOutcome`, `ControlAvailability`, UI |
@@ -75,9 +76,10 @@ These are **not** implemented, because no real backend exists. Each is a
 precondition for enabling one, and a reviewer should block any PR that adds
 hardware writes without them.
 
-1. **Verified mechanism per model.** Run the read-only, allowlisted
-   verification protocol in research note 02 §7 on a dedicated test Mac with no
-   other battery tools installed, including the persistence matrix (sleep,
+1. **Verified mechanism per model.** Run the verification protocol in research
+   note 02 §7 (a read-only, allowlisted capability probe, then single
+   reversible writes) on a dedicated test Mac with no other battery tools
+   installed, including the persistence matrix (sleep,
    wake, restart, shutdown, helper crash, unplug). Record the results in
    `docs/research/`.
 2. **Allowlist, never probe.** Writes only to keys or interfaces on a reviewed
@@ -120,7 +122,9 @@ hardware writes without them.
 12. **Physical adapter presence.** A backend that cuts the adapter must come
     with telemetry that distinguishes "adapter physically connected" from "Mac
     running on battery"; until then the policy ends a discharge session as
-    soon as it sees battery power (safe, but discharge cannot work).
+    soon as it sees battery power (safe, but discharge cannot work). Such a
+    backend must also enforce its own higher floor (research note 02 §7
+    suggests 25–30%) in addition to the policy's 20% minimum target.
 13. **Sleep interlock and bounded operations.** Sleep handling, deadlines, and
     restore-on-exit must live in the privileged component, with acknowledged
     sleep notifications and time-limited operations; the app's own will-sleep
@@ -134,6 +138,15 @@ hardware writes without them.
 - **Debounce (R14) and temperature dwell (R21)** are deferred to the first
   real backend (precondition 6). With simulated control, an extra transition
   has no physical effect.
+- **Failure handling (R11).** R11 asks for one retry and then a one-hour
+  backoff. CellKeeper instead restores normal charging after every failed
+  restricting request and faults the backend after 3 failures; the fault then
+  persists until the user clears it.
+- **Freshness (R9).** Readings must be ≤ 60 s old by read time, and the
+  driver's own update time (where reported) must be ≤ 180 s old, about three
+  of its one-minute refresh periods, because a 60 s limit on the driver time
+  would trip on normal refresh jitter. After wake, a stale driver time puts the
+  policy in fail-safe until the driver refreshes.
 - **Floor and resume.** The floor is fixed at 10% (R5 allows 5–20%).
 
 ## What CellKeeper will never do

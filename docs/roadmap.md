@@ -34,7 +34,6 @@ hardware state. Dates are deliberately omitted.
   public signals; label the cause "not reported" when unknown.
 - Diagnostics view and exportable report (no identifiers): telemetry,
   decisions, OS build, model identifier.
-- Telemetry freshness via the driver's update timestamp, not only read time.
 - `ProcessInfo` thermal and Low Power Mode state in the UI (system-wide, not
   battery temperature).
 - Unplug/replug and sleep/wake observation runs on real hardware to measure

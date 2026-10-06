@@ -113,7 +113,8 @@ See [docs/architecture.md](docs/architecture.md) for the full design.
 ## Safety
 
 Battery charging is hardware-adjacent. CellKeeper is designed to fail toward
-macOS's default behaviour, validates every setting, logs every decision, and
+macOS's default behaviour, validates every setting, logs every change in its
+decisions and every control request, and
 never writes to hardware in this version. Your Mac's built-in battery
 protections always remain in effect. Read [docs/safety.md](docs/safety.md)
 before contributing anything that could change charging behaviour.

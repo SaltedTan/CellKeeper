@@ -214,12 +214,21 @@ The controller adds, independent of the backend:
 - external-change detection: if the backend's mode differs from the mode
   CellKeeper last confirmed, another tool may be in control, so the backend is
   faulted at once (research rule R27);
-- a fault after 3 consecutive failures. While faulted, `.normal` is actively
-  requested until confirmed, nothing else is requested, and the fault
-  persists until the user clears it, even if recovery succeeds;
+- a fault after 3 failures (a successful request or a failure-free hour
+  resets the count). While faulted, `.normal` is actively requested until
+  confirmed, nothing else is requested, and the fault persists until the user
+  clears it, even if recovery succeeds. A fault belongs to the backend in use:
+  switching to another backend (which first requires a confirmed `.normal`)
+  starts that backend with a clean record;
+- a backend whose availability does not affect hardware can never report an
+  action as applied to hardware (a claimed `.applied` is downgraded and
+  logged);
 - `.normal`, confirmed, before switching backends. If it cannot be confirmed,
   the switch is refused and the old backend stays responsible for recovery;
-- `.normal` on quit;
+- will-sleep precautions that last until wake (bounded to 2 minutes of
+  monotonic time if no wake notification arrives);
+- `shutdown(reason:)` on quit: restore `.normal`, then turn every later
+  command, including ones already queued, into a no-op;
 - a bounded in-memory activity log mirrored to unified logging.
 
 Implementations today:
@@ -324,7 +333,9 @@ decisions.
 ## Distribution and security posture
 
 - Milestone 1 ships App-Sandboxed with Hardened Runtime and no other
-  entitlements (verified: telemetry works fully inside the sandbox).
+  entitlements (verified: telemetry works fully inside the sandbox). Release
+  builds do not carry the debugger entitlement `get-task-allow`; CI checks
+  both.
 - Contributor builds are ad-hoc signed and need no Apple Developer account.
   Release builds carry the Hardened Runtime flag even when ad-hoc signed;
   Debug builds omit it so the debugger can attach.

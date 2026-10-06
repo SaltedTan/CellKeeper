@@ -296,7 +296,9 @@ Exact names from SDK headers. "Private" means it is only in Apple OSS private he
 - **IOReport (libIOReport):** `[PRIVATE]`. The battery IOReport legend here only lists `BatteryCycleCount`.
 - **`powermetrics`:** `[PRIVILEGED]` (needs root).
 
-**Recommendation:** show temperature only if a public key reappears (top-level `Temperature` or IOPS `Temperature`). Keep that path behind runtime detection, with units marked unverified. Otherwise show "Unavailable on this macOS version". `ProcessInfo.thermalState` is not a substitute; it is system-wide thermal pressure.
+> **Lead decision (architecture D9):** CellKeeper reads only the documented IOPS `Temperature` key (specified in °C). The registry `Temperature` key is not used until its units are verified on hardware, because a wrong unit assumption would make temperature protection under-trigger.
+
+**Original recommendation:** show temperature only if a public key reappears (top-level `Temperature` or IOPS `Temperature`). Keep that path behind runtime detection, with units marked unverified. Otherwise show "Unavailable on this macOS version". `ProcessInfo.thermalState` is not a substitute; it is system-wide thermal pressure.
 
 ### G. Health, condition and "Maximum Capacity"
 
@@ -421,7 +423,7 @@ No sandbox denials appeared in the unified log.
    - **Units:** if `MaxCapacity == 100` and `CurrentCapacity ≤ 100`, treat them as percent; if `MaxCapacity > 100`, treat both as mAh.
    - **Percent shown to the user:** take it from IOPS, cross-checked with the registry. Do not derive the UI percent from mAh.
    - **Design cycles:** `DesignCycleCount9C` → `DesignCycleCount70` → unknown. Never use IOPS `DesignCycleCount`.
-   - **Temperature:** top-level `Temperature` / IOPS `Temperature` if present, otherwise "unavailable". Mark the units as unverified until tested on a build that has it.
+   - **Temperature:** IOPS `Temperature` if present, otherwise "unavailable". (Superseded: the registry `Temperature` key is not used; see the lead decision in §F.)
    - Every key is optional. Unknown or absent should be a first-class state in the model.
 4. **Power:**
    - `watts = Voltage(mV) × Amperage(mA) / 1e6`, signed (negative = discharging).
