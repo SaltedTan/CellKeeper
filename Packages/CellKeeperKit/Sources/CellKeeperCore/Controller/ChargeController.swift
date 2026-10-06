@@ -175,11 +175,16 @@ public actor ChargeController {
 
     /// Validates and applies new settings, then re-evaluates. Invalid settings
     /// are rejected and the current settings are kept.
+    ///
+    /// - Parameter adoptionsSeen: the ``ControllerStatus/adoptionCount`` the
+    ///   caller knew when the user made this change. Settings made before
+    ///   CellKeeper kept a limit changed outside it cannot turn management
+    ///   back on, because the user had not seen that yet; nil skips the check.
     @discardableResult
-    public func apply(settings newSettings: ChargingSettings) async throws -> ControllerStatus {
-        let validSettings: ChargingSettings
+    public func apply(settings newSettings: ChargingSettings, adoptionsSeen: Int? = nil) async throws -> ControllerStatus {
+        let checkedSettings: ChargingSettings
         do {
-            validSettings = try newSettings.validated()
+            checkedSettings = try newSettings.validated()
         } catch {
             _ = await exclusively {
                 record(.settings, "Rejected invalid settings: \(error)", level: .error)
@@ -187,6 +192,11 @@ public actor ChargeController {
             throw error
         }
         return await exclusively {
+            var validSettings = checkedSettings
+            if let adoptionsSeen, adoptionsSeen < adoptionCount, validSettings.isManagementEnabled, !settings.isManagementEnabled {
+                validSettings.isManagementEnabled = false
+                record(.settings, "Manage charging stays off: this change was made before CellKeeper kept a Charge Limit changed outside it.")
+            }
             guard validSettings != settings else { return }
             let previous = settings
             settings = validSettings
@@ -451,9 +461,10 @@ public actor ChargeController {
     /// CellKeeper did not make.
     private func observeBackendMode() async {
         isOwnedStateUnverified = false
+        let adoptionsBefore = adoptionCount
         let observed: ChargeControlMode?
         do {
-            observed = try await backend.currentMode()
+            observed = try await readBackendMode()
         } catch {
             // `ownedMode` is kept, so a later reading is still compared with
             // what CellKeeper last confirmed.
@@ -479,10 +490,8 @@ public actor ChargeController {
                 record(.safety, "An earlier CellKeeper session left macOS's Charge Limit changed\(left); CellKeeper will finish restoring your own limit of \(ownerLimit)% first.")
             }
         }
-        if let change = await backend.takeAdoptedLimitChange() {
-            adopt(change)
-            return
-        }
+        // A change adopted while reading has been handled by `adopt(_:)`.
+        guard adoptionCount == adoptionsBefore else { return }
         guard capabilities.availability.acceptsRequests else { return }
         guard let observed else {
             registerFailure("The backend did not report its mode.")
@@ -549,7 +558,8 @@ public actor ChargeController {
         let ownerLimitBefore = nativeLimit?.ownerLimit
         record(.request, "Requesting \(target) from \(backend.descriptor.displayName) backend.")
         do {
-            var outcome = try await setAndConfirm(mode)
+            let result = try await setAndConfirm(mode)
+            var outcome = result.outcome
             if ownerLimitBefore == nil, let ownerLimit = nativeLimit?.ownerLimit {
                 record(.safety, "Recorded your own macOS Charge Limit of \(ownerLimit)%; it will be restored when CellKeeper stops managing the limit.")
             }
@@ -578,9 +588,9 @@ public actor ChargeController {
                 lastExecution = ExecutionRecord(date: now(), action: action, result: .simulated)
                 record(.result, "Simulated \(mode); hardware unchanged.")
             case .adoptedOutsideChange:
-                // Nothing was written, so it does not count toward the limit.
-                // `adopt(_:)` has already logged what happened.
-                if isRestricting, !restrictingRequests.isEmpty {
+                // Only a write counts toward the limit. `adopt(_:)` has
+                // already logged what happened.
+                if isRestricting, !result.wroteBeforeAdopting, !restrictingRequests.isEmpty {
                     restrictingRequests.removeLast()
                 }
                 lastExecution = ExecutionRecord(date: now(), action: action, result: .adoptedOutsideChange)
@@ -620,11 +630,34 @@ public actor ChargeController {
         return ": macOS reports \(reported)%"
     }
 
+    /// What a confirmed request did.
+    private struct RequestResult {
+        var outcome: ControlOutcome
+        /// For ``ControlOutcome/adoptedOutsideChange``: CellKeeper had
+        /// already written when it found the outside change.
+        var wroteBeforeAdopting = false
+    }
+
+    /// Reads the backend's mode. A native backend may adopt an outside change
+    /// during any read; it is handled here at once, so no read can leave an
+    /// adoption unreported. Callers compare ``adoptionCount`` to notice it.
+    private func readBackendMode() async throws -> ChargeControlMode? {
+        let mode = try await backend.currentMode()
+        if let change = await backend.takeAdoptedLimitChange() {
+            nativeLimit = await backend.nativeLimitStatus()
+            adopt(change)
+        }
+        return mode
+    }
+
     /// Sets a mode and confirms it by read-back. On success the mode is
     /// recorded as owned by CellKeeper. On failure the current mode is
     /// unknown, and the last confirmed mode stays the expectation that later
-    /// readings are compared with.
-    private func setAndConfirm(_ mode: ChargeControlMode) async throws -> ControlOutcome {
+    /// readings are compared with. A native backend that finds an outside
+    /// change at any point adopts it; that is reported as
+    /// ``ControlOutcome/adoptedOutsideChange``, not as a failure.
+    private func setAndConfirm(_ mode: ChargeControlMode) async throws -> RequestResult {
+        let adoptionsBefore = adoptionCount
         do {
             // If the backend throws, the request is not counted as possibly in
             // effect: native backends track that themselves, through their
@@ -634,16 +667,21 @@ public actor ChargeController {
                 // Nothing was written: the user's new limit stays in effect.
                 nativeLimit = await backend.nativeLimitStatus()
                 adopt(await backend.takeAdoptedLimitChange())
-                return outcome
+                return RequestResult(outcome: outcome)
             }
             let readBack: ChargeControlMode?
             do {
-                readBack = try await backend.currentMode()
+                readBack = try await readBackendMode()
             } catch {
                 unconfirmedRequests.insert(mode)
                 throw BackendError.verificationFailed(expected: mode, actual: nil)
             }
             nativeLimit = await backend.nativeLimitStatus()
+            if adoptionCount > adoptionsBefore {
+                // Someone else changed the limit right after CellKeeper's
+                // write; the read-back adopted it.
+                return RequestResult(outcome: .adoptedOutsideChange, wroteBeforeAdopting: outcome == .applied)
+            }
             guard readBack == mode else {
                 unconfirmedRequests.insert(mode)
                 throw BackendError.verificationFailed(expected: mode, actual: readBack)
@@ -655,14 +693,20 @@ public actor ChargeController {
                 lastFailedRestoreUptime = nil
                 isRestoreOutstanding = false
             }
-            return outcome
+            return RequestResult(outcome: outcome)
         } catch {
+            nativeLimit = await backend.nativeLimitStatus()
+            if let change = await backend.takeAdoptedLimitChange() {
+                // The backend wrote, then found while confirming that someone
+                // else had changed the limit, and adopted that value.
+                adopt(change)
+                return RequestResult(outcome: .adoptedOutsideChange, wroteBeforeAdopting: true)
+            }
             currentMode = nil
             if mode == .normal {
                 lastFailedRestoreUptime = uptime()
                 isRestoreOutstanding = true
             }
-            nativeLimit = await backend.nativeLimitStatus()
             throw error
         }
     }
@@ -675,7 +719,12 @@ public actor ChargeController {
         let ownerLimit = await backend.nativeLimitStatus()?.ownerLimit
         let isNative = capabilities.isEnforcedByMacOS
         guard capabilities.availability.acceptsRequests else {
-            let observed = try? await backend.currentMode()
+            let adoptionsBefore = adoptionCount
+            let observed = try? await readBackendMode()
+            if adoptionCount > adoptionsBefore {
+                // The limit in effect is the user's own; `adopt(_:)` logged it.
+                return true
+            }
             nativeLimit = await backend.nativeLimitStatus()
             if nativeLimit?.isRecordUnreadable == true {
                 record(.safety, "Could not restore your own macOS Charge Limit (\(reason)): CellKeeper's record of it cannot be read. Set your limit in System Settings › Battery › Charging, then discard the record in Settings › Control.", level: .fault)
@@ -693,7 +742,7 @@ public actor ChargeController {
             return false
         }
         do {
-            let outcome = try await setAndConfirm(.normal)
+            let outcome = try await setAndConfirm(.normal).outcome
             if outcome == .adoptedOutsideChange {
                 // The limit now in effect is the user's own; `adopt(_:)` has
                 // logged it.
@@ -739,7 +788,8 @@ public actor ChargeController {
 
         let found = change.map { $0.isNoLimit ? "no limit (100%)" : "\($0.limit)%" } ?? "a new value"
         let expected = change.map { " (CellKeeper had set \($0.expectedLimit)%)" } ?? ""
-        var message = "macOS's Charge Limit was changed outside CellKeeper to \(found)\(expected), for example in System Settings. CellKeeper kept it as your own limit and changed nothing"
+        let when = change?.isFromEarlierSession == true ? "Before CellKeeper last stopped, " : ""
+        var message = "\(when)macOS's Charge Limit was changed outside CellKeeper to \(found)\(expected), for example in System Settings. CellKeeper kept it as your own limit and changed nothing"
         if settings.isManagementEnabled {
             settings.isManagementEnabled = false
             message += "; it turned off Manage charging, so turn that on to let CellKeeper manage the limit again"

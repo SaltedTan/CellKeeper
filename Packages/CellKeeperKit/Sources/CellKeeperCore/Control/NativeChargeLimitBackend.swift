@@ -134,6 +134,22 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         }
     }
 
+    /// Stored in place of the record after an outside change was adopted,
+    /// until the app has saved "Manage charging" as off. A crash in between
+    /// then cannot let a relaunch override the adopted limit. Holds nothing
+    /// to restore.
+    struct AdoptionMarker: Codable, Equatable {
+        var adoptedLimit: Int
+        var isNoLimit: Bool
+        var previousOwnerLimit: Int
+        var expectedLimit: Int
+        var adoptedAt: Date
+
+        func change(fromEarlierSession: Bool) -> AdoptedLimitChange {
+            AdoptedLimitChange(limit: adoptedLimit, isNoLimit: isNoLimit, previousOwnerLimit: previousOwnerLimit, expectedLimit: expectedLimit, date: adoptedAt, isFromEarlierSession: fromEarlierSession)
+        }
+    }
+
     private enum RecordState {
         case none
         case owned(OwnershipRecord)
@@ -185,6 +201,22 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             summary: "Sets macOS's own Charge Limit (80–100%) by running your “\(shortcutName)” shortcut, and macOS enforces it. Your own limit is recorded first and restored when CellKeeper stops managing it."
         )
         self.record = Self.loadRecord(from: store)
+        self.adoptedChange = Self.loadAdoptionMarker(from: store)?.change(fromEarlierSession: true)
+    }
+
+    /// A change adopted in an earlier session whose marker is still stored,
+    /// read without a backend. The app turns management off and then
+    /// removes the marker with ``removeAdoptionMarker(in:)``.
+    public static func pendingAdoption(in store: any OwnershipRecordStore) -> AdoptedLimitChange? {
+        loadAdoptionMarker(from: store)?.change(fromEarlierSession: true)
+    }
+
+    /// Removes an adoption marker once "Manage charging" has been saved as
+    /// off. Does nothing unless the store holds a marker, so it can never
+    /// delete a record of the user's own limit.
+    public static func removeAdoptionMarker(in store: any OwnershipRecordStore) throws {
+        guard loadAdoptionMarker(from: store) != nil else { return }
+        try store.remove()
     }
 
     /// A record in a store, read without a backend.
@@ -303,10 +335,11 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     }
 
     public func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome {
+        let isFirstContact = !hasReconciledRecord
         hasReconciledRecord = true
         switch mode {
         case .normal:
-            return try await restoreOwnerLimit()
+            return try await restoreOwnerLimit(isFirstContact: isFirstContact)
         case .nativeLimit(let percent):
             return try await setLimit(percent)
         case .inhibitCharging, .forceDischarge:
@@ -406,7 +439,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         owned.pendingTargets.insert(percent)
         try saveRecord(owned)
         try await runShortcut(percent)
-        try await confirm(percent, expected: .nativeLimit(percent: percent))
+        try await confirm(percent, expected: .nativeLimit(percent: percent), owned: owned)
         owned.confirm(percent)
         // The stored record still lists this value as pending, which counts as
         // CellKeeper's own, so a failed save loses nothing.
@@ -414,7 +447,9 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         return .applied
     }
 
-    private func restoreOwnerLimit() async throws -> ControlOutcome {
+    /// - Parameter isFirstContact: true if no earlier read in this session
+    ///   could have reconciled the record with macOS.
+    private func restoreOwnerLimit(isFirstContact: Bool) async throws -> ControlOutcome {
         switch record {
         case .none:
             return .unchanged
@@ -424,13 +459,16 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             // Restoring is attempted even if the setting cannot be read first;
             // only the read-back afterwards can confirm it.
             if let current = try? await read(), let percent = current.percent {
-                if percent == owned.ownerLimit {
+                // At first contact the user's limit may be back because a
+                // restore finished after an earlier session stopped waiting.
+                if percent == owned.ownerLimit, owned.accepts(percent) || isFirstContact {
                     clearRecord(reason: "\(owned.ownerLimit)% already in effect")
                     return .unchanged
                 }
                 if !owned.accepts(percent) {
-                    // The user (or another tool) chose a new limit: that is
-                    // now their own, so there is nothing to give back.
+                    // The user (or another tool) chose this limit, even if it
+                    // is the one recorded: it is now their own, so there is
+                    // nothing to give back.
                     adopt(current, replacing: owned)
                     return .adoptedOutsideChange
                 }
@@ -441,7 +479,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             owned.isRestoring = true
             saveRecordBestEffort(owned)
             try await runShortcut(owned.ownerLimit)
-            try await confirm(owned.ownerLimit, expected: .normal)
+            try await confirm(owned.ownerLimit, expected: .normal, owned: owned)
             clearRecord(reason: "restored \(owned.ownerLimit)%")
             return .applied
         }
@@ -460,11 +498,17 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         CellKeeperLog.backend.notice("Shortcut run for \(percent)% finished in \(self.uptime() - started, format: .fixed(precision: 2)) s; reading the setting back")
     }
 
-    /// Reads the setting back. Only this confirms a change.
-    private func confirm(_ percent: Int, expected: ChargeControlMode) async throws {
+    /// Reads the setting back. Only this confirms a change. A recognised
+    /// value that `owned` does not account for was set by someone else after
+    /// CellKeeper's write: it is adopted at once, so no later restore (which
+    /// might not manage to read first) can overwrite it.
+    private func confirm(_ percent: Int, expected: ChargeControlMode, owned: OwnershipRecord) async throws {
         let reading = try await read()
         guard reading.percent == percent else {
             CellKeeperLog.backend.error("Read-back after setting \(percent)%: \(String(describing: reading), privacy: .public)")
+            if let found = reading.percent, !owned.accepts(found) {
+                adopt(reading, replacing: owned)
+            }
             throw BackendError.verificationFailed(expected: expected, actual: reading.percent.map { .nativeLimit(percent: $0) })
         }
     }
@@ -498,6 +542,10 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             return .unreadable
         }
         guard let data else { return .none }
+        if decodeAdoptionMarker(data) != nil {
+            // An adopted change leaves nothing to restore.
+            return .none
+        }
         guard let owned = try? JSONDecoder().decode(OwnershipRecord.self, from: data),
               supportedLimits.contains(owned.ownerLimit), supportedLimits.contains(owned.target),
               owned.pendingTargets.allSatisfy(supportedLimits.contains)
@@ -506,6 +554,19 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             return .unreadable
         }
         return .owned(owned)
+    }
+
+    private static func loadAdoptionMarker(from store: any OwnershipRecordStore) -> AdoptionMarker? {
+        guard let data = try? store.load() else { return nil }
+        return decodeAdoptionMarker(data)
+    }
+
+    private static func decodeAdoptionMarker(_ data: Data) -> AdoptionMarker? {
+        guard let marker = try? JSONDecoder().decode(AdoptionMarker.self, from: data),
+              supportedLimits.contains(marker.adoptedLimit), supportedLimits.contains(marker.previousOwnerLimit),
+              supportedLimits.contains(marker.expectedLimit)
+        else { return nil }
+        return marker
     }
 
     private func saveRecord(_ owned: OwnershipRecord) throws {
@@ -529,18 +590,30 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     }
 
     /// Adopts a recognised limit that CellKeeper did not set as the user's
-    /// own: the record is forgotten and nothing is written.
+    /// own: the record is replaced by an adoption marker (nothing to
+    /// restore) and nothing is written to macOS.
     private func adopt(_ reading: NativeChargeLimitReading, replacing owned: OwnershipRecord) {
         guard let percent = reading.percent else { return }
-        adoptedChange = AdoptedLimitChange(
-            limit: percent,
+        let marker = AdoptionMarker(
+            adoptedLimit: percent,
             isNoLimit: reading == .noLimit,
             previousOwnerLimit: owned.ownerLimit,
             expectedLimit: owned.target,
-            date: now()
+            adoptedAt: now()
         )
+        adoptedChange = marker.change(fromEarlierSession: false)
         isLastReportedStateOwn = false
-        clearRecord(reason: "adopted \(percent)%, set outside CellKeeper, as the user's own limit (CellKeeper had set \(owned.target)%; the recorded limit was \(owned.ownerLimit)%)")
+        let reason = "adopted \(percent)%, set outside CellKeeper, as the user's own limit (CellKeeper had set \(owned.target)%; the recorded limit was \(owned.ownerLimit)%)"
+        do {
+            try store.save(try JSONEncoder().encode(marker))
+        } catch {
+            // Without the marker, at least never restore over the change.
+            CellKeeperLog.backend.error("Could not store the adoption marker: \(String(describing: error), privacy: .public)")
+            clearRecord(reason: reason)
+            return
+        }
+        record = .none
+        CellKeeperLog.backend.notice("Released the Charge Limit: \(reason, privacy: .public)")
     }
 
     private func clearRecord(reason: String) {

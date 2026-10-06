@@ -114,6 +114,7 @@ Then:
 - Distribution: notarized DMG on GitHub Releases, Homebrew cask, optional
   update mechanism.
 - Localization and accessibility review.
+- A tidier Settings window ([issue #4](https://github.com/SaltedTan/CellKeeper/issues/4)).
 
 ## Explicit non-goals
 

@@ -56,7 +56,9 @@ final class AppModel {
 
     private enum Command: Sendable {
         case evaluate(EvaluationTrigger)
-        case apply(ChargingSettings)
+        /// `adoptionsSeen`: outside changes the app had reflected when the
+        /// user made this change.
+        case apply(ChargingSettings, adoptionsSeen: Int)
         case startFullCharge
         case startDischarge
         case cancelOverride
@@ -103,7 +105,19 @@ final class AppModel {
     @ObservationIgnored private var handledAdoptionCount = 0
 
     init(store: SettingsStore = SettingsStore(), telemetry: any TelemetryProvider = SystemTelemetryProvider()) {
-        let loaded = store.loadChargingSettings()
+        var loaded = store.loadChargingSettings()
+        // An earlier session kept a Charge Limit changed outside CellKeeper
+        // but may have stopped before saving "Manage charging" as off.
+        if let adopted = NativeChargeLimitBackend.pendingAdoption(in: FileOwnershipRecordStore.default) {
+            CellKeeperLog.safety.notice("An earlier session kept a Charge Limit of \(adopted.limit)% set outside CellKeeper; Manage charging stays off")
+            if loaded.settings.isManagementEnabled {
+                loaded.settings.isManagementEnabled = false
+                try? store.save(loaded.settings)
+            }
+            if store.loadChargingSettings().settings.isManagementEnabled == false {
+                try? NativeChargeLimitBackend.removeAdoptionMarker(in: FileOwnershipRecordStore.default)
+            }
+        }
         let choice = store.string(forKey: Self.backendChoiceKey).flatMap(ControlBackendChoice.init(rawValue:)) ?? .simulated
         self.store = store
         self.telemetry = telemetry
@@ -203,9 +217,20 @@ final class AppModel {
     }
 
     /// Saves "Manage charging" as off after CellKeeper kept a Charge Limit
-    /// set outside it, so the next launch does not override it either.
+    /// set outside it, so the next launch does not override it either. Only
+    /// then is the backend's adoption marker removed; until it is, the next
+    /// launch turns management off again.
+    ///
+    /// The marker is removed from here, outside the backend. That is safe
+    /// because this runs between controller commands, and removal only ever
+    /// deletes a marker, never a record of the user's limit.
     func keepManagementOffAfterOutsideChange() {
-        updateSettings { $0.isManagementEnabled = false }
+        guard updateSettings({ $0.isManagementEnabled = false }) else { return }
+        do {
+            try NativeChargeLimitBackend.removeAdoptionMarker(in: FileOwnershipRecordStore.default)
+        } catch {
+            CellKeeperLog.app.error("Could not remove the adoption marker: \(String(describing: error), privacy: .public)")
+        }
     }
 
     // MARK: - User intents
@@ -215,25 +240,28 @@ final class AppModel {
     }
 
     /// Validates and applies a settings change. Invalid changes are rejected
-    /// with an explanation and nothing is saved or applied.
-    func updateSettings(_ change: (inout ChargingSettings) -> Void) {
+    /// with an explanation and nothing is saved or applied. Returns true if
+    /// the resulting settings are saved (including when nothing changed).
+    @discardableResult
+    func updateSettings(_ change: (inout ChargingSettings) -> Void) -> Bool {
         var proposed = settings
         change(&proposed)
-        guard proposed != settings else { return }
+        guard proposed != settings else { return true }
         let issues = proposed.validationIssues
         guard issues.isEmpty else {
             settingsError = issues.map(\.description).joined(separator: "\n")
-            return
+            return false
         }
         do {
             try store.save(proposed)
         } catch {
             settingsError = "Could not save settings: \(error)"
-            return
+            return false
         }
         settingsError = nil
         settings = proposed
-        send(.apply(proposed))
+        send(.apply(proposed, adoptionsSeen: handledAdoptionCount))
+        return true
     }
 
     func setChargeLimit(_ limit: Int) {
@@ -306,9 +334,9 @@ final class AppModel {
         switch command {
         case .evaluate(let trigger):
             status = await controller.evaluate(trigger)
-        case .apply(let newSettings):
+        case .apply(let newSettings, let adoptionsSeen):
             do {
-                status = try await controller.apply(settings: newSettings)
+                status = try await controller.apply(settings: newSettings, adoptionsSeen: adoptionsSeen)
             } catch {
                 settingsError = "Settings were rejected: \(error)"
             }

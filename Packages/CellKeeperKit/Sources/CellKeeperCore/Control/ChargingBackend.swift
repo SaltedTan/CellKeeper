@@ -174,13 +174,17 @@ public struct AdoptedLimitChange: Sendable, Equatable {
     /// The limit CellKeeper had set.
     public var expectedLimit: Int
     public var date: Date
+    /// True if the change was adopted in an earlier session and is reported
+    /// again because that session may not have turned management off.
+    public var isFromEarlierSession: Bool
 
-    public init(limit: Int, isNoLimit: Bool, previousOwnerLimit: Int, expectedLimit: Int, date: Date) {
+    public init(limit: Int, isNoLimit: Bool, previousOwnerLimit: Int, expectedLimit: Int, date: Date, isFromEarlierSession: Bool = false) {
         self.limit = limit
         self.isNoLimit = isNoLimit
         self.previousOwnerLimit = previousOwnerLimit
         self.expectedLimit = expectedLimit
         self.date = date
+        self.isFromEarlierSession = isFromEarlierSession
     }
 }
 

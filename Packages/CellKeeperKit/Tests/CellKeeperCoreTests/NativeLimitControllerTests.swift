@@ -254,14 +254,15 @@ struct NativeLimitControllerTests {
         #expect(system.runInputs == ["90"])
         #expect(status.currentMode == .normal)
         #expect(status.nativeLimit?.ownerLimit == nil)
-        #expect(store.data == nil)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store) == nil)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store)?.limit == 95)
         #expect(!status.settings.isManagementEnabled)
         #expect(status.decision?.state == .unmanaged)
         #expect(status.adoptedChange?.limit == 95)
         #expect(status.adoptedChange?.previousOwnerLimit == 80)
         #expect(status.adoptedChange?.expectedLimit == 90)
         #expect(status.adoptionCount == 1)
-        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("kept it as your own limit") && $0.message.contains("turned off Manage charging") })
+        #expect(status.events.contains { $0.kind == .safety && $0.message.hasPrefix("macOS's Charge Limit was changed outside CellKeeper to 95%") && $0.message.contains("kept it as your own limit") && $0.message.contains("turned off Manage charging") })
 
         // Nothing is written afterwards, not even when quitting.
         clock.advance(by: 600)
@@ -309,6 +310,121 @@ struct NativeLimitControllerTests {
         #expect(system.runInputs == ["90", "95"])
     }
 
+    @Test("Settings made before CellKeeper kept an outside change cannot turn management back on")
+    func staleSettingsKeepManagementOff() async throws {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        system.changeExternally(to: 95)
+        let adopted = await controller.evaluate(.periodic)
+        #expect(adopted.adoptionCount == 1)
+
+        clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
+        // For example, queued in the app before it saw the adoption.
+        let stale = try await controller.apply(settings: settings(limit: 85), adoptionsSeen: 0)
+        #expect(!stale.settings.isManagementEnabled)
+        #expect(stale.settings.chargeLimit == 85)
+        #expect(system.reading == .limit(95))
+        #expect(system.runInputs == ["90"])
+
+        // A change made after seeing it is the user's explicit wish.
+        let fresh = try await controller.apply(settings: settings(limit: 85), adoptionsSeen: 1)
+        #expect(fresh.settings.isManagementEnabled)
+        #expect(fresh.nativeLimit?.ownerLimit == 95)
+        #expect(system.reading == .limit(85))
+    }
+
+    @Test("A change found while reading back CellKeeper's own write is kept, even if CellKeeper quits at once")
+    func outsideChangeDuringReadBack() async throws {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
+        // Reads: the evaluation's, the backend's before writing, and its
+        // confirmation. The controller's own read-back then sees the change.
+        system.changeExternally(to: 95, afterReads: 3)
+        let status = try await controller.apply(settings: settings(limit: 85))
+        #expect(system.runInputs == ["90", "85"])
+        #expect(status.lastExecution?.result == .adoptedOutsideChange)
+        #expect(status.adoptedChange?.limit == 95)
+        #expect(!status.settings.isManagementEnabled)
+        #expect(!status.isBackendFaulted)
+
+        // CellKeeper did write 85%, so that still counts toward the rate limit.
+        let resumed = try await controller.apply(settings: settings(limit: 90), adoptionsSeen: 1)
+        guard case .refuse(.rateLimited) = resumed.decision?.action else {
+            Issue.record("expected rate limiting, got \(String(describing: resumed.decision?.action))")
+            return
+        }
+        let stopped = await controller.shutdown(reason: "quit")
+        #expect(system.reading == .limit(95))
+        #expect(system.runInputs == ["90", "85"])
+        #expect(stopped.currentMode == .normal)
+    }
+
+    @Test("A change found while confirming CellKeeper's write is kept, with no restore over it")
+    func outsideChangeDuringConfirmation() async throws {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
+        // Reads: the evaluation's, the backend's before writing, and its
+        // confirmation, which sees the change. A fallback restore whose own
+        // first read failed would otherwise write over it.
+        system.changeExternally(to: 95, afterReads: 2)
+        system.failRead(after: 3)
+        let status = try await controller.apply(settings: settings(limit: 85))
+        let stopped = await controller.shutdown(reason: "quit")
+        #expect(status.adoptedChange?.limit == 95)
+        #expect(!status.isBackendFaulted)
+        #expect(system.reading == .limit(95))
+        #expect(system.runInputs == ["90", "85"])
+        #expect(stopped.adoptionCount == 1)
+    }
+
+    @Test("Setting the recorded limit again by hand and quitting at once is kept as the user's choice")
+    func ownerValueSetByHandBeforeQuit() async {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        system.changeExternally(to: 80)
+        let stopped = await controller.shutdown(reason: "quit")
+        #expect(system.runInputs == ["90"])
+        #expect(system.reading == .limit(80))
+        #expect(stopped.adoptedChange?.limit == 80)
+        #expect(!stopped.settings.isManagementEnabled)
+    }
+
+    @Test("At first contact, the recorded limit already back in effect is cleared quietly, not adopted")
+    func firstContactOwnerValueNotAdopted() async {
+        storeOwnershipRecord(owner: 80, target: 90, in: store)
+        system.reading = .limit(80)
+        let (controller, _) = makeController(limit: 90)
+        let status = await controller.switchBackend(to: MockChargingBackend())
+        #expect(status.backend.identifier == "simulated")
+        #expect(status.adoptionCount == 0)
+        #expect(status.settings.isManagementEnabled)
+        #expect(system.runInputs.isEmpty)
+        #expect(store.data == nil)
+    }
+
+    @Test("An adoption whose marker survived a crash is reported again at the next launch")
+    func adoptionMarkerSurvivesCrash() async {
+        let (first, _) = makeController(limit: 90)
+        await first.evaluate(.launch)
+        system.changeExternally(to: 95)
+        await first.evaluate(.periodic)
+        // The app crashes before saving "Manage charging" as off.
+
+        let (second, _) = makeController(limit: 90)
+        let status = await second.evaluate(.launch)
+        #expect(status.adoptedChange?.isFromEarlierSession == true)
+        #expect(!status.settings.isManagementEnabled)
+        #expect(status.events.contains { $0.message.hasPrefix("Before CellKeeper last stopped, macOS's Charge Limit was changed") })
+        #expect(system.reading == .limit(95))
+        #expect(system.runInputs == ["90"])
+
+        // Once the app has saved management off, it removes the marker.
+        try? NativeChargeLimitBackend.removeAdoptionMarker(in: store)
+        #expect(store.data == nil)
+    }
+
     @Test("A change made just before quitting is kept, not overwritten by the restore")
     func quitKeepsOutsideChange() async {
         let (controller, _) = makeController(limit: 90)
@@ -317,7 +433,8 @@ struct NativeLimitControllerTests {
         let stopped = await controller.shutdown(reason: "quit")
         #expect(system.reading == .limit(85))
         #expect(system.runInputs == ["90"])
-        #expect(store.data == nil)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store) == nil)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store)?.limit == 85)
         #expect(stopped.adoptedChange?.limit == 85)
         #expect(!stopped.settings.isManagementEnabled)
     }
@@ -587,7 +704,8 @@ struct NativeLimitControllerTests {
         #expect(!status.isBackendFaulted)
         #expect(system.reading == .limit(95))
         #expect(system.runInputs.isEmpty)
-        #expect(store.data == nil)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store) == nil)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store)?.limit == 95)
         #expect(status.adoptedChange?.limit == 95)
         #expect(!status.settings.isManagementEnabled)
         #expect(!status.events.contains { $0.message.contains("finish restoring") })

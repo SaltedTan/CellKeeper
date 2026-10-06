@@ -30,6 +30,7 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
     private var _runInputs: [String] = []
     private var _listCalls = 0
     private var _delayedChange: (remainingReads: Int, reading: NativeChargeLimitReading)?
+    private var _delayedFailure: Int?
 
     init(reading: NativeChargeLimitReading = .limit(80), shortcutNames: [String] = [NativeChargeLimitBackend.defaultShortcutName]) {
         _reading = reading
@@ -65,6 +66,11 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
     /// Makes the next `count` reads fail.
     func failNextReads(_ count: Int) {
         lock.withLock { _failingReads += count }
+    }
+
+    /// Makes one read fail after `count` more reads.
+    func failRead(after count: Int) {
+        lock.withLock { _delayedFailure = count }
     }
 
     /// Behaviours for the next runs, before ``runBehaviour`` applies again.
@@ -121,6 +127,13 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
             if _failingReads > 0 {
                 _failingReads -= 1
                 throw FakeError(description: "read failed")
+            }
+            if let remaining = _delayedFailure {
+                if remaining == 0 {
+                    _delayedFailure = nil
+                    throw FakeError(description: "read failed")
+                }
+                _delayedFailure = remaining - 1
             }
             if let delayed = _delayedChange {
                 if delayed.remainingReads == 0 {

@@ -234,6 +234,13 @@ From the owner's screenshot of the Shortcuts editor (Shortcuts 10.0), the shortc
 
 **Also observed:** changing the Charge Limit produced a power-source change notification, so CellKeeper noticed the change within about a second, not at its next periodic check.
 
+**Repeated after the review fixes (22:37–22:38), with the same setup:**
+- CellKeeper again kept 90% about a second after the shortcut ran, and wrote nothing.
+- The adoption marker that replaced the record had already been removed when it was checked.
+- The saved settings had management off once the preferences were written to disk; a read about a second after adoption still showed the old value.
+- Quitting wrote nothing.
+- Afterwards the owner's 80% and saved settings were put back, as before.
+
 ---
 
 ## Inferences `[INFERRED/UNVERIFIED]`

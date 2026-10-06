@@ -261,7 +261,8 @@ struct NativeChargeLimitBackendTests {
         system.changeExternally(to: 95)
         #expect(try await backend.currentMode() == .normal)
         #expect(await backend.nativeLimitStatus()?.ownerLimit == nil)
-        #expect(store.data == nil)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store) == nil)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store)?.limit == 95)
         let adopted = await backend.takeAdoptedLimitChange()
         #expect(adopted == AdoptedLimitChange(limit: 95, isNoLimit: false, previousOwnerLimit: 80, expectedLimit: 90, date: clock.now))
         #expect(await backend.takeAdoptedLimitChange() == nil)
@@ -280,8 +281,49 @@ struct NativeChargeLimitBackendTests {
         #expect(try await backend.setMode(.normal) == .adoptedOutsideChange)
         #expect(system.reading == .limit(85))
         #expect(system.runInputs == ["90"])
-        #expect(store.data == nil)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store) == nil)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store)?.limit == 85)
         #expect(await backend.takeAdoptedLimitChange()?.limit == 85)
+    }
+
+    @Test("A change seen while confirming a write is adopted, so a restore that cannot read first writes nothing")
+    func adoptedWhileConfirming() async throws {
+        let backend = makeBackend()
+        // Reads: before writing, then the confirmation, which sees 95%.
+        system.changeExternally(to: 95, afterReads: 1)
+        await #expect(throws: BackendError.self) {
+            try await backend.setMode(.nativeLimit(percent: 90))
+        }
+        #expect(await backend.takeAdoptedLimitChange()?.limit == 95)
+        system.failNextReads(1)
+        #expect(try await backend.setMode(.normal) == .unchanged)
+        #expect(system.runInputs == ["90"])
+        #expect(system.reading == .limit(95))
+    }
+
+    @Test("The adoption marker holds nothing to restore, is reported after a relaunch, and only it can be removed")
+    func adoptionMarker() async throws {
+        let backend = makeBackend()
+        _ = try await backend.setMode(.nativeLimit(percent: 90))
+        system.changeExternally(to: 95)
+        _ = try await backend.currentMode()
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store) == nil)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store)?.limit == 95)
+
+        let relaunched = makeBackend()
+        let reported = await relaunched.takeAdoptedLimitChange()
+        #expect(reported?.limit == 95)
+        #expect(reported?.isFromEarlierSession == true)
+        #expect(try await relaunched.currentMode() == .normal)
+        #expect(try await relaunched.setMode(.normal) == .unchanged)
+
+        try NativeChargeLimitBackend.removeAdoptionMarker(in: store)
+        #expect(store.data == nil)
+
+        // Removing a marker never deletes a record of the user's limit.
+        _ = try await relaunched.setMode(.nativeLimit(percent: 90))
+        try NativeChargeLimitBackend.removeAdoptionMarker(in: store)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store)?.ownerLimit == 95)
     }
 
     @Test("\"No limit\" set outside CellKeeper is adopted, but not recorded as 100% without confirmation")
@@ -493,7 +535,8 @@ struct NativeChargeLimitBackendTests {
         #expect(try await backend.setMode(.nativeLimit(percent: 85)) == .adoptedOutsideChange)
         #expect(system.runInputs == ["90"])
         #expect(system.reading == .limit(95))
-        #expect(store.data == nil)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store) == nil)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store)?.limit == 95)
         #expect(await backend.takeAdoptedLimitChange()?.expectedLimit == 90)
     }
 

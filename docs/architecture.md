@@ -270,10 +270,23 @@ The native-limit extension of the contract:
 - **Outside changes are adopted.** A recognised value that CellKeeper did
   not set (not its target, a pending value, or the user's limit during a
   restore) was set by someone else, usually the user in System Settings.
-  The backend adopts it as the user's own limit: it deletes the record and
-  writes nothing. `currentMode()` then reports `.normal`; `setMode` returns
+  The backend adopts it as the user's own limit and writes nothing.
+  `currentMode()` then reports `.normal`; `setMode` returns
   `adoptedOutsideChange` instead of writing, including when asked to
   restore. `takeAdoptedLimitChange()` reports each adoption once.
+  - **Every read checks for this**: before a change, before a restore,
+    while confirming a write, and in the controller's read-back after it.
+    A value found while confirming is adopted at once, so a later restore
+    that cannot read first never writes over it.
+  - **The recorded limit, set again by hand, counts as an outside change**,
+    except on the first contact with a record from an earlier session. That
+    case cannot be told apart from a restore that finished late, so the
+    record is cleared quietly.
+  - **The record becomes an adoption marker.** The record file is replaced
+    by a marker (nothing to restore) until the app has saved "Manage
+    charging" as off; only then does the app remove it. If the app stops in
+    between, the next launch finds the marker and turns management off
+    first. Removing a marker never deletes a record of the user's limit.
 - **Confirmation.** Only a fresh read of the setting from macOS confirms a
   change. A shortcut or command exiting successfully does not: one did so
   while changing nothing (research note 08, O2).
@@ -293,7 +306,11 @@ The controller adds, independent of the backend:
   faulted at once (research rule R27). A native-limit backend adopts such a
   change instead (above); the controller then turns management off, so it
   never overrides what the user chose, and logs what it kept. Turning
-  management on again records the adopted value as the user's own limit;
+  management on again records the adopted value as the user's own limit.
+  A settings change the user made before the app had seen the adoption
+  (still queued, for example) cannot turn management back on
+  (`apply(settings:adoptionsSeen:)`). A write that was carried out before
+  the outside change was found still counts toward the rate limit;
 - a fault after 3 failures (a successful request or a failure-free hour
   resets the count). While faulted, `.normal` is actively requested until
   confirmed, nothing else is requested, and the fault persists until the user
@@ -483,6 +500,13 @@ verification protocol in research note 02 §7 and the rules in `safety.md`.
   question 3), so the log and the menu also name the earlier limit.
   Unrecognised reports are not adopted: they are handled as a state that
   cannot be read back.
+- **A stopped shortcut run might still take effect.** If a run misses its
+  20 s deadline, CellKeeper stops the `shortcuts` tool, but whether that
+  also stops the shortcut itself has not been observed. If the value landed
+  later, CellKeeper would not see it once it had restored and forgotten the
+  user's limit; if it still held the record and the value was no longer
+  among those it expects, it would adopt it as the user's. On this Mac runs
+  take about 0.2 s (note 08, O5).
 - **Sleep, restart and shutdown** behaviour of the Charge Limit itself is
   macOS's; see note 08 for what has been observed.
 
