@@ -208,12 +208,3 @@ struct SettingsStoreTests {
         #expect(result.recoveryReason != nil)
     }
 }
-
-/// In-memory ``KeyValueStorage`` so tests never write to ~/Library/Preferences.
-final class InMemoryStorage: KeyValueStorage {
-    private var values: [String: Any] = [:]
-
-    func data(forKey key: String) -> Data? { values[key] as? Data }
-    func string(forKey key: String) -> String? { values[key] as? String }
-    func set(_ value: Any?, forKey key: String) { values[key] = value }
-}

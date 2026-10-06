@@ -32,6 +32,19 @@ hardware state. Dates are deliberately omitted.
 Decided 2026-10-06: CellKeeper's first real control builds on Apple's
 native Charge Limit.
 
+Status: implemented as an experimental, opt-in backend
+(`NativeChargeLimitBackend`; [research note 08](research/08-native-charge-limit.md)).
+Done: the policy computes the native limit; ownership with restore on quit,
+management off, backend switch and failure; Shortcuts write path verified
+from the App Sandbox with no new entitlements; read-back through
+`pmset -g battlimit` (read-only); rate limiting and logging; UI for
+80/85/90/95/100 with unsupported features disabled; a limit changed in
+System Settings is kept as the user's own and management turns off (owner
+decision). Observed on the maintainer's Mac: the walk-through, one sleep run
+and one restart. Still open: shutdown observations, and schedules (below).
+Candidate follow-up: confirm changes through Shortcuts' documented "Get
+charge limit" action instead of `pmset -g battlimit` (note 08, O18).
+
 - Model "OS-managed limit" as a backend capability: the policy computes a
   desired native limit (80/85/90/95/100) instead of toggling charging.
 - Ownership: record the user's own native limit before changing it, and
@@ -84,6 +97,10 @@ Then:
   test the protocol.
 - Non-sandboxed, notarized app (see research 05); experimental backend behind
   explicit opt-in, per verified model; every precondition in `safety.md`.
+- Owner's direction (2026-10-06): in the long run CellKeeper controls
+  charging itself, and the user turns macOS's own Charge Limit off. The app
+  should then guide the user through turning it off, and detect it if it is
+  turned back on, so two limits never compete.
 
 ## Later
 
@@ -99,6 +116,7 @@ Then:
 - Distribution: notarized DMG on GitHub Releases, Homebrew cask, optional
   update mechanism.
 - Localization and accessibility review.
+- A tidier Settings window ([issue #4](https://github.com/SaltedTan/CellKeeper/issues/4)).
 
 ## Explicit non-goals
 

@@ -8,7 +8,7 @@ struct MenuBarView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if let status = model.status {
-                BatteryHeader(snapshot: status.snapshot, telemetryError: status.telemetryError)
+                BatteryHeader(snapshot: status.snapshot, telemetryError: status.telemetryError, nativeLimit: status.nativeLimit)
                 Divider()
                 ControlSummary(status: status)
                 Divider()
@@ -40,6 +40,7 @@ struct MenuBarView: View {
 private struct BatteryHeader: View {
     let snapshot: BatterySnapshot?
     let telemetryError: String?
+    let nativeLimit: NativeLimitStatus?
 
     var body: some View {
         if let snapshot, snapshot.isBatteryPresent {
@@ -56,10 +57,16 @@ private struct BatteryHeader: View {
             }
             if snapshot.chargingStatus == .notCharging {
                 // macOS does not report why charging is paused.
-                Text("macOS reports charging as paused. The cause (for example Charge Limit, Optimized Battery Charging, or another app) is not reported.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                Group {
+                    if let limit = nativeLimit?.reportedLimit, limit < 100 {
+                        Text("macOS reports charging as paused. Its Charge Limit is \(limit)%, the likely reason, but macOS does not report the cause.")
+                    } else {
+                        Text("macOS reports charging as paused. The cause (for example Charge Limit, Optimized Battery Charging, or another app) is not reported.")
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             }
         } else if let snapshot, !snapshot.isBatteryPresent {
             Label("No battery detected on this Mac.", systemImage: "batteryblock.slash")
@@ -81,14 +88,18 @@ private struct ControlSummary: View {
                 Spacer()
                 StatusBadge(title: status.capabilities.availability.badgeTitle, color: status.capabilities.availability.badgeColor)
             }
-            Text(status.capabilities.availability.explanation)
+            Text(status.capabilities.explanation)
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            if status.capabilities.isEnforcedByMacOS {
+                NativeLimitSummary(status: status)
+            }
+
             if let decision = status.decision {
                 LabeledContent("Policy", value: decision.state.title)
-                LabeledContent("Wants", value: decision.desiredMode.intentTitle)
+                LabeledContent("Wants", value: decision.desiredMode.intentTitle(nativeLimit: status.capabilities.isEnforcedByMacOS))
                 Text(decision.reason.description)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -117,9 +128,122 @@ private struct ControlSummary: View {
     }
 }
 
+/// Who enforces the limit, what macOS reports, and what will be restored.
+private struct NativeLimitSummary: View {
+    let status: ControllerStatus
+
+    var body: some View {
+        let native = status.nativeLimit
+        VStack(alignment: .leading, spacing: 4) {
+            Label {
+                if let reported = native?.reportedLimit {
+                    Text("macOS is enforcing its Charge Limit: \(Format.chargeLimit(reported))")
+                } else {
+                    Text("macOS enforces its own Charge Limit; its current value could not be read.")
+                }
+            } icon: {
+                Image(systemName: "laptopcomputer")
+            }
+            .font(.callout)
+            Group {
+                if native?.isRecordUnreadable == true {
+                    Text("CellKeeper's record of your own limit cannot be read, so it will not change or restore the limit. Set your limit in System Settings › Battery › Charging, then discard the record in Settings › Control.")
+                        .foregroundStyle(.red)
+                } else if let owner = native?.ownerLimit {
+                    Text("Set by CellKeeper. Your own limit, \(Format.chargeLimit(owner)), is restored when CellKeeper stops managing it, quits, or fails.")
+                } else {
+                    Text("This is your own setting; CellKeeper has not changed it.")
+                }
+                if let adopted = status.adoptedChange, !status.settings.isManagementEnabled {
+                    Text("The limit was changed outside CellKeeper to \(Format.chargeLimit(adopted.limit)), so CellKeeper kept it as your own and turned off Manage charging. Turn it on to let CellKeeper manage the limit again.")
+                        .foregroundStyle(.orange)
+                    if adopted.isNoLimit, adopted.previousOwnerLimit != adopted.limit {
+                        Text("If that was a temporary full charge rather than your choice, your earlier limit was \(Format.chargeLimit(adopted.previousOwnerLimit)).")
+                            .foregroundStyle(.orange)
+                    }
+                }
+                if native?.needsNoLimitConfirmation == true {
+                    Text("macOS reports no limit. If your own limit is 100%, confirm it in Settings › Control before CellKeeper changes anything.")
+                        .foregroundStyle(.orange)
+                }
+                if let pending = status.pendingBackend {
+                    Text(Format.pendingSwitch(to: pending.displayName, nativeLimit: native))
+                        .foregroundStyle(.orange)
+                }
+                if let problem = native?.readProblem {
+                    Text("Could not read the Charge Limit: \(problem)")
+                        .foregroundStyle(.orange)
+                }
+                if let owner = native?.ownerLimit, !status.capabilities.availability.acceptsRequests {
+                    Text("CellKeeper cannot change the limit back right now. Set \(Format.chargeLimit(owner)) in System Settings › Battery › Charging.")
+                        .foregroundStyle(.red)
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+/// The charge-limit control: a slider for CellKeeper's own control, or the
+/// values macOS's Charge Limit accepts.
+private struct ChargeLimitControl: View {
+    let model: AppModel
+
+    var body: some View {
+        if model.usesNativeLimit {
+            NativeChargeLimitPicker(model: model)
+        } else {
+            ChargeLimitSlider(model: model)
+        }
+    }
+}
+
+/// Changes are applied immediately; the controller rate-limits them.
+private struct NativeChargeLimitPicker: View {
+    let model: AppModel
+
+    var body: some View {
+        let steps = model.nativeLimitSteps
+        let limit = model.settings.chargeLimit
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Charge limit")
+                    .font(.headline)
+                Spacer()
+                Text(steps.contains(limit) ? Format.chargeLimit(limit) : "Not set")
+                    .monospacedDigit()
+            }
+            Picker("Charge limit", selection: Binding<Int?>(
+                get: { steps.contains(limit) ? limit : nil },
+                set: { if let value = $0 { model.setChargeLimit(value) } }
+            )) {
+                ForEach(steps, id: \.self) { step in
+                    Text("\(step)").tag(Int?.some(step))
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(!model.settings.isManagementEnabled)
+            if !steps.contains(limit) {
+                Text("\(limit)% cannot be set with macOS's Charge Limit. Choose one of the values above; until then your own limit stays in effect.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text("macOS resumes charging once the battery drops more than 5%; a custom resume point is not available with its Charge Limit.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ManageChargingToggle(model: model)
+        }
+    }
+}
+
 /// Charge-limit slider. Changes are applied when the drag ends, so dragging
 /// never produces a burst of control requests.
-private struct ChargeLimitControl: View {
+private struct ChargeLimitSlider: View {
     let model: AppModel
     @State private var draftLimit: Double?
 
@@ -155,13 +279,21 @@ private struct ChargeLimitControl: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
-            Toggle("Manage charging", isOn: Binding(
-                get: { model.settings.isManagementEnabled },
-                set: { newValue in model.updateSettings { $0.isManagementEnabled = newValue } }
-            ))
-            .toggleStyle(.switch)
-            .controlSize(.small)
+            ManageChargingToggle(model: model)
         }
+    }
+}
+
+private struct ManageChargingToggle: View {
+    let model: AppModel
+
+    var body: some View {
+        Toggle("Manage charging", isOn: Binding(
+            get: { model.settings.isManagementEnabled },
+            set: { newValue in model.updateSettings { $0.isManagementEnabled = newValue } }
+        ))
+        .toggleStyle(.switch)
+        .controlSize(.small)
     }
 }
 
@@ -174,7 +306,7 @@ private struct FullChargeControl: View {
             HStack {
                 switch override.kind {
                 case .fullCharge:
-                    Label("Charging to 100% until full, unplugged, or \(override.expiresAt.formatted(date: .omitted, time: .shortened))", systemImage: "arrow.up.to.line")
+                    Label(fullChargeText(override), systemImage: "arrow.up.to.line")
                 case .dischargeToLimit:
                     let target = override.targetPercent ?? model.settings.chargeLimit
                     let prefix = status.capabilities.availability.affectsHardware ? "Discharging" : "Simulating a discharge"
@@ -193,8 +325,31 @@ private struct FullChargeControl: View {
                 Label("Charge to 100% once", systemImage: "arrow.up.to.line")
             }
             .disabled(!model.settings.isManagementEnabled || model.settings.chargeLimit >= 100 || status.snapshot?.isOnExternalPower != true)
-            .help("Charges once to 100%, then returns to the limit. Ends when full, when unplugged, or after 12 hours.")
+            .help(status.capabilities.isEnforcedByMacOS
+                ? "Raises macOS's Charge Limit to 100% once, then sets your limit again. Ends when full, when unplugged, or after 12 hours."
+                : "Charges once to 100%, then returns to the limit. Ends when full, when unplugged, or after 12 hours.")
         }
+    }
+
+    /// Says a full charge is happening only while the policy is running one
+    /// and the backend has confirmed the mode it needs.
+    private func fullChargeText(_ override: ChargeOverride) -> String {
+        let until = "until full, unplugged, or \(override.expiresAt.formatted(date: .omitted, time: .shortened))"
+        switch status.capabilities.availability {
+        case .simulated:
+            return "Simulating a charge to 100% \(until)"
+        case .unavailable:
+            return "Full charge requested, but charging control is unavailable"
+        case .available, .experimental:
+            break
+        }
+        guard let decision = status.decision, decision.state == .fullChargeOverride,
+              status.currentMode == decision.desiredMode
+        else {
+            let why = status.lastExecution.map { " (\($0.result.title))" } ?? ""
+            return "Full charge requested, not in effect\(why)"
+        }
+        return "Charging to 100% \(until)"
     }
 }
 

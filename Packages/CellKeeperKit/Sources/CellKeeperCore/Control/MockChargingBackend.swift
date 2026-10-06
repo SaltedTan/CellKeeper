@@ -21,7 +21,7 @@ public actor MockChargingBackend: ChargingBackend {
     public private(set) var requestedModes: [ChargeControlMode] = []
 
     public init(
-        supportedModes: Set<ChargeControlMode> = Set(ChargeControlMode.allCases),
+        supportedModes: Set<ChargeControlMode> = ChargeControlMode.chargingModes,
         initialMode: ChargeControlMode = .normal
     ) {
         self.supportedModes = supportedModes

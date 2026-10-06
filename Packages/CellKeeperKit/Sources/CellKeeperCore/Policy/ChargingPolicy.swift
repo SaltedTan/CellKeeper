@@ -6,7 +6,9 @@ import Foundation
 /// The policy never calls a backend, reads hardware, or consults a clock;
 /// everything it depends on is in the input. Rules, highest priority first:
 ///
-/// 1. Invalid settings → fail safe (macOS default charging).
+/// 1. Invalid settings, or a release the controller requires (a pending
+///    backend switch, or a state it set but could not read back) → fail safe
+///    (macOS default charging).
 /// 2. Management disabled → macOS default charging.
 /// 3. Override expiry and unplugging are processed, even without a valid
 ///    charge reading.
@@ -27,10 +29,16 @@ import Foundation
 ///     limit cannot overshoot while the Mac sleeps.
 /// 13. Otherwise → charge toward the limit.
 ///
+/// With a native-limit backend (macOS enforces the limit; see
+/// ``evaluateNativeLimit(_:steps:overrideEnded:)``) rules 1–3 apply
+/// unchanged and the rest are replaced: CellKeeper only chooses the value of
+/// macOS's Charge Limit.
+///
 /// The desired mode is then turned into an action against the backend's
 /// capabilities and current mode. A faulted backend is only ever asked for
-/// `.normal`, and restricting changes are rate-limited; relaxing changes
-/// toward `.normal` never are.
+/// `.normal`, and restricting changes are rate-limited. Relaxing changes
+/// toward `.normal` are not, except that an automatic retry of a failed
+/// restore waits ``minimumRestoreRetryInterval``.
 public enum ChargingPolicy {
     /// At or below this charge, CellKeeper never restricts charging.
     public static let safetyFloorPercent = 10
@@ -48,6 +56,9 @@ public enum ChargingPolicy {
     public static let minimumRestrictingInterval: TimeInterval = 60
     /// Maximum restricting requests in any rolling hour.
     public static let maximumRestrictingRequestsPerHour = 20
+    /// Minimum time before a failed restore of `.normal` is retried
+    /// automatically. User-initiated evaluations retry at once.
+    public static let minimumRestoreRetryInterval: TimeInterval = 60
     /// Charge limits a discharge session may target.
     public static let dischargeTargetRange = 20...95
 
@@ -57,6 +68,10 @@ public enum ChargingPolicy {
         let issues = settings.validationIssues
         guard issues.isEmpty else {
             return decision(.failSafe, .normal, .invalidConfiguration(issues), memory: PolicyMemory(), input: input)
+        }
+        if let release = input.releaseReason {
+            let ended: OverrideEnd? = input.activeOverride?.kind == .dischargeToLimit ? .interrupted : nil
+            return decision(.failSafe, .normal, .releaseRequired(release), memory: input.memory, input: input, overrideEnded: ended)
         }
         guard settings.isManagementEnabled else {
             return decision(.unmanaged, .normal, .managementDisabled, memory: PolicyMemory(), input: input)
@@ -71,6 +86,10 @@ public enum ChargingPolicy {
             } else if input.snapshot?.powerSource == .battery {
                 overrideEnded = .unplugged
             }
+        }
+
+        if case .nativeLimit(let steps) = input.capabilities.style {
+            return evaluateNativeLimit(input, steps: steps, overrideEnded: overrideEnded)
         }
 
         func failSafe(_ reason: DecisionReason, memory: PolicyMemory = input.memory) -> PolicyDecision {
@@ -190,6 +209,74 @@ public enum ChargingPolicy {
         return make(.charging, .normal, reason)
     }
 
+    // MARK: - Native limit
+
+    /// The policy for a backend that sets macOS's own Charge Limit.
+    ///
+    /// macOS enforces the limit, including its hysteresis (it resumes after
+    /// a drop of more than 5%), its behaviour during sleep, and its
+    /// occasional calibration charge, so CellKeeper's latches, safety floor,
+    /// sleep precaution and on-battery rule have nothing to add. CellKeeper
+    /// cannot express a resume threshold, a temperature pause or a discharge
+    /// through it. What remains:
+    ///
+    /// 1. No battery, or a limit that is not one of `steps` → fail safe: the
+    ///    user's own limit.
+    /// 2. A temporary full charge → 100% until full, unplugged or expired.
+    ///    A discharge session cannot run and is interrupted.
+    /// 3. Otherwise → the configured limit.
+    ///
+    /// Unusable telemetry does not release the limit: macOS enforces it from
+    /// its own measurements, and releasing would only restore and re-apply
+    /// the setting after every wake. It only stops a full charge from being
+    /// recognised as complete; expiry and unplugging still end it.
+    static func evaluateNativeLimit(_ input: PolicyInput, steps: [Int], overrideEnded endedBeforeTelemetry: OverrideEnd?) -> PolicyDecision {
+        let limit = input.settings.chargeLimit
+        var overrideEnded = endedBeforeTelemetry
+        var notes: [PolicyNote] = []
+
+        func make(_ state: PolicyState, _ mode: ChargeControlMode, _ reason: DecisionReason) -> PolicyDecision {
+            decision(state, mode, reason, memory: PolicyMemory(), input: input, notes: notes, overrideEnded: overrideEnded)
+        }
+
+        let usableSnapshot = input.snapshot.flatMap { snapshot -> BatterySnapshot? in
+            guard snapshot.isBatteryPresent, staleness(of: snapshot, now: input.now) == nil,
+                  let percent = snapshot.chargePercent, (0...100).contains(percent),
+                  snapshot.powerSource != .unknown
+            else { return nil }
+            return snapshot
+        }
+        if usableSnapshot == nil {
+            notes.append(.nativeLimitKeptWithoutTelemetry)
+        }
+
+        var isFullChargeActive = false
+        if overrideEnded == nil, let activeOverride = input.activeOverride {
+            switch activeOverride.kind {
+            case .fullCharge:
+                if let snapshot = usableSnapshot, snapshot.isFullyCharged == true || (snapshot.chargePercent ?? 0) >= 100 {
+                    overrideEnded = .completed
+                } else {
+                    isFullChargeActive = true
+                }
+            case .dischargeToLimit:
+                overrideEnded = .interrupted
+                notes.append(.dischargeUnsupported)
+            }
+        }
+
+        if input.snapshot?.isBatteryPresent == false {
+            return make(.failSafe, .normal, .batteryNotPresent)
+        }
+        guard steps.contains(limit) else {
+            return make(.failSafe, .normal, .nativeLimitUnsupported(limit: limit, steps: steps))
+        }
+        if isFullChargeActive, let full = steps.last {
+            return make(.fullChargeOverride, .nativeLimit(percent: full), .nativeFullCharge)
+        }
+        return make(.osEnforcedLimit, .nativeLimit(percent: limit), .nativeLimitActive(limit: limit))
+    }
+
     // MARK: - Telemetry freshness
 
     /// The age in seconds if the snapshot is stale, otherwise nil. Checks
@@ -261,7 +348,7 @@ public enum ChargingPolicy {
             if input.currentMode == .normal {
                 return desired == .normal ? .noAction : .refuse(.backendFaulted)
             }
-            return .enableCharging
+            return restoreRetryRefusal(input) ?? .enableCharging
         }
         guard capabilities.supports(desired) else {
             return .refuse(.modeUnsupported(desired))
@@ -269,11 +356,19 @@ public enum ChargingPolicy {
         if input.currentMode == desired {
             return .noAction
         }
-        let currentLevel = input.currentMode?.restrictionLevel ?? 0
-        if desired.restrictionLevel > currentLevel, let retryAt = rateLimitRetryTime(input) {
+        if desired == .normal, let refusal = restoreRetryRefusal(input) {
+            return refusal
+        }
+        if desired.isRestricting(from: input.currentMode), let retryAt = rateLimitRetryTime(input) {
             return .refuse(.rateLimited(retryAt: retryAt))
         }
         return ChargingAction(requesting: desired)
+    }
+
+    /// A refusal while an automatic retry of a failed restore must wait.
+    static func restoreRetryRefusal(_ input: PolicyInput) -> ChargingAction? {
+        guard let notBefore = input.restoreRetryNotBefore, input.uptime < notBefore else { return nil }
+        return .refuse(.rateLimited(retryAt: input.now.addingTimeInterval(notBefore - input.uptime)))
     }
 
     /// When a restricting request must wait, the earliest (wall-clock) time it

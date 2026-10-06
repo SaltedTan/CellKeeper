@@ -474,7 +474,7 @@ actor OverclaimingBackend: ChargingBackend {
     private var mode: ChargeControlMode = .normal
 
     func capabilities() -> ControlCapabilities {
-        ControlCapabilities(availability: .simulated, supportedModes: Set(ChargeControlMode.allCases))
+        ControlCapabilities(availability: .simulated, supportedModes: ChargeControlMode.chargingModes)
     }
 
     func currentMode() -> ChargeControlMode? { mode }
@@ -516,7 +516,7 @@ actor ConcurrencyProbeBackend: ChargingBackend {
     private(set) var maximumConcurrentRequests = 0
 
     func capabilities() -> ControlCapabilities {
-        ControlCapabilities(availability: .simulated, supportedModes: Set(ChargeControlMode.allCases))
+        ControlCapabilities(availability: .simulated, supportedModes: ChargeControlMode.chargingModes)
     }
 
     func currentMode() -> ChargeControlMode? { mode }

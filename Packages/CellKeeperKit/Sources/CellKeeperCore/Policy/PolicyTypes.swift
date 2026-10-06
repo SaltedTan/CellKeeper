@@ -24,6 +24,9 @@ public enum PolicyState: String, Sendable, Equatable, Codable {
     /// A one-shot discharge session is running the Mac from its battery down
     /// to the limit.
     case discharging
+    /// macOS's own Charge Limit enforces the limit CellKeeper chose. Used only
+    /// with a native-limit backend.
+    case osEnforcedLimit
 }
 
 /// The concrete request the policy makes of the backend for this evaluation.
@@ -31,6 +34,8 @@ public enum ChargingAction: Sendable, Equatable {
     case enableCharging
     case disableCharging
     case requestDischarge
+    /// Set macOS's own Charge Limit to this percentage.
+    case setNativeLimit(Int)
     /// The backend is already in the desired mode.
     case noAction
     /// The desired mode cannot or must not be requested.
@@ -41,6 +46,7 @@ public enum ChargingAction: Sendable, Equatable {
         case .normal: self = .enableCharging
         case .inhibitCharging: self = .disableCharging
         case .forceDischarge: self = .requestDischarge
+        case .nativeLimit(let percent): self = .setNativeLimit(percent)
         }
     }
 
@@ -50,6 +56,7 @@ public enum ChargingAction: Sendable, Equatable {
         case .enableCharging: .normal
         case .disableCharging: .inhibitCharging
         case .requestDischarge: .forceDischarge
+        case .setNativeLimit(let percent): .nativeLimit(percent: percent)
         case .noAction, .refuse: nil
         }
     }
@@ -63,22 +70,37 @@ public enum RefusalReason: Sendable, Equatable, CustomStringConvertible {
     /// Repeated backend failures or an unexpected external change; only the
     /// fail-safe mode may be requested until the fault is cleared.
     case backendFaulted
-    /// Too many restricting changes recently; retry at the given time.
+    /// Too many restricting changes recently, or an automatic retry of a
+    /// failed restore too soon after it; retry at the given time.
     case rateLimited(retryAt: Date)
 
     public var description: String {
         switch self {
         case .controlUnavailable(let reason): "Control unavailable: \(reason)"
-        case .modeUnsupported(let mode): "Backend does not support \(mode.rawValue)"
+        case .modeUnsupported(let mode): "Backend does not support \(mode)"
         case .backendFaulted: "Backend faulted; only normal charging may be requested"
         case .rateLimited(let retryAt): "Rate-limited until \(retryAt.formatted(date: .omitted, time: .standard))"
         }
     }
 }
 
+/// Why the controller needs `.normal` restored regardless of the settings.
+public enum ReleaseReason: String, Sendable, Equatable {
+    /// The user switched to another backend; the switch completes once
+    /// `.normal` is confirmed on the current one.
+    case backendSwitch
+    /// CellKeeper holds a non-normal state but could not read it back, so it
+    /// cannot tell whether it is still what CellKeeper set.
+    case stateUnverified
+    /// A restore of `.normal` was attempted (possibly in an earlier session)
+    /// and has not been confirmed; it stays owed until it is.
+    case restoreUnfinished
+}
+
 /// Why the policy chose its desired mode.
 public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
     case invalidConfiguration([SettingsIssue])
+    case releaseRequired(ReleaseReason)
     case telemetryUnavailable
     case telemetryStale(ageSeconds: Int)
     case batteryNotPresent
@@ -96,11 +118,23 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
     case limitReached(percent: Int, limit: Int)
     case holdingAboveResumeThreshold(percent: Int, resumeThreshold: Int)
     case sleepPrecaution(percent: Int, resumeThreshold: Int)
+    /// macOS's Charge Limit is to be set to `limit` and enforced by macOS.
+    case nativeLimitActive(limit: Int)
+    /// A temporary full charge raises macOS's Charge Limit to 100%.
+    case nativeFullCharge
+    /// The charge limit cannot be expressed as macOS's Charge Limit.
+    case nativeLimitUnsupported(limit: Int, steps: [Int])
 
     public var description: String {
         switch self {
         case .invalidConfiguration(let issues):
             "Settings are invalid (\(issues.count) issue(s)); using macOS default charging."
+        case .releaseRequired(.backendSwitch):
+            "Switching backend: restoring macOS defaults (with macOS's Charge Limit, your own limit) first."
+        case .releaseRequired(.restoreUnfinished):
+            "An earlier restore of macOS defaults (with macOS's Charge Limit, your own limit) has not been confirmed; CellKeeper keeps trying before making any other change."
+        case .releaseRequired(.stateUnverified):
+            "CellKeeper could not read back the state it set, so it is restoring macOS defaults (with macOS's Charge Limit, your own limit)."
         case .telemetryUnavailable:
             "Battery telemetry is unavailable; using macOS default charging."
         case .telemetryStale(let age) where age < 0:
@@ -137,6 +171,14 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
             "Charge \(percent)% is above the resume threshold \(resume)%; charging stays paused."
         case .sleepPrecaution(let percent, let resume):
             "Mac is going to sleep at \(percent)% (resume threshold \(resume)%); charging paused to avoid overshooting the limit while asleep."
+        case .nativeLimitActive(let limit) where limit >= 100:
+            "CellKeeper wants macOS's Charge Limit at 100% (no limit), so macOS charges normally."
+        case .nativeLimitActive(let limit):
+            "CellKeeper wants macOS's Charge Limit at \(limit)%; macOS enforces it, including its own resume point."
+        case .nativeFullCharge:
+            "Temporary full charge: CellKeeper wants macOS's Charge Limit at 100% until the battery is full."
+        case .nativeLimitUnsupported(let limit, let steps):
+            "A \(limit)% limit cannot be set with macOS's Charge Limit (\(steps.map { "\($0)%" }.joined(separator: ", "))); your own macOS limit stays in effect."
         }
     }
 }
@@ -150,6 +192,9 @@ public enum PolicyNote: Sendable, Equatable, CustomStringConvertible {
     case dischargeUnsupported
     /// A temporary full charge is active but a higher-priority rule wins.
     case fullChargeSuppressed(by: PolicyState)
+    /// Telemetry is unusable, but a native limit stays as it is because macOS
+    /// enforces it from its own measurements.
+    case nativeLimitKeptWithoutTelemetry
 
     public var description: String {
         switch self {
@@ -159,6 +204,8 @@ public enum PolicyNote: Sendable, Equatable, CustomStringConvertible {
             "The current backend cannot discharge while plugged in."
         case .fullChargeSuppressed(let state):
             "Temporary full charge is paused by \(state.rawValue)."
+        case .nativeLimitKeptWithoutTelemetry:
+            "Battery telemetry is unavailable. macOS keeps enforcing its Charge Limit from its own measurements, so CellKeeper leaves it unchanged."
         }
     }
 }
@@ -272,6 +319,13 @@ public struct PolicyInput: Sendable, Equatable {
     public var recentRestrictingRequests: [TimeInterval]
     /// True when the Mac has announced that it is about to sleep.
     public var isSleepImminent: Bool
+    /// After a failed attempt to restore `.normal`, the uptime before which
+    /// it is not retried automatically. Nil for user-initiated evaluations,
+    /// which always retry at once.
+    public var restoreRetryNotBefore: TimeInterval?
+    /// Set when the controller needs `.normal` restored whatever the
+    /// settings say.
+    public var releaseReason: ReleaseReason?
 
     public init(
         now: Date,
@@ -284,7 +338,9 @@ public struct PolicyInput: Sendable, Equatable {
         memory: PolicyMemory = PolicyMemory(),
         isBackendFaulted: Bool = false,
         recentRestrictingRequests: [TimeInterval] = [],
-        isSleepImminent: Bool = false
+        isSleepImminent: Bool = false,
+        restoreRetryNotBefore: TimeInterval? = nil,
+        releaseReason: ReleaseReason? = nil
     ) {
         self.now = now
         self.uptime = uptime
@@ -297,6 +353,8 @@ public struct PolicyInput: Sendable, Equatable {
         self.isBackendFaulted = isBackendFaulted
         self.recentRestrictingRequests = recentRestrictingRequests
         self.isSleepImminent = isSleepImminent
+        self.restoreRetryNotBefore = restoreRetryNotBefore
+        self.releaseReason = releaseReason
     }
 }
 

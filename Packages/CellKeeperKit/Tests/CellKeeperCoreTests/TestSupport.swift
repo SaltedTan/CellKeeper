@@ -25,7 +25,7 @@ func snapshot(
     )
 }
 
-let simulatedCapabilities = ControlCapabilities(availability: .simulated, supportedModes: Set(ChargeControlMode.allCases))
+let simulatedCapabilities = ControlCapabilities(availability: .simulated, supportedModes: ChargeControlMode.chargingModes)
 
 func input(
     _ snapshot: BatterySnapshot?,
@@ -37,6 +37,7 @@ func input(
     faulted: Bool = false,
     recentRestrictingRequests: [TimeInterval] = [],
     sleepImminent: Bool = false,
+    restoreRetryNotBefore: TimeInterval? = nil,
     now: Date = referenceDate,
     uptime: TimeInterval = 10_000
 ) -> PolicyInput {
@@ -51,7 +52,8 @@ func input(
         memory: memory,
         isBackendFaulted: faulted,
         recentRestrictingRequests: recentRestrictingRequests,
-        isSleepImminent: sleepImminent
+        isSleepImminent: sleepImminent,
+        restoreRetryNotBefore: restoreRetryNotBefore
     )
 }
 
@@ -110,5 +112,25 @@ final class TestClock: @unchecked Sendable {
 
     func advance(by interval: TimeInterval) {
         lock.withLock { elapsed += interval }
+    }
+}
+
+/// In-memory ``KeyValueStorage`` so tests never write to ~/Library/Preferences.
+/// Thread-safe, so a backend, the test, and a second backend (simulating a
+/// relaunch) can share it.
+final class InMemoryStorage: KeyValueStorage, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Any] = [:]
+
+    func data(forKey key: String) -> Data? {
+        lock.withLock { values[key] as? Data }
+    }
+
+    func string(forKey key: String) -> String? {
+        lock.withLock { values[key] as? String }
+    }
+
+    func set(_ value: Any?, forKey key: String) {
+        lock.withLock { values[key] = value }
     }
 }

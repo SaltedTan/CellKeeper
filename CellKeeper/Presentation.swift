@@ -36,6 +36,23 @@ extension ControlAvailability {
     }
 }
 
+extension ControlCapabilities {
+    /// What the availability means for this kind of backend.
+    var explanation: String {
+        guard isEnforcedByMacOS else { return availability.explanation }
+        switch availability {
+        case .available:
+            return "CellKeeper sets macOS's Charge Limit through your shortcut, and macOS enforces it."
+        case .experimental:
+            return "CellKeeper sets macOS's Charge Limit through your shortcut, and macOS enforces it. Experimental: so far verified on one Mac."
+        case .simulated:
+            return availability.explanation
+        case .unavailable(let reason):
+            return "CellKeeper cannot change macOS's Charge Limit right now. \(reason)"
+        }
+    }
+}
+
 extension PolicyState {
     var title: String {
         switch self {
@@ -48,16 +65,20 @@ extension PolicyState {
         case .charging: "Charging to limit"
         case .holding: "Holding at limit"
         case .discharging: "Discharging to limit"
+        case .osEnforcedLimit: "Limit enforced by macOS"
         }
     }
 }
 
 extension ChargeControlMode {
-    var intentTitle: String {
+    /// What the mode means to the user. With a native-limit backend `.normal`
+    /// is the user's own macOS limit rather than unrestricted charging.
+    func intentTitle(nativeLimit: Bool) -> String {
         switch self {
-        case .normal: "Allow charging"
+        case .normal: nativeLimit ? "Your own macOS limit" : "Allow charging"
         case .inhibitCharging: "Pause charging"
         case .forceDischarge: "Run from battery"
+        case .nativeLimit(let percent): percent >= 100 ? "macOS limit off (100%)" : "macOS limit \(percent)%"
         }
     }
 }
@@ -65,8 +86,10 @@ extension ChargeControlMode {
 extension ExecutionRecord.Result {
     var title: String {
         switch self {
-        case .applied: "Applied to hardware"
+        case .applied: "Applied and confirmed"
+        case .unchanged: "Already in effect — nothing changed"
         case .simulated: "Simulated — hardware unchanged"
+        case .adoptedOutsideChange: "Kept your change made outside CellKeeper — nothing changed"
         case .failed(let message): "Failed: \(message)"
         case .refused(let reason): "Refused: \(reason)"
         }
@@ -100,6 +123,19 @@ enum Format {
 
     static func percent(_ value: Int?) -> String {
         value.map { "\($0)%" } ?? unavailable
+    }
+
+    /// A Charge Limit value, where 100% means no limit.
+    static func chargeLimit(_ value: Int) -> String {
+        value >= 100 ? "100% (no limit)" : "\(value)%"
+    }
+
+    /// Why a backend switch is still waiting.
+    static func pendingSwitch(to name: String, nativeLimit: NativeLimitStatus?) -> String {
+        if nativeLimit?.isAdoptionUnsaved == true {
+            return "Switching to \(name) once CellKeeper has stored its record of the limit it kept; it could not write to its storage yet."
+        }
+        return "Switching to \(name) once your own limit is confirmed restored."
     }
 
     static func celsius(_ value: Double?) -> String {
