@@ -391,11 +391,30 @@ final class AppModel {
         case .unmanaged: return "batteryblock.slash"
         case .failSafe: return "exclamationmark.triangle"
         case .temperaturePause: return "thermometer.high"
-        case .holding, .onBattery: return "batteryblock"
         case .discharging: return "minus.plus.batteryblock"
-        case .charging, .fullChargeOverride, .safetyFloor: return "bolt.batteryblock"
-        case .osEnforcedLimit: return status.snapshot?.isCharging == true ? "bolt.batteryblock" : "batteryblock"
+        case .holding, .onBattery, .charging, .fullChargeOverride, .safetyFloor, .osEnforcedLimit:
+            // A state that allows charging does not mean the battery is
+            // charging (unplugged at the safety floor, full at a 100% limit).
+            return status.snapshot?.isCharging == true ? "bolt.batteryblock" : "batteryblock"
         }
+    }
+
+    /// What the menu bar icon shows, for VoiceOver: the charge, whether the
+    /// battery is charging, and CellKeeper's state. The status item exposes
+    /// only a title to accessibility, not a value, so it is all in the label.
+    var menuBarAccessibilityLabel: String {
+        guard let status else { return "CellKeeper, reading battery" }
+        var parts = ["CellKeeper"]
+        if let snapshot = status.snapshot, snapshot.isBatteryPresent {
+            parts.append(snapshot.chargePercent.map { "\($0)%" } ?? "Charge unknown")
+            parts.append(snapshot.chargingStatus.title)
+        }
+        if status.isBackendFaulted {
+            parts.append("Control backend faulted")
+        } else if let decision = status.decision {
+            parts.append(decision.state.title)
+        }
+        return parts.joined(separator: ", ")
     }
 }
 
