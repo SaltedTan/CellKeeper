@@ -53,6 +53,16 @@ extension ControlCapabilities {
     }
 }
 
+extension ControllerStatus {
+    /// True while CellKeeper owes the user's own Charge Limit back and has not
+    /// confirmed it: a restore failed or could not be checked yet, possibly in
+    /// an earlier session.
+    var isOwnLimitRestorePending: Bool {
+        guard nativeLimit?.ownerLimit != nil else { return false }
+        return nativeLimit?.isRestoreUnfinished == true || decision?.reason == .releaseRequired(.restoreUnfinished)
+    }
+}
+
 extension PolicyState {
     var title: String {
         switch self {

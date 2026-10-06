@@ -149,6 +149,9 @@ private struct NativeLimitSummary: View {
                 if native?.isRecordUnreadable == true {
                     Text("CellKeeper's record of your own limit cannot be read, so it will not change or restore the limit. Set your limit in System Settings › Battery › Charging, then discard the record in Settings › Control.")
                         .foregroundStyle(.red)
+                } else if let owner = native?.ownerLimit, status.isOwnLimitRestorePending {
+                    Text("CellKeeper could not confirm yet that your own limit, \(Format.chargeLimit(owner)), is back. It keeps trying; you can also set it in System Settings › Battery › Charging.")
+                        .foregroundStyle(.red)
                 } else if let owner = native?.ownerLimit {
                     Text("Set by CellKeeper. Your own limit, \(Format.chargeLimit(owner)), is restored when CellKeeper stops managing it, quits, or fails.")
                 } else {
@@ -174,7 +177,7 @@ private struct NativeLimitSummary: View {
                     Text("Could not read the Charge Limit: \(problem)")
                         .foregroundStyle(.orange)
                 }
-                if let owner = native?.ownerLimit, !status.capabilities.availability.acceptsRequests {
+                if let owner = native?.ownerLimit, !status.capabilities.availability.acceptsRequests, !status.isOwnLimitRestorePending {
                     Text("CellKeeper cannot change the limit back right now. Set \(Format.chargeLimit(owner)) in System Settings › Battery › Charging.")
                         .foregroundStyle(.red)
                 }
