@@ -81,6 +81,10 @@ private struct ControlSummary: View {
     let status: ControllerStatus
 
     var body: some View {
+        // When macOS's Charge Limit is settled, its summary says it all; the
+        // details return as soon as anything differs (Settings › Control and
+        // Activity always have them).
+        let isSettled = status.isNativeLimitSettled
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("Charging control")
@@ -88,16 +92,18 @@ private struct ControlSummary: View {
                 Spacer()
                 StatusBadge(title: status.capabilities.availability.badgeTitle, color: status.capabilities.availability.badgeColor)
             }
-            Text(status.capabilities.explanation)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            if !isSettled {
+                Text(status.capabilities.explanation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             if status.capabilities.isEnforcedByMacOS {
                 NativeLimitSummary(status: status)
             }
 
-            if let decision = status.decision {
+            if let decision = status.decision, !isSettled {
                 LabeledContent("Policy", value: decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS))
                 LabeledContent("Wants", value: decision.desiredMode.intentTitle(nativeLimit: status.capabilities.isEnforcedByMacOS))
                 Text(decision.reason.description)
@@ -232,16 +238,13 @@ private struct NativeChargeLimitPicker: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .disabled(!model.settings.isManagementEnabled)
+            .help("macOS enforces this limit and resumes charging once the battery drops more than 5%; a custom resume point is not available with its Charge Limit.")
             if !steps.contains(limit) {
                 Text("\(limit)% cannot be set with macOS's Charge Limit. Choose one of the values above; until then your own limit stays in effect.")
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            Text("macOS resumes charging once the battery drops more than 5%; a custom resume point is not available with its Charge Limit.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             ManageChargingToggle(model: model)
         }
     }

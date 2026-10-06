@@ -63,6 +63,23 @@ extension ControllerStatus {
     }
 }
 
+extension ControllerStatus {
+    /// With macOS's Charge Limit: CellKeeper's limit is in effect and
+    /// confirmed, and nothing failed, was refused, or is pending. The menu
+    /// then only needs the Charge Limit summary.
+    var isNativeLimitSettled: Bool {
+        guard capabilities.isEnforcedByMacOS, capabilities.availability.acceptsRequests,
+              !isBackendFaulted, pendingBackend == nil,
+              let decision, decision.state == .osEnforcedLimit, decision.notes.isEmpty,
+              currentMode == decision.desiredMode
+        else { return false }
+        switch lastExecution?.result {
+        case .failed?, .refused?: return false
+        default: return true
+        }
+    }
+}
+
 extension PolicyState {
     /// With a native-limit backend the fail-safe is the user's own macOS
     /// limit, never a default such as 100%.
