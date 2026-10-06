@@ -314,9 +314,7 @@ private struct FullChargeControl: View {
                 case .fullCharge:
                     Label(fullChargeText(override), systemImage: "arrow.up.to.line")
                 case .dischargeToLimit:
-                    let target = override.targetPercent ?? model.settings.chargeLimit
-                    let prefix = status.capabilities.availability.affectsHardware ? "Discharging" : "Simulating a discharge"
-                    Label("\(prefix) to \(target)% while plugged in. Stops at the target, on sleep, or when unplugged.", systemImage: "minus.plus.batteryblock")
+                    Label(dischargeText(override), systemImage: "minus.plus.batteryblock")
                         .foregroundStyle(.orange)
                 }
                 Spacer()
@@ -341,21 +339,45 @@ private struct FullChargeControl: View {
     /// and the backend has confirmed the mode it needs.
     private func fullChargeText(_ override: ChargeOverride) -> String {
         let until = "until full, unplugged, or \(override.expiresAt.formatted(date: .omitted, time: .shortened))"
-        switch status.capabilities.availability {
-        case .simulated:
-            return "Simulating a charge to 100% \(until)"
-        case .unavailable:
-            return "Full charge requested, but charging control is unavailable"
-        case .available, .experimental:
-            break
+        switch overrideProgress(runningIn: .fullChargeOverride) {
+        case .unavailable: return "Full charge requested, but charging control is unavailable"
+        case .notInEffect(let why): return "Full charge requested, not in effect\(why)"
+        case .running(simulated: true): return "Simulating a charge to 100% \(until)"
+        case .running(simulated: false): return "Charging to 100% \(until)"
         }
-        guard let decision = status.decision, decision.state == .fullChargeOverride,
+    }
+
+    /// Like ``fullChargeText(_:)``. The session stops at its target or at
+    /// the current limit, whichever is higher (`ChargingPolicy`).
+    private func dischargeText(_ override: ChargeOverride) -> String {
+        let limit = status.settings.chargeLimit
+        let target = max(override.targetPercent ?? limit, limit)
+        let stops = "Stops at the target, on sleep, or when unplugged."
+        switch overrideProgress(runningIn: .discharging) {
+        case .unavailable: return "Discharge to \(target)% requested, but charging control is unavailable"
+        case .notInEffect(let why): return "Discharge to \(target)% requested, not in effect\(why). \(stops)"
+        case .running(simulated: true): return "Simulating a discharge to \(target)% while plugged in. \(stops)"
+        case .running(simulated: false): return "Discharging to \(target)% while plugged in. \(stops)"
+        }
+    }
+
+    private enum OverrideProgress {
+        case unavailable
+        /// `why` is the last action, ready to append, or empty.
+        case notInEffect(why: String)
+        case running(simulated: Bool)
+    }
+
+    /// Whether the policy is running the override (`state`) and the backend
+    /// has confirmed the mode it needs.
+    private func overrideProgress(runningIn state: PolicyState) -> OverrideProgress {
+        if case .unavailable = status.capabilities.availability { return .unavailable }
+        guard let decision = status.decision, decision.state == state,
               status.currentMode == decision.desiredMode
         else {
-            let why = status.lastExecution.map { " (\($0.result.title))" } ?? ""
-            return "Full charge requested, not in effect\(why)"
+            return .notInEffect(why: status.lastExecution.map { " (\($0.result.title))" } ?? "")
         }
-        return "Charging to 100% \(until)"
+        return .running(simulated: status.capabilities.availability == .simulated)
     }
 }
 
