@@ -53,33 +53,6 @@ extension ControlCapabilities {
     }
 }
 
-extension ControllerStatus {
-    /// True while CellKeeper owes the user's own Charge Limit back and has not
-    /// confirmed it: a restore failed or could not be checked yet, possibly in
-    /// an earlier session.
-    var isOwnLimitRestorePending: Bool {
-        guard nativeLimit?.ownerLimit != nil else { return false }
-        return nativeLimit?.isRestoreUnfinished == true || decision?.reason == .releaseRequired(.restoreUnfinished)
-    }
-}
-
-extension ControllerStatus {
-    /// With macOS's Charge Limit: CellKeeper's limit is in effect and
-    /// confirmed, and nothing failed, was refused, or is pending. The menu
-    /// then only needs the Charge Limit summary.
-    var isNativeLimitSettled: Bool {
-        guard capabilities.isEnforcedByMacOS, capabilities.availability.acceptsRequests,
-              !isBackendFaulted, pendingBackend == nil,
-              let decision, decision.state == .osEnforcedLimit, decision.notes.isEmpty,
-              currentMode == decision.desiredMode
-        else { return false }
-        switch lastExecution?.result {
-        case .failed?, .refused?: return false
-        default: return true
-        }
-    }
-}
-
 extension PolicyState {
     /// With a native-limit backend the fail-safe is the user's own macOS
     /// limit, never a default such as 100%.
