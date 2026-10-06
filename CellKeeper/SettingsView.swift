@@ -49,8 +49,9 @@ private struct ChargingSettingsTab: View {
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }
-                    LabeledContent("Resume charging at", value: "Decided by macOS")
-                    Text("macOS's Charge Limit resumes charging once the battery drops more than 5% while plugged in. A custom resume threshold cannot be set through it, so this setting is not used.")
+                    // Settings macOS's Charge Limit cannot express are hidden
+                    // rather than shown disabled; this says what macOS does instead.
+                    Label("macOS enforces this limit and resumes charging once the battery drops more than 5%. A custom resume threshold, temperature protection and discharging are not available with macOS's Charge Limit; your Mac's own battery protections always stay in effect.", systemImage: "info.circle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -70,24 +71,20 @@ private struct ChargingSettingsTab: View {
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
-                LabeledContent("Discharge to the limit") {
-                    Button("Discharge Now…") { isConfirmingDischarge = true }
-                        .disabled(!canStartDischarge)
-                }
-                .confirmationDialog("Discharge to \(settings.chargeLimit)% while plugged in?", isPresented: $isConfirmingDischarge) {
-                    Button("Start Discharge") { model.startDischargeToLimit() }
-                } message: {
-                    if model.status?.capabilities.availability.affectsHardware == true {
-                        Text("CellKeeper will ask the Mac to run from its battery even though it is plugged in, once, until the charge reaches \(settings.chargeLimit)%. It stops at that level, before sleep, if the battery gets warm, or when unplugged.")
-                    } else {
-                        Text("The current backend only simulates this: CellKeeper will record a one-time discharge to \(settings.chargeLimit)%, but your Mac's charging will not change.")
+                if !isNative {
+                    LabeledContent("Discharge to the limit") {
+                        Button("Discharge Now…") { isConfirmingDischarge = true }
+                            .disabled(!canStartDischarge)
                     }
-                }
-                if isNative {
-                    Text("Not available with macOS's Charge Limit: it can stop charging at the limit, but cannot run the Mac from its battery while plugged in.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                } else {
+                    .confirmationDialog("Discharge to \(settings.chargeLimit)% while plugged in?", isPresented: $isConfirmingDischarge) {
+                        Button("Start Discharge") { model.startDischargeToLimit() }
+                    } message: {
+                        if model.status?.capabilities.availability.affectsHardware == true {
+                            Text("CellKeeper will ask the Mac to run from its battery even though it is plugged in, once, until the charge reaches \(settings.chargeLimit)%. It stops at that level, before sleep, if the battery gets warm, or when unplugged.")
+                        } else {
+                            Text("The current backend only simulates this: CellKeeper will record a one-time discharge to \(settings.chargeLimit)%, but your Mac's charging will not change.")
+                        }
+                    }
                     Text("A one-time session that runs the Mac from its battery while plugged in until the limit is reached. Needs a backend that supports it and a limit of \(ChargingPolicy.dischargeTargetRange.lowerBound)–\(ChargingPolicy.dischargeTargetRange.upperBound)%.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -95,18 +92,12 @@ private struct ChargingSettingsTab: View {
             }
             .disabled(!settings.isManagementEnabled)
 
-            Section {
-                if isNative {
-                    Label("Not available with macOS's Charge Limit, which has no temperature pause. CellKeeper's temperature protection is not active with this backend; your Mac's own battery protections always are.", systemImage: "info.circle")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            if !isNative {
+                Section("Temperature protection") {
+                    TemperatureProtectionControls(model: model)
                 }
-                TemperatureProtectionControls(model: model)
-                    .disabled(isNative)
-            } header: {
-                Text("Temperature protection")
+                .disabled(!settings.isManagementEnabled)
             }
-            .disabled(!settings.isManagementEnabled)
 
             if let error = model.settingsError {
                 Label(error, systemImage: "exclamationmark.triangle")

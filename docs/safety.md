@@ -84,7 +84,7 @@ All of these are enforced in `CellKeeperCore` and covered by unit tests.
 | Changes are rate-limited (≥ 60 s apart, ≤ 20 per hour), and real changes still count after a switch to Simulated and back; simulated requests are dropped when the backend changes; a take-over that needs no change runs nothing | `ChargingPolicy.rateLimitRetryTime`, `ChargeController.request`, `ChargeController.completePendingSwitch` |
 | The read-back uses `pmset -g battlimit` with fixed arguments, read-only, through a strict parser; anything unrecognised is never guessed | `PmsetChargeLimitReader`, `ChargeLimitReportParser` |
 | Tools are run directly (no shell), with standard input closed, a deadline (shortcut 20 s, pmset 5 s), bounded output, and cancellation; incomplete output is never parsed | `ProcessRunner` |
-| Features the Charge Limit cannot express are disabled with an explanation: custom resume threshold, temperature pause, discharge | `SettingsView`, `MenuBarView`, `ChargingPolicy.evaluateNativeLimit` |
+| Features the Charge Limit cannot express are not offered, and a note says so: custom resume threshold, temperature pause, discharge | `SettingsView`, `MenuBarView`, `ChargingPolicy.evaluateNativeLimit` |
 | The menu shows that macOS is enforcing the limit, the value macOS reports, and the limit that will be restored | `NativeLimitSummary` |
 
 ### Validation ranges
