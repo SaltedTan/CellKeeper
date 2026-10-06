@@ -10,7 +10,7 @@ struct CellKeeperApp: App {
             MenuBarView(model: appDelegate.model)
         } label: {
             Image(systemName: appDelegate.model.menuBarSymbolName)
-                .accessibilityLabel("CellKeeper")
+                .accessibilityLabel(appDelegate.model.menuBarAccessibilityLabel)
         }
         .menuBarExtraStyle(.window)
 
