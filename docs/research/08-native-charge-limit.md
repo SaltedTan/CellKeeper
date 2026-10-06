@@ -160,7 +160,7 @@ Planned procedure:
    - The arguments are fixed.
    - The parser accepts only the shapes in O4.
    - Every active entry must be a manual Charge Limit, and they must agree.
-   - Anything else is "unrecognised": CellKeeper then neither records nor changes the limit.
+   - Anything else is "unrecognised": CellKeeper then records nothing and sets no new limit. It still attempts to restore a limit it already recorded, and treats that restore as unconfirmed until it reads it back.
 3. **Sandbox:** stays on, with no new entitlements (O3). Keeping it also blocks pmset's SMC user-client attempt (O7).
 4. **Confirmation:** only a read-back equal to the requested value. The exit status never confirms (O2).
 

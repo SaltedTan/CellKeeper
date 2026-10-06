@@ -64,10 +64,14 @@ public actor ChargeController {
     private var currentMode: ChargeControlMode?
     /// The mode CellKeeper last requested and confirmed on this backend.
     private var ownedMode: ChargeControlMode?
-    /// Modes requested since the last confirmation whose confirmation failed.
-    /// Any of them may have taken effect, so finding one later is not an
-    /// outside change.
+    /// Modes the backend accepted since the last confirmation but that could
+    /// not be confirmed. Any of them may have taken effect, so finding one
+    /// later is not an outside change. Requests the backend rejected are not
+    /// included.
     private var unconfirmedRequests: Set<ChargeControlMode> = []
+    /// A restore of `.normal` was attempted and not confirmed. Until it is,
+    /// the policy is told to release whatever the settings say.
+    private var isRestoreOutstanding = false
     /// Whether ``ownedMode`` has been seeded from what the current backend
     /// remembers from an earlier session.
     private var hasSeededOwnership = false
@@ -299,6 +303,7 @@ public actor ChargeController {
         currentMode = nil
         ownedMode = nil
         unconfirmedRequests = []
+        isRestoreOutstanding = false
         hasSeededOwnership = false
         nativeLimit = nil
         lastExecution = nil
@@ -377,6 +382,7 @@ public actor ChargeController {
         capabilities = await backend.capabilities()
         await observeBackendMode()
         let releaseReason: ReleaseReason? = pendingBackend != nil ? .backendSwitch
+            : isRestoreOutstanding ? .restoreUnfinished
             : isOwnedStateUnverified ? .stateUnverified
             : nil
 
@@ -446,6 +452,10 @@ public actor ChargeController {
                 ownedMode = .nativeLimit(percent: target)
                 record(.safety, "macOS's Charge Limit was left at \(target)% by an earlier CellKeeper session; your own limit (\(nativeLimit?.ownerLimit.map { "\($0)%" } ?? "unknown")) is still recorded and will be restored.")
             }
+            if nativeLimit?.isRestoreUnfinished == true {
+                isRestoreOutstanding = true
+                record(.safety, "An earlier session could not confirm restoring your own Charge Limit; CellKeeper will finish that first.")
+            }
         }
         guard capabilities.availability.acceptsRequests else { return }
         guard let observed else {
@@ -453,7 +463,11 @@ public actor ChargeController {
             isOwnedStateUnverified = holdsNonNormalState
             return
         }
-        if let owned = ownedMode, owned != observed, unconfirmedRequests.contains(observed) {
+        if observed == .normal, !(nativeLimit?.hasUnresolvedOwnership ?? false) {
+            isRestoreOutstanding = false
+        }
+        let isOwnDoing = nativeLimit?.isReportedStateOwn == true || unconfirmedRequests.contains(observed)
+        if let owned = ownedMode, owned != observed, isOwnDoing {
             ownedMode = observed
             unconfirmedRequests = []
             record(.result, "Now confirmed: \(describeTarget(observed)), requested earlier but not confirmed then.")
@@ -579,15 +593,20 @@ public actor ChargeController {
     /// readings are compared with.
     private func setAndConfirm(_ mode: ChargeControlMode) async throws -> ControlOutcome {
         do {
+            // If the backend throws, the request is not counted as possibly in
+            // effect: native backends track that themselves, through their
+            // record (`isReportedStateOwn`).
             let outcome = try await backend.setMode(mode)
             let readBack: ChargeControlMode?
             do {
                 readBack = try await backend.currentMode()
             } catch {
+                unconfirmedRequests.insert(mode)
                 throw BackendError.verificationFailed(expected: mode, actual: nil)
             }
             nativeLimit = await backend.nativeLimitStatus()
             guard readBack == mode else {
+                unconfirmedRequests.insert(mode)
                 throw BackendError.verificationFailed(expected: mode, actual: readBack)
             }
             currentMode = mode
@@ -595,13 +614,14 @@ public actor ChargeController {
             unconfirmedRequests = []
             if mode == .normal {
                 lastFailedRestoreUptime = nil
+                isRestoreOutstanding = false
             }
             return outcome
         } catch {
             currentMode = nil
-            unconfirmedRequests.insert(mode)
             if mode == .normal {
                 lastFailedRestoreUptime = uptime()
+                isRestoreOutstanding = true
             }
             nativeLimit = await backend.nativeLimitStatus()
             throw error

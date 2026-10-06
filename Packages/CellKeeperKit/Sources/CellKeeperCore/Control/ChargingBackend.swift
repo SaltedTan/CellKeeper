@@ -217,6 +217,12 @@ public struct NativeLimitStatus: Sendable, Equatable {
     /// limit only after the user confirms it (it could also be a temporary
     /// state such as a full charge).
     public var needsNoLimitConfirmation: Bool
+    /// CellKeeper started restoring the user's limit and has not confirmed
+    /// it, possibly in an earlier session.
+    public var isRestoreUnfinished: Bool
+    /// The state last reported by `currentMode()` is one CellKeeper set or
+    /// restored, even if it could not confirm it at the time.
+    public var isReportedStateOwn: Bool
 
     public init(
         reportedLimit: Int? = nil,
@@ -225,7 +231,9 @@ public struct NativeLimitStatus: Sendable, Equatable {
         ownerLimit: Int? = nil,
         target: Int? = nil,
         isRecordUnreadable: Bool = false,
-        needsNoLimitConfirmation: Bool = false
+        needsNoLimitConfirmation: Bool = false,
+        isRestoreUnfinished: Bool = false,
+        isReportedStateOwn: Bool = false
     ) {
         self.reportedLimit = reportedLimit
         self.readAt = readAt
@@ -234,6 +242,8 @@ public struct NativeLimitStatus: Sendable, Equatable {
         self.target = target
         self.isRecordUnreadable = isRecordUnreadable
         self.needsNoLimitConfirmation = needsNoLimitConfirmation
+        self.isRestoreUnfinished = isRestoreUnfinished
+        self.isReportedStateOwn = isReportedStateOwn
     }
 
     /// True while CellKeeper has changed the setting and must restore it.

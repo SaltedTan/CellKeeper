@@ -92,6 +92,9 @@ public enum ReleaseReason: String, Sendable, Equatable {
     /// CellKeeper holds a non-normal state but could not read it back, so it
     /// cannot tell whether it is still what CellKeeper set.
     case stateUnverified
+    /// A restore of `.normal` was attempted (possibly in an earlier session)
+    /// and has not been confirmed; it stays owed until it is.
+    case restoreUnfinished
 }
 
 /// Why the policy chose its desired mode.
@@ -128,6 +131,8 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
             "Settings are invalid (\(issues.count) issue(s)); using macOS default charging."
         case .releaseRequired(.backendSwitch):
             "Switching backend: restoring macOS defaults (with macOS's Charge Limit, your own limit) first."
+        case .releaseRequired(.restoreUnfinished):
+            "An earlier restore of macOS defaults (with macOS's Charge Limit, your own limit) has not been confirmed; CellKeeper keeps trying before making any other change."
         case .releaseRequired(.stateUnverified):
             "CellKeeper could not read back the state it set, so it is restoring macOS defaults (with macOS's Charge Limit, your own limit)."
         case .telemetryUnavailable:

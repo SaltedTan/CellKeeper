@@ -373,6 +373,27 @@ struct NativeChargeLimitBackendTests {
         #expect(await backend.nativeLimitStatus()?.target == 90)
     }
 
+    @Test("Finding an earlier change in effect does not cancel an unfinished restore")
+    func promotionKeepsRestore() async throws {
+        storeOwnershipRecord(owner: 80, target: 85, pending: 90, restoring: true, in: store)
+        system.reading = .limit(90)
+        let backend = makeBackend()
+        #expect(try await backend.currentMode() == .nativeLimit(percent: 90))
+        let status = await backend.nativeLimitStatus()
+        #expect(status?.target == 90)
+        #expect(status?.isRestoreUnfinished == true)
+        #expect(status?.isReportedStateOwn == true)
+    }
+
+    @Test("A value CellKeeper never set is not reported as its own")
+    func foreignValueNotOwn() async throws {
+        let backend = makeBackend()
+        _ = try await backend.setMode(.nativeLimit(percent: 90))
+        system.changeExternally(to: 95)
+        _ = try await backend.currentMode()
+        #expect(await backend.nativeLimitStatus()?.isReportedStateOwn == false)
+    }
+
     @Test("A restore that took effect without confirmation is recognised later")
     func unconfirmedRestoreRecognised() async throws {
         let backend = makeBackend()

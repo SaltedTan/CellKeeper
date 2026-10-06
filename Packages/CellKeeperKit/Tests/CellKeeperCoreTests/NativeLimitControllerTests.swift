@@ -138,7 +138,14 @@ struct NativeLimitControllerTests {
         let status = await controller.switchBackend(to: makeNativeBackend(system: system, store: store, clock: clock))
         #expect(status.pendingBackend == nil)
         #expect(status.backend.identifier == NativeChargeLimitBackend.identifier)
-        #expect(status.decision?.state == .osEnforcedLimit)
+        // The restore the switch started is still finished first.
+        #expect(status.decision?.reason == .releaseRequired(.restoreUnfinished))
+        #expect(system.reading == .limit(80))
+
+        clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
+        let managing = await controller.evaluate(.periodic)
+        #expect(managing.decision?.state == .osEnforcedLimit)
+        #expect(system.reading == .limit(90))
     }
 
     @Test("An earlier session's change is restored before switching to another backend")
@@ -287,8 +294,45 @@ struct NativeLimitControllerTests {
         clock.advance(by: ChargingPolicy.minimumRestoreRetryInterval)
         let later = await controller.evaluate(.periodic)
         #expect(!later.isBackendFaulted)
-        #expect(later.currentMode == .nativeLimit(percent: 90))
         #expect(later.events.contains { $0.message.contains("Now confirmed") })
+        // Recognising its own change does not cancel the restore that failed.
+        #expect(later.decision?.reason == .releaseRequired(.restoreUnfinished))
+        #expect(system.reading == .limit(80))
+        #expect(later.nativeLimit?.ownerLimit == nil)
+    }
+
+    @Test("A request rejected before anything was written never makes an outside change look like CellKeeper's")
+    func rejectedRequestNotTrusted() async throws {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
+        store.saveFails = true
+        system.runBehaviour = .fails
+        let failed = try await controller.apply(settings: settings(limit: 95))
+        #expect(system.runInputs == ["90", "80"])
+        #expect(failed.nativeLimit?.ownerLimit == 80)
+
+        system.changeExternally(to: 95)
+        store.saveFails = false
+        system.runBehaviour = .applies
+        clock.advance(by: ChargingPolicy.minimumRestoreRetryInterval)
+        let status = await controller.evaluate(.periodic)
+        #expect(status.isBackendFaulted)
+        #expect(!status.events.contains { $0.message.contains("Now confirmed") })
+        #expect(system.reading == .limit(80))
+    }
+
+    @Test("A restore that failed when quitting is finished at the next launch")
+    func unfinishedRestoreResumedAtLaunch() async {
+        storeOwnershipRecord(owner: 80, target: 90, restoring: true, in: store)
+        system.reading = .limit(90)
+        let (controller, _) = makeController(limit: 90)
+        let status = await controller.evaluate(.launch)
+        #expect(status.decision?.reason == .releaseRequired(.restoreUnfinished))
+        #expect(system.reading == .limit(80))
+        #expect(system.runInputs == ["80"])
+        #expect(store.data == nil)
+        #expect(status.events.contains { $0.message.contains("finish that first") })
     }
 
     @Test("A restore that took effect without confirmation is not mistaken for an outside change")

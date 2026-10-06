@@ -114,11 +114,18 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         }
 
         /// `percent` was read back: it is now the only value CellKeeper has
-        /// in effect.
+        /// in effect, and CellKeeper is about to set it or has just set it.
         mutating func confirm(_ percent: Int) {
             target = percent
             pendingTargets = []
             isRestoring = false
+        }
+
+        /// A pending value was found in effect. An unfinished restore stays
+        /// unfinished: finding an earlier change does not cancel it.
+        mutating func promote(_ percent: Int) {
+            target = percent
+            pendingTargets = []
         }
     }
 
@@ -145,6 +152,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     private var lastReading: NativeChargeLimitReading?
     private var lastReadAt: Date?
     private var lastReadProblem: String?
+    private var isLastReportedStateOwn = false
 
     /// - Parameters:
     ///   - store: where the user's own limit is recorded.
@@ -244,6 +252,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     }
 
     public func currentMode() async throws -> ChargeControlMode? {
+        isLastReportedStateOwn = false
         switch record {
         case .unreadable:
             _ = try? await read()
@@ -268,13 +277,15 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             if owned.isRestoring, percent == owned.ownerLimit {
                 // A restore that could not be confirmed took effect.
                 clearRecord(reason: "your own limit of \(owned.ownerLimit)% is now in effect")
+                isLastReportedStateOwn = true
                 return .normal
             }
+            isLastReportedStateOwn = owned.accepts(percent)
             if owned.pendingTargets.contains(percent) {
                 // An interrupted change took effect after all. The stored
                 // record already accepts this value, so a failed save loses
                 // nothing.
-                owned.confirm(percent)
+                owned.promote(percent)
                 saveRecordBestEffort(owned)
             }
             return .nativeLimit(percent: percent)
@@ -301,9 +312,11 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         case .owned(let owned):
             status.ownerLimit = owned.ownerLimit
             status.target = owned.target
+            status.isRestoreUnfinished = owned.isRestoring
         case .unreadable:
             status.isRecordUnreadable = true
         }
+        status.isReportedStateOwn = isLastReportedStateOwn
         return status
     }
 

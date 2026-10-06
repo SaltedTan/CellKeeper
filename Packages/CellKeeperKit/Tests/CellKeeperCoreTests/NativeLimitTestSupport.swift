@@ -183,8 +183,9 @@ func makeNativeBackend(
 }
 
 /// Writes an ownership record the way a previous session would have.
-func storeOwnershipRecord(owner: Int, target: Int, pending: Int? = nil, in store: InMemoryRecordStore) {
+func storeOwnershipRecord(owner: Int, target: Int, pending: Int? = nil, restoring: Bool = false, in store: InMemoryRecordStore) {
     let pendingField = pending.map { #","pendingTargets":[\#($0)]"# } ?? ""
-    let json = #"{"ownerLimit":\#(owner),"target":\#(target)\#(pendingField),"recordedAt":0}"#
+    let restoringField = restoring ? #","isRestoring":true"# : ""
+    let json = #"{"ownerLimit":\#(owner),"target":\#(target)\#(pendingField)\#(restoringField),"recordedAt":0}"#
     store.data = Data(json.utf8)
 }

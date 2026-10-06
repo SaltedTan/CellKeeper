@@ -303,9 +303,16 @@ The controller adds, independent of the backend:
 - if a read fails while CellKeeper holds a non-normal state, `.normal` is
   requested (`ReleaseReason.stateUnverified`). The last confirmed mode stays
   the expectation, so a reading that differs from it after reads recover is
-  still treated as an outside change. Modes CellKeeper requested since then
-  without being able to confirm them are remembered too: finding one of them
-  confirms it rather than counting as an outside change;
+  still treated as an outside change. A request the backend accepted but
+  that could not be confirmed is remembered, so finding it later confirms it
+  rather than counting as an outside change. A request the backend rejected
+  is not remembered. Native backends decide this from their record and
+  report it as `isReportedStateOwn`;
+- a restore of `.normal` that was attempted and not confirmed stays owed
+  (`ReleaseReason.restoreUnfinished`) until it is confirmed, whatever the
+  settings say. The native backend persists this (`isRestoring`), so the
+  next launch finishes it first. Finding an earlier change of CellKeeper's
+  in effect does not cancel it;
 - a backend that finds an outside change itself, just before writing
   (`BackendError.changedOutside`), faults at once, like the controller's own
   detection;
@@ -558,3 +565,4 @@ decisions.
 | D22 | The ownership record is a fsync'd file, written and read back before any change | `UserDefaults` persists asynchronously; losing the record after a change would lose the user's limit |
 | D23 | "No limit" is recorded as 100% only after the user confirms it | The report cannot distinguish a 100% limit from temporary states; the owner's rule is never to assume 100% |
 | D24 | Invalid settings are rejected before use, never applied | The UI only offers valid values; a rejected change keeps the previous valid settings, so there is no "invalid settings" state to restore from at run time. The policy still fails safe if handed invalid settings directly |
+| D25 | An attempted restore stays owed until confirmed, across relaunches | Otherwise recognising an earlier change, or a relaunch, could quietly abandon giving the user's limit back |
