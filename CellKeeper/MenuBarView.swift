@@ -146,10 +146,21 @@ private struct NativeLimitSummary: View {
             }
             .font(.callout)
             Group {
-                if let owner = native?.ownerLimit {
+                if native?.isRecordUnreadable == true {
+                    Text("CellKeeper's record of your own limit cannot be read, so it will not change or restore the limit. Set your limit in System Settings › Battery › Charging, then discard the record in Settings › Control.")
+                        .foregroundStyle(.red)
+                } else if let owner = native?.ownerLimit {
                     Text("Set by CellKeeper. Your own limit, \(Format.chargeLimit(owner)), is restored when CellKeeper stops managing it, quits, or fails.")
                 } else {
                     Text("This is your own setting; CellKeeper has not changed it.")
+                }
+                if native?.needsNoLimitConfirmation == true {
+                    Text("macOS reports no limit. If your own limit is 100%, confirm it in Settings › Control before CellKeeper changes anything.")
+                        .foregroundStyle(.orange)
+                }
+                if let pending = status.pendingBackend {
+                    Text("Switching to \(pending.displayName) once your own limit is confirmed restored.")
+                        .foregroundStyle(.orange)
                 }
                 if let problem = native?.readProblem {
                     Text("Could not read the Charge Limit: \(problem)")
@@ -287,7 +298,7 @@ private struct FullChargeControl: View {
             HStack {
                 switch override.kind {
                 case .fullCharge:
-                    Label("Charging to 100% until full, unplugged, or \(override.expiresAt.formatted(date: .omitted, time: .shortened))", systemImage: "arrow.up.to.line")
+                    Label(fullChargeText(override), systemImage: "arrow.up.to.line")
                 case .dischargeToLimit:
                     let target = override.targetPercent ?? model.settings.chargeLimit
                     let prefix = status.capabilities.availability.affectsHardware ? "Discharging" : "Simulating a discharge"
@@ -310,6 +321,19 @@ private struct FullChargeControl: View {
                 ? "Raises macOS's Charge Limit to 100% once, then sets your limit again. Ends when full, when unplugged, or after 12 hours."
                 : "Charges once to 100%, then returns to the limit. Ends when full, when unplugged, or after 12 hours.")
         }
+    }
+
+    /// Says a full charge is happening only once the backend confirmed it.
+    private func fullChargeText(_ override: ChargeOverride) -> String {
+        let until = "until full, unplugged, or \(override.expiresAt.formatted(date: .omitted, time: .shortened))"
+        guard status.capabilities.availability.affectsHardware else {
+            return "Simulating a charge to 100% \(until)"
+        }
+        guard let desired = status.decision?.desiredMode, status.currentMode == desired else {
+            let why = status.lastExecution.map { " (\($0.result.title))" } ?? ""
+            return "Full charge requested, not yet in effect\(why)"
+        }
+        return "Charging to 100% \(until)"
     }
 }
 

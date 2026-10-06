@@ -107,9 +107,13 @@ Requirement → location:
 - **Quit.** `applicationShouldTerminate` returns `.terminateLater`, restores
   `.normal` off the main actor, and replies through
   `RunLoop.main.perform(inModes: [.common])`. This avoids a deadlock when
-  `terminate(_:)` is called from inside a main-actor job. The 3 s bound only
-  limits how long quitting *waits*; it cannot complete a hung backend call
-  (see "Known limitations").
+  `terminate(_:)` is called from inside a main-actor job.
+  - Quitting cancels the command task, so an in-flight tool run is stopped
+    at once and the restore is not stuck behind it.
+  - The 10 s bound only limits how long quitting *waits*.
+  - If the restore of the user's own Charge Limit is not confirmed by then,
+    an alert says which value to set by hand before the app exits; the next
+    launch also retries (see "Native Charge Limit backend").
 - **Time.** Wall-clock time is used for telemetry age and display. Override
   expiry and rate limiting use a monotonic clock (`ContinuousClock`, which
   keeps counting during sleep), so changing the system clock cannot extend a
@@ -289,7 +293,18 @@ The controller adds, independent of the backend:
   action as applied to hardware (a claimed `.applied` is downgraded and
   logged);
 - `.normal`, confirmed, before switching backends. If it cannot be confirmed,
-  the switch is refused and the old backend stays responsible for recovery;
+  the old backend stays responsible and the switch stays *pending*. The
+  policy is then told to release (`ReleaseReason.backendSwitch`) whatever
+  the settings say, so `.normal` keeps being requested (automatic retries
+  60 s apart), and the switch completes as soon as it is confirmed.
+  Choosing the current kind of backend again cancels the pending switch;
+- if a read fails while CellKeeper holds a non-normal state, `.normal` is
+  requested (`ReleaseReason.stateUnverified`). The last confirmed mode stays
+  the expectation, so a reading that differs from it after reads recover is
+  still treated as an outside change;
+- a backend that finds an outside change itself, just before writing
+  (`BackendError.changedOutside`), faults at once, like the controller's own
+  detection;
 - on the first read from a backend, ownership that the backend remembers from
   an earlier session (`nativeLimitStatus().target`) is adopted as
   CellKeeper's own. A change made while CellKeeper was not running is then
@@ -325,28 +340,48 @@ the real system.
 | Change the limit | `shortcuts run "CellKeeper Set Charge Limit" -i <file>`. The file holds only the digits, in the container's temporary directory; 20 s deadline. The shortcut wraps Apple's “Set Battery Charge Limit” action. | `[PUBLIC-API]` CLI, user-created shortcut, verified on one Mac |
 | Check the shortcut exists | `shortcuts list` (cached for 5 minutes once found; checked again after any failed run) | `[PUBLIC-API]` |
 | Read the limit back | `pmset -g battlimit`, fixed arguments, strict parser (`ChargeLimitReportParser`). Anything unrecognised means "do not change anything". | `[PRIVATE/UNDOCUMENTED]`, read-only |
-| Record of the user's own limit | JSON in the app's `UserDefaults` (`nativeChargeLimit.ownership.v1`): own limit, target, time. Written before the first change; cleared only after a confirmed restore. | — |
+| Record of the user's own limit | JSON file `Application Support/CellKeeper/native-charge-limit-ownership.json` in the app's container, holding the own limit, the last confirmed target, a pending target, and the time. Each save writes a temporary file, flushes it with `F_FULLFSYNC`, renames it into place, flushes the directory, and reads it back; if any step fails, nothing is changed. Cleared only after a confirmed restore. | — |
 | Platform | Apple silicon (`hw.optional.arm64`), macOS 26.4+, both tools present | `[PUBLIC-API]` |
 
 Lifecycle:
 
 1. **Take-over.** When the policy first wants `nativeLimit(n)`, the backend
-   reads macOS's limit (say 80%), persists `{own: 80, target: n}`, runs the
-   shortcut with `n`, and reads back. If macOS already shows `n`, nothing
-   runs and the request is `unchanged`. CellKeeper still records ownership,
-   so an outside change is noticed later.
-2. **Holding.** Each evaluation reads the limit. A value other than the
-   target faults the backend, and the user's own limit is restored once.
-3. **Release.** Management off, quit, backend switch, invalid settings,
-   any failed request, or a fault all request `.normal`. The backend runs
-   the shortcut with the recorded value, reads it back, and only then
-   deletes the record. If macOS already shows that value, nothing runs.
+   reads macOS's limit (say 80%) and durably stores
+   `{own: 80, target: 80, pending: n}`. Only then does it run the shortcut
+   with `n`. After reading `n` back, it stores `{target: n}`.
+   - If macOS already shows `n`, nothing runs and the request is
+     `unchanged`. CellKeeper still records ownership, so an outside change
+     is noticed later.
+   - A report of "no limit" is recorded as 100% only after the user confirms
+     in Settings that their limit is 100%. Otherwise the backend is
+     unavailable and changes nothing, because "no limit" could also be a
+     temporary state.
+2. **Holding.** Each evaluation reads the limit; so does the backend before
+   every change. A value other than the confirmed or pending target faults
+   the backend, and the user's own limit is restored once.
+3. **Release.** Any of these requests `.normal`: management off, quit, a
+   backend switch (pending until confirmed), any failed request, a state
+   that could not be read back, or a fault.
+   - The backend runs the shortcut with the recorded value (even if it
+     could not read the setting first) and reads it back.
+   - Only then does it delete the record.
+   - If macOS already shows that value, nothing runs.
 4. **Crash or kill.** The record survives. At the next launch:
    - macOS showing the recorded own limit means a restore completed late
      (or the user restored it), so the record is cleared.
-   - macOS showing the target means CellKeeper is still responsible and
-     continues as before.
+   - macOS showing the target, or the pending target (which is then
+     confirmed), means CellKeeper is still responsible and continues as
+     before.
    - Anything else is an outside change: fault, then restore.
+   - The app checks for a record regardless of which backend is selected.
+     If one exists while another backend is selected, it starts on the
+     native backend and immediately requests the switch, so the limit is
+     restored first.
+5. **Unreadable record.** If the record cannot be read or is implausible,
+   CellKeeper does not know what to restore. It then refuses every change,
+   reports unresolved ownership (a backend switch stays pending, quitting
+   warns), and shows the recovery: set the limit by hand in System
+   Settings, then discard the record in Settings › Control.
 
 Every request is logged with the value macOS reported when it was
 confirmed.
@@ -393,18 +428,18 @@ verification protocol in research note 02 §7 and the rules in `safety.md`.
   backend becomes unavailable (with nothing recorded) or its requests fail
   (while it owns the limit). It never guesses. Every pmset run also attempts
   to open the SMC user client; the App Sandbox denies this (note 08, O7).
-- **"No limit" means 100%.** That is how the report showed a 100% limit. If
-  another state, such as a temporary "Charge to Full Now", also shows "no
-  limit" at the moment CellKeeper takes over, CellKeeper would record 100%
-  as the user's limit. The recorded value is always shown in the UI and the
-  log.
+- **"No limit" needs the user.** The report showed a 100% limit as "no
+  limit", but a temporary state such as "Charge to Full Now" might look the
+  same. CellKeeper therefore records it as 100% only after the user confirms
+  their limit is 100% (once per session), and never assumes it.
 - **No restore without the shortcut.** If the shortcut is deleted or
   renamed while CellKeeper owns the limit, CellKeeper cannot change it back.
   It says so and points to System Settings › Battery › Charging, which is
   the always-available manual recovery.
 - **Crashes and force-quits.** The limit stays at CellKeeper's value until
   CellKeeper runs again (the record survives) or the user changes it. On a
-  normal quit the restore usually takes about 0.3 s; the quit budget is 3 s.
+  normal quit the restore usually takes about 0.3 s; quitting waits up to
+  10 s and warns if the restore was not confirmed.
 - **Outside changes are reverted once.** If the limit is changed in System
   Settings or by another tool while CellKeeper manages it, CellKeeper faults
   and restores the user's recorded limit. That also reverts a deliberate
@@ -510,3 +545,7 @@ decisions.
 | D18 | An outside change to the native limit faults the backend and restores the recorded limit once | Matches R27 and the owner's rule to restore on any failure; documented in the UI (turn management off before changing the limit by hand) |
 | D19 | Automatic retries of a failed restore wait 60 s; user actions retry at once | Bounds shortcut runs while a backend is broken without delaying a restore the user asked for |
 | D20 | The native backend is `experimental` and opt-in with a confirmation | Verified on one Mac; relies on an undocumented read-back |
+| D21 | A backend switch that cannot restore `.normal` stays pending instead of being dropped; at launch, an outstanding record overrides the selected backend until it is restored | Restoring the user's limit must not depend on which backend the user selects or on the app staying open |
+| D22 | The ownership record is a fsync'd file, written and read back before any change | `UserDefaults` persists asynchronously; losing the record after a change would lose the user's limit |
+| D23 | "No limit" is recorded as 100% only after the user confirms it | The report cannot distinguish a 100% limit from temporary states; the owner's rule is never to assume 100% |
+| D24 | Invalid settings are rejected before use, never applied | The UI only offers valid values; a rejected change keeps the previous valid settings, so there is no "invalid settings" state to restore from at run time. The policy still fails safe if handed invalid settings directly |

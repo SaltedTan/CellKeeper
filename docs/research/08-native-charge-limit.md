@@ -102,7 +102,7 @@ The shortcut's actions run in `BackgroundShortcutRunner`, not in the calling pro
 | `shortcuts run` (warm, 80 → 80) | 0.18–0.24 s |
 | `shortcuts run` (first of the session, stdin) | 0.74 s |
 
-So a restore takes well under CellKeeper's 3-second quit budget on this Mac.
+So a restore takes well under CellKeeper's quit wait (10 s) on this Mac.
 
 ### O6 — Errors `[VERIFIED-EXPERIMENTALLY]`
 
@@ -128,7 +128,7 @@ A missing shortcut exits 1 with `Error: The operation couldn’t be completed. C
 ## Inferences `[INFERRED/UNVERIFIED]`
 
 - **I1:** Standard input probably reaches the shortcut as untyped data that "Set Battery Charge Limit" cannot use as a number, while a `.txt` file is coerced to text and then to a number. Only the outcome (O1, O2) was observed.
-- **I2:** "No battery level limits set" means the Charge Limit is at 100%: that is what the report showed after setting 100%. It might also appear in other states, such as a temporary "Charge to Full Now". CellKeeper therefore records it as 100% only when it reads it at take-over, shows it to the user, and restores it as 100% (which is what the user had). It never maps an unknown state to 100%.
+- **I2:** "No battery level limits set" probably means the Charge Limit is at 100%: that is what the report showed after setting 100%. It might also appear in other states, such as a temporary "Charge to Full Now" (open question 3). CellKeeper therefore records it as the user's 100% limit only after the user confirms that their limit is 100%. It never maps "no limit" or an unknown state to 100% by itself.
 - **I3:** Entries with a reason other than `manualChargeLimit` (for example from Optimized Battery Charging) or with disagreeing values may exist. CellKeeper treats them as unrecognised and changes nothing.
 - **I4:** `chargeSocLimitDrain = 1` is consistent with third-party reports that macOS drains a battery above the limit down to it (02 §3.7, unverified).
 - **I5:** The 80% limit observed throughout was the owner's own setting. The owner confirmed this; the observations are consistent with it.

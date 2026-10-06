@@ -162,6 +162,9 @@ public enum BackendError: Error, Sendable, Equatable, CustomStringConvertible {
     case operationFailed(String)
     /// The backend reported success but a read-back did not match.
     case verificationFailed(expected: ChargeControlMode, actual: ChargeControlMode?)
+    /// Before making a change, the backend found a state CellKeeper did not
+    /// set: someone else changed it.
+    case changedOutside(expected: ChargeControlMode, found: ChargeControlMode?)
 
     public var description: String {
         switch self {
@@ -173,6 +176,8 @@ public enum BackendError: Error, Sendable, Equatable, CustomStringConvertible {
             "Operation failed: \(message)"
         case .verificationFailed(let expected, let actual):
             "Read-back mismatch: expected \(expected), got \(actual.map(String.init(describing:)) ?? "unknown")"
+        case .changedOutside(let expected, let found):
+            "Changed outside CellKeeper: expected \(expected), found \(found.map(String.init(describing:)) ?? "unknown")"
         }
     }
 }
@@ -203,20 +208,40 @@ public struct NativeLimitStatus: Sendable, Equatable {
     /// The user's own limit, recorded before CellKeeper first changed it.
     /// Non-nil exactly while CellKeeper is responsible for the setting.
     public var ownerLimit: Int?
-    /// The limit CellKeeper most recently set (or is setting) while
-    /// responsible for it.
+    /// The limit CellKeeper last confirmed while responsible for it.
     public var target: Int?
+    /// A record of the user's limit exists but cannot be read. CellKeeper
+    /// may have changed the setting and cannot know what to restore.
+    public var isRecordUnreadable: Bool
+    /// macOS reports no limit, and CellKeeper will record that as a 100%
+    /// limit only after the user confirms it (it could also be a temporary
+    /// state such as a full charge).
+    public var needsNoLimitConfirmation: Bool
 
-    public init(reportedLimit: Int? = nil, readAt: Date? = nil, readProblem: String? = nil, ownerLimit: Int? = nil, target: Int? = nil) {
+    public init(
+        reportedLimit: Int? = nil,
+        readAt: Date? = nil,
+        readProblem: String? = nil,
+        ownerLimit: Int? = nil,
+        target: Int? = nil,
+        isRecordUnreadable: Bool = false,
+        needsNoLimitConfirmation: Bool = false
+    ) {
         self.reportedLimit = reportedLimit
         self.readAt = readAt
         self.readProblem = readProblem
         self.ownerLimit = ownerLimit
         self.target = target
+        self.isRecordUnreadable = isRecordUnreadable
+        self.needsNoLimitConfirmation = needsNoLimitConfirmation
     }
 
     /// True while CellKeeper has changed the setting and must restore it.
     public var isOwnedByCellKeeper: Bool { ownerLimit != nil }
+
+    /// True while CellKeeper may have changed the setting and has not
+    /// confirmed giving it back, including when its record is unreadable.
+    public var hasUnresolvedOwnership: Bool { ownerLimit != nil || isRecordUnreadable }
 }
 
 /// A charging-control backend.

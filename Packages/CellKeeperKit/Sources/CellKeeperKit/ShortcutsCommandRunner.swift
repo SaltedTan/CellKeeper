@@ -38,6 +38,9 @@ public struct ShortcutsCommandRunner: ShortcutRunning {
         guard result.status == 0 else {
             throw ShortcutsCommandError.failed(command: "list", message: result.errorSummary)
         }
+        guard result.isOutputComplete else {
+            throw ShortcutsCommandError.failed(command: "list", message: "incomplete output")
+        }
         return result.standardOutput.split(whereSeparator: \.isNewline).map(String.init)
     }
 

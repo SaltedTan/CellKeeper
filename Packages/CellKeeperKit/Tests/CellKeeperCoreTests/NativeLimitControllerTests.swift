@@ -9,7 +9,7 @@ import Testing
 struct NativeLimitControllerTests {
     let clock = TestClock()
     let system = FakeChargeLimitSystem(reading: .limit(80))
-    let storage = InMemoryStorage()
+    let store = InMemoryRecordStore()
 
     private func makeController(limit: Int = 90, managed: Bool = true, percent: Int = 75) -> (ChargeController, StubTelemetry) {
         let clock = clock
@@ -18,7 +18,7 @@ struct NativeLimitControllerTests {
         settings.isManagementEnabled = managed
         let controller = ChargeController(
             telemetry: telemetry,
-            backend: makeNativeBackend(system: system, storage: storage, clock: clock),
+            backend: makeNativeBackend(system: system, store: store, clock: clock),
             settings: settings,
             now: { clock.now },
             uptime: { clock.uptime }
@@ -38,6 +38,7 @@ struct NativeLimitControllerTests {
     func appliesLimit() async {
         let (controller, _) = makeController(limit: 90)
         let status = await controller.evaluate(.launch)
+        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("Recorded your own macOS Charge Limit of 80%") })
         #expect(system.runInputs == ["90"])
         #expect(system.reading == .limit(90))
         #expect(status.decision?.state == .osEnforcedLimit)
@@ -101,15 +102,83 @@ struct NativeLimitControllerTests {
         #expect(system.runInputs == ["90", "80"])
     }
 
-    @Test("If the user's limit cannot be restored, the backend switch is refused")
-    func switchRefusedWithoutRestore() async {
+    @Test("If the user's limit cannot be restored, the switch waits and keeps restoring until it can")
+    func switchPendingUntilRestored() async {
         let (controller, _) = makeController(limit: 90)
         await controller.evaluate(.launch)
         system.runBehaviour = .fails
+        let refused = await controller.switchBackend(to: MockChargingBackend())
+        #expect(refused.backend.identifier == NativeChargeLimitBackend.identifier)
+        #expect(refused.pendingBackend?.identifier == "simulated")
+        #expect(refused.nativeLimit?.ownerLimit == 80)
+        #expect(refused.events.contains { $0.kind == .safety && $0.message.contains("refused") })
+
+        // Management is still on, but the pending switch wins: CellKeeper
+        // keeps asking for the user's limit, with automatic retries spaced.
+        system.runBehaviour = .applies
+        clock.advance(by: 10)
+        let waiting = await controller.evaluate(.periodic)
+        #expect(waiting.decision?.reason == .releaseRequired(.backendSwitch))
+        #expect(system.reading == .limit(90))
+
+        clock.advance(by: ChargingPolicy.minimumRestoreRetryInterval)
+        let switched = await controller.evaluate(.periodic)
+        #expect(system.reading == .limit(80))
+        #expect(switched.backend.identifier == "simulated")
+        #expect(switched.pendingBackend == nil)
+    }
+
+    @Test("Choosing the current backend again cancels a pending switch")
+    func pendingSwitchCancelled() async {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        system.runBehaviour = .fails
+        await controller.switchBackend(to: MockChargingBackend())
+        system.runBehaviour = .applies
+        let status = await controller.switchBackend(to: makeNativeBackend(system: system, store: store, clock: clock))
+        #expect(status.pendingBackend == nil)
+        #expect(status.backend.identifier == NativeChargeLimitBackend.identifier)
+        #expect(status.decision?.state == .osEnforcedLimit)
+    }
+
+    @Test("An earlier session's change is restored before switching to another backend")
+    func startupRecoveryBeforeSwitch() async {
+        storeOwnershipRecord(owner: 80, target: 90, in: store)
+        system.reading = .limit(90)
+        let (controller, _) = makeController(limit: 90)
+        let status = await controller.switchBackend(to: MockChargingBackend())
+        #expect(system.reading == .limit(80))
+        #expect(system.runInputs == ["80"])
+        #expect(status.backend.identifier == "simulated")
+        #expect(store.data == nil)
+    }
+
+    @Test("An unreadable record is never treated as nothing to restore")
+    func unreadableRecordBlocksSwitch() async {
+        store.data = Data("not json".utf8)
+        system.reading = .limit(90)
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
         let status = await controller.switchBackend(to: MockChargingBackend())
         #expect(status.backend.identifier == NativeChargeLimitBackend.identifier)
-        #expect(status.nativeLimit?.ownerLimit == 80)
-        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("refused") })
+        #expect(status.pendingBackend != nil)
+        #expect(status.nativeLimit?.hasUnresolvedOwnership == true)
+        #expect(!status.events.contains { $0.message.contains("nothing to restore") })
+        #expect(status.events.contains { $0.message.contains("cannot be read") })
+        #expect(system.runInputs.isEmpty)
+
+        let stopped = await controller.shutdown(reason: "quit")
+        #expect(stopped.nativeLimit?.hasUnresolvedOwnership == true)
+    }
+
+    @Test("A quit whose restore fails reports the limit as unresolved")
+    func shutdownReportsUnresolved() async {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        system.runBehaviour = .fails
+        let stopped = await controller.shutdown(reason: "quit")
+        #expect(stopped.nativeLimit?.hasUnresolvedOwnership == true)
+        #expect(stopped.nativeLimit?.ownerLimit == 80)
     }
 
     @Test("A shortcut that finishes without effect is a failure; nothing is reported as applied")
@@ -186,6 +255,48 @@ struct NativeLimitControllerTests {
         #expect(system.runInputs == ["90", "80"])
     }
 
+    @Test("After a read failure, a later outside change is still detected rather than overwritten")
+    func detectionSurvivesReadFailure() async {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        system.readFails = true
+        system.runBehaviour = .fails
+        let unverified = await controller.evaluate(.periodic)
+        #expect(unverified.decision?.reason == .releaseRequired(.stateUnverified))
+
+        system.changeExternally(to: 95)
+        system.readFails = false
+        system.runBehaviour = .applies
+        clock.advance(by: 120)
+        let status = await controller.evaluate(.periodic)
+        #expect(status.isBackendFaulted)
+        #expect(system.reading == .limit(80))
+        #expect(system.runInputs.filter { $0 == "90" }.count == 1)
+    }
+
+    @Test("If CellKeeper cannot read back the limit it set, it restores the user's limit")
+    func unverifiedStateRestores() async {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        system.failNextReads(1)
+        let status = await controller.evaluate(.periodic)
+        #expect(status.decision?.reason == .releaseRequired(.stateUnverified))
+        #expect(system.reading == .limit(80))
+        #expect(status.nativeLimit?.ownerLimit == nil)
+    }
+
+    @Test("An outside change found by the backend just before writing faults it and restores")
+    func outsideChangeFoundByBackend() async {
+        let backend = ChangedOutsideBackend()
+        let clock = clock
+        let telemetry = StubTelemetry(snapshot(percent: 75), clock: clock)
+        let controller = ChargeController(telemetry: telemetry, backend: backend, settings: settings(limit: 90), now: { clock.now }, uptime: { clock.uptime })
+        let status = await controller.evaluate(.launch)
+        #expect(status.isBackendFaulted)
+        #expect(await backend.requests == [.nativeLimit(percent: 90), .normal])
+        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("Changed outside CellKeeper") })
+    }
+
     // MARK: - Relaunch
 
     @Test("After a crash, the next session knows it set the limit and restores the recorded one")
@@ -206,7 +317,7 @@ struct NativeLimitControllerTests {
 
     @Test("A change made while CellKeeper was not running is treated as an outside change")
     func relaunchAfterOutsideChange() async {
-        storeOwnershipRecord(owner: 80, target: 90, in: storage)
+        storeOwnershipRecord(owner: 80, target: 90, in: store)
         system.reading = .limit(95)
         let (controller, _) = makeController(limit: 90)
         let status = await controller.evaluate(.launch)
@@ -217,7 +328,7 @@ struct NativeLimitControllerTests {
 
     @Test("A restore that completed after the last session stopped waiting is recognised")
     func relaunchAfterLateRestore() async {
-        storeOwnershipRecord(owner: 80, target: 90, in: storage)
+        storeOwnershipRecord(owner: 80, target: 90, in: store)
         system.reading = .limit(80)
         let (controller, _) = makeController(limit: 80, managed: false)
         let status = await controller.evaluate(.launch)
@@ -300,11 +411,14 @@ struct NativeLimitControllerTests {
         #expect(system.runInputs.isEmpty)
     }
 
-    @Test("A user limit of 100% is restored as 100%")
+    @Test("A user limit of 100% is recorded only after confirmation, and restored as 100%")
     func restoresNoLimit() async {
         system.reading = .noLimit
         let (controller, _) = makeController(limit: 80)
-        await controller.evaluate(.launch)
+        let unconfirmed = await controller.evaluate(.launch)
+        #expect(unconfirmed.nativeLimit?.needsNoLimitConfirmation == true)
+        #expect(system.runInputs.isEmpty)
+        await controller.confirmNoLimitIsOwnerLimit()
         #expect(system.reading == .limit(80))
         await controller.shutdown(reason: "quit")
         #expect(system.reading == .noLimit)
@@ -353,5 +467,25 @@ struct NativeLimitControllerTests {
         #expect(status.activeOverride == nil)
         #expect(status.decision?.notes.contains(.dischargeUnsupported) == true)
         #expect(system.runInputs.isEmpty)
+    }
+}
+
+/// A native-limit backend whose pre-write check always finds an outside
+/// change.
+actor ChangedOutsideBackend: ChargingBackend {
+    nonisolated let descriptor = BackendDescriptor(identifier: "changed-outside", displayName: "Changed outside", summary: "")
+    private(set) var requests: [ChargeControlMode] = []
+    private var mode: ChargeControlMode = .normal
+
+    func capabilities() -> ControlCapabilities { nativeCapabilities }
+    func currentMode() -> ChargeControlMode? { mode }
+
+    func setMode(_ newMode: ChargeControlMode) throws -> ControlOutcome {
+        requests.append(newMode)
+        if newMode == .normal {
+            mode = .normal
+            return .applied
+        }
+        throw BackendError.changedOutside(expected: .nativeLimit(percent: 85), found: .nativeLimit(percent: 95))
     }
 }

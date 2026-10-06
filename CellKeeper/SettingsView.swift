@@ -195,7 +195,7 @@ private struct ControlSettingsTab: View {
                 Text("Simulated records what CellKeeper would do without changing your Mac. Read-only performs no control. macOS Charge Limit lets macOS enforce the limit you choose here; it is the only real control in this version.")
             }
 
-            if model.backendChoice == .nativeLimit {
+            if model.backendChoice == .nativeLimit || model.status?.capabilities.isEnforcedByMacOS == true {
                 NativeLimitSetupSection(model: model)
             }
 
@@ -234,6 +234,8 @@ private struct ControlSettingsTab: View {
 /// How to create the shortcut, and what macOS reports about its limit.
 private struct NativeLimitSetupSection: View {
     let model: AppModel
+    @State private var isConfirmingNoLimit = false
+    @State private var isConfirmingDiscard = false
 
     var body: some View {
         let native = model.status?.nativeLimit
@@ -258,12 +260,47 @@ private struct NativeLimitSetupSection: View {
                     .foregroundStyle(.orange)
             }
             LabeledContent("Your own limit") {
-                if let owner = native?.ownerLimit {
+                if native?.isRecordUnreadable == true {
+                    Text("Unknown: the record cannot be read")
+                        .foregroundStyle(.red)
+                } else if let owner = native?.ownerLimit {
                     Text("\(Format.chargeLimit(owner)), recorded; restored when CellKeeper stops managing it")
                         .multilineTextAlignment(.trailing)
                 } else {
                     Text("In effect; CellKeeper has not changed it")
                 }
+            }
+            if native?.needsNoLimitConfirmation == true {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("macOS reports no Charge Limit. That usually means your limit is 100%, but it can also mean a temporary full charge is in progress. CellKeeper records your limit only once it knows it.")
+                        .font(.caption)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("My Charge Limit is 100%") { isConfirmingNoLimit = true }
+                }
+                .confirmationDialog("Is your own Charge Limit 100%?", isPresented: $isConfirmingNoLimit) {
+                    Button("Yes, my limit is 100%") { model.confirmNoLimitIsOwnerLimit() }
+                } message: {
+                    Text("Check System Settings › Battery › ⓘ next to Charging. CellKeeper will restore 100% when it stops managing the limit.")
+                }
+            }
+            if native?.isRecordUnreadable == true {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("CellKeeper's record of your own limit cannot be read, so it will neither change nor restore the limit. Set your limit in System Settings › Battery › Charging first, then discard the record.")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button("I've Set My Limit — Discard the Record…") { isConfirmingDiscard = true }
+                }
+                .confirmationDialog("Discard CellKeeper's record of your Charge Limit?", isPresented: $isConfirmingDiscard) {
+                    Button("Discard Record", role: .destructive) { model.discardUnreadableRecord() }
+                } message: {
+                    Text("Only do this after setting your own limit in System Settings. CellKeeper will then treat the current limit as yours.")
+                }
+            }
+            if let pending = model.status?.pendingBackend {
+                Label("Switching to \(pending.displayName) once your own limit is confirmed restored. CellKeeper retries automatically; choose macOS Charge Limit again to cancel.", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             }
             Text("CellKeeper reads the limit with “pmset -g battlimit”, an undocumented, read-only report that a macOS update could change. If CellKeeper cannot read or recognise it, it makes no changes. You can always set the limit yourself in System Settings › Battery › Charging.")
                 .font(.caption)

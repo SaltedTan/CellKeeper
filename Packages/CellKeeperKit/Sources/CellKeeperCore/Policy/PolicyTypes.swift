@@ -84,9 +84,20 @@ public enum RefusalReason: Sendable, Equatable, CustomStringConvertible {
     }
 }
 
+/// Why the controller needs `.normal` restored regardless of the settings.
+public enum ReleaseReason: String, Sendable, Equatable {
+    /// The user switched to another backend; the switch completes once
+    /// `.normal` is confirmed on the current one.
+    case backendSwitch
+    /// CellKeeper holds a non-normal state but could not read it back, so it
+    /// cannot tell whether it is still what CellKeeper set.
+    case stateUnverified
+}
+
 /// Why the policy chose its desired mode.
 public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
     case invalidConfiguration([SettingsIssue])
+    case releaseRequired(ReleaseReason)
     case telemetryUnavailable
     case telemetryStale(ageSeconds: Int)
     case batteryNotPresent
@@ -115,6 +126,10 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
         switch self {
         case .invalidConfiguration(let issues):
             "Settings are invalid (\(issues.count) issue(s)); using macOS default charging."
+        case .releaseRequired(.backendSwitch):
+            "Switching backend: restoring macOS defaults (with macOS's Charge Limit, your own limit) first."
+        case .releaseRequired(.stateUnverified):
+            "CellKeeper could not read back the state it set, so it is restoring macOS defaults (with macOS's Charge Limit, your own limit)."
         case .telemetryUnavailable:
             "Battery telemetry is unavailable; using macOS default charging."
         case .telemetryStale(let age) where age < 0:
@@ -152,11 +167,11 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
         case .sleepPrecaution(let percent, let resume):
             "Mac is going to sleep at \(percent)% (resume threshold \(resume)%); charging paused to avoid overshooting the limit while asleep."
         case .nativeLimitActive(let limit) where limit >= 100:
-            "macOS's Charge Limit is set to 100% (no limit); macOS charges normally."
+            "CellKeeper wants macOS's Charge Limit at 100% (no limit), so macOS charges normally."
         case .nativeLimitActive(let limit):
-            "macOS's Charge Limit holds the battery at \(limit)%; macOS enforces it, including its own resume point."
+            "CellKeeper wants macOS's Charge Limit at \(limit)%; macOS enforces it, including its own resume point."
         case .nativeFullCharge:
-            "Temporary full charge: macOS's Charge Limit is raised to 100% until the battery is full."
+            "Temporary full charge: CellKeeper wants macOS's Charge Limit at 100% until the battery is full."
         case .nativeLimitUnsupported(let limit, let steps):
             "A \(limit)% limit cannot be set with macOS's Charge Limit (\(steps.map { "\($0)%" }.joined(separator: ", "))); your own macOS limit stays in effect."
         }
@@ -303,6 +318,9 @@ public struct PolicyInput: Sendable, Equatable {
     /// it is not retried automatically. Nil for user-initiated evaluations,
     /// which always retry at once.
     public var restoreRetryNotBefore: TimeInterval?
+    /// Set when the controller needs `.normal` restored whatever the
+    /// settings say.
+    public var releaseReason: ReleaseReason?
 
     public init(
         now: Date,
@@ -316,7 +334,8 @@ public struct PolicyInput: Sendable, Equatable {
         isBackendFaulted: Bool = false,
         recentRestrictingRequests: [TimeInterval] = [],
         isSleepImminent: Bool = false,
-        restoreRetryNotBefore: TimeInterval? = nil
+        restoreRetryNotBefore: TimeInterval? = nil,
+        releaseReason: ReleaseReason? = nil
     ) {
         self.now = now
         self.uptime = uptime
@@ -330,6 +349,7 @@ public struct PolicyInput: Sendable, Equatable {
         self.recentRestrictingRequests = recentRestrictingRequests
         self.isSleepImminent = isSleepImminent
         self.restoreRetryNotBefore = restoreRetryNotBefore
+        self.releaseReason = releaseReason
     }
 }
 

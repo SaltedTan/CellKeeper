@@ -63,6 +63,8 @@ struct ChargeLimitReportParserTests {
         ChargeLimitReportParserTests.report(0),
         ChargeLimitReportParserTests.report(80).replacingOccurrences(of: "chargeSocLimitSoc = 80;", with: "chargeSocLimitSoc = eighty;"),
         ChargeLimitReportParserTests.report(80).replacingOccurrences(of: "    }\n)", with: "    }\n"),
+        ChargeLimitReportParserTests.report(80).replacingOccurrences(of: "chargeSocLimitSoc = 80;", with: "chargeSocLimitSoc = 95;\n        chargeSocLimitSoc = 80;"),
+        ChargeLimitReportParserTests.report(80).replacingOccurrences(of: "Terminated = 0;", with: "Terminated = 1;\n        Terminated = 0;"),
     ])
     func unrecognised(text: String) {
         guard case .unrecognized = ChargeLimitReportParser.parse(text) else {
@@ -131,6 +133,83 @@ struct CommandLineAdapterTests {
         let result = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "head -c 600000 /dev/zero | tr '\\0' x"], timeout: 10)
         #expect(result.status == 0)
         #expect(result.standardOutput.utf8.count == ProcessRunner.outputLimit)
+        #expect(!result.isOutputComplete)
+    }
+
+    @Test("Ordinary output is complete")
+    func completeOutput() async throws {
+        let result = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf done"], timeout: 10)
+        #expect(result.isOutputComplete)
+    }
+
+    @Test("A descendant holding the output open neither hides what was written nor delays the result")
+    func descendantHoldsPipe() async throws {
+        let started = Date()
+        let result = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf already_written; sleep 5 & exit 0"], timeout: 10)
+        #expect(result.status == 0)
+        #expect(result.standardOutput == "already_written")
+        #expect(!result.isOutputComplete)
+        #expect(Date().timeIntervalSince(started) < 3)
+    }
+
+    @Test("Cancelling the calling task stops the tool promptly")
+    func cancellation() async {
+        let task = Task {
+            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"], timeout: 30)
+        }
+        try? await Task.sleep(for: .milliseconds(200))
+        let started = Date()
+        task.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await task.value
+        }
+        #expect(Date().timeIntervalSince(started) < 3)
+    }
+
+    @Test("An already-cancelled task does not start the tool")
+    func cancelledBeforeStart() async throws {
+        let tools = try FakeTools()
+        let marker = tools.path("started")
+        let executable = try tools.script("tool", "touch '\(marker)'")
+        let task = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await ProcessRunner.run(executable, arguments: [], timeout: 5)
+        }
+        await #expect(throws: CancellationError.self) {
+            try await task.value
+        }
+        #expect(!FileManager.default.fileExists(atPath: marker))
+    }
+
+    // MARK: - Record file
+
+    @Test("The record file is saved, read back, replaced and removed")
+    func recordFile() throws {
+        let tools = try FakeTools()
+        let store = FileOwnershipRecordStore(url: tools.directory.appendingPathComponent("nested/record.json"))
+        #expect(try store.load() == nil)
+        try store.save(Data("first".utf8))
+        #expect(try store.load() == Data("first".utf8))
+        try store.save(Data("second".utf8))
+        #expect(try store.load() == Data("second".utf8))
+        let leftovers = try FileManager.default.contentsOfDirectory(atPath: tools.path("nested"))
+        #expect(leftovers == ["record.json"])
+        try store.remove()
+        #expect(try store.load() == nil)
+        try store.remove()
+    }
+
+    @Test("A record file that cannot be written is an error, not a silent success")
+    func recordFileUnwritable() throws {
+        let tools = try FakeTools()
+        let directory = tools.directory.appendingPathComponent("locked", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path) }
+        let store = FileOwnershipRecordStore(url: directory.appendingPathComponent("record.json"))
+        #expect(throws: (any Error).self) {
+            try store.save(Data("x".utf8))
+        }
     }
 
     // MARK: - shortcuts

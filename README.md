@@ -65,9 +65,12 @@ Requirements: macOS Tahoe 26.4 or later on a Mac with Apple silicon.
 
 What happens:
 - **Before its first change**, CellKeeper reads your current Charge Limit
-  and records it.
+  and records it durably. If macOS reports "no limit", CellKeeper first asks
+  you to confirm that your limit is 100%.
 - **It restores exactly that value** when you turn off **Manage charging**,
-  switch backend, quit, or if anything fails.
+  switch backend, quit, or if anything fails. If it cannot confirm the
+  restore when quitting, it tells you which value to set, and it tries
+  again the next time it starts.
 - **Every change is confirmed** by reading the setting back from macOS.
   The read uses `pmset -g battlimit`, an undocumented, read-only report;
   CellKeeper changes nothing if it cannot read or recognise it.

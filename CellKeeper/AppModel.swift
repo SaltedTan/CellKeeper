@@ -63,6 +63,17 @@ final class AppModel {
         case switchBackend(ControlBackendChoice)
         case resetFault
         case recheckBackend
+        case confirmNoLimit
+        case discardUnreadableRecord
+    }
+
+    /// How quitting went for the user's own Charge Limit.
+    enum TerminationOutcome: Sendable {
+        /// Nothing is left changed, or the restore was confirmed.
+        case restored
+        /// CellKeeper may have left the Charge Limit changed; `ownerLimit` is
+        /// the value to set by hand, if known.
+        case unresolved(ownerLimit: Int?)
     }
 
     static let backendChoiceKey = "controlBackend"
@@ -70,13 +81,18 @@ final class AppModel {
     /// macOS reports battery estimates as invalid for 30 s after wake
     /// (`BatteryInvalidWakeSeconds`), so re-read once that has passed.
     static let postWakeRereadDelay: Duration = .seconds(35)
-    nonisolated static let terminationTimeout: Duration = .seconds(3)
+    /// How long quitting waits for the user's own Charge Limit to be
+    /// restored. In-flight tool runs are cancelled when quitting starts, and
+    /// a restore normally takes well under a second.
+    nonisolated static let terminationTimeout: Duration = .seconds(10)
 
     @ObservationIgnored private let store: SettingsStore
     @ObservationIgnored private let telemetry: any TelemetryProvider
     @ObservationIgnored private let controller: ChargeController
-    /// The native-limit backend in use, if any, for availability re-checks.
-    @ObservationIgnored private var nativeBackend: NativeChargeLimitBackend?
+    /// A backend to switch to as soon as the app starts: set when an earlier
+    /// session left macOS's Charge Limit changed while another backend is
+    /// selected, so the native backend can restore it first.
+    @ObservationIgnored private var startupSwitch: ControlBackendChoice?
     @ObservationIgnored private let commands: AsyncStream<Command>
     @ObservationIgnored private let commandSink: AsyncStream<Command>.Continuation
     @ObservationIgnored private var tasks: [Task<Void, Never>] = []
@@ -90,8 +106,12 @@ final class AppModel {
         self.settings = loaded.settings
         self.settingsRecoveryMessage = loaded.recoveryReason
         self.backendChoice = choice
-        let backend = choice.makeBackend()
-        self.nativeBackend = backend as? NativeChargeLimitBackend
+        // Recovery must not depend on which backend is selected: if a record
+        // of the user's own Charge Limit exists, start with the backend that
+        // can restore it and switch once it has.
+        let needsRecovery = choice != .nativeLimit && NativeChargeLimitBackend.hasOutstandingRecord(in: FileOwnershipRecordStore.default)
+        self.startupSwitch = needsRecovery ? choice : nil
+        let backend = needsRecovery ? ControlBackendChoice.nativeLimit.makeBackend() : choice.makeBackend()
         self.controller = ChargeController(telemetry: telemetry, backend: backend, settings: loaded.settings)
         (commands, commandSink) = AsyncStream.makeStream(of: Command.self)
     }
@@ -100,7 +120,8 @@ final class AppModel {
 
     func start() {
         guard tasks.isEmpty else { return }
-        CellKeeperLog.app.notice("CellKeeper starting with \(self.backendChoice.rawValue, privacy: .public) backend")
+        let initialBackend = startupSwitch == nil ? backendChoice : .nativeLimit
+        CellKeeperLog.app.notice("CellKeeper starting with \(initialBackend.rawValue, privacy: .public) backend")
 
         tasks.append(Task { [weak self, commands] in
             for await command in commands {
@@ -133,6 +154,10 @@ final class AppModel {
             Task { @MainActor in self?.send(.evaluate(.willSleep)) }
         })
 
+        if let startupSwitch {
+            CellKeeperLog.app.notice("An earlier session left macOS's Charge Limit changed; restoring it before switching to the \(startupSwitch.rawValue, privacy: .public) backend")
+            send(.switchBackend(startupSwitch))
+        }
         send(.evaluate(.launch))
     }
 
@@ -147,19 +172,29 @@ final class AppModel {
 
     /// Restores macOS default charging and shuts the controller down, so no
     /// queued command can apply a restriction afterwards. Waits at most
-    /// `timeout`. Runs entirely off the main actor.
-    nonisolated static func shutDown(_ controller: ChargeController, timeout: Duration) async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+    /// `timeout`, then reports whether anything may be left changed. Runs
+    /// entirely off the main actor.
+    nonisolated static func shutDown(_ controller: ChargeController, timeout: Duration) async -> TerminationOutcome {
+        let finished = await withCheckedContinuation { (continuation: CheckedContinuation<ControllerStatus?, Never>) in
             let gate = ResumeOnce(continuation)
             Task.detached {
-                await controller.shutdown(reason: "CellKeeper is quitting")
-                gate.resume()
+                gate.resume(returning: await controller.shutdown(reason: "CellKeeper is quitting"))
             }
             Task.detached {
                 try? await Task.sleep(for: timeout)
-                gate.resume()
+                gate.resume(returning: nil)
             }
         }
+        // If the restore is still running, the latest status is still the
+        // best evidence of what may be left changed.
+        var status = finished
+        if status == nil {
+            status = await controller.status
+        }
+        guard let native = status?.nativeLimit, native.hasUnresolvedOwnership else {
+            return .restored
+        }
+        return .unresolved(ownerLimit: native.ownerLimit)
     }
 
     // MARK: - User intents
@@ -208,6 +243,9 @@ final class AppModel {
         send(.cancelOverride)
     }
 
+    /// Saves the choice at once: if the switch cannot complete in this
+    /// session, the next launch restores the old backend's changes first and
+    /// then switches.
     func selectBackend(_ choice: ControlBackendChoice) {
         guard choice != backendChoice else { return }
         backendChoice = choice
@@ -223,6 +261,16 @@ final class AppModel {
     /// and re-evaluates.
     func recheckBackend() {
         send(.recheckBackend)
+    }
+
+    /// The user confirmed that their own Charge Limit is 100%.
+    func confirmNoLimitIsOwnerLimit() {
+        send(.confirmNoLimit)
+    }
+
+    /// The user set their limit by hand and wants the unreadable record gone.
+    func discardUnreadableRecord() {
+        send(.discardUnreadableRecord)
     }
 
     /// True when the selected backend sets macOS's own Charge Limit, so the
@@ -260,23 +308,23 @@ final class AppModel {
         case .cancelOverride:
             status = await controller.cancelOverride()
         case .switchBackend(let choice):
-            let backend = choice.makeBackend()
-            let newStatus = await controller.switchBackend(to: backend)
-            if newStatus.backend.identifier == backend.descriptor.identifier {
-                nativeBackend = backend as? NativeChargeLimitBackend
-            }
+            let newStatus = await controller.switchBackend(to: choice.makeBackend())
             status = newStatus
-            // The controller refuses a switch it cannot make safely; reflect
-            // the backend actually in use.
-            if let actual = ControlBackendChoice(backendIdentifier: newStatus.backend.identifier), actual != backendChoice {
+            // A switch the controller cannot make yet stays pending; anything
+            // else is reflected as the backend actually in use.
+            if newStatus.pendingBackend == nil,
+               let actual = ControlBackendChoice(backendIdentifier: newStatus.backend.identifier), actual != backendChoice {
                 backendChoice = actual
                 store.set(actual.rawValue, forKey: Self.backendChoiceKey)
             }
         case .resetFault:
             status = await controller.resetBackendFault()
         case .recheckBackend:
-            await nativeBackend?.recheckAvailability()
-            status = await controller.evaluate(.manual)
+            status = await controller.recheckBackendAvailability()
+        case .confirmNoLimit:
+            status = await controller.confirmNoLimitIsOwnerLimit()
+        case .discardUnreadableRecord:
+            status = await controller.discardUnreadableOwnershipRecord()
         }
     }
 
@@ -298,19 +346,19 @@ final class AppModel {
 }
 
 /// Resumes a continuation exactly once, from whichever caller gets there first.
-private final class ResumeOnce: @unchecked Sendable {
+private final class ResumeOnce<Value: Sendable>: @unchecked Sendable {
     private let lock = NSLock()
-    private var continuation: CheckedContinuation<Void, Never>?
+    private var continuation: CheckedContinuation<Value, Never>?
 
-    init(_ continuation: CheckedContinuation<Void, Never>) {
+    init(_ continuation: CheckedContinuation<Value, Never>) {
         self.continuation = continuation
     }
 
-    func resume() {
+    func resume(returning value: Value) {
         let pending = lock.withLock {
             defer { continuation = nil }
             return continuation
         }
-        pending?.resume()
+        pending?.resume(returning: value)
     }
 }

@@ -23,6 +23,7 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
     private var _runBehaviour: RunBehaviour = .applies
     private var _nextRuns: [RunBehaviour] = []
     private var _readFails = false
+    private var _failingReads = 0
     private var _listFails = false
     private var _runInputs: [String] = []
     private var _listCalls = 0
@@ -56,6 +57,11 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
     var names: [String] {
         get { lock.withLock { _names } }
         set { lock.withLock { _names = newValue } }
+    }
+
+    /// Makes the next `count` reads fail.
+    func failNextReads(_ count: Int) {
+        lock.withLock { _failingReads += count }
     }
 
     /// Behaviours for the next runs, before ``runBehaviour`` applies again.
@@ -100,8 +106,56 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
     func readChargeLimit() async throws -> NativeChargeLimitReading {
         try lock.withLock {
             if _readFails { throw FakeError(description: "read failed") }
+            if _failingReads > 0 {
+                _failingReads -= 1
+                throw FakeError(description: "read failed")
+            }
             return _reading
         }
+    }
+}
+
+/// An in-memory ``OwnershipRecordStore`` with failure injection, shared by a
+/// backend and the test (and by a second backend, to simulate a relaunch).
+final class InMemoryRecordStore: OwnershipRecordStore, @unchecked Sendable {
+    struct StoreError: Error {}
+
+    private let lock = NSLock()
+    private var stored: Data?
+    private var _saveFails = false
+    private var _loadFails = false
+
+    var data: Data? {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
+    }
+
+    var saveFails: Bool {
+        get { lock.withLock { _saveFails } }
+        set { lock.withLock { _saveFails = newValue } }
+    }
+
+    var loadFails: Bool {
+        get { lock.withLock { _loadFails } }
+        set { lock.withLock { _loadFails = newValue } }
+    }
+
+    func load() throws -> Data? {
+        try lock.withLock {
+            if _loadFails { throw StoreError() }
+            return stored
+        }
+    }
+
+    func save(_ data: Data) throws {
+        try lock.withLock {
+            if _saveFails { throw StoreError() }
+            stored = data
+        }
+    }
+
+    func remove() throws {
+        lock.withLock { stored = nil }
     }
 }
 
@@ -109,14 +163,14 @@ let nativeCapabilities = ControlCapabilities.nativeLimit(availability: .experime
 
 func makeNativeBackend(
     system: FakeChargeLimitSystem,
-    storage: InMemoryStorage,
+    store: InMemoryRecordStore,
     platformIssue: String? = nil,
     clock: TestClock = TestClock()
 ) -> NativeChargeLimitBackend {
     NativeChargeLimitBackend(
         runner: system,
         reader: system,
-        storage: storage,
+        store: store,
         platformIssue: platformIssue,
         now: { clock.now },
         uptime: { clock.uptime }
@@ -124,7 +178,8 @@ func makeNativeBackend(
 }
 
 /// Writes an ownership record the way a previous session would have.
-func storeOwnershipRecord(owner: Int, target: Int, in storage: InMemoryStorage) {
-    let json = #"{"ownerLimit":\#(owner),"target":\#(target),"recordedAt":0}"#
-    storage.set(Data(json.utf8), forKey: NativeChargeLimitBackend.ownershipKey)
+func storeOwnershipRecord(owner: Int, target: Int, pending: Int? = nil, in store: InMemoryRecordStore) {
+    let pendingField = pending.map { #","pendingTarget":\#($0)"# } ?? ""
+    let json = #"{"ownerLimit":\#(owner),"target":\#(target)\#(pendingField),"recordedAt":0}"#
+    store.data = Data(json.utf8)
 }

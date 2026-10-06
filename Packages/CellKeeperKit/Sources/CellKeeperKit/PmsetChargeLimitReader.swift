@@ -38,6 +38,9 @@ public struct PmsetChargeLimitReader: ChargeLimitReading {
         guard result.status == 0 else {
             throw PmsetChargeLimitError.failed(result.errorSummary)
         }
+        guard result.isOutputComplete else {
+            throw PmsetChargeLimitError.failed("incomplete output")
+        }
         return ChargeLimitReportParser.parse(result.standardOutput)
     }
 }
@@ -53,9 +56,9 @@ public struct PmsetChargeLimitReader: ChargeLimitReading {
 /// - With the Charge Limit at 100%: the single line
 ///   `No battery level limits set`.
 ///
-/// The parser accepts only these shapes, requires every active entry to be a
-/// manual Charge Limit, and requires them to agree. Anything else is
-/// `.unrecognized`.
+/// The parser accepts only these shapes, rejects repeated keys, requires
+/// every active entry to be a manual Charge Limit, and requires them to
+/// agree. Anything else is `.unrecognized`.
 public enum ChargeLimitReportParser {
     static let noLimitLine = "No battery level limits set"
     static let header = "Battery level limits:"
@@ -94,6 +97,7 @@ public enum ChargeLimitReportParser {
                 }
                 let key = String(line[..<separator.lowerBound])
                 let value = String(line[separator.upperBound...].dropLast())
+                guard entry?[key] == nil else { return .unrecognized("repeated key \(key)") }
                 entry?[key] = value
             }
         }

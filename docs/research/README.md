@@ -29,7 +29,7 @@ Every mechanism is classified with one or more tags:
 | `[SMC/HW]` | Implemented by the SMC or charger/gauge hardware/firmware |
 | `[PRIVILEGED]` | Requires root, administrator rights, or a private entitlement |
 | `[ARCH-SPECIFIC]` | Differs between Apple silicon and Intel |
-| `[VERIFIED-EXPERIMENTALLY]` | Observed on the research machine using read-only methods |
+| `[VERIFIED-EXPERIMENTALLY]` | Observed on the research machine. Notes 01–07 used read-only methods only; note 08 also changed the user-level Charge Limit through the Shortcuts app and restored it, as described there |
 | `[INFERRED/UNVERIFIED]` | Reasoned from sources or third-party claims; not observed |
 
 Some notes use their own evidence labels alongside these tags:
@@ -60,8 +60,12 @@ Some notes use their own evidence labels alongside these tags:
   [`../roadmap.md`](../roadmap.md), milestone 4).
 - Notes written before the bundle identifier was chosen use the placeholder
   `com.example.CellKeeper`; the project uses `io.github.saltedtan.CellKeeper`.
-- All local experiments were read-only. No IOUserClient was opened, no SMC
-  key was read or written, no system setting was changed, and no proprietary
+- The experiments for notes 01–07 were read-only. Note 08 changed one
+  user-level setting, the Charge Limit, only through the owner's shortcut and
+  the documented `shortcuts` tool, and restored and read back the owner's
+  80% after every change. In all notes no IOUserClient was opened by
+  CellKeeper or its probes, no SMC key was read or written, no `pmset`
+  setting was changed, and no proprietary
   binary (Apple's or anyone else's) was disassembled or string-dumped.
 
 ## Key findings (lead's synthesis)

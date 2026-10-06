@@ -35,13 +35,12 @@ public enum NativeChargeLimitSupport {
 extension NativeChargeLimitBackend {
     /// The backend wired to this Mac: the documented `shortcuts` tool for
     /// changes, the undocumented read-only `pmset -g battlimit` report for
-    /// read-back, and the app's user defaults for the record of the user's
-    /// own limit.
-    public static func system() -> NativeChargeLimitBackend {
+    /// read-back, and a durable file for the record of the user's own limit.
+    public static func system(store: FileOwnershipRecordStore = .default) -> NativeChargeLimitBackend {
         NativeChargeLimitBackend(
             runner: ShortcutsCommandRunner(),
             reader: PmsetChargeLimitReader(),
-            storage: UserDefaults.standard,
+            store: store,
             platformIssue: NativeChargeLimitSupport.platformIssue()
         )
     }

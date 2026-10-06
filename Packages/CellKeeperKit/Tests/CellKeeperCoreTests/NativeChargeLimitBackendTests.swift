@@ -5,11 +5,11 @@ import Testing
 @Suite("Native Charge Limit backend")
 struct NativeChargeLimitBackendTests {
     let system = FakeChargeLimitSystem(reading: .limit(80))
-    let storage = InMemoryStorage()
+    let store = InMemoryRecordStore()
     let clock = TestClock()
 
     private func makeBackend(platformIssue: String? = nil) -> NativeChargeLimitBackend {
-        makeNativeBackend(system: system, storage: storage, platformIssue: platformIssue, clock: clock)
+        makeNativeBackend(system: system, store: store, platformIssue: platformIssue, clock: clock)
     }
 
     // MARK: - Availability
@@ -110,7 +110,7 @@ struct NativeChargeLimitBackendTests {
         let status = await backend.nativeLimitStatus()
         #expect(status?.ownerLimit == 80)
         #expect(status?.target == 90)
-        #expect(storage.data(forKey: NativeChargeLimitBackend.ownershipKey) != nil)
+        #expect(store.data != nil)
     }
 
     @Test("Releasing restores exactly the recorded limit and forgets it")
@@ -124,13 +124,32 @@ struct NativeChargeLimitBackendTests {
         #expect(system.reading == .limit(85))
         #expect(try await backend.currentMode() == .normal)
         #expect(await backend.nativeLimitStatus()?.ownerLimit == nil)
-        #expect(storage.data(forKey: NativeChargeLimitBackend.ownershipKey) == nil)
+        #expect(store.data == nil)
     }
 
-    @Test("A limit of 100% (reported as no limit) is restored as 100%, not assumed")
+    @Test("\"No limit\" is never assumed to be the user's 100% limit")
+    func noLimitNeedsConfirmation() async throws {
+        system.reading = .noLimit
+        let backend = makeBackend()
+        guard case .unavailable(let reason) = await backend.capabilities().availability else {
+            Issue.record("expected unavailable until confirmed")
+            return
+        }
+        #expect(reason.contains("100%"))
+        #expect(await backend.nativeLimitStatus()?.needsNoLimitConfirmation == true)
+        await #expect(throws: BackendError.self) {
+            try await backend.setMode(.nativeLimit(percent: 80))
+        }
+        #expect(system.runInputs.isEmpty)
+        #expect(store.data == nil)
+    }
+
+    @Test("Once the user confirms it, a 100% limit (reported as no limit) is recorded and restored as 100%")
     func restoresNoLimit() async throws {
         system.reading = .noLimit
         let backend = makeBackend()
+        await backend.confirmNoLimitIsOwnerLimit()
+        #expect(await backend.capabilities().availability == .experimental)
         _ = try await backend.setMode(.nativeLimit(percent: 80))
         #expect(await backend.nativeLimitStatus()?.ownerLimit == 100)
         _ = try await backend.setMode(.normal)
@@ -166,7 +185,7 @@ struct NativeChargeLimitBackendTests {
             try await backend.setMode(.nativeLimit(percent: 90))
         }
         #expect(system.runInputs.isEmpty)
-        #expect(storage.data(forKey: NativeChargeLimitBackend.ownershipKey) == nil)
+        #expect(store.data == nil)
     }
 
     @Test("Only the advertised steps and normal are accepted")
@@ -257,17 +276,17 @@ struct NativeChargeLimitBackendTests {
 
     @Test("At relaunch, a record whose limit is already back in effect is cleared")
     func relaunchAfterCompletedRestore() async throws {
-        storeOwnershipRecord(owner: 80, target: 90, in: storage)
+        storeOwnershipRecord(owner: 80, target: 90, in: store)
         system.reading = .limit(80)
         let backend = makeBackend()
         #expect(try await backend.currentMode() == .normal)
         #expect(await backend.nativeLimitStatus()?.ownerLimit == nil)
-        #expect(storage.data(forKey: NativeChargeLimitBackend.ownershipKey) == nil)
+        #expect(store.data == nil)
     }
 
     @Test("An unreadable record blocks all changes rather than losing the user's limit")
     func unreadableRecord() async throws {
-        storage.set(Data("not json".utf8), forKey: NativeChargeLimitBackend.ownershipKey)
+        store.data = Data("not json".utf8)
         let backend = makeBackend()
         guard case .unavailable = await backend.capabilities().availability else {
             Issue.record("expected unavailable")
@@ -281,11 +300,107 @@ struct NativeChargeLimitBackendTests {
             try await backend.setMode(.normal)
         }
         #expect(system.runInputs.isEmpty)
+        let status = await backend.nativeLimitStatus()
+        #expect(status?.isRecordUnreadable == true)
+        #expect(status?.hasUnresolvedOwnership == true)
+        #expect(NativeChargeLimitBackend.hasOutstandingRecord(in: store))
+    }
+
+    @Test("A record that cannot even be loaded is treated as unreadable")
+    func unloadableRecord() async {
+        store.data = Data()
+        store.loadFails = true
+        let backend = makeBackend()
+        #expect(await backend.nativeLimitStatus()?.isRecordUnreadable == true)
+        #expect(NativeChargeLimitBackend.hasOutstandingRecord(in: store))
+    }
+
+    @Test("An unreadable record is discarded only on request, and only then are changes allowed")
+    func discardUnreadableRecord() async throws {
+        store.data = Data("not json".utf8)
+        let backend = makeBackend()
+        try await backend.discardUnreadableRecord()
+        #expect(store.data == nil)
+        #expect(await backend.nativeLimitStatus()?.hasUnresolvedOwnership == false)
+        #expect(try await backend.setMode(.nativeLimit(percent: 90)) == .applied)
+    }
+
+    // MARK: - Durability and interrupted changes
+
+    @Test("If the record cannot be stored durably, nothing is changed")
+    func durableRecordRequired() async {
+        store.saveFails = true
+        let backend = makeBackend()
+        await #expect(throws: BackendError.self) {
+            try await backend.setMode(.nativeLimit(percent: 90))
+        }
+        #expect(system.runInputs.isEmpty)
+        #expect(system.reading == .limit(80))
+    }
+
+    @Test("The value being set is stored before the shortcut runs")
+    func pendingTargetStoredFirst() async throws {
+        system.runBehaviour = .fails
+        let backend = makeBackend()
+        await #expect(throws: BackendError.self) {
+            try await backend.setMode(.nativeLimit(percent: 90))
+        }
+        let saved = try #require(store.data.flatMap { String(data: $0, encoding: .utf8) })
+        #expect(saved.contains(#""pendingTarget":90"#))
+        #expect(saved.contains(#""ownerLimit":80"#))
+    }
+
+    @Test("A change that took effect without confirmation is accepted at relaunch")
+    func pendingTargetPromoted() async throws {
+        storeOwnershipRecord(owner: 80, target: 85, pending: 90, in: store)
+        system.reading = .limit(90)
+        let backend = makeBackend()
+        #expect(try await backend.currentMode() == .nativeLimit(percent: 90))
+        #expect(await backend.nativeLimitStatus()?.target == 90)
+        _ = try await backend.setMode(.normal)
+        #expect(system.reading == .limit(80))
+    }
+
+    @Test("A change made by someone else is caught before writing over it")
+    func outsideChangeBeforeWrite() async throws {
+        let backend = makeBackend()
+        _ = try await backend.setMode(.nativeLimit(percent: 90))
+        system.changeExternally(to: 95)
+        await #expect(throws: BackendError.changedOutside(expected: .nativeLimit(percent: 90), found: .nativeLimit(percent: 95))) {
+            try await backend.setMode(.nativeLimit(percent: 85))
+        }
+        #expect(system.runInputs == ["90"])
+        // The user's own limit can still be restored.
+        _ = try await backend.setMode(.normal)
+        #expect(system.reading == .limit(80))
+    }
+
+    @Test("The restore runs even if the setting cannot be read first")
+    func restoreWithoutPreRead() async throws {
+        let backend = makeBackend()
+        _ = try await backend.setMode(.nativeLimit(percent: 90))
+        system.failNextReads(1)
+        #expect(try await backend.setMode(.normal) == .applied)
+        #expect(system.reading == .limit(80))
+        #expect(system.runInputs == ["90", "80"])
+    }
+
+    @Test("A restore that cannot be confirmed keeps the record")
+    func unconfirmedRestoreKeepsRecord() async throws {
+        let backend = makeBackend()
+        _ = try await backend.setMode(.nativeLimit(percent: 90))
+        system.readFails = true
+        await #expect(throws: BackendError.self) {
+            try await backend.setMode(.normal)
+        }
+        #expect(system.runInputs == ["90", "80"])
+        #expect(await backend.nativeLimitStatus()?.ownerLimit == 80)
+        #expect(store.data != nil)
     }
 
     @Test("A record with values outside the Charge Limit's range is unreadable")
     func implausibleRecord() async {
-        storeOwnershipRecord(owner: 50, target: 90, in: storage)
+        storeOwnershipRecord(owner: 50, target: 90, in: store)
         guard case .unavailable = await makeBackend().capabilities().availability else {
             Issue.record("expected unavailable")
             return

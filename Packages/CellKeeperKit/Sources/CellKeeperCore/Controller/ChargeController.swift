@@ -25,8 +25,13 @@ import os
 ///   into a no-op, so nothing queued behind it can re-apply a restriction.
 /// - If the backend's mode changes without CellKeeper requesting it, another
 ///   tool may be controlling charging: the backend is faulted immediately.
-/// - Switching backends requires a confirmed restore of `.normal` first;
-///   otherwise the switch is refused and the old backend is kept.
+/// - Switching backends requires a confirmed restore of `.normal` first. If
+///   it cannot be confirmed, the old backend is kept and the switch stays
+///   pending: `.normal` keeps being requested until it is confirmed, and the
+///   switch then completes.
+/// - If CellKeeper holds a non-normal state and cannot read it back, it
+///   requests `.normal`, and it keeps comparing later readings with the
+///   state it last confirmed.
 /// - Restricting requests are recorded on a monotonic clock for rate limiting.
 ///   After a failed restore of `.normal`, automatic evaluations wait
 ///   ``ChargingPolicy/minimumRestoreRetryInterval`` before retrying it.
@@ -65,6 +70,11 @@ public actor ChargeController {
     private var nativeLimit: NativeLimitStatus?
     /// When a request for `.normal` last failed, for retry spacing.
     private var lastFailedRestoreUptime: TimeInterval?
+    /// A backend the user switched to, waiting for `.normal` to be confirmed
+    /// on the current one.
+    private var pendingBackend: (any ChargingBackend)?
+    /// Set for an evaluation in which a non-normal state could not be read.
+    private var isOwnedStateUnverified = false
     private var decision: PolicyDecision?
     private var lastExecution: ExecutionRecord?
     private var consecutiveFailures = 0
@@ -120,6 +130,7 @@ public actor ChargeController {
             capabilities: capabilities,
             currentMode: currentMode,
             nativeLimit: nativeLimit,
+            pendingBackend: pendingBackend?.descriptor,
             decision: decision,
             lastExecution: lastExecution,
             consecutiveFailures: consecutiveFailures,
@@ -210,28 +221,84 @@ public actor ChargeController {
     }
 
     /// Confirms `.normal` on the current backend, then switches to
-    /// `newBackend`. If `.normal` cannot be confirmed, the switch is refused
-    /// and the current backend stays responsible for recovery.
+    /// `newBackend`. If `.normal` cannot be confirmed, the current backend
+    /// stays responsible: the switch is refused for now and stays pending,
+    /// later evaluations keep requesting `.normal`, and the switch completes
+    /// once it is confirmed. Choosing a backend of the current kind cancels a
+    /// pending switch.
     @discardableResult
     public func switchBackend(to newBackend: any ChargingBackend) async -> ControllerStatus {
         await exclusively {
-            guard await restoreNormal(reason: "switching backend") else {
-                record(.safety, "Backend switch to \(newBackend.descriptor.displayName) refused: normal charging could not be confirmed on \(backend.descriptor.displayName).", level: .fault)
+            if newBackend.descriptor.identifier == backend.descriptor.identifier {
+                if let pending = pendingBackend {
+                    pendingBackend = nil
+                    record(.settings, "Switch to \(pending.descriptor.displayName) cancelled; staying with \(backend.descriptor.displayName).")
+                    await performEvaluation(.backendChanged)
+                }
                 return
             }
-            let previousName = backend.descriptor.displayName
-            backend = newBackend
-            consecutiveFailures = 0
-            lastFailureUptime = nil
-            lastFailedRestoreUptime = nil
-            currentMode = nil
-            ownedMode = nil
-            hasSeededOwnership = false
-            nativeLimit = nil
-            lastExecution = nil
-            record(.settings, "Control backend changed from \(previousName) to \(newBackend.descriptor.displayName).")
-            await performEvaluation(.backendChanged)
+            pendingBackend = newBackend
+            guard await restoreNormal(reason: "switching backend") else {
+                record(.safety, "Backend switch to \(newBackend.descriptor.displayName) refused for now: normal charging could not be confirmed on \(backend.descriptor.displayName). CellKeeper keeps trying and switches once it is confirmed.", level: .fault)
+                return
+            }
+            await completePendingSwitch()
         }
+    }
+
+    /// Native-limit backends: looks for the shortcut again, then evaluates.
+    @discardableResult
+    public func recheckBackendAvailability() async -> ControllerStatus {
+        await exclusively {
+            await (backend as? NativeChargeLimitBackend)?.recheckAvailability()
+            await performEvaluation(.manual)
+        }
+    }
+
+    /// Native-limit backends: the user confirmed that their own Charge Limit
+    /// is 100%, so a report of "no limit" may be recorded as such.
+    @discardableResult
+    public func confirmNoLimitIsOwnerLimit() async -> ControllerStatus {
+        await exclusively {
+            guard let native = backend as? NativeChargeLimitBackend else { return }
+            await native.confirmNoLimitIsOwnerLimit()
+            record(.settings, "You confirmed that your own macOS Charge Limit is 100% (no limit).")
+            await performEvaluation(.manual)
+        }
+    }
+
+    /// Native-limit backends: discards an unreadable record of the user's
+    /// limit after the user has set their limit by hand.
+    @discardableResult
+    public func discardUnreadableOwnershipRecord() async -> ControllerStatus {
+        await exclusively {
+            guard let native = backend as? NativeChargeLimitBackend else { return }
+            do {
+                try await native.discardUnreadableRecord()
+                record(.safety, "Discarded the unreadable record of your own Charge Limit at your request.")
+            } catch {
+                record(.failure, "Could not discard the unreadable record: \(error)", level: .error)
+            }
+            await performEvaluation(.manual)
+        }
+    }
+
+    /// Switches to the pending backend. `.normal` must already be confirmed.
+    private func completePendingSwitch() async {
+        guard let newBackend = pendingBackend else { return }
+        pendingBackend = nil
+        let previousName = backend.descriptor.displayName
+        backend = newBackend
+        consecutiveFailures = 0
+        lastFailureUptime = nil
+        lastFailedRestoreUptime = nil
+        currentMode = nil
+        ownedMode = nil
+        hasSeededOwnership = false
+        nativeLimit = nil
+        lastExecution = nil
+        record(.settings, "Control backend changed from \(previousName) to \(newBackend.descriptor.displayName).")
+        await performEvaluation(.backendChanged)
     }
 
     /// Clears the faulted state so non-normal modes may be requested again.
@@ -304,6 +371,9 @@ public actor ChargeController {
 
         capabilities = await backend.capabilities()
         await observeBackendMode()
+        let releaseReason: ReleaseReason? = pendingBackend != nil ? .backendSwitch
+            : isOwnedStateUnverified ? .stateUnverified
+            : nil
 
         let input = PolicyInput(
             now: now(),
@@ -319,7 +389,8 @@ public actor ChargeController {
             isSleepImminent: sleepAnnouncedAtUptime != nil,
             restoreRetryNotBefore: trigger.isAutomatic
                 ? lastFailedRestoreUptime.map { $0 + ChargingPolicy.minimumRestoreRetryInterval }
-                : nil
+                : nil,
+            releaseReason: releaseReason
         )
         restrictingRequestTimes.removeAll { input.uptime - $0 >= 60 * 60 }
         let newDecision = ChargingPolicy.evaluate(input)
@@ -340,19 +411,26 @@ public actor ChargeController {
 
         await execute(newDecision.action)
         nativeLimit = await backend.nativeLimitStatus()
+
+        if pendingBackend != nil, currentMode == .normal, !(nativeLimit?.hasUnresolvedOwnership ?? false) {
+            await completePendingSwitch()
+        }
     }
 
     /// Reads the backend's mode, counting failures and detecting changes that
     /// CellKeeper did not make.
     private func observeBackendMode() async {
+        isOwnedStateUnverified = false
         let observed: ChargeControlMode?
         do {
             observed = try await backend.currentMode()
         } catch {
+            // `ownedMode` is kept, so a later reading is still compared with
+            // what CellKeeper last confirmed.
             currentMode = nil
-            ownedMode = nil
             nativeLimit = await backend.nativeLimitStatus()
             registerFailure("Could not read the backend's mode: \(error)")
+            isOwnedStateUnverified = holdsNonNormalState
             return
         }
         currentMode = observed
@@ -366,8 +444,8 @@ public actor ChargeController {
         }
         guard capabilities.availability.acceptsRequests else { return }
         guard let observed else {
-            ownedMode = nil
             registerFailure("The backend did not report its mode.")
+            isOwnedStateUnverified = holdsNonNormalState
             return
         }
         if let owned = ownedMode, owned != observed {
@@ -379,6 +457,11 @@ public actor ChargeController {
                 record(.safety, "Charging mode changed outside CellKeeper (expected \(owned), found \(observed)); another tool may be controlling charging. Backend faulted; restoring normal charging.", level: .fault)
             }
         }
+    }
+
+    /// True if CellKeeper may have a non-normal state in effect.
+    private var holdsNonNormalState: Bool {
+        (ownedMode.map { $0 != .normal } ?? false) || (nativeLimit?.hasUnresolvedOwnership ?? false)
     }
 
     private func execute(_ action: ChargingAction) async {
@@ -411,9 +494,13 @@ public actor ChargeController {
             restrictingRequestTimes.append(uptime())
         }
         let target = describeTarget(mode)
+        let ownerLimitBefore = nativeLimit?.ownerLimit
         record(.request, "Requesting \(target) from \(backend.descriptor.displayName) backend.")
         do {
             var outcome = try await setAndConfirm(mode)
+            if ownerLimitBefore == nil, let ownerLimit = nativeLimit?.ownerLimit {
+                record(.safety, "Recorded your own macOS Charge Limit of \(ownerLimit)% before changing it; it is restored when CellKeeper stops managing it.")
+            }
             // A fault persists until the user clears it, even if restoring
             // normal charging succeeds.
             if !isBackendFaulted {
@@ -442,7 +529,13 @@ public actor ChargeController {
         } catch {
             let message = String(describing: error)
             lastExecution = ExecutionRecord(date: now(), action: action, result: .failed(message))
-            registerFailure("Backend failed to apply \(target): \(message)")
+            if case BackendError.changedOutside = error {
+                consecutiveFailures = max(consecutiveFailures + 1, Self.maximumConsecutiveFailures)
+                lastFailureUptime = uptime()
+                record(.safety, "Not applied: \(message). It may have been changed in System Settings or by another tool. Backend faulted; restoring \(describeTarget(.normal)).", level: .fault)
+            } else {
+                registerFailure("Backend failed to apply \(target): \(message)")
+            }
             if mode != .normal {
                 _ = await restoreNormal(reason: "safety fallback after failed \(mode) request")
             }
@@ -469,7 +562,9 @@ public actor ChargeController {
     }
 
     /// Sets a mode and confirms it by read-back. On success the mode is
-    /// recorded as owned by CellKeeper; on any failure the mode is unknown.
+    /// recorded as owned by CellKeeper. On failure the current mode is
+    /// unknown, and the last confirmed mode stays the expectation that later
+    /// readings are compared with.
     private func setAndConfirm(_ mode: ChargeControlMode) async throws -> ControlOutcome {
         do {
             let outcome = try await backend.setMode(mode)
@@ -491,7 +586,6 @@ public actor ChargeController {
             return outcome
         } catch {
             currentMode = nil
-            ownedMode = nil
             if mode == .normal {
                 lastFailedRestoreUptime = uptime()
             }
@@ -510,7 +604,11 @@ public actor ChargeController {
         guard capabilities.availability.acceptsRequests else {
             let observed = try? await backend.currentMode()
             nativeLimit = await backend.nativeLimitStatus()
-            if observed == nil || observed == .normal, !(nativeLimit?.isOwnedByCellKeeper ?? false) {
+            if nativeLimit?.isRecordUnreadable == true {
+                record(.safety, "Could not restore your own macOS Charge Limit (\(reason)): CellKeeper's record of it cannot be read. Set your limit in System Settings › Battery › Charging, then discard the record in Settings › Control.", level: .fault)
+                return false
+            }
+            if observed == nil || observed == .normal, !(nativeLimit?.hasUnresolvedOwnership ?? false) {
                 record(.safety, "Restore normal charging (\(reason)): the backend controls nothing; nothing to restore.")
                 return true
             }

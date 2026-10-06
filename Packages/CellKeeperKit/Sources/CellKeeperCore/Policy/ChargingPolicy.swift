@@ -6,7 +6,9 @@ import Foundation
 /// The policy never calls a backend, reads hardware, or consults a clock;
 /// everything it depends on is in the input. Rules, highest priority first:
 ///
-/// 1. Invalid settings → fail safe (macOS default charging).
+/// 1. Invalid settings, or a release the controller requires (a pending
+///    backend switch, or a state it set but could not read back) → fail safe
+///    (macOS default charging).
 /// 2. Management disabled → macOS default charging.
 /// 3. Override expiry and unplugging are processed, even without a valid
 ///    charge reading.
@@ -66,6 +68,10 @@ public enum ChargingPolicy {
         let issues = settings.validationIssues
         guard issues.isEmpty else {
             return decision(.failSafe, .normal, .invalidConfiguration(issues), memory: PolicyMemory(), input: input)
+        }
+        if let release = input.releaseReason {
+            let ended: OverrideEnd? = input.activeOverride?.kind == .dischargeToLimit ? .interrupted : nil
+            return decision(.failSafe, .normal, .releaseRequired(release), memory: input.memory, input: input, overrideEnded: ended)
         }
         guard settings.isManagementEnabled else {
             return decision(.unmanaged, .normal, .managementDisabled, memory: PolicyMemory(), input: input)

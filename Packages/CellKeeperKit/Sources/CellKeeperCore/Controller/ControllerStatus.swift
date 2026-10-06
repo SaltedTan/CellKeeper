@@ -84,6 +84,9 @@ public struct ControllerStatus: Sendable, Equatable {
     public var currentMode: ChargeControlMode?
     /// macOS's Charge Limit as seen by a native-limit backend; nil otherwise.
     public var nativeLimit: NativeLimitStatus?
+    /// A backend the user switched to, waiting until `.normal` is confirmed
+    /// on the current one.
+    public var pendingBackend: BackendDescriptor?
     public var decision: PolicyDecision?
     public var lastExecution: ExecutionRecord?
     public var consecutiveFailures: Int
