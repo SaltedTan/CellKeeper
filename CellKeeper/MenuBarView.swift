@@ -167,7 +167,7 @@ private struct NativeLimitSummary: View {
                         .foregroundStyle(.orange)
                 }
                 if let pending = status.pendingBackend {
-                    Text("Switching to \(pending.displayName) once your own limit is confirmed restored.")
+                    Text(Format.pendingSwitch(to: pending.displayName, nativeLimit: native))
                         .foregroundStyle(.orange)
                 }
                 if let problem = native?.readProblem {

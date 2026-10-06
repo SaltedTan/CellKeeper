@@ -298,7 +298,7 @@ private struct NativeLimitSetupSection: View {
                 }
             }
             if let pending = model.status?.pendingBackend {
-                Label("Switching to \(pending.displayName) once your own limit is confirmed restored. CellKeeper retries automatically; choose macOS Charge Limit again to cancel.", systemImage: "arrow.triangle.2.circlepath")
+                Label(Format.pendingSwitch(to: pending.displayName, nativeLimit: native) + " CellKeeper retries automatically; choose macOS Charge Limit again to cancel.", systemImage: "arrow.triangle.2.circlepath")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }

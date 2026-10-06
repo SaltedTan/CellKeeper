@@ -130,6 +130,14 @@ enum Format {
         value >= 100 ? "100% (no limit)" : "\(value)%"
     }
 
+    /// Why a backend switch is still waiting.
+    static func pendingSwitch(to name: String, nativeLimit: NativeLimitStatus?) -> String {
+        if nativeLimit?.isAdoptionUnsaved == true {
+            return "Switching to \(name) once CellKeeper has stored its record of the limit it kept; it could not write to its storage yet."
+        }
+        return "Switching to \(name) once your own limit is confirmed restored."
+    }
+
     static func celsius(_ value: Double?) -> String {
         value.map { "\($0.formatted(.number.precision(.fractionLength(1)))) °C" } ?? unavailable
     }
