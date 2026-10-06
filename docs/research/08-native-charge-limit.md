@@ -151,6 +151,7 @@ All runs ended with the owner's 80% in effect and no record left behind. The Cel
 | 21:31:23 | CellKeeper's will-sleep evaluation. The change to 85% was still rate-limited (O11). | 80% (the owner's) | — |
 | 21:31:28 | Clamshell sleep | 80% | 81%, AC |
 | 21:32:43 | Maintenance dark wake. CellKeeper recorded 80% and set 85%, confirmed by read-back. | 85% | 81% |
+| 21:33:01 | Maintenance dark wake (10 s) | — | 81%, AC, charging (CellKeeper's telemetry) |
 | 21:33:11–21:41:23 | Asleep (492 s) | — | — |
 | 21:41:23 | Maintenance dark wake | — | 85%, AC, not charging (CellKeeper's telemetry; `pmset -g log`'s line for this wake still showed 81%) |
 | 21:42:24–21:45:11 | Asleep, apart from one 10 s dark wake | — | 85% |
@@ -162,12 +163,12 @@ CellKeeper made no change between 21:32:43 and quitting. So the 85% read at 21:4
 
 **Observed:**
 - The 85% limit survived about 12.5 minutes of sleep, five maintenance dark wakes and a full wake.
-- On AC, the battery rose from 81% to 85% while the Mac was asleep, and was reported "not charging" at 85% from then on.
+- On AC, with the lid closed throughout, the battery rose from 81% to 85% between dark-wake readings (21:33:01 and 21:41:23). From then on it was reported "not charging" at 85%.
+- Every battery reading was taken at a dark wake or after the full wake; none was taken during sleep itself.
 
-**Inferred, not observed:**
-- That macOS stopped charging at the limit while asleep. The charge stopping at exactly the limit fits that.
-- One run cannot separate charging during sleep from charging during a dark wake.
-- It says nothing about longer sleeps or sleep on battery power.
+**Inferred, not observed** `[INFERRED/UNVERIFIED]`:
+- That the charging, and its stop at the limit, happened during sleep itself, with macOS enforcing the limit while asleep. The charge stopping at exactly the limit fits that. However, the charging could also have happened during the dark wakes, which this run cannot rule out.
+- Nothing is known about longer sleeps or sleep on battery power.
 
 ### O11 — The shortcut runs during a maintenance dark wake `[VERIFIED-EXPERIMENTALLY]`
 
@@ -230,7 +231,7 @@ Planned procedure:
    - Then restore 80%.
    - In the run, the 85% was set during a dark wake just after the lid closed (O11), rather than before.
 2. **Restart (pending):** with the owner's own 80% (no CellKeeper change), restart and read `pmset -g battlimit`. Optionally repeat with a CellKeeper-set value, which also exercises the launch-time recovery path.
-3. **Enforcement during sleep:** partly seen in O10, where charging rose to the limit and stopped there while the Mac was asleep on AC. A longer sleep, and sleep on battery power, are deferred to a later observation run.
+3. **Enforcement during sleep:** not yet observed directly. In O10, with the lid closed on AC, the charge rose to the limit and stopped there between dark-wake readings. Enforcement during sleep itself is only inferred from that. A longer sleep, and sleep on battery power, are deferred to a later observation run.
 
 ---
 
