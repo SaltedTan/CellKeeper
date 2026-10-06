@@ -46,6 +46,7 @@ rules are in [`docs/safety.md`](safety.md).
 │  ChargeLimitReportParser   – strict parser for that report (fixtures)         ││
 │  ProcessRunner             – no shell, stdin closed, deadline, bounded output ││
 │  NativeChargeLimitSupport  – platform check; `NativeChargeLimitBackend.system`││
+│  FileOwnershipRecordStore  – durable record of the user's own Charge Limit    ││
 └───────────────┬──────────────────────────────────────────────────────────────┘│
                 │ depends on                                                    │
 ┌───────────────▼──────────────── CellKeeperCore (pure Swift, no IOKit) ────────▼───────────────┐
@@ -53,7 +54,8 @@ rules are in [`docs/safety.md`](safety.md).
 │  Settings:   ChargingSettings (+ validation), SettingsStore (UserDefaults JSON)                │
 │  Policy:     ChargingPolicy (pure state machine), PolicyInput/Decision/Memory, ChargeOverride  │
 │  Control:    ChargingBackend (protocol), MockChargingBackend, ReadOnlyChargingBackend,         │
-│              NativeChargeLimitBackend (+ ShortcutRunning / ChargeLimitReading protocols)       │
+│              NativeChargeLimitBackend (+ ShortcutRunning / ChargeLimitReading /                │
+│              OwnershipRecordStore protocols)                                                   │
 │  Controller: ChargeController (actor: telemetry → policy → backend, safety fallbacks, log)     │
 │  Support:    CellKeeperLog (os.Logger categories)                                              │
 └────────────────────────────────────────────────────────────────────────────────────────────────┘
@@ -154,13 +156,13 @@ even when the charge reading is unusable.
 - **Discharge to limit** — a confirmed, one-shot session (never a persistent
   setting). Ends at the limit, and is interrupted before sleep, on temperature
   pause, on lost or stale telemetry, when the backend cannot discharge, or if
-  the limit is outside 20–95%. After it ends it never restarts by itself.
+  its confirmed target is outside 20–95%. After it ends it never restarts by itself.
 
 ### Precedence (highest first)
 
 | # | Condition | State | Desired mode |
 |---|---|---|---|
-| 1 | Settings invalid | `failSafe` | normal |
+| 1 | Settings invalid, or the controller requires a release (`ReleaseReason`: a pending backend switch, an unfinished restore, or a state it set but could not read back) | `failSafe` | normal |
 | 2 | Management disabled | `unmanaged` | normal |
 | 3 | No/stale telemetry (by read time, or by the driver's own update time > 180 s), future timestamps, no battery, unknown % or power source | `failSafe` | normal (a discharge session is interrupted) |
 | 4 | Safety floor latched | `safetyFloor` | normal |
@@ -178,9 +180,11 @@ even when the charge reading is unusable.
 With a native-limit backend (`ControlCapabilities.style == .nativeLimit`),
 macOS enforces the limit. That includes its hysteresis: it resumes after a
 drop of more than 5%. It also includes its behaviour during sleep and its
-occasional calibration charge. CellKeeper only chooses the limit's value. The
-first three rows of the table above apply unchanged (invalid settings,
-management off, override expiry and unplugging). The rest are replaced by:
+occasional calibration charge. CellKeeper only chooses the limit's value.
+Rows 1 and 2 of the table above apply unchanged (invalid settings or a
+required release, then management off), and so do override expiry and
+unplugging. Row 3 does not (see "Missing or stale telemetry" below). The
+rest are replaced by:
 
 | # | Condition | State | Desired mode |
 |---|---|---|---|
@@ -191,7 +195,7 @@ management off, override expiry and unplugging). The rest are replaced by:
 
 What the native-limit policy does with features and inputs it cannot use:
 - **Discharge:** a session is interrupted with a note.
-- **Resume threshold, temperature protection, safety floor, sleep precaution, on-battery rule:** not used. macOS does these jobs itself, or the Charge Limit cannot express them; the UI disables the settings and explains why.
+- **Resume threshold, temperature protection, safety floor, sleep precaution, on-battery rule:** not used. macOS does these jobs itself, or the Charge Limit cannot express them; Settings hides them and one note says what macOS does instead.
 - **Missing or stale telemetry:** does *not* release the limit, because macOS enforces it from its own measurements. Releasing would only restore and re-apply the setting after every wake. Missing telemetry only means a full charge cannot be recognised as complete; it still ends on expiry or unplug.
 
 ### From desired mode to action
@@ -230,6 +234,7 @@ public protocol ChargingBackend: Sendable {
     func currentMode() async throws -> ChargeControlMode? // nil = unknown
     func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome
     func nativeLimitStatus() async -> NativeLimitStatus?  // default nil; no I/O
+    func takeAdoptedLimitChange() async -> AdoptedLimitChange? // native only; each adoption once
 }
 ```
 
@@ -244,7 +249,9 @@ public protocol ChargingBackend: Sendable {
   shows exactly these four states.
 - `ControlOutcome`: `applied` (the requested state was reached by this
   request and confirmed), `unchanged` (it was already in effect, so nothing
-  was changed; confirmed all the same), or `simulated`. Simulated backends
+  was changed; confirmed all the same), `simulated`, or, for native-limit
+  backends, `adoptedOutsideChange` (a limit CellKeeper did not set was kept
+  as the user's own and nothing was written). Simulated backends
   must never return `applied` or `unchanged`, and `setMode` must throw rather
   than return when the requested state was not reached.
 - `.normal` must always be accepted by a backend that accepts requests.
@@ -384,8 +391,8 @@ Implementations today:
 ## Native Charge Limit backend
 
 `NativeChargeLimitBackend` (Core) holds the logic. It never touches the
-system itself: it is given a `ShortcutRunning`, a `ChargeLimitReading`, a
-`KeyValueStorage` and a platform check. That lets the unit tests run it
+system itself: it is given a `ShortcutRunning`, a `ChargeLimitReading`, an
+`OwnershipRecordStore` and a platform check. That lets the unit tests run it
 against a fake macOS. `NativeChargeLimitBackend.system()` (Kit) wires it to
 the real system.
 
@@ -413,8 +420,9 @@ Lifecycle:
 2. **Holding.** Each evaluation reads the limit; so does the backend before
    every change, including a restore. A value CellKeeper did not set (not
    the confirmed target, a pending one, or the user's limit during a
-   restore) is adopted as the user's own limit: the record is deleted,
-   nothing is written, and management is turned off and saved. A pending
+   restore) is adopted as the user's own limit: the record is replaced by
+   an adoption marker, nothing is written, and management is turned off and
+   saved. A pending
    value that turns out to be in effect becomes the confirmed target.
 3. **Release.** Any of these requests `.normal`: management off, quit, a
    backend switch (pending until confirmed), any failed request, a state
@@ -605,9 +613,9 @@ decisions.
 |---|---|---|
 | D1 | Swift package for core + thin app project | Fast `swift test`, enforced dependency direction, no project churn for core files |
 | D2 | Policy as a pure function with explicit memory | Determinism and exhaustive testing |
-| D3 | Simulated backend is the default | Requirement; no verified public control mechanism exists |
-| D4 | Control only on Apple silicon (future) | Intel Macs end at macOS 26, and no supported control exists there ([03](research/03-intel-differences.md)) |
-| D5 | App Sandbox on for milestone 1 | All current functionality works sandboxed; revisit only if a helper is adopted |
+| D3 | Simulated backend is the default | Nothing changes until the user opts in; the only real control, macOS's Charge Limit, is experimental and opt-in |
+| D4 | Control only on Apple silicon | macOS's Charge Limit needs Apple silicon; Intel Macs end at macOS 26, and no supported control exists there ([03](research/03-intel-differences.md)) |
+| D5 | App Sandbox on | All current functionality works sandboxed, including launching `shortcuts` and `pmset` (note 08, O3); revisit only if a helper is adopted |
 | D6 | macOS 14 deployment target | Observation framework and `openSettings` need 14. The telemetry APIs exist on 14–27, but have been verified only on 27 |
 | D7 | No third-party dependencies | Nothing needed; avoids licence and supply-chain review |
 | D8 | Swift Testing | Modern, ships with Xcode 16+, works with plain `swift test` |
