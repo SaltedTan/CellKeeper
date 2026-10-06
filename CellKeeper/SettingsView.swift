@@ -56,7 +56,11 @@ private struct ChargingSettingsTab: View {
                 .confirmationDialog("Discharge to \(settings.chargeLimit)% while plugged in?", isPresented: $isConfirmingDischarge) {
                     Button("Start Discharge") { model.startDischargeToLimit() }
                 } message: {
-                    Text("CellKeeper will ask the Mac to run from its battery even though it is plugged in, once, until the charge reaches \(settings.chargeLimit)%. It stops at the limit, before sleep, if the battery gets warm, or when unplugged.")
+                    if model.status?.capabilities.availability.affectsHardware == true {
+                        Text("CellKeeper will ask the Mac to run from its battery even though it is plugged in, once, until the charge reaches \(settings.chargeLimit)%. It stops at that level, before sleep, if the battery gets warm, or when unplugged.")
+                    } else {
+                        Text("The current backend only simulates this: CellKeeper will record a one-time discharge to \(settings.chargeLimit)%, but your Mac's charging will not change.")
+                    }
                 }
                 Text("A one-time session that runs the Mac from its battery while plugged in until the limit is reached. Needs a backend that supports it and a limit of \(ChargingPolicy.dischargeTargetRange.lowerBound)–\(ChargingPolicy.dischargeTargetRange.upperBound)%.")
                     .font(.caption)
@@ -66,7 +70,10 @@ private struct ChargingSettingsTab: View {
 
             Section("Temperature protection") {
                 Toggle("Pause charging when the battery is warm", isOn: binding(\.temperatureProtection.isEnabled))
-                Stepper(value: binding(\.temperatureProtection.pauseAtCelsius),
+                Stepper(value: Binding(
+                            get: { settings.temperatureProtection.pauseAtCelsius },
+                            set: { pause in model.updateSettings { $0 = $0.withTemperaturePause(pause) } }
+                        ),
                         in: ChargingSettings.temperaturePauseRange, step: 1) {
                     LabeledContent("Pause at", value: Format.celsius(settings.temperatureProtection.pauseAtCelsius))
                 }
@@ -139,7 +146,7 @@ private struct ControlSettingsTab: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     LabeledContent("Reported mode", value: status.currentMode?.intentTitle ?? "Unknown")
-                    LabeledContent("Consecutive failures", value: "\(status.consecutiveFailures)")
+                    LabeledContent("Recent failures", value: "\(status.consecutiveFailures)")
                     if status.isBackendFaulted {
                         Button("Clear fault and retry") { model.resetBackendFault() }
                     }

@@ -220,6 +220,32 @@ struct ChargeControllerTests {
         #expect(later.currentMode == .inhibitCharging)
     }
 
+    @Test("Sleep precautions persist until wake, not just for one evaluation")
+    func sleepPrecautionPersists() async {
+        let backend = MockChargingBackend()
+        let (controller, _) = makeController(percent: 78, backend: backend)
+        await controller.evaluate(.launch)
+        let announced = await controller.evaluate(.willSleep)
+        #expect(announced.currentMode == .inhibitCharging)
+
+        // A power notification before the Mac actually sleeps must not undo it.
+        clock.advance(by: 5)
+        let beforeSleep = await controller.evaluate(.powerSourceChanged)
+        #expect(beforeSleep.currentMode == .inhibitCharging)
+
+        let woke = await controller.evaluate(.didWake)
+        #expect(woke.currentMode == .normal)
+    }
+
+    @Test("A will-sleep announcement without a wake expires on the monotonic clock")
+    func sleepAnnouncementExpires() async {
+        let (controller, _) = makeController(percent: 78)
+        await controller.evaluate(.willSleep)
+        clock.advance(by: ChargeController.sleepAnnouncementWindow + 1)
+        let later = await controller.evaluate(.periodic)
+        #expect(later.decision?.state == .charging)
+    }
+
     @Test("Imminent sleep stops a discharge session")
     func sleepStopsDischarge() async {
         let backend = MockChargingBackend()
@@ -230,6 +256,33 @@ struct ChargeControllerTests {
         #expect(sleeping.activeOverride == nil)
         #expect(sleeping.decision?.overrideEnded == .interrupted)
         #expect(sleeping.currentMode == .inhibitCharging)
+    }
+
+    @Test("A backend fault ends a discharge session; clearing the fault does not restart it")
+    func faultEndsDischarge() async {
+        let backend = MockChargingBackend()
+        let (controller, _) = makeController(percent: 90, backend: backend)
+        await controller.startDischargeToLimit()
+        await backend.simulateExternalChange(to: .normal)
+        let faulted = await controller.evaluate(.periodic)
+        #expect(faulted.isBackendFaulted)
+        #expect(faulted.activeOverride == nil)
+
+        clock.advance(by: 120)
+        let reset = await controller.resetBackendFault()
+        #expect(reset.currentMode == .inhibitCharging)
+        #expect(await backend.requestedModes.last == .inhibitCharging)
+        #expect(await backend.requestedModes.filter { $0 == .forceDischarge }.count == 1)
+    }
+
+    @Test("A temporary full charge cannot start while management is off")
+    func fullChargeRequiresManagement() async throws {
+        let (controller, _) = makeController(percent: 85)
+        var settings = ChargingSettings.default
+        settings.isManagementEnabled = false
+        try await controller.apply(settings: settings)
+        let status = await controller.startFullCharge()
+        #expect(status.activeOverride == nil)
     }
 
     @Test("A discharge session cannot start without a valid target")
@@ -296,6 +349,63 @@ struct ChargeControllerTests {
         #expect(status.events.contains { $0.kind == .safety && $0.message.contains("refused") })
     }
 
+    @Test("After shutdown, queued and later commands do nothing")
+    func shutdownIsTerminal() async {
+        let backend = MockChargingBackend()
+        let (controller, _) = makeController(percent: 85, backend: backend)
+        await controller.evaluate(.launch)
+        let stopped = await controller.shutdown(reason: "quit")
+        #expect(stopped.currentMode == .normal)
+        let requestsAtShutdown = await backend.requestedModes
+
+        clock.advance(by: 120)
+        await controller.evaluate(.periodic)
+        await controller.startDischargeToLimit()
+        await controller.startFullCharge()
+        #expect(await backend.requestedModes == requestsAtShutdown)
+        #expect(await controller.status.currentMode == .normal)
+    }
+
+    @Test("Failures are forgotten after a failure-free hour")
+    func failureCountDecays() async {
+        // At 50% nothing needs requesting once normal charging is confirmed,
+        // so only the passage of time can reset the count.
+        let backend = MockChargingBackend()
+        let (controller, _) = makeController(percent: 50, backend: backend)
+        await controller.evaluate(.launch)
+        await backend.failNextModeReads(2)
+        await controller.evaluate(.periodic)
+        let failing = await controller.evaluate(.periodic)
+        #expect(failing.consecutiveFailures == 2)
+
+        clock.advance(by: ChargeController.failureMemory + 1)
+        let afterHour = await controller.evaluate(.periodic)
+        #expect(afterHour.consecutiveFailures == 0)
+    }
+
+    @Test("A non-hardware backend can never report a hardware change")
+    func appliedDowngraded() async {
+        let (controller, _) = makeController(percent: 85, backend: OverclaimingBackend())
+        let status = await controller.evaluate(.launch)
+        #expect(status.lastExecution?.result == .simulated)
+        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("not a hardware backend") })
+    }
+
+    @Test("Repeated rate-limit refusals are logged once")
+    func rateLimitLoggedOnce() async {
+        let (controller, telemetry) = makeController(percent: 85)
+        await controller.evaluate(.launch)
+        await telemetry.set(snapshot(percent: 50))
+        await controller.evaluate(.periodic)
+        await telemetry.set(snapshot(percent: 85))
+        for _ in 0..<5 {
+            clock.advance(by: 5)
+            await controller.evaluate(.periodic)
+        }
+        let refusals = await controller.status.events.filter { $0.kind == .request && $0.message.hasPrefix("Refused") }
+        #expect(refusals.count == 1)
+    }
+
     @Test("Restoring system defaults requests and confirms normal charging")
     func restoreDefaults() async {
         let backend = MockChargingBackend()
@@ -355,6 +465,23 @@ struct ChargeControllerTests {
             await controller.evaluate(.periodic)
         }
         #expect(await controller.status.events.count == ChargeController.eventLimit)
+    }
+}
+
+/// A simulated backend that wrongly claims its changes reached hardware.
+actor OverclaimingBackend: ChargingBackend {
+    nonisolated let descriptor = BackendDescriptor(identifier: "overclaiming", displayName: "Overclaiming", summary: "")
+    private var mode: ChargeControlMode = .normal
+
+    func capabilities() -> ControlCapabilities {
+        ControlCapabilities(availability: .simulated, supportedModes: Set(ChargeControlMode.allCases))
+    }
+
+    func currentMode() -> ChargeControlMode? { mode }
+
+    func setMode(_ newMode: ChargeControlMode) -> ControlOutcome {
+        mode = newMode
+        return .applied
     }
 }
 

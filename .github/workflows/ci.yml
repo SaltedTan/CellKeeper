@@ -135,4 +135,9 @@ jobs:
           # The App Sandbox entitlement must survive signing. Remove this check
           # only if the app is deliberately shipped without the sandbox.
           test "$(plutil -extract 'com\.apple\.security\.app-sandbox' raw -o - "${entitlements}")" = "true"
+          # Release builds must not be debuggable.
+          if plutil -extract 'com\.apple\.security\.get-task-allow' raw -o - "${entitlements}" >/dev/null 2>&1; then
+            echo "::error::Release build carries com.apple.security.get-task-allow"
+            exit 1
+          fi
           lipo -archs "${app}/Contents/MacOS/CellKeeper"

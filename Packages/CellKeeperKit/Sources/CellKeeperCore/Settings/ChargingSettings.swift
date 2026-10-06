@@ -135,6 +135,19 @@ public struct ChargingSettings: Sendable, Equatable, Codable {
         return copy
     }
 
+    /// Returns a copy with a new temperature-pause threshold (clamped to the
+    /// allowed range), lowering the resume threshold only as far as needed to
+    /// stay valid. Intended for UI controls.
+    public func withTemperaturePause(_ celsius: Double) -> ChargingSettings {
+        var copy = self
+        let range = Self.temperaturePauseRange
+        let pause = celsius.isFinite ? min(max(celsius, range.lowerBound), range.upperBound) : TemperatureProtection.default.pauseAtCelsius
+        copy.temperatureProtection.pauseAtCelsius = pause
+        let maximumResume = pause - Self.minimumTemperatureHysteresis
+        copy.temperatureProtection.resumeAtCelsius = min(max(copy.temperatureProtection.resumeAtCelsius, Self.minimumTemperatureResume), maximumResume)
+        return copy
+    }
+
     // MARK: - Codable
 
     // Decoding tolerates missing and unknown keys (falling back to defaults)

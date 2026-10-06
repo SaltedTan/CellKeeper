@@ -176,7 +176,9 @@ private struct FullChargeControl: View {
                 case .fullCharge:
                     Label("Charging to 100% until full, unplugged, or \(override.expiresAt.formatted(date: .omitted, time: .shortened))", systemImage: "arrow.up.to.line")
                 case .dischargeToLimit:
-                    Label("Discharging to \(model.settings.chargeLimit)% while plugged in. Stops at the limit, on sleep, or when unplugged.", systemImage: "minus.plus.batteryblock")
+                    let target = override.targetPercent ?? model.settings.chargeLimit
+                    let prefix = status.capabilities.availability.affectsHardware ? "Discharging" : "Simulating a discharge"
+                    Label("\(prefix) to \(target)% while plugged in. Stops at the target, on sleep, or when unplugged.", systemImage: "minus.plus.batteryblock")
                         .foregroundStyle(.orange)
                 }
                 Spacer()

@@ -103,6 +103,8 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
             "Settings are invalid (\(issues.count) issue(s)); using macOS default charging."
         case .telemetryUnavailable:
             "Battery telemetry is unavailable; using macOS default charging."
+        case .telemetryStale(let age) where age < 0:
+            "Battery telemetry is timestamped \(-age)s in the future; using macOS default charging."
         case .telemetryStale(let age):
             "Battery telemetry is \(age)s old; using macOS default charging."
         case .batteryNotPresent:
@@ -169,8 +171,8 @@ public enum OverrideEnd: String, Sendable, Equatable, CustomStringConvertible {
     case expired
     /// External power was disconnected.
     case unplugged
-    /// A safety rule ended it (sleep, temperature, lost telemetry, an
-    /// unsupported backend, or an invalid target).
+    /// A safety rule ended it (sleep, temperature, lost telemetry, a faulted
+    /// or unsupported backend, or an invalid target).
     case interrupted
 
     public var description: String {
@@ -196,6 +198,10 @@ public struct ChargeOverride: Sendable, Equatable {
     }
 
     public var kind: Kind
+    /// For a discharge session, the percentage confirmed by the user when it
+    /// started. The session never discharges below it, nor below the current
+    /// charge limit.
+    public var targetPercent: Int?
     /// Wall-clock start, for display.
     public var startedAt: Date
     /// Wall-clock expiry estimate, for display.
@@ -208,9 +214,10 @@ public struct ChargeOverride: Sendable, Equatable {
     public static let minimumDuration: TimeInterval = 60 * 60
     public static let maximumDuration: TimeInterval = 48 * 60 * 60
 
-    public init(kind: Kind, startedAt: Date, uptime: TimeInterval, duration: TimeInterval) {
+    public init(kind: Kind, targetPercent: Int? = nil, startedAt: Date, uptime: TimeInterval, duration: TimeInterval) {
         let clamped = min(max(duration.isFinite ? duration : 0, Self.minimumDuration), Self.maximumDuration)
         self.kind = kind
+        self.targetPercent = targetPercent
         self.startedAt = startedAt
         self.expiresAt = startedAt.addingTimeInterval(clamped)
         self.expiresAtUptime = uptime + clamped
@@ -220,8 +227,8 @@ public struct ChargeOverride: Sendable, Equatable {
         ChargeOverride(kind: .fullCharge, startedAt: start, uptime: uptime, duration: duration)
     }
 
-    public static func dischargeToLimit(at start: Date, uptime: TimeInterval, duration: TimeInterval = defaultDischargeDuration) -> ChargeOverride {
-        ChargeOverride(kind: .dischargeToLimit, startedAt: start, uptime: uptime, duration: duration)
+    public static func dischargeToLimit(target: Int, at start: Date, uptime: TimeInterval, duration: TimeInterval = defaultDischargeDuration) -> ChargeOverride {
+        ChargeOverride(kind: .dischargeToLimit, targetPercent: target, startedAt: start, uptime: uptime, duration: duration)
     }
 }
 

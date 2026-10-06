@@ -115,6 +115,17 @@ struct ChargingSettingsTests {
         #expect(clamped.isValid)
     }
 
+    @Test("Changing the temperature pause keeps the resume threshold valid")
+    func withTemperaturePause() {
+        for pause in stride(from: 30.0, through: 50.0, by: 1) {
+            #expect(ChargingSettings.default.withTemperaturePause(pause).isValid)
+        }
+        let lowered = ChargingSettings.default.withTemperaturePause(36)
+        #expect(lowered.temperatureProtection.pauseAtCelsius == 36)
+        #expect(lowered.temperatureProtection.resumeAtCelsius == 33)
+        #expect(ChargingSettings.default.withTemperaturePause(.nan).isValid)
+    }
+
     @Test("Resume threshold range follows the limit")
     func resumeRange() {
         #expect(ChargingSettings.resumeThresholdRange(forChargeLimit: 80) == 60...77)

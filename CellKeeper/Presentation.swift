@@ -62,18 +62,6 @@ extension ChargeControlMode {
     }
 }
 
-extension ChargingAction {
-    var title: String {
-        switch self {
-        case .enableCharging: "Enable charging"
-        case .disableCharging: "Disable charging"
-        case .requestDischarge: "Request discharge"
-        case .noAction: "No change needed"
-        case .refuse(let reason): "Not requested — \(reason)"
-        }
-    }
-}
-
 extension ExecutionRecord.Result {
     var title: String {
         switch self {
@@ -124,10 +112,6 @@ enum Format {
 
     static func milliamps(_ value: Int?) -> String {
         value.map { "\($0) mA" } ?? unavailable
-    }
-
-    static func milliampHours(_ value: Int?) -> String {
-        value.map { "\($0) mAh" } ?? unavailable
     }
 
     static func minutes(_ value: Int?) -> String? {

@@ -6,6 +6,9 @@ MARKETING_VERSION = 0.1.0
 CURRENT_PROJECT_VERSION = 1
 
 CODE_SIGN_ENTITLEMENTS = Config/CellKeeper.entitlements
+// Release builds must not carry the debugger entitlement (get-task-allow),
+// even when ad-hoc signed.
+CODE_SIGN_INJECT_BASE_ENTITLEMENTS[config=Release] = NO
 
 GENERATE_INFOPLIST_FILE = YES
 // Menu-bar-only app: no Dock icon or main menu.

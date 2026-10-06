@@ -15,9 +15,14 @@ import os
 /// - After a failed restricting request, `.normal` is requested immediately
 ///   and must itself be confirmed by read-back.
 /// - Mode-read failures count as failures. After
-///   ``maximumConsecutiveFailures`` failures the backend is faulted: only
+///   ``maximumConsecutiveFailures`` failures (a failure-free hour or a
+///   successful request resets the count) the backend is faulted: only
 ///   `.normal` is requested (actively, until confirmed) until
 ///   ``resetBackendFault()``.
+/// - A backend whose availability does not affect hardware can never report
+///   an action as applied to hardware.
+/// - ``shutdown(reason:)`` restores `.normal` and turns every later command
+///   into a no-op, so nothing queued behind it can re-apply a restriction.
 /// - If the backend's mode changes without CellKeeper requesting it, another
 ///   tool may be controlling charging: the backend is faulted immediately.
 /// - Switching backends requires a confirmed restore of `.normal` first;
@@ -25,6 +30,12 @@ import os
 /// - Restricting requests are recorded on a monotonic clock for rate limiting.
 public actor ChargeController {
     public static let maximumConsecutiveFailures = 3
+    /// A failure-free period of this length resets the failure count.
+    public static let failureMemory: TimeInterval = 60 * 60
+    /// How long a will-sleep announcement keeps sleep precautions active if
+    /// no wake notification follows (the monotonic clock keeps counting
+    /// during sleep, so a real sleep always exceeds it).
+    public static let sleepAnnouncementWindow: TimeInterval = 120
     public static let eventLimit = 200
 
     private let telemetry: any TelemetryProvider
@@ -44,6 +55,9 @@ public actor ChargeController {
     private var decision: PolicyDecision?
     private var lastExecution: ExecutionRecord?
     private var consecutiveFailures = 0
+    private var lastFailureUptime: TimeInterval?
+    private var sleepAnnouncedAtUptime: TimeInterval?
+    private var isShutDown = false
     private var restrictingRequestTimes: [TimeInterval] = []
     private var events: [ControlEvent] = []
     private var nextEventID = 0
@@ -142,6 +156,10 @@ public actor ChargeController {
     @discardableResult
     public func startFullCharge(duration: TimeInterval = ChargeOverride.defaultFullChargeDuration) async -> ControllerStatus {
         await exclusively {
+            guard settings.isManagementEnabled else {
+                record(.override, "Temporary full charge not started: charge management is off.")
+                return
+            }
             let override = ChargeOverride.fullCharge(at: now(), uptime: uptime(), duration: duration)
             activeOverride = override
             record(.override, "Temporary full charge requested (expires \(override.expiresAt.formatted(date: .omitted, time: .shortened))).")
@@ -160,7 +178,7 @@ public actor ChargeController {
                 record(.override, "Discharge not started: requires charge management on and a limit of \(ChargingPolicy.dischargeTargetRange.lowerBound)–\(ChargingPolicy.dischargeTargetRange.upperBound)%.", level: .default)
                 return
             }
-            let override = ChargeOverride.dischargeToLimit(at: now(), uptime: uptime(), duration: duration)
+            let override = ChargeOverride.dischargeToLimit(target: settings.chargeLimit, at: now(), uptime: uptime(), duration: duration)
             activeOverride = override
             record(.override, "Discharge to \(settings.chargeLimit)% requested (expires \(override.expiresAt.formatted(date: .omitted, time: .shortened))).")
             await performEvaluation(.overrideChanged)
@@ -190,6 +208,7 @@ public actor ChargeController {
             let previousName = backend.descriptor.displayName
             backend = newBackend
             consecutiveFailures = 0
+            lastFailureUptime = nil
             currentMode = nil
             ownedMode = nil
             lastExecution = nil
@@ -204,17 +223,28 @@ public actor ChargeController {
         await exclusively {
             guard consecutiveFailures > 0 else { return }
             consecutiveFailures = 0
+            lastFailureUptime = nil
             record(.safety, "Backend fault cleared by user.")
             await performEvaluation(.manual)
         }
     }
 
-    /// Requests macOS default charging (`.normal`) and confirms it. Call
-    /// before quitting.
+    /// Requests macOS default charging (`.normal`) and confirms it.
     @discardableResult
     public func restoreSystemDefaults(reason: String) async -> ControllerStatus {
         await exclusively {
             _ = await restoreNormal(reason: reason)
+        }
+    }
+
+    /// Restores `.normal`, then stops: every later command (including ones
+    /// already queued) becomes a no-op. Call when quitting.
+    @discardableResult
+    public func shutdown(reason: String) async -> ControllerStatus {
+        await exclusively {
+            _ = await restoreNormal(reason: reason)
+            isShutDown = true
+            record(.safety, "Controller shut down; no further requests will be made.")
         }
     }
 
@@ -241,12 +271,26 @@ public actor ChargeController {
             record(.telemetry, Self.describe(snapshot))
         }
 
+        let evaluationUptime = uptime()
+        switch trigger {
+        case .willSleep: sleepAnnouncedAtUptime = evaluationUptime
+        case .didWake, .launch: sleepAnnouncedAtUptime = nil
+        default: break
+        }
+        if let announced = sleepAnnouncedAtUptime, evaluationUptime - announced > Self.sleepAnnouncementWindow {
+            sleepAnnouncedAtUptime = nil
+        }
+        if !isBackendFaulted, let lastFailure = lastFailureUptime, evaluationUptime - lastFailure > Self.failureMemory {
+            consecutiveFailures = 0
+            lastFailureUptime = nil
+        }
+
         capabilities = await backend.capabilities()
         await observeBackendMode()
 
         let input = PolicyInput(
             now: now(),
-            uptime: uptime(),
+            uptime: evaluationUptime,
             settings: settings,
             snapshot: snapshot,
             activeOverride: activeOverride,
@@ -255,7 +299,7 @@ public actor ChargeController {
             memory: memory,
             isBackendFaulted: isBackendFaulted,
             recentRestrictingRequests: restrictingRequestTimes,
-            isSleepImminent: trigger == .willSleep
+            isSleepImminent: sleepAnnouncedAtUptime != nil
         )
         restrictingRequestTimes.removeAll { input.uptime - $0 >= 60 * 60 }
         let newDecision = ChargingPolicy.evaluate(input)
@@ -308,7 +352,13 @@ public actor ChargeController {
         case .noAction:
             return
         case .refuse(let reason):
-            let isRepeat = lastExecution?.result == .refused(reason)
+            let isRepeat: Bool
+            switch (lastExecution?.result, reason) {
+            case (.refused(.rateLimited)?, .rateLimited):
+                isRepeat = true
+            default:
+                isRepeat = lastExecution?.result == .refused(reason)
+            }
             lastExecution = ExecutionRecord(date: now(), action: action, result: .refused(reason))
             if !isRepeat {
                 record(.request, "Refused: \(reason)")
@@ -327,11 +377,16 @@ public actor ChargeController {
         }
         record(.request, "Requesting \(mode.rawValue) from \(backend.descriptor.displayName) backend.")
         do {
-            let outcome = try await setAndConfirm(mode)
+            var outcome = try await setAndConfirm(mode)
             // A fault persists until the user clears it, even if restoring
             // normal charging succeeds.
             if !isBackendFaulted {
                 consecutiveFailures = 0
+                lastFailureUptime = nil
+            }
+            if outcome == .applied, !capabilities.availability.affectsHardware {
+                record(.safety, "\(backend.descriptor.displayName) backend reported a hardware change but is not a hardware backend; treating it as simulated.", level: .error)
+                outcome = .simulated
             }
             switch outcome {
             case .applied:
@@ -402,6 +457,7 @@ public actor ChargeController {
 
     private func registerFailure(_ message: String, level: OSLogType = .error) {
         consecutiveFailures += 1
+        lastFailureUptime = uptime()
         record(.failure, "\(message) (consecutive failures: \(consecutiveFailures)).", level: level)
         if consecutiveFailures == Self.maximumConsecutiveFailures {
             record(.safety, "Backend marked faulted; only normal charging will be requested until the fault is cleared.", level: .fault)
@@ -415,7 +471,9 @@ public actor ChargeController {
     /// waiter, so no caller can barge ahead.
     private func exclusively(_ body: () async -> Void) async -> ControllerStatus {
         await acquire()
-        await body()
+        if !isShutDown {
+            await body()
+        }
         release()
         return status
     }

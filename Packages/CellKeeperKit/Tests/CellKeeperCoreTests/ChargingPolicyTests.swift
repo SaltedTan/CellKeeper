@@ -150,7 +150,7 @@ struct PowerSourceAndSleepTests {
 
 @Suite("Discharge sessions")
 struct DischargeSessionTests {
-    let session = ChargeOverride.dischargeToLimit(at: referenceDate, uptime: 10_000)
+    let session = ChargeOverride.dischargeToLimit(target: 80, at: referenceDate, uptime: 10_000)
 
     @Test("Above the limit on external power, an active session requests discharge")
     func dischargeRequested() {
@@ -225,10 +225,37 @@ struct DischargeSessionTests {
 
     @Test("A session with a target outside 20–95% is interrupted")
     func invalidTarget() {
-        let settings = ChargingSettings(chargeLimit: 100, resumeThreshold: 90)
-        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 100), settings: settings, override: session))
-        #expect(decision.overrideEnded != nil)
-        #expect(decision.desiredMode == .normal)
+        let settings = ChargingSettings(chargeLimit: 96, resumeThreshold: 80)
+        let outOfRange = ChargeOverride.dischargeToLimit(target: 96, at: referenceDate, uptime: 10_000)
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 98), settings: settings, override: outOfRange))
+        #expect(decision.overrideEnded == .interrupted)
+        #expect(decision.desiredMode != .forceDischarge)
+    }
+
+    @Test("Lowering the limit mid-session never discharges below the confirmed target")
+    func targetIsCaptured() {
+        let lowered = ChargingSettings(chargeLimit: 60, resumeThreshold: 55)
+        let running = ChargingPolicy.evaluate(input(snapshot(percent: 85), settings: lowered, override: session))
+        #expect(running.state == .discharging)
+        #expect(running.reason == .dischargingToLimit(percent: 85, limit: 80))
+
+        let done = ChargingPolicy.evaluate(input(snapshot(percent: 80), settings: lowered, override: session, currentMode: .forceDischarge))
+        #expect(done.overrideEnded == .completed)
+        #expect(done.desiredMode == .inhibitCharging)
+    }
+
+    @Test("Raising the limit mid-session stops discharging at the new limit")
+    func raisedLimitStopsEarlier() {
+        let raised = ChargingSettings(chargeLimit: 90, resumeThreshold: 85)
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 88), settings: raised, override: session, currentMode: .forceDischarge))
+        #expect(decision.overrideEnded == .completed)
+    }
+
+    @Test("A faulted backend interrupts the session")
+    func faultInterrupts() {
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 90), override: session, currentMode: .forceDischarge, faulted: true))
+        #expect(decision.overrideEnded == .interrupted)
+        #expect(decision.action == .enableCharging)
     }
 }
 
@@ -443,7 +470,7 @@ struct RateLimitTests {
         let toNormal = ChargingPolicy.evaluate(input(snapshot(percent: 50), currentMode: .inhibitCharging, recentRestrictingRequests: recent))
         #expect(toNormal.action == .enableCharging)
 
-        let session = ChargeOverride.dischargeToLimit(at: referenceDate, uptime: 10_000)
+        let session = ChargeOverride.dischargeToLimit(target: 80, at: referenceDate, uptime: 10_000)
         let dischargeToHold = ChargingPolicy.evaluate(input(snapshot(percent: 80), override: session, currentMode: .forceDischarge, memory: PolicyMemory(limitReached: true), recentRestrictingRequests: recent))
         #expect(dischargeToHold.action == .disableCharging)
     }

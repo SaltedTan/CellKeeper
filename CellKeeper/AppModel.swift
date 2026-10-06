@@ -93,6 +93,8 @@ final class AppModel {
 
         tasks.append(Task { [weak self, commands] in
             for await command in commands {
+                // Commands still buffered at quit must not run.
+                guard !Task.isCancelled else { break }
                 await self?.perform(command)
             }
         })
@@ -132,13 +134,14 @@ final class AppModel {
         return controller
     }
 
-    /// Asks the backend to restore macOS default charging, waiting at most
+    /// Restores macOS default charging and shuts the controller down, so no
+    /// queued command can apply a restriction afterwards. Waits at most
     /// `timeout`. Runs entirely off the main actor.
-    nonisolated static func restoreSystemDefaults(using controller: ChargeController, timeout: Duration) async {
+    nonisolated static func shutDown(_ controller: ChargeController, timeout: Duration) async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let gate = ResumeOnce(continuation)
             Task.detached {
-                await controller.restoreSystemDefaults(reason: "CellKeeper is quitting")
+                await controller.shutdown(reason: "CellKeeper is quitting")
                 gate.resume()
             }
             Task.detached {

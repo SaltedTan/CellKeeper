@@ -19,7 +19,8 @@ import Foundation
 ///    is kept and re-applied once power returns).
 /// 7. Temperature protection tripped → charging paused.
 /// 8. Temporary full charge active → charging allowed.
-/// 9. Discharge session active → run from the battery down to the limit.
+/// 9. Discharge session active → run from the battery down to the confirmed
+///    target (never below it, never below the current limit).
 /// 10. Charge limit of 100% → charging allowed.
 /// 11. Limit latch set → hold.
 /// 12. Sleep imminent at or above the resume threshold → hold, so a software
@@ -119,10 +120,13 @@ public enum ChargingPolicy {
                     activeKind = .fullCharge
                 }
             case .dischargeToLimit:
-                if percent <= limit {
+                // Stop at the confirmed target, or at the current limit if it
+                // was raised since; never below what the user confirmed.
+                let target = activeOverride.targetPercent ?? limit
+                if percent <= max(target, limit) {
                     overrideEnded = .completed
-                } else if !dischargeTargetRange.contains(limit) || input.isSleepImminent
-                    || memory.temperatureTripped || memory.belowSafetyFloor {
+                } else if !dischargeTargetRange.contains(target) || input.isSleepImminent
+                    || memory.temperatureTripped || memory.belowSafetyFloor || input.isBackendFaulted {
                     overrideEnded = .interrupted
                 } else if !input.capabilities.supports(.forceDischarge) {
                     overrideEnded = .interrupted
@@ -159,7 +163,8 @@ public enum ChargingPolicy {
         case .fullCharge:
             return make(.fullChargeOverride, .normal, .fullChargeRequested(percent: percent))
         case .dischargeToLimit:
-            return make(.discharging, .forceDischarge, .dischargingToLimit(percent: percent, limit: limit))
+            let target = max(input.activeOverride?.targetPercent ?? limit, limit)
+            return make(.discharging, .forceDischarge, .dischargingToLimit(percent: percent, limit: target))
         case nil:
             break
         }

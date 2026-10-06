@@ -38,7 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let controller = model.stopForTermination()
         Task.detached {
-            await AppModel.restoreSystemDefaults(using: controller, timeout: AppModel.terminationTimeout)
+            await AppModel.shutDown(controller, timeout: AppModel.terminationTimeout)
             RunLoop.main.perform(inModes: [.common]) {
                 MainActor.assumeIsolated {
                     NSApplication.shared.reply(toApplicationShouldTerminate: true)
