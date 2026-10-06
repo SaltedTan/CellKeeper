@@ -31,7 +31,9 @@ private struct ChargingSettingsTab: View {
             Section {
                 Toggle("Manage charging", isOn: binding(\.isManagementEnabled))
             } footer: {
-                Text("When off, CellKeeper asks for macOS default charging and only shows telemetry.")
+                Text(isNative
+                     ? "When off, CellKeeper gives back your own macOS Charge Limit if it changed it, and only shows telemetry."
+                     : "When off, CellKeeper asks for macOS default charging and only shows telemetry.")
             }
 
             Section("Charge limit") {
@@ -415,7 +417,7 @@ private struct AboutTab: View {
                 Text("Open-source battery charge management for macOS. Early development: telemetry is real; charging control is simulated unless you choose macOS Charge Limit, which lets macOS enforce your limit.")
                 Text("CellKeeper is an independent open-source project and is not affiliated with Apple, AppHouseKitchen, AlDente, or their respective developers.")
                     .font(.callout)
-                Text("Safety: CellKeeper is experimental software that may eventually interact with hardware-adjacent battery functions. It is provided under the Apache License 2.0 without warranty of any kind. Your Mac's own battery protections always remain in effect.")
+                Text("Safety: CellKeeper is experimental software. With the macOS Charge Limit backend it changes macOS's own Charge Limit; it never writes to hardware itself. It is provided under the Apache License 2.0 without warranty of any kind. Your Mac's own battery protections always remain in effect.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

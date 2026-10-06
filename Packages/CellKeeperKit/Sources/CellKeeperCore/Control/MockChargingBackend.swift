@@ -1,8 +1,8 @@
 /// A simulated backend. It records requests and tracks a simulated mode but
 /// never touches hardware, and it always reports ``ControlOutcome/simulated``.
 ///
-/// Used as the default backend while real control is unimplemented, and in
-/// tests (with failure injection).
+/// The default backend, so nothing changes until the user opts in to real
+/// control. Also used in tests (with failure injection).
 public actor MockChargingBackend: ChargingBackend {
     public nonisolated let descriptor = BackendDescriptor(
         identifier: "simulated",

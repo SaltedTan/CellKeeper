@@ -128,7 +128,7 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .invalidConfiguration(let issues):
-            "Settings are invalid (\(issues.count) issue(s)); using macOS default charging."
+            "Settings are invalid (\(issues.count) issue(s)); using macOS default charging (with macOS's Charge Limit, your own limit)."
         case .releaseRequired(.backendSwitch):
             "Switching backend: restoring macOS defaults (with macOS's Charge Limit, your own limit) first."
         case .releaseRequired(.restoreUnfinished):

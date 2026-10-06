@@ -98,7 +98,7 @@ private struct ControlSummary: View {
             }
 
             if let decision = status.decision {
-                LabeledContent("Policy", value: decision.state.title)
+                LabeledContent("Policy", value: decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS))
                 LabeledContent("Wants", value: decision.desiredMode.intentTitle(nativeLimit: status.capabilities.isEnforcedByMacOS))
                 Text(decision.reason.description)
                     .font(.caption)
@@ -119,7 +119,10 @@ private struct ControlSummary: View {
                 }
             }
             if status.isBackendFaulted {
-                Label("The control backend failed repeatedly. Only normal charging will be requested.", systemImage: "exclamationmark.triangle")
+                Label(status.capabilities.isEnforcedByMacOS
+                      ? "The control backend failed repeatedly. Until the fault is cleared, CellKeeper only gives back your own Charge Limit."
+                      : "The control backend failed repeatedly. Only normal charging will be requested.",
+                      systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)

@@ -412,7 +412,7 @@ final class AppModel {
         if status.isBackendFaulted {
             parts.append("Control backend faulted")
         } else if let decision = status.decision {
-            parts.append(decision.state.title)
+            parts.append(decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS))
         }
         return parts.joined(separator: ", ")
     }

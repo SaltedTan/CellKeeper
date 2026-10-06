@@ -64,10 +64,12 @@ extension ControllerStatus {
 }
 
 extension PolicyState {
-    var title: String {
+    /// With a native-limit backend the fail-safe is the user's own macOS
+    /// limit, never a default such as 100%.
+    func title(nativeLimit: Bool) -> String {
         switch self {
         case .unmanaged: "Not managing charging"
-        case .failSafe: "Fail-safe: macOS default charging"
+        case .failSafe: nativeLimit ? "Fail-safe: your own macOS limit" : "Fail-safe: macOS default charging"
         case .safetyFloor: "Low battery: charging allowed"
         case .onBattery: "On battery: restrictions cleared"
         case .temperaturePause: "Paused: battery temperature"
