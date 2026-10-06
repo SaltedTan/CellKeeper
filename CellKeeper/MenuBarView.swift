@@ -15,7 +15,7 @@ struct MenuBarView: View {
                 ChargeLimitControl(model: model)
                 FullChargeControl(model: model, status: status)
                 Divider()
-                TelemetryDetails(snapshot: status.snapshot)
+                TelemetryDetails(snapshot: status.snapshot, thermalState: model.thermalState, isLowPowerModeEnabled: model.isLowPowerModeEnabled)
             } else {
                 ProgressView("Reading battery…")
                     .frame(maxWidth: .infinity)
@@ -389,6 +389,8 @@ private struct FullChargeControl: View {
 
 private struct TelemetryDetails: View {
     let snapshot: BatterySnapshot?
+    let thermalState: ProcessInfo.ThermalState
+    let isLowPowerModeEnabled: Bool
 
     var body: some View {
         DisclosureGroup("Battery details") {
@@ -411,10 +413,12 @@ private struct TelemetryDetails: View {
                     if let toFull = Format.minutes(snapshot.timeToFullMinutes) {
                         row("Time to full", toFull)
                     }
+                    row("Mac thermal state", thermalState.title)
+                    row("Low Power Mode", isLowPowerModeEnabled ? "On" : "Off")
                 }
                 .font(.caption)
                 .padding(.top, 4)
-                Text("Read at \(snapshot.timestamp.formatted(date: .omitted, time: .standard)). Capacity percentage is computed by CellKeeper from full-charge and design capacity, and may differ from the figure macOS shows.")
+                Text("Read at \(snapshot.timestamp.formatted(date: .omitted, time: .standard)). Capacity percentage is computed by CellKeeper from full-charge and design capacity, and may differ from the figure macOS shows. The thermal state is macOS's reading for the whole Mac, not the battery's temperature.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)

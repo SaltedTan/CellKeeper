@@ -108,6 +108,18 @@ extension ExecutionRecord.Result {
     }
 }
 
+extension ProcessInfo.ThermalState {
+    var title: String {
+        switch self {
+        case .nominal: "Nominal"
+        case .fair: "Fair"
+        case .serious: "Serious"
+        case .critical: "Critical"
+        @unknown default: "Unknown"
+        }
+    }
+}
+
 extension PowerSource {
     var title: String {
         switch self {
