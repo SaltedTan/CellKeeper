@@ -4,9 +4,11 @@
 //
 // - CellKeeperCore: platform-neutral domain logic (telemetry model, settings
 //   validation, charging policy state machine, controller, backend protocol,
-//   mock/read-only backends). No IOKit, no hardware access.
-// - CellKeeperKit: macOS system adapters (read-only IOKit telemetry and
-//   power-source notifications). Depends on CellKeeperCore.
+//   simulated, read-only and native Charge Limit backends). No IOKit, no
+//   hardware access.
+// - CellKeeperKit: macOS system adapters (read-only IOKit telemetry,
+//   power-source notifications, the `shortcuts` and `pmset` runners, and the
+//   Charge Limit record file). Depends on CellKeeperCore.
 
 import PackageDescription
 
