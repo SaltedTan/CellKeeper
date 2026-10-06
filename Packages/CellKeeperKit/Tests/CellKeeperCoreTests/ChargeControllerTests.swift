@@ -237,6 +237,20 @@ struct ChargeControllerTests {
         #expect(woke.currentMode == .normal)
     }
 
+    @Test("The re-read after a wake does not undo a sleep announced since")
+    func postWakeRereadKeepsSleepPrecaution() async {
+        let backend = MockChargingBackend()
+        let (controller, _) = makeController(percent: 78, backend: backend)
+        await controller.evaluate(.didWake)
+        let announced = await controller.evaluate(.willSleep)
+        #expect(announced.currentMode == .inhibitCharging)
+
+        clock.advance(by: 2)
+        let reread = await controller.evaluate(.postWakeReread)
+        #expect(reread.decision?.reason == .sleepPrecaution(percent: 78, resumeThreshold: 75))
+        #expect(reread.currentMode == .inhibitCharging)
+    }
+
     @Test("A will-sleep announcement without a wake expires on the monotonic clock")
     func sleepAnnouncementExpires() async {
         let (controller, _) = makeController(percent: 78)

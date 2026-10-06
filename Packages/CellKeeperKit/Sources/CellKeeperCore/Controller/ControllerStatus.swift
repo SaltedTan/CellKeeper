@@ -12,13 +12,17 @@ public enum EvaluationTrigger: String, Sendable {
     case backendChanged
     case willSleep
     case didWake
+    /// The re-read shortly after waking, once macOS's battery estimates are
+    /// valid again. Unlike ``didWake`` it never clears a sleep announcement:
+    /// the Mac may have been told to sleep again since it woke.
+    case postWakeReread
     case manual
 
     /// True for evaluations the system started, as opposed to a user action.
     /// Only automatic evaluations wait before retrying a failed restore.
     public var isAutomatic: Bool {
         switch self {
-        case .launch, .powerSourceChanged, .periodic, .willSleep, .didWake: true
+        case .launch, .powerSourceChanged, .periodic, .willSleep, .didWake, .postWakeReread: true
         case .settingsChanged, .overrideChanged, .backendChanged, .manual: false
         }
     }
