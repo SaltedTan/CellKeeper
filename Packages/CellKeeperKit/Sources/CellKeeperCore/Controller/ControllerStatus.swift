@@ -98,6 +98,10 @@ public struct ControllerStatus: Sendable, Equatable {
     /// How many outside changes have been adopted in this session, so the
     /// app can react to each one exactly once.
     public var adoptionCount: Int
+    /// Why the latest settings change that turned management on was refused,
+    /// for the user; nil if it was not refused, or the latest change did not
+    /// turn management on.
+    public var managementRefusal: String?
     /// A backend the user switched to, waiting until `.normal` is confirmed
     /// on the current one.
     public var pendingBackend: BackendDescriptor?

@@ -300,6 +300,12 @@ private struct ManageChargingToggle: View {
         ))
         .toggleStyle(.switch)
         .controlSize(.small)
+        if let error = model.settingsError {
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 

@@ -323,6 +323,7 @@ struct NativeLimitControllerTests {
         // For example, queued in the app before it saw the adoption.
         let stale = try await controller.apply(settings: settings(limit: 85), adoptionsSeen: 0)
         #expect(!stale.settings.isManagementEnabled)
+        #expect(stale.managementRefusal?.contains("has just kept a Charge Limit changed outside it") == true)
         #expect(stale.settings.chargeLimit == 85)
         #expect(system.reading == .limit(95))
         #expect(system.runInputs == ["90"])
@@ -330,6 +331,7 @@ struct NativeLimitControllerTests {
         // A change made after seeing it is the user's explicit wish.
         let fresh = try await controller.apply(settings: settings(limit: 85), adoptionsSeen: 1)
         #expect(fresh.settings.isManagementEnabled)
+        #expect(fresh.managementRefusal == nil)
         #expect(fresh.nativeLimit?.ownerLimit == 95)
         #expect(system.reading == .limit(85))
     }
@@ -590,12 +592,14 @@ struct NativeLimitControllerTests {
         #expect(!refused.settings.isManagementEnabled)
         #expect(refused.adoptedChange?.limit == 95)
         #expect(refused.events.contains { $0.message.hasPrefix("Manage charging stays off: CellKeeper could not remove") })
+        #expect(refused.managementRefusal?.contains("could not remove its record") == true)
         #expect(system.runInputs == ["90"])
 
         store.removeFails = false
         clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
         let managing = try await controller.apply(settings: settings(limit: 90), adoptionsSeen: 1)
         #expect(managing.settings.isManagementEnabled)
+        #expect(managing.managementRefusal == nil)
         #expect(system.reading == .limit(90))
     }
 
