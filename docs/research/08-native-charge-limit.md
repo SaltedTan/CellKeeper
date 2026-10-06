@@ -24,9 +24,9 @@ Tags follow the [classification legend](README.md#classification-legend). Each f
 |---|---|---|
 | Can the shortcut take the limit as input? | **Yes, as a text file** (`shortcuts run "<name>" -i <file containing 85>`). The same value piped through standard input ran without error and **changed nothing**. | `[PUBLIC-API]` (CLI) `[VERIFIED-EXPERIMENTALLY]` |
 | Can a sandboxed app launch `/usr/bin/shortcuts`? | **Yes.** An App-Sandboxed probe with no other entitlement listed shortcuts and changed the limit 80 → 85 → 80. **No entitlement or design change is needed.** | `[PUBLIC-API]` `[VERIFIED-EXPERIMENTALLY]` (ad-hoc-signed probe) |
-| How can the current limit be read back? | With `pmset -g battlimit`, which CellKeeper uses now. It works unprivileged and inside the sandbox, and it reflected each change as soon as `shortcuts run` exited. It is undocumented, so CellKeeper uses it read-only and refuses to act on anything it does not recognise. Shortcuts also has a "Get charge limit" action (O16), which could give a documented read-back; its output has not been tested yet. | `[PRIVATE/UNDOCUMENTED][VERIFIED-EXPERIMENTALLY]` (pmset read); getter `[PUBLIC-API]`, untested |
+| How can the current limit be read back? | With `pmset -g battlimit`, which CellKeeper uses now. It works unprivileged and inside the sandbox, and it reflected each change as soon as `shortcuts run` exited. It is undocumented, so CellKeeper uses it read-only and refuses to act on anything it does not recognise. Shortcuts also has a "Get charge limit" action (O16). Run from Terminal, it returned the same value as `pmset` for 80, 85 and 100%, and plain `100` for no limit (O18), so it could replace `pmset` as a documented read-back. Not yet tried from the sandbox. | `[PRIVATE/UNDOCUMENTED][VERIFIED-EXPERIMENTALLY]` (pmset read); getter `[PUBLIC-API][VERIFIED-EXPERIMENTALLY]` (Terminal only) |
 | Is a shortcut finishing a confirmation? | **No.** A run exited 0 and changed nothing (O2). | `[VERIFIED-EXPERIMENTALLY]` |
-| Does the limit hold through sleep and restart? | **Sleep: yes, in one owner-performed run.** An 85% limit set by CellKeeper was still in effect after about 12 minutes of clamshell sleep on AC, with five maintenance wakes and a full wake, and was not re-applied (O10). **Restart: pending.** See "Sleep and restart" below. | `[VERIFIED-EXPERIMENTALLY]` (one run; read back with the undocumented report) |
+| Does the limit hold through sleep and restart? | **Sleep: yes, in one owner-performed run.** An 85% limit set by CellKeeper was still in effect after about 12 minutes of clamshell sleep on AC, with five maintenance wakes and a full wake, and was not re-applied (O10). **Restart: yes, in one owner-performed run.** The owner's own 80% was still in effect after a restart, both in `pmset -g battlimit` and in System Settings (O17). See "Sleep and restart" below. | `[VERIFIED-EXPERIMENTALLY]` (one run each) |
 
 ---
 
@@ -257,7 +257,44 @@ The owner reports that the Shortcuts action library on this Mac contains a "Get 
 - how its result reaches `shortcuts run … -o <file>`;
 - how long it takes.
 
-A shortcut containing only that action, run with `-o`, would answer these without changing anything.
+A shortcut containing only that action, run with `-o`, would answer these without changing anything. O18 does that.
+
+### O17 — The limit held through a restart (owner-performed) `[VERIFIED-EXPERIMENTALLY]`
+
+**Setup:**
+- CellKeeper was not running, and the owner's own limit of 80% was in effect, with both entries at 80 (O4).
+- The owner restarted the Mac with Apple menu › Restart. In the power log, `powerd` started again at 23:18:35.
+
+**After logging back in, before CellKeeper was opened:**
+- `pmset -g battlimit` showed both entries at 80%, reason `manualChargeLimit`.
+- The entry owned by PowerUIAgent now named PID 476 instead of 97057, as expected after a fresh boot.
+- System Settings › Battery › Charging showed 80% (owner's report).
+
+**Inferred, not observed:** macOS keeps the Charge Limit as a persistent setting. That rests on one restart, with the owner's own value. A value set by CellKeeper should behave the same way, since it is the same setting, but that was not restarted. Shutdown was not tested.
+
+### O18 — The "Get charge limit" action returns the limit as text `[PUBLIC-API][VERIFIED-EXPERIMENTALLY]`
+
+**Setup:**
+- The owner created a shortcut "CellKeeper Get Charge Limit" containing only the "Get charge limit" action.
+- It was run unsandboxed, from Terminal, a few minutes after the restart in O17.
+- 85% and 100% were set briefly with the owner's setter shortcut (O1). Afterwards 80% was set again and read back.
+
+| Limit set | Getter output (`--output-type public.plain-text`) | `pmset -g battlimit` | Getter time |
+|---|---|---|---|
+| 80 (owner's) | `80` | 80 | 0.12–0.16 s |
+| 85 | `85` | 85 | 0.15 s |
+| 100 | `100` | No battery level limits set | 0.17 s |
+
+**Other observations:**
+- **Output format:** plain ASCII digits with no line terminator. `-o -` writes the same to standard output.
+- **No file without an output type.** With `-o <file>` and no `--output-type`, the type follows the file extension. With `.txt` the file was written. With `.bin` the run exited 0 in 0.13 s and **wrote no file**. A missing output must therefore count as a failure.
+- **Cold start:** the very first run, about 4 minutes after boot with a load average near 19, took **91.7 s** (and, with `.bin`, wrote nothing). Warm runs took 0.12–0.17 s, about the same as the setter (0.19 s). CellKeeper's 20 s run deadline would have stopped that first run.
+
+**Inferred, not observed:**
+- The getter reports the configured Charge Limit.
+- It reports 100 where `pmset` reports no limit, which supports I2 for this state.
+- What it returns during a temporary state ("Charge to Full Now", "Set Until Tomorrow") is unknown. Unlike `pmset`'s entries, a single number cannot show that such a state exists.
+- Whether it works from the App Sandbox (writing its output into the container) is untested. The setter does work from the sandbox (O3).
 
 ---
 
@@ -273,7 +310,7 @@ A shortcut containing only that action, run with `-o`, would answer these withou
 
 ## Sleep and restart
 
-**Status:** sleep observed once (O10–O12); restart still pending. The design does not depend on the outcome:
+**Status:** sleep observed once (O10–O12) and restart once (O17); shutdown not tested. The design does not depend on the outcome:
 - CellKeeper re-reads the limit after every wake and at launch.
 - It treats any value it did not set as an outside change.
 - It keeps the user's own limit in a persisted record until it has been restored and read back.
@@ -285,7 +322,7 @@ Planned procedure:
    - Compare `pmset -g battlimit` before and after, and `pmset -g log` for the sleep/wake entries and their charge readings.
    - Then restore 80%.
    - In the run, the 85% was set during a dark wake just after the lid closed (O11), rather than before.
-2. **Restart (pending):** with the owner's own 80% (no CellKeeper change), restart and read `pmset -g battlimit`. Optionally repeat with a CellKeeper-set value, which also exercises the launch-time recovery path.
+2. **Restart (done, O17):** with the owner's own 80% (no CellKeeper change), restart and read `pmset -g battlimit`. Optionally repeat with a CellKeeper-set value, which also exercises the launch-time recovery path (not done).
 3. **Enforcement during sleep:** not yet observed directly. In O10, with the lid closed on AC, the charge rose to the limit and stopped there between dark-wake readings. Enforcement during sleep itself is only inferred from that. A longer sleep, and sleep on battery power, are deferred to a later observation run.
 
 ---
@@ -309,11 +346,11 @@ Planned procedure:
 
 ## Open questions
 
-1. ~~Is there a "Get Battery Charge Limit" Shortcuts action?~~ Yes (O16), as one beta-era report suggested (S3). Can its output replace `pmset -g battlimit` as a documented read-back?
+1. ~~Is there a "Get Battery Charge Limit" Shortcuts action?~~ Yes (O16), as one beta-era report suggested (S3), and its output matches `pmset` (O18). Should it replace `pmset -g battlimit` as the read-back? It would mean a second shortcut, and it cannot show temporary states. Does it work from the sandbox, and what does it return during a temporary full charge?
 2. How does "Set Until Tomorrow" (S4) appear in `battlimit`, and does macOS revert it in a way CellKeeper would see as an outside change?
 3. How does "Charge to Full Now" appear in `battlimit`: an empty list, `Terminated = 1`, or another reason?
 4. Does Optimized Battery Charging add entries with another `chargeSocLimitReason`?
-5. Restart and shutdown behaviour, and longer sleeps (above); one sleep run is recorded in O10. Apple Community users report that the limit is not enforced while the Mac is shut down (02 §4).
+5. Shutdown behaviour, longer sleeps, and a restart with a CellKeeper-set value (above); one sleep run (O10) and one restart (O17) are recorded. Apple Community users report that the limit is not enforced while the Mac is shut down (02 §4).
 6. Is the `battlimit` report stable across macOS 27.x and on macOS 26.4–26.x?
 
 ---

@@ -40,8 +40,10 @@ from the App Sandbox with no new entitlements; read-back through
 `pmset -g battlimit` (read-only); rate limiting and logging; UI for
 80/85/90/95/100 with unsupported features disabled; a limit changed in
 System Settings is kept as the user's own and management turns off (owner
-decision). Observed on the maintainer's Mac: the walk-through and one sleep
-run. Still open: restart and shutdown observations, and schedules (below).
+decision). Observed on the maintainer's Mac: the walk-through, one sleep run
+and one restart. Still open: shutdown observations, and schedules (below).
+Candidate follow-up: confirm changes through Shortcuts' documented "Get
+charge limit" action instead of `pmset -g battlimit` (note 08, O18).
 
 - Model "OS-managed limit" as a backend capability: the policy computes a
   desired native limit (80/85/90/95/100) instead of toggling charging.
