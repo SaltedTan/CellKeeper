@@ -94,6 +94,13 @@ and 26 can open it (CI enforces this).
 4. Use clear commit messages (`area: summary`, e.g. `policy: clamp override
    duration`).
 
+`main` is protected, and that includes maintainers. Every change lands
+through a pull request. The branch must be up to date with `main`, and these
+CI checks must pass: **Repository hygiene**, **macOS 26 / Xcode 26.6** and
+**macOS 15 / Xcode 16.0**. Review threads must be resolved. The Xcode 27
+preview job is informational only. Force-pushes to `main` and deleting it are
+blocked, and merged branches are deleted automatically.
+
 By contributing, you agree that your contributions are licensed under the
 Apache License 2.0 (see [LICENSE](LICENSE)).
 
