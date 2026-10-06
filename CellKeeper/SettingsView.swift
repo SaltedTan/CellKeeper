@@ -34,6 +34,7 @@ private struct ChargingSettingsTab: View {
                 Text(isNative
                      ? "When off, CellKeeper gives back your own macOS Charge Limit if it changed it, and only shows telemetry."
                      : "When off, CellKeeper asks for macOS default charging and only shows telemetry.")
+                    .footerParagraph()
             }
 
             Section("Charge limit") {
@@ -186,6 +187,7 @@ private struct ControlSettingsTab: View {
                 }
             } footer: {
                 Text("Simulated records what CellKeeper would do without changing your Mac. Read-only performs no control. macOS Charge Limit lets macOS enforce the limit you choose here; it is the only real control in this version.")
+                    .footerParagraph()
             }
 
             if let status = model.status {
@@ -441,5 +443,16 @@ private struct AboutTab: View {
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+private extension View {
+    /// Grouped forms on macOS align section footers to the trailing edge,
+    /// which suits buttons, not paragraphs.
+    func footerParagraph() -> some View {
+        font(.caption)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
