@@ -158,7 +158,7 @@ struct ChargeControllerTests {
         })
     }
 
-    @Test("A mode change made outside Cell Keeper faults the backend and restores normal charging")
+    @Test("A mode change made outside CellKeeper faults the backend and restores normal charging")
     func externalWriterDetected() async throws {
         let backend = MockChargingBackend()
         let (controller, _) = makeController(percent: 85, backend: backend)
@@ -169,7 +169,7 @@ struct ChargeControllerTests {
         let status = await controller.evaluate(.periodic)
         #expect(status.isBackendFaulted)
         #expect(status.currentMode == .normal)
-        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("outside Cell Keeper") })
+        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("outside CellKeeper") })
 
         // The fault persists: no restriction is re-applied.
         clock.advance(by: 120)

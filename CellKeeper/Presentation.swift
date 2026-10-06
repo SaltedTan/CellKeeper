@@ -25,7 +25,7 @@ extension ControlAvailability {
     var explanation: String {
         switch self {
         case .available:
-            "Cell Keeper can change charging on this Mac."
+            "CellKeeper can change charging on this Mac."
         case .experimental:
             "Hardware control is experimental on this Mac."
         case .simulated:

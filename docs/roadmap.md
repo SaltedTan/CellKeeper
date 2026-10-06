@@ -1,4 +1,4 @@
-# Cell Keeper roadmap
+# CellKeeper roadmap
 
 Milestones are ordered by risk: everything that can be done with public,
 read-only, or simulated interfaces comes before anything that changes
@@ -12,7 +12,7 @@ hardware state. Dates are deliberately omitted.
 - **No public API** inhibits charging or forces discharge, and the
   undocumented SMC keys community tools relied on are reportedly gated on
   macOS 27 firmware, even for root.
-- Therefore Cell Keeper's first real control path should **cooperate with**
+- Therefore CellKeeper's first real control path should **cooperate with**
   the native limit, and anything below 80% or "discharge to target" stays
   experimental until a mechanism is verified on real hardware.
 
@@ -29,7 +29,7 @@ hardware state. Dates are deliberately omitted.
 
 ## Milestone 2 — Native Charge Limit backend (80–100%, public interfaces only)
 
-Decided 2026-10-06: Cell Keeper's first real control builds on Apple's
+Decided 2026-10-06: CellKeeper's first real control builds on Apple's
 native Charge Limit.
 
 - Model "OS-managed limit" as a backend capability: the policy computes a
@@ -89,7 +89,7 @@ Then:
 
 - Notifications (limit reached, temperature pause, fault, override ended).
 - Launch at login (`SMAppService.mainApp`).
-- App Intents / Shortcuts actions for Cell Keeper's own controls.
+- App Intents / Shortcuts actions for CellKeeper's own controls.
 - Scheduling of overrides and limits (monotonic-clock expiries, re-evaluated
   on clock change and wake).
 - Calibration workflow (never below 15%, only within 10–40 °C, user-initiated

@@ -12,7 +12,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		C311E0000000000000000301 /* Cell Keeper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Cell Keeper.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		C311E0000000000000000301 /* CellKeeper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CellKeeper.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		C311E0000000000000000302 /* Shared.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Shared.xcconfig; sourceTree = "<group>"; };
 		C311E0000000000000000303 /* CellKeeper.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = CellKeeper.xcconfig; sourceTree = "<group>"; };
 		C311E0000000000000000304 /* CellKeeperKit */ = {isa = PBXFileReference; lastKnownFileType = wrapper; path = CellKeeperKit; sourceTree = "<group>"; };
@@ -63,7 +63,7 @@
 		C311E0000000000000000603 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				C311E0000000000000000301 /* Cell Keeper.app */,
+				C311E0000000000000000301 /* CellKeeper.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -100,7 +100,7 @@
 				C311E0000000000000000202 /* CellKeeperKit */,
 			);
 			productName = CellKeeper;
-			productReference = C311E0000000000000000301 /* Cell Keeper.app */;
+			productReference = C311E0000000000000000301 /* CellKeeper.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */

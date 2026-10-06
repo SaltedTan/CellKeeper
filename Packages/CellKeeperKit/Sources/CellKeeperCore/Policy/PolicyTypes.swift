@@ -114,7 +114,7 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
         case .managementDisabled:
             "Charge management is off; macOS manages charging."
         case .onBatteryPower:
-            "Running on battery; Cell Keeper's restrictions are cleared until power is reconnected."
+            "Running on battery; CellKeeper's restrictions are cleared until power is reconnected."
         case .belowSafetyFloor(let percent, let floor):
             "Charge \(percent)% reached the \(floor)% safety floor; charging is always allowed until it recovers."
         case .temperatureHigh(let celsius, let pauseAt):

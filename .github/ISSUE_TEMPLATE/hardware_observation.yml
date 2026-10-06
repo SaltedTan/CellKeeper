@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Observations from real hardware help decide what Cell Keeper can safely support.
+        Observations from real hardware help decide what CellKeeper can safely support.
         **Read-only observations only.** Do not write SMC keys or change system settings to produce a report,
         and never include serial numbers, lot codes, or other identifiers.
   - type: input

@@ -343,7 +343,7 @@ public actor ChargeController {
         if let owned = ownedMode, owned != observed {
             ownedMode = nil
             consecutiveFailures = max(consecutiveFailures, Self.maximumConsecutiveFailures)
-            record(.safety, "Charging mode changed outside Cell Keeper (expected \(owned.rawValue), found \(observed.rawValue)); another tool may be controlling charging. Backend faulted; restoring normal charging.", level: .fault)
+            record(.safety, "Charging mode changed outside CellKeeper (expected \(owned.rawValue), found \(observed.rawValue)); another tool may be controlling charging. Backend faulted; restoring normal charging.", level: .fault)
         }
     }
 

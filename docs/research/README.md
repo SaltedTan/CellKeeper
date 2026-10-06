@@ -1,4 +1,4 @@
-# Cell Keeper research notes
+# CellKeeper research notes
 
 These notes record what is known about battery telemetry and charging control
 on macOS, how it was established, and how sure we are. They were produced on
@@ -65,7 +65,7 @@ Some notes use their own evidence labels alongside these tags:
 
 ## Key findings (lead's synthesis)
 
-| Capability | Mechanism | Classification | Status in Cell Keeper |
+| Capability | Mechanism | Classification | Status in CellKeeper |
 |---|---|---|---|
 | Battery %, AC/battery, charging, charged, time estimates | `IOPSCopyPowerSourcesInfo` | PUBLIC-API, IOKIT, verified | Used |
 | Adapter wattage | `IOPSCopyExternalPowerAdapterDetails` | PUBLIC-API, verified | Used |
@@ -73,7 +73,7 @@ Some notes use their own evidence labels alongside these tags:
 | Cycle count, voltage, amperage | `AppleSmartBattery` registry (key constants in public `IOPM.h`) | IOKIT, verified, no privilege | Used |
 | Design cycle count, mAh capacities | `AppleSmartBattery` registry (`DesignCycleCount9C`, `BatteryData`) | PRIVATE/UNDOCUMENTED keys, IOKIT, verified | Used, all optional |
 | Battery temperature | None public on macOS 27 (IOPS key documented but absent; registry key gone, units unverified on older macOS) | — | Shown as unavailable; protection cannot trigger |
-| Health / condition / "Maximum Capacity" | Gated by a private entitlement; only undocumented `system_profiler` output | PRIVILEGED / PRIVATE | Not shown; Cell Keeper shows its own computed full-charge ÷ design ratio, labelled as such |
+| Health / condition / "Maximum Capacity" | Gated by a private entitlement; only undocumented `system_profiler` output | PRIVILEGED / PRIVATE | Not shown; CellKeeper shows its own computed full-charge ÷ design ratio, labelled as such |
 | Native Charge Limit (80–100%) | System Settings; Shortcuts action | PUBLIC (user setting), ARCH-SPECIFIC (Apple silicon, macOS 26.4+) | Not integrated yet (milestone 3) |
 | Read native limit state | `pmset -g battlimit` | PRIVATE/UNDOCUMENTED, verified read-only | Not used |
 | Inhibit charging / force discharge | Only private: SMC keys (largely gated on macOS 27 firmware), private `ChargeInhibit`/`DisableInflow` assertions (root) | PRIVATE, PRIVILEGED, SMC/HW, unverified | Not implemented; simulated |
@@ -106,7 +106,7 @@ before telemetry validation) or recorded as preconditions in
 - Specific third-party SMC write encodings and magic values were removed from
   note 02, keeping only key names and claimed behaviour (clean-room).
 - The registry `Temperature` key's units are unverified (Smart Battery
-  format vs. hundredths of a degree), so Cell Keeper does not use it (see
+  format vs. hundredths of a degree), so CellKeeper does not use it (see
   architecture decision D9).
 - Specific write values for the Intel key in note 03 were removed for the
   same clean-room reason as note 02.
