@@ -24,7 +24,7 @@ Tags follow the [classification legend](README.md#classification-legend). Each f
 |---|---|---|
 | Can the shortcut take the limit as input? | **Yes, as a text file** (`shortcuts run "<name>" -i <file containing 85>`). The same value piped through standard input ran without error and **changed nothing**. | `[PUBLIC-API]` (CLI) `[VERIFIED-EXPERIMENTALLY]` |
 | Can a sandboxed app launch `/usr/bin/shortcuts`? | **Yes.** An App-Sandboxed probe with no other entitlement listed shortcuts and changed the limit 80 → 85 → 80. **No entitlement or design change is needed.** | `[PUBLIC-API]` `[VERIFIED-EXPERIMENTALLY]` (ad-hoc-signed probe) |
-| How can the current limit be read back? | Only through `pmset -g battlimit`. It works unprivileged and inside the sandbox, and it reflected each change as soon as `shortcuts run` exited. It is undocumented, so CellKeeper uses it read-only and refuses to act on anything it does not recognise. | `[PRIVATE/UNDOCUMENTED][VERIFIED-EXPERIMENTALLY]` (read) |
+| How can the current limit be read back? | With `pmset -g battlimit`, which CellKeeper uses now. It works unprivileged and inside the sandbox, and it reflected each change as soon as `shortcuts run` exited. It is undocumented, so CellKeeper uses it read-only and refuses to act on anything it does not recognise. Shortcuts also has a "Get charge limit" action (O16), which could give a documented read-back; its output has not been tested yet. | `[PRIVATE/UNDOCUMENTED][VERIFIED-EXPERIMENTALLY]` (pmset read); getter `[PUBLIC-API]`, untested |
 | Is a shortcut finishing a confirmation? | **No.** A run exited 0 and changed nothing (O2). | `[VERIFIED-EXPERIMENTALLY]` |
 | Does the limit hold through sleep and restart? | **Sleep: yes, in one owner-performed run.** An 85% limit set by CellKeeper was still in effect after about 12 minutes of clamshell sleep on AC, with five maintenance wakes and a full wake, and was not re-applied (O10). **Restart: pending.** See "Sleep and restart" below. | `[VERIFIED-EXPERIMENTALLY]` (one run; read back with the undocumented report) |
 
@@ -247,6 +247,18 @@ From the owner's screenshot of the Shortcuts editor (Shortcuts 10.0), the shortc
 - The saved settings showed management off a few seconds later. A read right after quitting still showed the old value, which is the lag the marker covers.
 - Afterwards the test marker was removed, and the owner's 80% and saved settings were put back.
 
+### O16 — Shortcuts has a "Get charge limit" action (owner's report)
+
+The owner reports that the Shortcuts action library on this Mac contains a "Get charge limit" action. This answers open question 1.
+
+**Not tested yet:**
+- what the action returns: a number, text, or something else;
+- what it returns when there is no limit (100%), and in temporary states;
+- how its result reaches `shortcuts run … -o <file>`;
+- how long it takes.
+
+A shortcut containing only that action, run with `-o`, would answer these without changing anything.
+
 ---
 
 ## Inferences `[INFERRED/UNVERIFIED]`
@@ -297,7 +309,7 @@ Planned procedure:
 
 ## Open questions
 
-1. Is there a "Get Battery Charge Limit" Shortcuts action? One beta-era press report mentions a getter (S3); release coverage only mentions the setter (S2, S4). If a getter exists, it would give a documented read-back.
+1. ~~Is there a "Get Battery Charge Limit" Shortcuts action?~~ Yes (O16), as one beta-era report suggested (S3). Can its output replace `pmset -g battlimit` as a documented read-back?
 2. How does "Set Until Tomorrow" (S4) appear in `battlimit`, and does macOS revert it in a way CellKeeper would see as an outside change?
 3. How does "Charge to Full Now" appear in `battlimit`: an empty list, `Terminated = 1`, or another reason?
 4. Does Optimized Battery Charging add entries with another `chargeSocLimitReason`?
