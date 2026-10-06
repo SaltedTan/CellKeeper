@@ -356,6 +356,7 @@ final class AppModel {
                 if newSettings.isManagementEnabled, !newStatus.settings.isManagementEnabled, settings == newSettings {
                     settings.isManagementEnabled = false
                     try? store.save(settings)
+                    settingsError = newStatus.managementRefusal ?? "Manage charging stays off; Settings › Activity says why."
                 }
             } catch {
                 settingsError = "Settings were rejected: \(error)"

@@ -106,6 +106,7 @@ public actor ChargeController {
     /// management is turned on again.
     private var adoptedChange: AdoptedLimitChange?
     private var adoptionCount = 0
+    private var managementRefusal: String?
     private var events: [ControlEvent] = []
     private var nextEventID = 0
     private var lastEvaluation: Date?
@@ -159,6 +160,7 @@ public actor ChargeController {
             nativeLimit: nativeLimit,
             adoptedChange: adoptedChange,
             adoptionCount: adoptionCount,
+            managementRefusal: managementRefusal,
             pendingBackend: pendingBackend?.descriptor,
             decision: decision,
             lastExecution: lastExecution,
@@ -199,14 +201,18 @@ public actor ChargeController {
         }
         return await exclusively {
             var validSettings = checkedSettings
+            var refusal: String?
             if let adoptionsSeen, adoptionsSeen < adoptionCount, validSettings.isManagementEnabled, !settings.isManagementEnabled {
                 validSettings.isManagementEnabled = false
+                refusal = "Manage charging stays off: CellKeeper has just kept a Charge Limit changed outside it. Turn it on again to let CellKeeper manage the limit."
                 record(.settings, "Manage charging stays off: this change was made before CellKeeper kept a Charge Limit changed outside it.")
             }
             if validSettings.isManagementEnabled, !settings.isManagementEnabled, await !retireAdoption() {
                 validSettings.isManagementEnabled = false
+                refusal = "Manage charging stays off: CellKeeper could not remove its record of the Charge Limit it kept, so it leaves the limit as it is. Try again later."
                 record(.safety, "Manage charging stays off: CellKeeper could not remove what records the Charge Limit it kept, so it leaves the limit as it is. Try again later.", level: .error)
             }
+            managementRefusal = refusal
             guard validSettings != settings else { return }
             let previous = settings
             settings = validSettings
