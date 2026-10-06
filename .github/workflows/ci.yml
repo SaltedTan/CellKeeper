@@ -1,0 +1,138 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Least privilege: every job only reads the repository.
+permissions:
+  contents: read
+
+# `shell: bash` runs `bash --noprofile --norc -eo pipefail {0}`, so a failing
+# command inside a pipeline fails the step. Scripts must stay bash 3.2
+# compatible (the macOS images ship bash 3.2).
+defaults:
+  run:
+    shell: bash
+
+# A new push to a pull request cancels the superseded run; runs on main are
+# never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  hygiene:
+    name: Repository hygiene
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Project file format is still the Xcode 16 format
+        run: |
+          version=$(grep -E '^[[:space:]]*objectVersion = [0-9]+;' CellKeeper.xcodeproj/project.pbxproj | grep -oE '[0-9]+')
+          echo "objectVersion = ${version}"
+          if [ "${version}" != "77" ]; then
+            echo "::error file=CellKeeper.xcodeproj/project.pbxproj::objectVersion is ${version}, expected 77. A newer Xcode rewrote the project file; revert that change so Xcode 16 and 26 can still open it."
+            exit 1
+          fi
+
+      - name: Shared scheme is committed
+        run: test -f CellKeeper.xcodeproj/xcshareddata/xcschemes/CellKeeper.xcscheme
+
+      - name: No user state, build products, or signing material is tracked
+        run: |
+          if git ls-files | grep -E '(^|/)xcuserdata/|\.xcuserstate$|\.(p12|pfx|p8|cer|mobileprovision|provisionprofile|keychain|keychain-db)$|(^|/)\.env$|(^|/)Local\.xcconfig$|(^|/)\.DS_Store$|(^|/)(\.build|DerivedData)/'; then
+            echo "::error::The files listed above must not be committed."
+            exit 1
+          fi
+
+  build-test:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Reference toolchain: stable Xcode, warnings are errors.
+          - name: macOS 26 / Xcode 26.6
+            runner: macos-26
+            xcode: "26.6"
+            werror: true
+          # Oldest toolchain the project promises (Xcode 16.0 / Swift 6.0, the
+          # newest line that still runs on macOS 14). If this fails on a
+          # compiler difference, raise the documented minimum instead.
+          - name: macOS 15 / Xcode 16.0
+            runner: macos-15
+            xcode: "16.0"
+            werror: false
+          # Preview image, outside GitHub's SLA. Informational only: do not
+          # mark this check as required.
+          - name: macOS 27 / Xcode 27.0 (preview image)
+            runner: xcode-27
+            xcode: "27.0"
+            werror: false
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_${{ matrix.xcode }}.app/Contents/Developer
+      WARNINGS_AS_ERRORS: ${{ matrix.werror }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Show toolchain
+        run: |
+          if [ ! -d "${DEVELOPER_DIR}" ]; then
+            echo "::error::${DEVELOPER_DIR} does not exist on this runner image. Installed:"
+            ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          xcodebuild -version
+          swift --version
+          xcrun --sdk macosx --show-sdk-version
+
+      - name: Test CellKeeperKit (Swift Testing)
+        run: |
+          flags=()
+          if [ "${WARNINGS_AS_ERRORS}" = "true" ]; then
+            flags+=(-Xswiftc -warnings-as-errors)
+          fi
+          swift test --package-path Packages/CellKeeperKit ${flags[@]+"${flags[@]}"}
+
+      - name: Build CellKeeper (Debug and Release, ad-hoc signed)
+        run: |
+          flags=()
+          if [ "${WARNINGS_AS_ERRORS}" = "true" ]; then
+            flags+=(SWIFT_TREAT_WARNINGS_AS_ERRORS=YES)
+          fi
+          for configuration in Debug Release; do
+            xcodebuild build \
+              -quiet \
+              -project CellKeeper.xcodeproj \
+              -scheme CellKeeper \
+              -configuration "${configuration}" \
+              -destination 'generic/platform=macOS' \
+              -derivedDataPath "${RUNNER_TEMP}/DerivedData" \
+              CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
+              ${flags[@]+"${flags[@]}"}
+          done
+
+      - name: Verify signature and entitlements
+        run: |
+          app="${RUNNER_TEMP}/DerivedData/Build/Products/Release/CellKeeper.app"
+          entitlements="${RUNNER_TEMP}/signed-entitlements.plist"
+          codesign --verify --strict --verbose=2 "${app}"
+          codesign --display --entitlements - --xml "${app}" > "${entitlements}"
+          plutil -p "${entitlements}"
+          # The App Sandbox entitlement must survive signing. Remove this check
+          # only if the app is deliberately shipped without the sandbox.
+          test "$(plutil -extract 'com\.apple\.security\.app-sandbox' raw -o - "${entitlements}")" = "true"
+          lipo -archs "${app}/Contents/MacOS/CellKeeper"
