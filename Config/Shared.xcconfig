@@ -4,8 +4,10 @@
 // Config/Local.xcconfig.example to Config/Local.xcconfig (git-ignored) and
 // edit it there. Do not commit team IDs or personal identifiers.
 
-// Placeholder reverse-DNS prefix. Replace before distributing builds.
-CELLKEEPER_BUNDLE_ID_PREFIX = com.example
+// Reverse-DNS prefix based on the maintainer's GitHub Pages domain
+// (saltedtan.github.io). Forks distributing their own builds should use their
+// own prefix via Config/Local.xcconfig.
+CELLKEEPER_BUNDLE_ID_PREFIX = io.github.saltedtan
 
 MACOSX_DEPLOYMENT_TARGET = 14.0
 SDKROOT = macosx

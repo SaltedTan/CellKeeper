@@ -27,7 +27,7 @@ struct MenuBarView: View {
                     openSettings()
                 }
                 Spacer()
-                Button("Quit CellKeeper") {
+                Button("Quit Cell Keeper") {
                     NSApp.terminate(nil)
                 }
             }
@@ -225,7 +225,7 @@ private struct TelemetryDetails: View {
                 }
                 .font(.caption)
                 .padding(.top, 4)
-                Text("Read at \(snapshot.timestamp.formatted(date: .omitted, time: .standard)). Capacity percentage is computed by CellKeeper from full-charge and design capacity, and may differ from the figure macOS shows.")
+                Text("Read at \(snapshot.timestamp.formatted(date: .omitted, time: .standard)). Capacity percentage is computed by Cell Keeper from full-charge and design capacity, and may differ from the figure macOS shows.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
                     .fixedSize(horizontal: false, vertical: true)

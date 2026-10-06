@@ -1,6 +1,8 @@
 // Build settings for the CellKeeper app target.
 
-PRODUCT_NAME = CellKeeper
+// The user-facing name has a space; the Swift module name does not.
+PRODUCT_NAME = Cell Keeper
+PRODUCT_MODULE_NAME = CellKeeper
 PRODUCT_BUNDLE_IDENTIFIER = $(CELLKEEPER_BUNDLE_ID_PREFIX).CellKeeper
 MARKETING_VERSION = 0.1.0
 CURRENT_PROJECT_VERSION = 1
@@ -14,8 +16,8 @@ GENERATE_INFOPLIST_FILE = YES
 // Menu-bar-only app: no Dock icon or main menu.
 INFOPLIST_KEY_LSUIElement = YES
 INFOPLIST_KEY_LSApplicationCategoryType = public.app-category.utilities
-INFOPLIST_KEY_CFBundleDisplayName = CellKeeper
-INFOPLIST_KEY_NSHumanReadableCopyright = Copyright © 2026 The CellKeeper Contributors. Licensed under the Apache License, Version 2.0.
+INFOPLIST_KEY_CFBundleDisplayName = Cell Keeper
+INFOPLIST_KEY_NSHumanReadableCopyright = Copyright © 2026 The Cell Keeper Contributors. Licensed under the Apache License, Version 2.0.
 
 COMBINE_HIDPI_IMAGES = YES
 LD_RUNPATH_SEARCH_PATHS = $(inherited) @executable_path/../Frameworks

@@ -1,4 +1,4 @@
-# CellKeeper roadmap
+# Cell Keeper roadmap
 
 Milestones are ordered by risk: everything that can be done with public,
 read-only, or simulated interfaces comes before anything that changes
@@ -12,7 +12,7 @@ hardware state. Dates are deliberately omitted.
 - **No public API** inhibits charging or forces discharge, and the
   undocumented SMC keys community tools relied on are reportedly gated on
   macOS 27 firmware, even for root.
-- Therefore CellKeeper's first real control path should **cooperate with**
+- Therefore Cell Keeper's first real control path should **cooperate with**
   the native limit, and anything below 80% or "discharge to target" stays
   experimental until a mechanism is verified on real hardware.
 
@@ -27,11 +27,29 @@ hardware state. Dates are deliberately omitted.
 - Simulated and read-only backends; honest UI status.
 - Unit tests, CI, research notes, safety model.
 
-## Milestone 2 — macOS charging-state awareness and diagnostics
+## Milestone 2 — Native Charge Limit backend (80–100%, public interfaces only)
 
-- Detect and display whether macOS is likely holding the charge (Charge
-  Limit, Optimized Battery Charging, battery health management) using only
-  public signals; label the cause "not reported" when unknown.
+Decided 2026-10-06: Cell Keeper's first real control builds on Apple's
+native Charge Limit.
+
+- Model "OS-managed limit" as a backend capability: the policy computes a
+  desired native limit (80/85/90/95/100) instead of toggling charging.
+- Ownership: record the user's own native limit before changing it, and
+  restore *that* value on release rather than assuming 100%.
+- Apply it through a user-installed Shortcut run by the documented
+  `shortcuts` command-line tool; verify the sandbox can launch it, or document
+  the required entitlement change.
+- Detect and display whether macOS is holding the charge (Charge Limit,
+  Optimized Battery Charging, battery health management) from public signals;
+  label the cause "not reported" when unknown.
+- Verify on the maintainer's Mac, which already uses the native limit: does
+  it hold across sleep, restart, and shutdown? Does the Shortcuts action
+  accept a variable? This is a supported, user-level setting, so testing it
+  on a daily-use Mac is acceptable.
+- Use it for schedules ("100% before travel on Friday") without root.
+
+## Milestone 3 — Diagnostics and observability
+
 - Diagnostics view and exportable report (no identifiers): telemetry,
   decisions, OS build, model identifier.
 - `ProcessInfo` thermal and Low Power Mode state in the UI (system-wide, not
@@ -39,43 +57,39 @@ hardware state. Dates are deliberately omitted.
 - Unplug/replug and sleep/wake observation runs on real hardware to measure
   notification cadence (research 01, open question 1).
 
-## Milestone 3 — Delegated native-limit backend (public interfaces only)
+## Milestone 4 — Charge limits below 80% (gated)
 
-- Model "OS-managed limit" as a backend capability: the policy computes a
-  desired native limit (80/85/90/95/100) instead of toggling charging.
-- Apply it through a user-installed Shortcut run by the documented
-  `shortcuts` command-line tool; verify the sandbox can launch it, or document
-  the required entitlement change.
-- Verify on a clean Mac: does the limit hold across sleep, restart, and
-  shutdown? Does the action accept a variable?
-- Use it for schedules ("100% before travel on Friday") without root.
+Tracked in the GitHub issue "Support charge limits below 80%". No public
+mechanism exists; every candidate is private and needs root. This milestone
+is **blocked** until all of the following are available:
 
-## Milestone 4 — Hardware verification lab (no shipped writes)
+- **A dedicated test Mac** with no other battery tools. Hardware experiments
+  with private mechanisms must not run on a daily-use Mac, and the maintainer
+  currently has only one.
+- **A verified mechanism.** Follow research note 02 §7 (read-only,
+  allowlisted capability probe, then single reversible writes, then the
+  persistence matrix). Evaluate Apple's private `ChargeInhibit` power
+  assertion first (released automatically when the owning process exits),
+  and the SMC adapter-cut key only if a genuine need remains.
+- **An Apple Developer ID**, because a privileged helper must be signed and
+  notarized to be installed reliably.
 
-- Follow the protocol in research note 02 §7 on dedicated test Macs with no
-  other battery tools: read-only capability probe of a reviewed allowlist,
-  then single reversible writes, then the persistence matrix.
-- Evaluate in this order: native limit via Shortcuts; Apple's private
-  `ChargeInhibit` power assertion (released automatically when the owning
-  process exits); the SMC adapter-cut key only if a genuine need remains.
-- Publish results per model, macOS build, and firmware in `docs/research/`.
-
-## Milestone 5 — Privileged helper skeleton (only if milestone 4 finds a viable mechanism)
+Then:
 
 - `CellKeeperHelper` launch daemon registered with `SMAppService`, XPC with
   code-signing requirements on both sides, typed operations only.
-- Lease / dead-man switch, restore-on-start, restore-on-SIGTERM, uninstall
-  flow. First version can only *restore defaults* and report state.
+- Per-control leases, restore-on-start, restore-on-SIGTERM, uninstall flow;
+  first version can only *restore defaults* and report state.
 - In-process mock helper transport so contributors without a Developer ID can
   test the protocol.
-- Developer ID signing, notarization, non-sandboxed app (see research 05).
-- Experimental hardware backend behind explicit opt-in, per verified model.
+- Non-sandboxed, notarized app (see research 05); experimental backend behind
+  explicit opt-in, per verified model; every precondition in `safety.md`.
 
 ## Later
 
 - Notifications (limit reached, temperature pause, fault, override ended).
 - Launch at login (`SMAppService.mainApp`).
-- App Intents / Shortcuts actions for CellKeeper's own controls.
+- App Intents / Shortcuts actions for Cell Keeper's own controls.
 - Scheduling of overrides and limits (monotonic-clock expiries, re-evaluated
   on clock change and wake).
 - Calibration workflow (never below 15%, only within 10–40 °C, user-initiated

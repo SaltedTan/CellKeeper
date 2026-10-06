@@ -127,7 +127,7 @@ jobs:
 
       - name: Verify signature and entitlements
         run: |
-          app="${RUNNER_TEMP}/DerivedData/Build/Products/Release/CellKeeper.app"
+          app="${RUNNER_TEMP}/DerivedData/Build/Products/Release/Cell Keeper.app"
           entitlements="${RUNNER_TEMP}/signed-entitlements.plist"
           codesign --verify --strict --verbose=2 "${app}"
           codesign --display --entitlements - --xml "${app}" > "${entitlements}"
@@ -140,4 +140,4 @@ jobs:
             echo "::error::Release build carries com.apple.security.get-task-allow"
             exit 1
           fi
-          lipo -archs "${app}/Contents/MacOS/CellKeeper"
+          lipo -archs "${app}/Contents/MacOS/Cell Keeper"

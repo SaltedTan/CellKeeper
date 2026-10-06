@@ -89,7 +89,7 @@ final class AppModel {
 
     func start() {
         guard tasks.isEmpty else { return }
-        CellKeeperLog.app.notice("CellKeeper starting with \(self.backendChoice.rawValue, privacy: .public) backend")
+        CellKeeperLog.app.notice("Cell Keeper starting with \(self.backendChoice.rawValue, privacy: .public) backend")
 
         tasks.append(Task { [weak self, commands] in
             for await command in commands {
@@ -141,7 +141,7 @@ final class AppModel {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let gate = ResumeOnce(continuation)
             Task.detached {
-                await controller.shutdown(reason: "CellKeeper is quitting")
+                await controller.shutdown(reason: "Cell Keeper is quitting")
                 gate.resume()
             }
             Task.detached {

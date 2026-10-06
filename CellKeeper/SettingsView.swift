@@ -30,7 +30,7 @@ private struct ChargingSettingsTab: View {
             Section {
                 Toggle("Manage charging", isOn: binding(\.isManagementEnabled))
             } footer: {
-                Text("When off, CellKeeper asks for macOS default charging and only shows telemetry.")
+                Text("When off, Cell Keeper asks for macOS default charging and only shows telemetry.")
             }
 
             Section("Charge limit") {
@@ -57,9 +57,9 @@ private struct ChargingSettingsTab: View {
                     Button("Start Discharge") { model.startDischargeToLimit() }
                 } message: {
                     if model.status?.capabilities.availability.affectsHardware == true {
-                        Text("CellKeeper will ask the Mac to run from its battery even though it is plugged in, once, until the charge reaches \(settings.chargeLimit)%. It stops at that level, before sleep, if the battery gets warm, or when unplugged.")
+                        Text("Cell Keeper will ask the Mac to run from its battery even though it is plugged in, once, until the charge reaches \(settings.chargeLimit)%. It stops at that level, before sleep, if the battery gets warm, or when unplugged.")
                     } else {
-                        Text("The current backend only simulates this: CellKeeper will record a one-time discharge to \(settings.chargeLimit)%, but your Mac's charging will not change.")
+                        Text("The current backend only simulates this: Cell Keeper will record a one-time discharge to \(settings.chargeLimit)%, but your Mac's charging will not change.")
                     }
                 }
                 Text("A one-time session that runs the Mac from its battery while plugged in until the limit is reached. Needs a backend that supports it and a limit of \(ChargingPolicy.dischargeTargetRange.lowerBound)–\(ChargingPolicy.dischargeTargetRange.upperBound)%.")
@@ -83,7 +83,7 @@ private struct ChargingSettingsTab: View {
                     LabeledContent("Resume at", value: Format.celsius(settings.temperatureProtection.resumeAtCelsius))
                 }
                 if model.status?.snapshot?.temperatureCelsius == nil {
-                    Label("This Mac does not currently report battery temperature through the interfaces CellKeeper uses, so this protection cannot trigger.", systemImage: "info.circle")
+                    Label("This Mac does not currently report battery temperature through the interfaces Cell Keeper uses, so this protection cannot trigger.", systemImage: "info.circle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -133,7 +133,7 @@ private struct ControlSettingsTab: View {
                 }
                 .pickerStyle(.radioGroup)
             } footer: {
-                Text("No hardware charging-control backend exists in this version. CellKeeper reads battery telemetry and computes what it would do; the simulated backend records those requests without changing your Mac.")
+                Text("No hardware charging-control backend exists in this version. Cell Keeper reads battery telemetry and computes what it would do; the simulated backend records those requests without changing your Mac.")
             }
 
             if let status = model.status {
@@ -199,12 +199,12 @@ private struct AboutTab: View {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
-                Text("CellKeeper \(version)")
+                Text("Cell Keeper \(version)")
                     .font(.title2.weight(.semibold))
                 Text("Open-source battery charge management for macOS. Early development: telemetry is real; charging control is simulated.")
-                Text("CellKeeper is an independent open-source project and is not affiliated with Apple, AppHouseKitchen, AlDente, or their respective developers.")
+                Text("Cell Keeper is an independent open-source project and is not affiliated with Apple, AppHouseKitchen, AlDente, or their respective developers.")
                     .font(.callout)
-                Text("Safety: CellKeeper is experimental software that may eventually interact with hardware-adjacent battery functions. It is provided under the Apache License 2.0 without warranty of any kind. Your Mac's own battery protections always remain in effect.")
+                Text("Safety: Cell Keeper is experimental software that may eventually interact with hardware-adjacent battery functions. It is provided under the Apache License 2.0 without warranty of any kind. Your Mac's own battery protections always remain in effect.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

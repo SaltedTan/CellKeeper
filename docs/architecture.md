@@ -1,8 +1,8 @@
-# CellKeeper architecture
+# Cell Keeper architecture
 
 Status: milestone 1 (telemetry + policy engine + simulated control). Last reviewed 2026-10-06.
 
-This document describes how CellKeeper is put together and why. Research that
+This document describes how Cell Keeper is put together and why. Research that
 informed these decisions is in [`docs/research/`](research/README.md); safety
 rules are in [`docs/safety.md`](safety.md).
 
@@ -21,7 +21,7 @@ rules are in [`docs/safety.md`](safety.md).
    errors, quitting, and unplugging all converge on it.
 4. **Honest state.** Simulated actions are reported as simulated, refused
    actions as refused, and what macOS reports is shown separately from what
-   CellKeeper wants.
+   Cell Keeper wants.
 5. **Minimal machinery.** No third-party dependencies, no dependency
    injection framework, two modules plus the app.
 
@@ -174,7 +174,7 @@ even when the charge reading is unusable.
 "Restricting" means moving further from macOS defaults
 (normal → inhibit → discharge). Relaxing changes toward `.normal` are never
 rate-limited or blocked by a fault. (Research rule R13 caps *all* non-safety
-transitions; CellKeeper deliberately counts only restricting ones, treating
+transitions; Cell Keeper deliberately counts only restricting ones, treating
 every relaxing change as a safety-direction change. Total transitions are
 therefore at most about twice the restricting budget.)
 
@@ -212,7 +212,7 @@ The controller adds, independent of the backend:
   non-normal request;
 - mode-read failures count as failures;
 - external-change detection: if the backend's mode differs from the mode
-  CellKeeper last confirmed, another tool may be in control, so the backend is
+  Cell Keeper last confirmed, another tool may be in control, so the backend is
   faulted at once (research rule R27);
 - a fault after 3 failures (a successful request or a failure-free hour
   resets the count). While faulted, `.normal` is actively requested until
@@ -236,7 +236,7 @@ Implementations today:
 | Backend | Availability | Behaviour |
 |---|---|---|
 | `MockChargingBackend` (default) | `simulated` | Records requests, tracks a simulated mode, supports failure injection for tests. Never touches hardware. |
-| `ReadOnlyChargingBackend` | `unavailable` | Accepts nothing; CellKeeper still computes and shows what it would do. |
+| `ReadOnlyChargingBackend` | `unavailable` | Accepts nothing; Cell Keeper still computes and shows what it would do. |
 
 ## Future control backends
 
@@ -250,7 +250,7 @@ candidates, in the order we intend to evaluate them:
    (80–100%) on macOS 26.4+ with Apple silicon. Press reports describe a
    Shortcuts action to set it; whether an app can drive that action reliably
    is unverified. This is a different *style* of control: the OS enforces a
-   limit rather than CellKeeper toggling charging. The current mode-based
+   limit rather than Cell Keeper toggling charging. The current mode-based
    contract cannot express it, so it will need a small explicit extension:
    - a target percentage and the supported increments (80–100 in steps of 5);
    - ownership: record the user's own limit before changing it, and on
@@ -357,7 +357,7 @@ decisions.
 | D7 | No third-party dependencies | Nothing needed; avoids licence and supply-chain review |
 | D8 | Swift Testing | Modern, ships with Xcode 16+, works with plain `swift test` |
 | D9 | Registry temperature not used | Units unverified; a wrong unit would silently weaken protection |
-| D10 | Restrictions cleared on battery power | If CellKeeper dies while unplugged, the next plug-in charges normally |
+| D10 | Restrictions cleared on battery power | If Cell Keeper dies while unplugged, the next plug-in charges normally |
 | D11 | Discharge is a confirmed one-shot session, not a setting | A persistent "discharge above limit" setting could discharge a freshly topped-up battery or restart unattended (rule R20) |
 | D12 | Monotonic clock for expiry and rate limits | Wall-clock changes must not extend overrides or block restrictions (rule R22) |
 | D13 | Faults persist until the user clears them | Automatic recovery from a fault could hide a misbehaving backend and cycle restrictions |

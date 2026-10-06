@@ -1,5 +1,5 @@
 name: Bug report
-description: Something in CellKeeper does not work as documented.
+description: Something in Cell Keeper does not work as documented.
 labels: [bug]
 body:
   - type: markdown
@@ -26,7 +26,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: CellKeeper version or commit
+      label: Cell Keeper version or commit
       placeholder: 0.1.0 / abc1234
     validations:
       required: true
@@ -59,7 +59,7 @@ body:
     id: other-tools
     attributes:
       label: Other battery or charging tools installed?
-      description: Other battery managers, and macOS Charge Limit / Optimized Battery Charging, affect what CellKeeper observes.
+      description: Other battery managers, and macOS Charge Limit / Optimized Battery Charging, affect what Cell Keeper observes.
       options:
         - "No"
         - "Yes (please name them below)"
@@ -70,5 +70,5 @@ body:
     id: logs
     attributes:
       label: Activity log or unified log excerpt
-      description: Settings › Activity, or `log show --last 30m --predicate 'subsystem == "<bundle id>"'`. Remove anything you consider private.
+      description: Settings › Activity, or `log show --last 30m --predicate 'subsystem == "io.github.saltedtan.CellKeeper"'`. Remove anything you consider private.
       render: text

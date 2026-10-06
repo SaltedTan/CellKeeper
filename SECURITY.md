@@ -2,17 +2,19 @@
 
 ## Supported versions
 
-CellKeeper is pre-release software. Only the latest commit on `main` is
+Cell Keeper is pre-release software. Only the latest commit on `main` is
 supported; fixes are not backported.
 
 ## Reporting a vulnerability
 
 Please **do not** open a public issue for security problems.
 
-Report privately through GitHub's private vulnerability reporting
-("Report a vulnerability" on the repository's Security tab).
-**[MAINTAINERS: enable private vulnerability reporting, or add an alternative
-private contact here, before publishing the repository.]**
+Report privately in either of these ways:
+
+- GitHub's private vulnerability reporting: "Report a vulnerability" on the
+  [Security tab](https://github.com/SaltedTan/CellKeeper/security);
+- email to **seanthz6889@gmail.com** with "Cell Keeper security" in the
+  subject.
 
 Please include affected versions or commits, reproduction steps, and the
 impact you expect. We aim to acknowledge reports within 7 days and to agree a
@@ -20,13 +22,13 @@ disclosure timeline with you.
 
 ## Scope and threat model
 
-CellKeeper currently runs as an ordinary, App-Sandboxed user application. It
+Cell Keeper currently runs as an ordinary, App-Sandboxed user application. It
 only reads battery telemetry through public, read-only interfaces and performs
 no hardware control, so its attack surface is small.
 
 Issues we especially want to hear about:
 
-- anything that lets CellKeeper change charging or hardware state in this
+- anything that lets Cell Keeper change charging or hardware state in this
   version, or report a simulated action as a real one;
 - leaks of device identifiers (serial numbers etc.) into logs, files, or the
   UI;

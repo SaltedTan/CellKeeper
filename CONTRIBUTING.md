@@ -1,6 +1,6 @@
-# Contributing to CellKeeper
+# Contributing to Cell Keeper
 
-Thank you for helping. CellKeeper touches battery charging, so we hold
+Thank you for helping. Cell Keeper touches battery charging, so we hold
 contributions to a few rules that matter more here than in most apps. Please
 read this whole page before opening a pull request.
 
@@ -8,7 +8,7 @@ read this whole page before opening a pull request.
 
 ### 1. Clean-room development
 
-CellKeeper is an independent implementation. Contributions must not include:
+Cell Keeper is an independent implementation. Contributions must not include:
 
 - source code, assets, icons, screenshots, text, UI layouts, or branding from
   other battery-management applications (open-source or proprietary);

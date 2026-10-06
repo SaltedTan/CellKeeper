@@ -1,8 +1,8 @@
 // Copy to Config/Local.xcconfig (git-ignored) to override signing and
 // identity for your own builds. Never commit Local.xcconfig.
 
-// Your reverse-DNS prefix, e.g. org.yourname
-// CELLKEEPER_BUNDLE_ID_PREFIX = org.example
+// Your reverse-DNS prefix, e.g. io.github.yourname
+// CELLKEEPER_BUNDLE_ID_PREFIX = io.github.yourname
 
 // Your Apple Developer team ID and signing identity.
 // DEVELOPMENT_TEAM = ABCDE12345

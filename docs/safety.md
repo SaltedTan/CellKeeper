@@ -1,6 +1,6 @@
-# CellKeeper safety model
+# Cell Keeper safety model
 
-Battery charging is hardware-adjacent. This document states what CellKeeper
+Battery charging is hardware-adjacent. This document states what Cell Keeper
 does and does not do to stay safe, which safeguards exist today, and which are
 required before any real control backend may be enabled. The underlying
 analysis, sources, and full rule set (R1–R33) are in
@@ -8,7 +8,7 @@ analysis, sources, and full rule set (R1–R33) are in
 
 ## Current status (milestone 1)
 
-**CellKeeper does not change how your Mac charges.** It reads battery
+**Cell Keeper does not change how your Mac charges.** It reads battery
 telemetry through public, read-only interfaces and computes what it *would*
 do. The default control backend is simulated: requests are recorded and
 labelled "Simulated — hardware unchanged". The read-only backend performs no
@@ -21,9 +21,9 @@ are always in effect and cannot be overridden by CellKeeper.
 
 ## The safe state
 
-The **safe state** is `ChargeControlMode.normal`: CellKeeper has no
+The **safe state** is `ChargeControlMode.normal`: Cell Keeper has no
 restriction in effect and macOS/firmware decide charging. Every failure path
-converges on it. CellKeeper only ever *restricts* charging relative to macOS
+converges on it. Cell Keeper only ever *restricts* charging relative to macOS
 defaults (inhibit charging, or run from the battery while plugged in); it never
 commands charging that macOS would withhold and never writes charge voltage,
 current, or protection settings.
@@ -38,7 +38,7 @@ All of these are enforced in `CellKeeperCore` and covered by unit tests.
 | Missing, stale (read > 60 s ago, or the driver's own update time > 180 s old), future-dated telemetry, unknown power source, no battery → fail safe | R1, R9, R10 | `ChargingPolicy.staleness`, `BatteryTelemetryParser` |
 | Implausible telemetry values discarded (percent, temperature −20…80 °C, voltage, current, overflow-safe parsing) | R10 | `BatteryTelemetryParser` |
 | Safety floor: at ≤ 10% charging is always allowed, overriding temperature protection and every other rule, until the charge recovers to 15% | R5 | `ChargingPolicy.nextFloorLatch` |
-| On battery power, CellKeeper's restrictions are cleared, so a later plug-in charges normally even if CellKeeper has stopped | R18 | `ChargingPolicy` (`onBattery`) |
+| On battery power, Cell Keeper's restrictions are cleared, so a later plug-in charges normally even if Cell Keeper has stopped | R18 | `ChargingPolicy` (`onBattery`) |
 | Overrides always expire, on a monotonic clock that wall-clock changes cannot affect: a temporary full charge at 100%/fully charged, on unplug, or after 1–48 h (default 12 h); expiry and unplug are processed even when the charge reading is unusable | R22, R23 | `ChargeOverride`, `ChargingPolicy` |
 | Temperature protection with hysteresis; an unknown temperature can never hold charging off | R21 | `ChargingPolicy.nextTemperatureLatch` |
 | Discharge is a confirmed, one-shot session, never a setting. Its target (20–95%) is captured when confirmed; it never goes below that target or the current limit. It ends at the target, on unplug, before sleep, on temperature pause, on lost telemetry, on a backend fault, or if unsupported, and never restarts by itself | R6, R16, R20 | `ChargeOverride.dischargeToLimit`, `ChargingPolicy`, `SettingsView` |
@@ -48,7 +48,7 @@ All of these are enforced in `CellKeeperCore` and covered by unit tests.
 | After a failed restricting request, normal charging is requested immediately and confirmed | R1 | `ChargeController` |
 | Mode-read failures count as failures; 3 failures fault the backend (a successful request or a failure-free hour resets the count). While faulted, normal charging is actively requested until confirmed, nothing else is requested, and the fault persists until the user clears it | R11 | `ChargeController`, `ChargingPolicy.action` |
 | A backend that does not affect hardware can never report an action as applied to hardware | R30 | `ChargeController.request` |
-| A mode change CellKeeper did not make faults the backend at once and restores normal charging | R27 | `ChargeController.observeBackendMode` |
+| A mode change Cell Keeper did not make faults the backend at once and restores normal charging | R27 | `ChargeController.observeBackendMode` |
 | Backend switch only after normal charging is confirmed on the old backend; otherwise refused | R4 | `ChargeController.switchBackend` |
 | On quit the controller restores normal charging and then shuts down; commands still queued become no-ops (deadlock-free) | R19 | `ChargeController.shutdown`, `AppDelegate` |
 | All commands serialized under one FIFO lock; user commands applied in order | — | `ChargeController`, `AppModel` command queue |
@@ -79,9 +79,10 @@ hardware writes without them.
 1. **Verified mechanism per model.** Run the verification protocol in research
    note 02 §7 (a read-only, allowlisted capability probe, then single
    reversible writes) on a dedicated test Mac with no other battery tools
-   installed, including the persistence matrix (sleep,
-   wake, restart, shutdown, helper crash, unplug). Record the results in
-   `docs/research/`.
+   installed. Private mechanisms are never tried on a daily-use Mac; the
+   maintainer currently has no separate test Mac, so this is blocked. Include
+   the persistence matrix (sleep, wake, restart, shutdown, helper crash,
+   unplug), and record the results in `docs/research/`.
 2. **Allowlist, never probe.** Writes only to keys or interfaces on a reviewed
    per-model, per-firmware allowlist with expected type and size. Unknown
    hardware or a changed OS/firmware build means monitor-only (R12, R15).
@@ -139,7 +140,7 @@ hardware writes without them.
   real backend (precondition 6). With simulated control, an extra transition
   has no physical effect.
 - **Failure handling (R11).** R11 asks for one retry and then a one-hour
-  backoff. CellKeeper instead restores normal charging after every failed
+  backoff. Cell Keeper instead restores normal charging after every failed
   restricting request and faults the backend after 3 failures; the fault then
   persists until the user clears it.
 - **Freshness (R9).** Readings must be ≤ 60 s old by read time, and the
@@ -149,7 +150,7 @@ hardware writes without them.
   policy in fail-safe until the driver refreshes.
 - **Floor and resume.** The floor is fixed at 10% (R5 allows 5–20%).
 
-## What CellKeeper will never do
+## What Cell Keeper will never do
 
 - Write to unknown SMC keys or probe keys by writing values.
 - Change charge voltage, charge current, gauge configuration, or protection
@@ -160,7 +161,7 @@ hardware writes without them.
 
 ## If charging does not resume
 
-Milestone 1 cannot affect charging, so CellKeeper cannot be the cause of a
+Milestone 1 cannot affect charging, so Cell Keeper cannot be the cause of a
 charging problem today. If your Mac shows "Not Charging", macOS's own Charge
 Limit, Optimized Battery Charging, battery health management, a weak adapter,
 or another battery tool may be responsible; see Apple's guidance on the
@@ -170,7 +171,7 @@ before such a backend ships (R31).
 
 ## Disclaimer
 
-CellKeeper is experimental software provided under the Apache License 2.0,
+Cell Keeper is experimental software provided under the Apache License 2.0,
 **without warranty of any kind**. Battery behaviour differs between Mac
 models and macOS versions, and future control features depend on undocumented
 interfaces that Apple may change at any time. Use at your own risk.

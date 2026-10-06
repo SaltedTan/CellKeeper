@@ -5,7 +5,7 @@ public struct ReadOnlyChargingBackend: ChargingBackend {
     public let descriptor = BackendDescriptor(
         identifier: "read-only",
         displayName: "Read-only",
-        summary: "Shows telemetry and what CellKeeper would do. No control is attempted."
+        summary: "Shows telemetry and what Cell Keeper would do. No control is attempted."
     )
 
     public let reason: String
