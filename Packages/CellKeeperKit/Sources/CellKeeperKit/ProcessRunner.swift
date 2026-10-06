@@ -35,9 +35,11 @@ enum ProcessRunnerError: Error, Sendable, Equatable, CustomStringConvertible {
 ///
 /// One thread polls both output streams and the process: at most
 /// ``outputLimit`` bytes per stream are kept (the rest is read and
-/// discarded), the tool is stopped (SIGTERM, then SIGKILL) at the deadline or
-/// when the calling task is cancelled, and the runner never waits more than
-/// ``streamGracePeriod`` for streams a descendant keeps open.
+/// discarded), each poll reads a bounded amount so a flood of output cannot
+/// delay the deadline or cancellation checks, the tool is stopped (SIGTERM,
+/// then SIGKILL) at the deadline or when the calling task is cancelled, and
+/// the runner never waits more than ``streamGracePeriod`` for streams a
+/// descendant keeps open.
 enum ProcessRunner {
     /// Output beyond this many bytes per stream is discarded.
     static let outputLimit = 256 * 1024
@@ -124,6 +126,11 @@ enum ProcessRunner {
             if stoppedForCancellation { throw CancellationError() }
             throw ProcessRunnerError.timedOut(seconds: Int(timeout.rounded(.up)))
         }
+        if cancellation.isCancelled { throw CancellationError() }
+        // A tool that finished after the deadline has not met it.
+        if let exited = exitedAt, exited > deadline {
+            throw ProcessRunnerError.timedOut(seconds: Int(timeout.rounded(.up)))
+        }
         return ProcessResult(
             status: process.terminationStatus,
             standardOutput: streams[0].text,
@@ -150,9 +157,12 @@ private final class CapturedStream {
 
     var text: String { String(decoding: data, as: UTF8.self) }
 
+    /// The most read from one stream in one poll.
+    static let readsPerPoll = 4
+
     func drain() {
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        while !isAtEnd {
+        for _ in 0..<Self.readsPerPoll where !isAtEnd {
             let count = buffer.withUnsafeMutableBytes { read(descriptor, $0.baseAddress, $0.count) }
             if count > 0 {
                 let room = ProcessRunner.outputLimit - data.count

@@ -11,6 +11,8 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
         case hasNoEffect
         /// The shortcut reports an error.
         case fails
+        /// The shortcut sets the limit, but the next read fails.
+        case appliesButNextReadFails
     }
 
     struct FakeError: Error, CustomStringConvertible {
@@ -92,9 +94,12 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
             _runInputs.append(input)
             let behaviour = _nextRuns.isEmpty ? _runBehaviour : _nextRuns.removeFirst()
             switch behaviour {
-            case .applies:
+            case .applies, .appliesButNextReadFails:
                 guard let percent = Int(input) else { throw FakeError(description: "not a number") }
                 _reading = percent >= 100 ? .noLimit : .limit(percent)
+                if behaviour == .appliesButNextReadFails {
+                    _failingReads += 1
+                }
             case .hasNoEffect:
                 break
             case .fails:
@@ -179,7 +184,7 @@ func makeNativeBackend(
 
 /// Writes an ownership record the way a previous session would have.
 func storeOwnershipRecord(owner: Int, target: Int, pending: Int? = nil, in store: InMemoryRecordStore) {
-    let pendingField = pending.map { #","pendingTarget":\#($0)"# } ?? ""
+    let pendingField = pending.map { #","pendingTargets":[\#($0)]"# } ?? ""
     let json = #"{"ownerLimit":\#(owner),"target":\#(target)\#(pendingField),"recordedAt":0}"#
     store.data = Data(json.utf8)
 }

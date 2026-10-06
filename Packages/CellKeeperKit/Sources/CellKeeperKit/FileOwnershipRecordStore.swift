@@ -36,9 +36,15 @@ public struct FileOwnershipRecordStore: OwnershipRecordStore {
             .appendingPathComponent("native-charge-limit-ownership.json"))
     }
 
+    /// Nil only if the file genuinely does not exist; any other failure
+    /// (for example a permission problem) is an error, never "no record".
     public func load() throws -> Data? {
-        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
-        return try Data(contentsOf: url)
+        do {
+            return try Data(contentsOf: url)
+        } catch {
+            if Self.isMissingFile(error) { return nil }
+            throw error
+        }
     }
 
     public func save(_ data: Data) throws {
@@ -58,9 +64,22 @@ public struct FileOwnershipRecordStore: OwnershipRecordStore {
     }
 
     public func remove() throws {
-        guard FileManager.default.fileExists(atPath: url.path) else { return }
-        try FileManager.default.removeItem(at: url)
+        guard unlink(url.path) == 0 else {
+            if errno == ENOENT { return }
+            throw FileOwnershipRecordStoreError.system(operation: "unlink", errno: errno)
+        }
         try Self.flushDirectory(url.deletingLastPathComponent())
+    }
+
+    private static func isMissingFile(_ error: any Error) -> Bool {
+        if let cocoa = error as? CocoaError, cocoa.code == .fileReadNoSuchFile || cocoa.code == .fileNoSuchFile {
+            return true
+        }
+        if let posix = (error as NSError).userInfo[NSUnderlyingErrorKey] as? NSError,
+           posix.domain == NSPOSIXErrorDomain, posix.code == Int(ENOENT) {
+            return true
+        }
+        return false
     }
 
     private static func writeDurably(_ data: Data, to file: URL) throws {

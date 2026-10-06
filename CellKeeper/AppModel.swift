@@ -174,27 +174,27 @@ final class AppModel {
     /// queued command can apply a restriction afterwards. Waits at most
     /// `timeout`, then reports whether anything may be left changed. Runs
     /// entirely off the main actor.
+    ///
+    /// The durable record of the user's own Charge Limit decides the outcome,
+    /// whether or not the restore finished in time: it is deleted only after
+    /// a confirmed restore, so while it exists the limit may still be
+    /// CellKeeper's.
     nonisolated static func shutDown(_ controller: ChargeController, timeout: Duration) async -> TerminationOutcome {
-        let finished = await withCheckedContinuation { (continuation: CheckedContinuation<ControllerStatus?, Never>) in
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let gate = ResumeOnce(continuation)
             Task.detached {
-                gate.resume(returning: await controller.shutdown(reason: "CellKeeper is quitting"))
+                await controller.shutdown(reason: "CellKeeper is quitting")
+                gate.resume(returning: ())
             }
             Task.detached {
                 try? await Task.sleep(for: timeout)
-                gate.resume(returning: nil)
+                gate.resume(returning: ())
             }
         }
-        // If the restore is still running, the latest status is still the
-        // best evidence of what may be left changed.
-        var status = finished
-        if status == nil {
-            status = await controller.status
-        }
-        guard let native = status?.nativeLimit, native.hasUnresolvedOwnership else {
+        guard let outstanding = NativeChargeLimitBackend.outstandingRecord(in: FileOwnershipRecordStore.default) else {
             return .restored
         }
-        return .unresolved(ownerLimit: native.ownerLimit)
+        return .unresolved(ownerLimit: outstanding.ownerLimit)
     }
 
     // MARK: - User intents

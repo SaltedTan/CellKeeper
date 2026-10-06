@@ -302,7 +302,7 @@ private struct NativeLimitSetupSection: View {
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
-            Text("CellKeeper reads the limit with “pmset -g battlimit”, an undocumented, read-only report that a macOS update could change. If CellKeeper cannot read or recognise it, it makes no changes. You can always set the limit yourself in System Settings › Battery › Charging.")
+            Text("CellKeeper reads the limit with “pmset -g battlimit”, an undocumented, read-only report that a macOS update could change. If CellKeeper cannot read or recognise it, it sets no new limit; it still tries to give back your own recorded limit, and reports that as unconfirmed until it reads it back. You can always set the limit yourself in System Settings › Battery › Charging.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

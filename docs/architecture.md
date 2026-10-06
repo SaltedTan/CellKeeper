@@ -111,9 +111,11 @@ Requirement → location:
   - Quitting cancels the command task, so an in-flight tool run is stopped
     at once and the restore is not stuck behind it.
   - The 10 s bound only limits how long quitting *waits*.
-  - If the restore of the user's own Charge Limit is not confirmed by then,
-    an alert says which value to set by hand before the app exits; the next
-    launch also retries (see "Native Charge Limit backend").
+  - The durable record of the user's own Charge Limit decides the outcome:
+    it is deleted only after a confirmed restore. If it still exists (also
+    when the wait ran out), an alert says which value to set by hand before
+    the app exits, and the next launch retries (see "Native Charge Limit
+    backend").
 - **Time.** Wall-clock time is used for telemetry age and display. Override
   expiry and rate limiting use a monotonic clock (`ContinuousClock`, which
   keeps counting during sleep), so changing the system clock cannot extend a
@@ -301,7 +303,9 @@ The controller adds, independent of the backend:
 - if a read fails while CellKeeper holds a non-normal state, `.normal` is
   requested (`ReleaseReason.stateUnverified`). The last confirmed mode stays
   the expectation, so a reading that differs from it after reads recover is
-  still treated as an outside change;
+  still treated as an outside change. Modes CellKeeper requested since then
+  without being able to confirm them are remembered too: finding one of them
+  confirms it rather than counting as an outside change;
 - a backend that finds an outside change itself, just before writing
   (`BackendError.changedOutside`), faults at once, like the controller's own
   detection;
@@ -338,17 +342,17 @@ the real system.
 | Concern | Mechanism | Classification |
 |---|---|---|
 | Change the limit | `shortcuts run "CellKeeper Set Charge Limit" -i <file>`. The file holds only the digits, in the container's temporary directory; 20 s deadline. The shortcut wraps Apple's “Set Battery Charge Limit” action. | `[PUBLIC-API]` CLI, user-created shortcut, verified on one Mac |
-| Check the shortcut exists | `shortcuts list` (cached for 5 minutes once found; checked again after any failed run) | `[PUBLIC-API]` |
+| Check the shortcut exists | `shortcuts list` before taking over (cached for 5 minutes once found; checked again after any failed run). Skipped while CellKeeper owns the limit, so a restore never waits for it; a missing shortcut then shows up as a failed run | `[PUBLIC-API]` |
 | Read the limit back | `pmset -g battlimit`, fixed arguments, strict parser (`ChargeLimitReportParser`). Anything unrecognised means "do not change anything". | `[PRIVATE/UNDOCUMENTED]`, read-only |
-| Record of the user's own limit | JSON file `Application Support/CellKeeper/native-charge-limit-ownership.json` in the app's container, holding the own limit, the last confirmed target, a pending target, and the time. Each save writes a temporary file, flushes it with `F_FULLFSYNC`, renames it into place, flushes the directory, and reads it back; if any step fails, nothing is changed. Cleared only after a confirmed restore. | — |
+| Record of the user's own limit | JSON file `Application Support/CellKeeper/native-charge-limit-ownership.json` in the app's container, holding the own limit, the last confirmed target, the targets being set but not yet confirmed, whether a restore is in progress, and the time. A missing file means no record; any other failure to read it counts as an unreadable record. Each save writes a temporary file, flushes it with `F_FULLFSYNC`, renames it into place, flushes the directory, and reads it back; if any step fails, nothing is changed. Cleared only after a confirmed restore. | — |
 | Platform | Apple silicon (`hw.optional.arm64`), macOS 26.4+, both tools present | `[PUBLIC-API]` |
 
 Lifecycle:
 
 1. **Take-over.** When the policy first wants `nativeLimit(n)`, the backend
    reads macOS's limit (say 80%) and durably stores
-   `{own: 80, target: 80, pending: n}`. Only then does it run the shortcut
-   with `n`. After reading `n` back, it stores `{target: n}`.
+   `{own: 80, target: 80, pending: [n]}`. Only then does it run the shortcut
+   with `n`. After reading `n` back, it stores `{target: n, pending: []}`.
    - If macOS already shows `n`, nothing runs and the request is
      `unchanged`. CellKeeper still records ownership, so an outside change
      is noticed later.
@@ -357,19 +361,23 @@ Lifecycle:
      unavailable and changes nothing, because "no limit" could also be a
      temporary state.
 2. **Holding.** Each evaluation reads the limit; so does the backend before
-   every change. A value other than the confirmed or pending target faults
-   the backend, and the user's own limit is restored once.
+   every change. A value CellKeeper did not set (not the confirmed target, a
+   pending one, or the user's limit during a restore) faults the backend, and
+   the user's own limit is restored once. A pending value that turns out to
+   be in effect becomes the confirmed target.
 3. **Release.** Any of these requests `.normal`: management off, quit, a
    backend switch (pending until confirmed), any failed request, a state
    that could not be read back, or a fault.
-   - The backend runs the shortcut with the recorded value (even if it
-     could not read the setting first) and reads it back.
-   - Only then does it delete the record.
+   - The backend marks the restore as in progress, runs the shortcut with
+     the recorded value (even if it could not read the setting first), and
+     reads it back.
+   - Only then does it delete the record. If the read-back failed but a
+     later read shows the user's limit, the restore counts as done.
    - If macOS already shows that value, nothing runs.
 4. **Crash or kill.** The record survives. At the next launch:
    - macOS showing the recorded own limit means a restore completed late
      (or the user restored it), so the record is cleared.
-   - macOS showing the target, or the pending target (which is then
+   - macOS showing the target, or a pending target (which is then
      confirmed), means CellKeeper is still responsible and continues as
      before.
    - Anything else is an outside change: fault, then restore.
@@ -425,8 +433,9 @@ verification protocol in research note 02 §7 and the rules in `safety.md`.
 
 - **Undocumented read-back.** `pmset -g battlimit` is not in pmset(1) and
   may change in any macOS update. If its output is not recognised, the
-  backend becomes unavailable (with nothing recorded) or its requests fail
-  (while it owns the limit). It never guesses. Every pmset run also attempts
+  backend becomes unavailable (with nothing recorded), or its requests fail
+  while it owns the limit. A restore of the recorded limit is still
+  attempted, and stays unconfirmed until it reads back. It never guesses. Every pmset run also attempts
   to open the SMC user client; the App Sandbox denies this (note 08, O7).
 - **"No limit" needs the user.** The report showed a 100% limit as "no
   limit", but a temporary state such as "Charge to Full Now" might look the

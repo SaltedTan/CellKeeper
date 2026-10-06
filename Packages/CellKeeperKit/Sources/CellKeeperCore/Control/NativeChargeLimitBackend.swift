@@ -82,13 +82,43 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         var ownerLimit: Int
         /// The limit CellKeeper last confirmed.
         var target: Int
-        /// A limit CellKeeper started setting but has not confirmed. Either
-        /// it or ``target`` may be in effect after an interrupted change.
-        var pendingTarget: Int?
+        /// Limits CellKeeper started setting since ``target`` was confirmed.
+        /// Any of them may be in effect after an interrupted change.
+        var pendingTargets: Set<Int> = []
+        /// CellKeeper started restoring ``ownerLimit`` but has not confirmed it.
+        var isRestoring = false
         var recordedAt: Date
 
+        init(ownerLimit: Int, target: Int, recordedAt: Date) {
+            self.ownerLimit = ownerLimit
+            self.target = target
+            self.recordedAt = recordedAt
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case ownerLimit, target, pendingTargets, isRestoring, recordedAt
+        }
+
+        init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            ownerLimit = try container.decode(Int.self, forKey: .ownerLimit)
+            target = try container.decode(Int.self, forKey: .target)
+            pendingTargets = try container.decodeIfPresent(Set<Int>.self, forKey: .pendingTargets) ?? []
+            isRestoring = try container.decodeIfPresent(Bool.self, forKey: .isRestoring) ?? false
+            recordedAt = try container.decode(Date.self, forKey: .recordedAt)
+        }
+
+        /// True if `percent` may be in effect because of CellKeeper.
         func accepts(_ percent: Int) -> Bool {
-            percent == target || percent == pendingTarget
+            percent == target || pendingTargets.contains(percent) || (isRestoring && percent == ownerLimit)
+        }
+
+        /// `percent` was read back: it is now the only value CellKeeper has
+        /// in effect.
+        mutating func confirm(_ percent: Int) {
+            target = percent
+            pendingTargets = []
+            isRestoring = false
         }
     }
 
@@ -143,14 +173,25 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         self.record = Self.loadRecord(from: store)
     }
 
-    /// True if `store` holds a record, readable or not: an earlier session
-    /// may have left macOS's Charge Limit changed.
-    public static func hasOutstandingRecord(in store: any OwnershipRecordStore) -> Bool {
-        do {
-            return try store.load() != nil
-        } catch {
-            return true
+    /// A record in a store, read without a backend.
+    public struct OutstandingRecord: Sendable, Equatable {
+        /// The user's own limit, or nil if the record cannot be read.
+        public var ownerLimit: Int?
+    }
+
+    /// The record in `store`, readable or not, or nil if there is none. A
+    /// record means CellKeeper may have left macOS's Charge Limit changed.
+    public static func outstandingRecord(in store: any OwnershipRecordStore) -> OutstandingRecord? {
+        switch loadRecord(from: store) {
+        case .none: nil
+        case .owned(let owned): OutstandingRecord(ownerLimit: owned.ownerLimit)
+        case .unreadable: OutstandingRecord(ownerLimit: nil)
         }
+    }
+
+    /// True if `store` holds a record, readable or not.
+    public static func hasOutstandingRecord(in store: any OwnershipRecordStore) -> Bool {
+        outstandingRecord(in: store) != nil
     }
 
     // MARK: - ChargingBackend
@@ -160,8 +201,15 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         if let platformIssue {
             return .unavailable(platformIssue, style: style)
         }
-        if case .unreadable = record {
+        switch record {
+        case .unreadable:
             return .unavailable("CellKeeper's record of your own Charge Limit cannot be read, so it does not know what to restore. Set your limit in System Settings › Battery › Charging, then discard the record in Settings › Control.", style: style)
+        case .owned:
+            // Restoring must not wait for, or depend on, listing shortcuts; a
+            // missing shortcut shows up as a failed run.
+            return .nativeLimit(availability: .experimental, steps: Self.supportedLimits)
+        case .none:
+            break
         }
         if let checked = shortcutConfirmedAtUptime, uptime() - checked < Self.shortcutCheckValidity {
             return .nativeLimit(availability: .experimental, steps: Self.supportedLimits)
@@ -217,11 +265,17 @@ public actor NativeChargeLimitBackend: ChargingBackend {
                     return .normal
                 }
             }
-            if let pending = owned.pendingTarget, percent == pending {
-                // An interrupted change took effect after all.
-                owned.target = pending
-                owned.pendingTarget = nil
-                try? saveRecord(owned)
+            if owned.isRestoring, percent == owned.ownerLimit {
+                // A restore that could not be confirmed took effect.
+                clearRecord(reason: "your own limit of \(owned.ownerLimit)% is now in effect")
+                return .normal
+            }
+            if owned.pendingTargets.contains(percent) {
+                // An interrupted change took effect after all. The stored
+                // record already accepts this value, so a failed save loses
+                // nothing.
+                owned.confirm(percent)
+                saveRecordBestEffort(owned)
             }
             return .nativeLimit(percent: percent)
         }
@@ -311,30 +365,23 @@ public actor NativeChargeLimitBackend: ChargingBackend {
                 throw BackendError.changedOutside(expected: .nativeLimit(percent: existing.target), found: .nativeLimit(percent: currentPercent))
             }
             owned = existing
-            owned.target = currentPercent
+            owned.confirm(currentPercent)
         }
 
         if currentPercent == percent {
-            owned.target = percent
-            owned.pendingTarget = nil
             try saveRecord(owned)
             return .unchanged
         }
         // The record, including the value about to be set, is durable before
         // anything changes.
-        owned.pendingTarget = percent
+        owned.pendingTargets.insert(percent)
         try saveRecord(owned)
         try await runShortcut(percent)
         try await confirm(percent, expected: .nativeLimit(percent: percent))
-        owned.target = percent
-        owned.pendingTarget = nil
-        do {
-            try saveRecord(owned)
-        } catch {
-            // The stored record still lists this value as pending, which
-            // counts as CellKeeper's own; nothing is lost.
-            CellKeeperLog.backend.error("Could not update the Charge Limit record after a confirmed change: \(String(describing: error), privacy: .public)")
-        }
+        owned.confirm(percent)
+        // The stored record still lists this value as pending, which counts as
+        // CellKeeper's own, so a failed save loses nothing.
+        saveRecordBestEffort(owned)
         return .applied
     }
 
@@ -344,13 +391,18 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             return .unchanged
         case .unreadable:
             throw BackendError.unavailable("CellKeeper's record of your own Charge Limit cannot be read, so it does not know what to restore.")
-        case .owned(let owned):
+        case .owned(var owned):
             // Restoring is attempted even if the setting cannot be read first;
             // only the read-back afterwards can confirm it.
             if let current = try? await read(), current.percent == owned.ownerLimit {
                 clearRecord(reason: "\(owned.ownerLimit)% already in effect")
                 return .unchanged
             }
+            // Mark the restore as in progress, so a later reading of the
+            // user's limit is recognised as CellKeeper's own doing. Restoring
+            // goes ahead even if this cannot be stored.
+            owned.isRestoring = true
+            saveRecordBestEffort(owned)
             try await runShortcut(owned.ownerLimit)
             try await confirm(owned.ownerLimit, expected: .normal)
             clearRecord(reason: "restored \(owned.ownerLimit)%")
@@ -411,7 +463,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         guard let data else { return .none }
         guard let owned = try? JSONDecoder().decode(OwnershipRecord.self, from: data),
               supportedLimits.contains(owned.ownerLimit), supportedLimits.contains(owned.target),
-              owned.pendingTarget.map(supportedLimits.contains) ?? true
+              owned.pendingTargets.allSatisfy(supportedLimits.contains)
         else {
             CellKeeperLog.safety.fault("The record of the user's own Charge Limit is invalid; refusing to change the Charge Limit")
             return .unreadable
@@ -426,6 +478,17 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             throw BackendError.operationFailed("Could not record your own Charge Limit durably, so nothing was changed: \(error)")
         }
         record = .owned(owned)
+    }
+
+    /// Saves the record, keeping the in-memory copy current even if the
+    /// store fails. Only for updates the stored record already covers.
+    private func saveRecordBestEffort(_ owned: OwnershipRecord) {
+        record = .owned(owned)
+        do {
+            try store.save(try JSONEncoder().encode(owned))
+        } catch {
+            CellKeeperLog.backend.error("Could not update the Charge Limit record: \(String(describing: error), privacy: .public)")
+        }
     }
 
     private func clearRecord(reason: String) {

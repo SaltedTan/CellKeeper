@@ -136,6 +136,15 @@ struct CommandLineAdapterTests {
         #expect(!result.isOutputComplete)
     }
 
+    @Test("A tool flooding its output still stops at the deadline")
+    func floodingToolTimesOut() async {
+        let started = Date()
+        await #expect(throws: ProcessRunnerError.timedOut(seconds: 1)) {
+            try await ProcessRunner.run(URL(fileURLWithPath: "/usr/bin/yes"), arguments: [], timeout: 0.3)
+        }
+        #expect(Date().timeIntervalSince(started) < 4)
+    }
+
     @Test("Ordinary output is complete")
     func completeOutput() async throws {
         let result = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf done"], timeout: 10)
@@ -197,6 +206,23 @@ struct CommandLineAdapterTests {
         try store.remove()
         #expect(try store.load() == nil)
         try store.remove()
+    }
+
+    @Test("A record that exists but cannot be reached is an error, never \"no record\"")
+    func recordFileUnreachable() throws {
+        let tools = try FakeTools()
+        let directory = tools.directory.appendingPathComponent("hidden", isDirectory: true)
+        let store = FileOwnershipRecordStore(url: directory.appendingPathComponent("record.json"))
+        try store.save(Data("owned".utf8))
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: directory.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path) }
+        #expect(throws: (any Error).self) {
+            try store.load()
+        }
+        #expect(throws: (any Error).self) {
+            try store.remove()
+        }
+        #expect(NativeChargeLimitBackend.hasOutstandingRecord(in: store))
     }
 
     @Test("A record file that cannot be written is an error, not a silent success")

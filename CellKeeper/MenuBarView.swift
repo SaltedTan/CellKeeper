@@ -323,15 +323,23 @@ private struct FullChargeControl: View {
         }
     }
 
-    /// Says a full charge is happening only once the backend confirmed it.
+    /// Says a full charge is happening only while the policy is running one
+    /// and the backend has confirmed the mode it needs.
     private func fullChargeText(_ override: ChargeOverride) -> String {
         let until = "until full, unplugged, or \(override.expiresAt.formatted(date: .omitted, time: .shortened))"
-        guard status.capabilities.availability.affectsHardware else {
+        switch status.capabilities.availability {
+        case .simulated:
             return "Simulating a charge to 100% \(until)"
+        case .unavailable:
+            return "Full charge requested, but charging control is unavailable"
+        case .available, .experimental:
+            break
         }
-        guard let desired = status.decision?.desiredMode, status.currentMode == desired else {
+        guard let decision = status.decision, decision.state == .fullChargeOverride,
+              status.currentMode == decision.desiredMode
+        else {
             let why = status.lastExecution.map { " (\($0.result.title))" } ?? ""
-            return "Full charge requested, not yet in effect\(why)"
+            return "Full charge requested, not in effect\(why)"
         }
         return "Charging to 100% \(until)"
     }

@@ -72,8 +72,10 @@ What happens:
   restore when quitting, it tells you which value to set, and it tries
   again the next time it starts.
 - **Every change is confirmed** by reading the setting back from macOS.
-  The read uses `pmset -g battlimit`, an undocumented, read-only report;
-  CellKeeper changes nothing if it cannot read or recognise it.
+  The read uses `pmset -g battlimit`, an undocumented, read-only report.
+  If CellKeeper cannot read or recognise it, it sets no new limit; it still
+  tries to give back your recorded limit, and treats that as unconfirmed
+  until it reads it back.
 - **Features macOS's Charge Limit cannot express are disabled:** a custom
   resume threshold (macOS resumes after a drop of more than 5%), the
   temperature pause, and discharging.

@@ -223,6 +223,8 @@ struct NativeChargeLimitBackendTests {
         await #expect(throws: BackendError.self) {
             try await backend.setMode(.nativeLimit(percent: 90))
         }
+        // Nothing changed, so releasing needs no shortcut run.
+        #expect(try await backend.setMode(.normal) == .unchanged)
         _ = await backend.capabilities()
         #expect(system.listCalls == 2)
     }
@@ -346,7 +348,7 @@ struct NativeChargeLimitBackendTests {
             try await backend.setMode(.nativeLimit(percent: 90))
         }
         let saved = try #require(store.data.flatMap { String(data: $0, encoding: .utf8) })
-        #expect(saved.contains(#""pendingTarget":90"#))
+        #expect(saved.contains(#""pendingTargets":[90]"#))
         #expect(saved.contains(#""ownerLimit":80"#))
     }
 
@@ -359,6 +361,66 @@ struct NativeChargeLimitBackendTests {
         #expect(await backend.nativeLimitStatus()?.target == 90)
         _ = try await backend.setMode(.normal)
         #expect(system.reading == .limit(80))
+    }
+
+    @Test("A pending change that took effect is accepted even if the record cannot be updated")
+    func promotionWithoutSave() async throws {
+        storeOwnershipRecord(owner: 80, target: 85, pending: 90, in: store)
+        store.saveFails = true
+        system.reading = .limit(90)
+        let backend = makeBackend()
+        #expect(try await backend.currentMode() == .nativeLimit(percent: 90))
+        #expect(await backend.nativeLimitStatus()?.target == 90)
+    }
+
+    @Test("A restore that took effect without confirmation is recognised later")
+    func unconfirmedRestoreRecognised() async throws {
+        let backend = makeBackend()
+        _ = try await backend.setMode(.nativeLimit(percent: 90))
+        system.scheduleRuns([.appliesButNextReadFails])
+        await #expect(throws: BackendError.self) {
+            try await backend.setMode(.normal)
+        }
+        #expect(system.reading == .limit(80))
+        #expect(try await backend.currentMode() == .normal)
+        #expect(store.data == nil)
+    }
+
+    @Test("An unconfirmed change stays CellKeeper's own even after a failed restore")
+    func pendingSurvivesFailedRestore() async throws {
+        let backend = makeBackend()
+        _ = try await backend.setMode(.nativeLimit(percent: 85))
+        system.scheduleRuns([.appliesButNextReadFails, .fails])
+        await #expect(throws: BackendError.self) {
+            try await backend.setMode(.nativeLimit(percent: 90))
+        }
+        await #expect(throws: BackendError.self) {
+            try await backend.setMode(.normal)
+        }
+        #expect(system.reading == .limit(90))
+        // 90% was CellKeeper's own request, so it is not an outside change.
+        #expect(try await backend.setMode(.nativeLimit(percent: 95)) == .applied)
+    }
+
+    @Test("While CellKeeper owns the limit, availability does not wait for the shortcut list")
+    func ownedSkipsList() async throws {
+        storeOwnershipRecord(owner: 80, target: 90, in: store)
+        system.reading = .limit(90)
+        system.listFails = true
+        let backend = makeBackend()
+        #expect(await backend.capabilities().availability == .experimental)
+        #expect(system.listCalls == 0)
+    }
+
+    @Test("The outstanding record can be read without a backend")
+    func outstandingRecord() {
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store) == nil)
+        storeOwnershipRecord(owner: 85, target: 90, in: store)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store)?.ownerLimit == 85)
+        store.data = Data("not json".utf8)
+        let unreadable = NativeChargeLimitBackend.outstandingRecord(in: store)
+        #expect(unreadable != nil)
+        #expect(unreadable?.ownerLimit == nil)
     }
 
     @Test("A change made by someone else is caught before writing over it")

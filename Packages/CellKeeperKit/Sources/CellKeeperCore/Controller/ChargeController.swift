@@ -64,6 +64,10 @@ public actor ChargeController {
     private var currentMode: ChargeControlMode?
     /// The mode CellKeeper last requested and confirmed on this backend.
     private var ownedMode: ChargeControlMode?
+    /// Modes requested since the last confirmation whose confirmation failed.
+    /// Any of them may have taken effect, so finding one later is not an
+    /// outside change.
+    private var unconfirmedRequests: Set<ChargeControlMode> = []
     /// Whether ``ownedMode`` has been seeded from what the current backend
     /// remembers from an earlier session.
     private var hasSeededOwnership = false
@@ -294,6 +298,7 @@ public actor ChargeController {
         lastFailedRestoreUptime = nil
         currentMode = nil
         ownedMode = nil
+        unconfirmedRequests = []
         hasSeededOwnership = false
         nativeLimit = nil
         lastExecution = nil
@@ -448,8 +453,15 @@ public actor ChargeController {
             isOwnedStateUnverified = holdsNonNormalState
             return
         }
-        if let owned = ownedMode, owned != observed {
+        if let owned = ownedMode, owned != observed, unconfirmedRequests.contains(observed) {
+            ownedMode = observed
+            unconfirmedRequests = []
+            record(.result, "Now confirmed: \(describeTarget(observed)), requested earlier but not confirmed then.")
+        } else if ownedMode == observed {
+            unconfirmedRequests = []
+        } else if let owned = ownedMode {
             ownedMode = nil
+            unconfirmedRequests = []
             consecutiveFailures = max(consecutiveFailures, Self.maximumConsecutiveFailures)
             if capabilities.isEnforcedByMacOS {
                 record(.safety, "macOS's Charge Limit changed outside CellKeeper (expected \(owned), found \(observed)); it may have been changed in System Settings or by another tool. Backend faulted; restoring your own limit.", level: .fault)
@@ -580,12 +592,14 @@ public actor ChargeController {
             }
             currentMode = mode
             ownedMode = mode
+            unconfirmedRequests = []
             if mode == .normal {
                 lastFailedRestoreUptime = nil
             }
             return outcome
         } catch {
             currentMode = nil
+            unconfirmedRequests.insert(mode)
             if mode == .normal {
                 lastFailedRestoreUptime = uptime()
             }
@@ -634,7 +648,7 @@ public actor ChargeController {
             return true
         } catch {
             if isNative, let ownerLimit {
-                registerFailure("Could not restore your own macOS Charge Limit of \(ownerLimit)% (\(reason)): \(error)", level: .fault)
+                registerFailure("Could not restore your own macOS Charge Limit of \(ownerLimit)% (\(reason)): \(error). CellKeeper will retry; you can also set it in System Settings › Battery › Charging", level: .fault)
             } else {
                 registerFailure("Could not restore normal charging (\(reason)): \(error)", level: .fault)
             }

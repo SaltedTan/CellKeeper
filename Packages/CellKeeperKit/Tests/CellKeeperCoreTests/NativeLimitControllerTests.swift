@@ -274,6 +274,52 @@ struct NativeLimitControllerTests {
         #expect(system.runInputs.filter { $0 == "90" }.count == 1)
     }
 
+    @Test("A change CellKeeper made without confirming it is not mistaken for an outside change")
+    func ownUnconfirmedChangeAccepted() async throws {
+        let (controller, _) = makeController(limit: 85)
+        await controller.evaluate(.launch)
+        clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
+        system.scheduleRuns([.appliesButNextReadFails, .fails])
+        let failed = try await controller.apply(settings: settings(limit: 90))
+        #expect(system.reading == .limit(90))
+        #expect(failed.nativeLimit?.ownerLimit == 80)
+
+        clock.advance(by: ChargingPolicy.minimumRestoreRetryInterval)
+        let later = await controller.evaluate(.periodic)
+        #expect(!later.isBackendFaulted)
+        #expect(later.currentMode == .nativeLimit(percent: 90))
+        #expect(later.events.contains { $0.message.contains("Now confirmed") })
+    }
+
+    @Test("A restore that took effect without confirmation is not mistaken for an outside change")
+    func ownUnconfirmedRestoreAccepted() async throws {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        system.scheduleRuns([.appliesButNextReadFails])
+        let off = try await controller.apply(settings: settings(limit: 90, managed: false))
+        #expect(system.reading == .limit(80))
+        #expect(off.nativeLimit?.ownerLimit == 80)
+
+        clock.advance(by: ChargingPolicy.minimumRestoreRetryInterval)
+        let later = await controller.evaluate(.periodic)
+        #expect(!later.isBackendFaulted)
+        #expect(later.currentMode == .normal)
+        #expect(later.nativeLimit?.ownerLimit == nil)
+        #expect(system.runInputs == ["90", "80"])
+    }
+
+    @Test("At relaunch, a pending change that took effect is CellKeeper's own even if the record cannot be updated")
+    func relaunchPromotionWithoutSave() async {
+        storeOwnershipRecord(owner: 80, target: 85, pending: 90, in: store)
+        store.saveFails = true
+        system.reading = .limit(90)
+        let (controller, _) = makeController(limit: 90)
+        let status = await controller.evaluate(.launch)
+        #expect(!status.isBackendFaulted)
+        #expect(status.decision?.action == .noAction)
+        #expect(system.runInputs.isEmpty)
+    }
+
     @Test("If CellKeeper cannot read back the limit it set, it restores the user's limit")
     func unverifiedStateRestores() async {
         let (controller, _) = makeController(limit: 90)
