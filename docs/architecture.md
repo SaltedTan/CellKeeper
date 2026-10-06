@@ -264,10 +264,16 @@ The native-limit extension of the contract:
     `.normal` is already in effect.
 - **Reporting.** `currentMode()` is `.normal` while nothing is recorded,
   because the user's own limit is in effect whatever its value. Otherwise it
-  is `.nativeLimit` with the value macOS reports, read afresh. A value other
-  than CellKeeper's target is an outside change.
+  is `.nativeLimit` with the value macOS reports, read afresh.
   `nativeLimitStatus()` reports the last read value, the recorded own limit,
   and the current target, without new I/O.
+- **Outside changes are adopted.** A recognised value that CellKeeper did
+  not set (not its target, a pending value, or the user's limit during a
+  restore) was set by someone else, usually the user in System Settings.
+  The backend adopts it as the user's own limit: it deletes the record and
+  writes nothing. `currentMode()` then reports `.normal`; `setMode` returns
+  `adoptedOutsideChange` instead of writing, including when asked to
+  restore. `takeAdoptedLimitChange()` reports each adoption once.
 - **Confirmation.** Only a fresh read of the setting from macOS confirms a
   change. A shortcut or command exiting successfully does not: one did so
   while changing nothing (research note 08, O2).
@@ -284,7 +290,10 @@ The controller adds, independent of the backend:
 - mode-read failures count as failures;
 - external-change detection: if the backend's mode differs from the mode
   CellKeeper last confirmed, another tool may be in control, so the backend is
-  faulted at once (research rule R27);
+  faulted at once (research rule R27). A native-limit backend adopts such a
+  change instead (above); the controller then turns management off, so it
+  never overrides what the user chose, and logs what it kept. Turning
+  management on again records the adopted value as the user's own limit;
 - a fault after 3 failures (a successful request or a failure-free hour
   resets the count). While faulted, `.normal` is actively requested until
   confirmed, nothing else is requested, and the fault persists until the user
@@ -303,7 +312,7 @@ The controller adds, independent of the backend:
 - if a read fails while CellKeeper holds a non-normal state, `.normal` is
   requested (`ReleaseReason.stateUnverified`). The last confirmed mode stays
   the expectation, so a reading that differs from it after reads recover is
-  still treated as an outside change. A request the backend accepted but
+  still treated as an outside change (and adopted, for a native backend). A request the backend accepted but
   that could not be confirmed is remembered, so finding it later confirms it
   rather than counting as an outside change. A request the backend rejected
   is not remembered. Native backends decide this from their record and
@@ -315,11 +324,13 @@ The controller adds, independent of the backend:
   in effect does not cancel it;
 - a backend that finds an outside change itself, just before writing
   (`BackendError.changedOutside`), faults at once, like the controller's own
-  detection;
+  detection. A native backend adopts it instead (`adoptedOutsideChange`),
+  which counts as nothing written;
 - on the first read from a backend, ownership that the backend remembers from
-  an earlier session (`nativeLimitStatus().target`) is adopted as
+  an earlier session (`nativeLimitStatus().target`) is taken on as
   CellKeeper's own. A change made while CellKeeper was not running is then
-  detected like any other outside change. Because a normal quit never
+  detected (and, for a native backend, adopted) like any other outside
+  change. Because a normal quit never
   leaves such a record, its presence also makes the restore owed: the
   user's limit is restored before anything else;
 - after a failed restore of `.normal`, automatic evaluations wait 60 s
@@ -370,10 +381,11 @@ Lifecycle:
      unavailable and changes nothing, because "no limit" could also be a
      temporary state.
 2. **Holding.** Each evaluation reads the limit; so does the backend before
-   every change. A value CellKeeper did not set (not the confirmed target, a
-   pending one, or the user's limit during a restore) faults the backend, and
-   the user's own limit is restored once. A pending value that turns out to
-   be in effect becomes the confirmed target.
+   every change, including a restore. A value CellKeeper did not set (not
+   the confirmed target, a pending one, or the user's limit during a
+   restore) is adopted as the user's own limit: the record is deleted,
+   nothing is written, and management is turned off and saved. A pending
+   value that turns out to be in effect becomes the confirmed target.
 3. **Release.** Any of these requests `.normal`: management off, quit, a
    backend switch (pending until confirmed), any failed request, a state
    that could not be read back, or a fault.
@@ -391,7 +403,7 @@ Lifecycle:
      user's limit first (a normal quit never leaves a record, so the earlier
      session did not finish, and its markers may be stale), then resumes
      management, setting its limit again subject to the rate limit.
-   - Anything else is an outside change: fault, then restore.
+   - Anything else is an outside change, adopted as in step 2.
    - The app checks for a record regardless of which backend is selected.
      If one exists while another backend is selected, it starts on the
      native backend and immediately requests the switch, so the limit is
@@ -463,11 +475,14 @@ verification protocol in research note 02 §7 and the rules in `safety.md`.
   CellKeeper runs again (the record survives) or the user changes it. On a
   normal quit the restore usually takes about 0.3 s; quitting waits up to
   10 s and warns if the restore was not confirmed.
-- **Outside changes are reverted once.** If the limit is changed in System
-  Settings or by another tool while CellKeeper manages it, CellKeeper faults
-  and restores the user's recorded limit. That also reverts a deliberate
-  change made in System Settings. To change the limit by hand, turn off
-  "Manage charging" first.
+- **Outside changes are adopted, whoever made them.** CellKeeper cannot tell
+  a change made in System Settings from one made by another tool or by
+  macOS itself. It keeps any recognised value as the user's own limit and
+  forgets the limit it had recorded. If macOS reports "no limit", that may
+  be a temporary full charge rather than the user's choice (note 08, open
+  question 3), so the log and the menu also name the earlier limit.
+  Unrecognised reports are not adopted: they are handled as a state that
+  cannot be read back.
 - **Sleep, restart and shutdown** behaviour of the Charge Limit itself is
   macOS's; see note 08 for what has been observed.
 
@@ -565,7 +580,7 @@ decisions.
 | D15 | For a native-limit backend, `.normal` means "the user's own limit, as recorded" | Every existing fail-safe path (quit, management off, backend switch, failure, fault) then restores exactly that value without new code paths |
 | D16 | CellKeeper takes ownership whenever it manages the native limit, even when the value is already right | Consistent outside-change detection; a take-over that needs no write runs nothing and does not use the rate budget |
 | D17 | Missing or stale telemetry does not release a native limit | macOS enforces it from its own measurements; releasing would only cause a restore-and-reapply cycle after every wake |
-| D18 | An outside change to the native limit faults the backend and restores the recorded limit once | Matches R27 and the owner's rule to restore on any failure; documented in the UI (turn management off before changing the limit by hand) |
+| D18 | An outside change to the native limit is adopted as the user's own limit: nothing is written and management is turned off (owner decision, 2026-10-06; replaces "fault and restore the recorded limit once") | A change made in System Settings is usually deliberate, and reverting it undid the user's choice. Turning management off keeps CellKeeper from overriding it later; turning management on again records the new value as the user's own |
 | D19 | Automatic retries of a failed restore wait 60 s; user actions retry at once | Bounds shortcut runs while a backend is broken without delaying a restore the user asked for |
 | D20 | The native backend is `experimental` and opt-in with a confirmation | Verified on one Mac; relies on an undocumented read-back |
 | D21 | A backend switch that cannot restore `.normal` stays pending instead of being dropped; at launch, an outstanding record overrides the selected backend until it is restored | Restoring the user's limit must not depend on which backend the user selects or on the app staying open |

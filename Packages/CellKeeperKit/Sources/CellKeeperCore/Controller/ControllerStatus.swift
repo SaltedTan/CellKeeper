@@ -33,6 +33,9 @@ public struct ExecutionRecord: Sendable, Equatable {
         case unchanged
         /// Recorded by a simulated backend; hardware unchanged.
         case simulated
+        /// macOS's Charge Limit had been changed outside CellKeeper; the new
+        /// value was kept as the user's own and nothing was changed.
+        case adoptedOutsideChange
         case failed(String)
         case refused(RefusalReason)
     }
@@ -84,6 +87,13 @@ public struct ControllerStatus: Sendable, Equatable {
     public var currentMode: ChargeControlMode?
     /// macOS's Charge Limit as seen by a native-limit backend; nil otherwise.
     public var nativeLimit: NativeLimitStatus?
+    /// The latest change to macOS's Charge Limit made outside CellKeeper and
+    /// adopted as the user's own limit; cleared when management is turned
+    /// on again.
+    public var adoptedChange: AdoptedLimitChange?
+    /// How many outside changes have been adopted in this session, so the
+    /// app can react to each one exactly once.
+    public var adoptionCount: Int
     /// A backend the user switched to, waiting until `.normal` is confirmed
     /// on the current one.
     public var pendingBackend: BackendDescriptor?

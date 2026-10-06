@@ -70,7 +70,9 @@ final class AppModel {
     /// How quitting went for the user's own Charge Limit.
     enum TerminationOutcome: Sendable {
         /// Nothing is left changed, or the restore was confirmed.
-        case restored
+        /// `keptOutsideChange` is true if CellKeeper found a limit set
+        /// outside it, kept it as the user's own, and turned management off.
+        case restored(keptOutsideChange: Bool)
         /// CellKeeper may have left the Charge Limit changed; `ownerLimit` is
         /// the value to set by hand, if known.
         case unresolved(ownerLimit: Int?)
@@ -97,6 +99,8 @@ final class AppModel {
     @ObservationIgnored private let commandSink: AsyncStream<Command>.Continuation
     @ObservationIgnored private var tasks: [Task<Void, Never>] = []
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
+    /// Outside changes to the Charge Limit already reflected in the settings.
+    @ObservationIgnored private var handledAdoptionCount = 0
 
     init(store: SettingsStore = SettingsStore(), telemetry: any TelemetryProvider = SystemTelemetryProvider()) {
         let loaded = store.loadChargingSettings()
@@ -192,9 +196,16 @@ final class AppModel {
             }
         }
         guard let outstanding = NativeChargeLimitBackend.outstandingRecord(in: FileOwnershipRecordStore.default) else {
-            return .restored
+            let status = await controller.status
+            return .restored(keptOutsideChange: status.adoptedChange != nil && !status.settings.isManagementEnabled)
         }
         return .unresolved(ownerLimit: outstanding.ownerLimit)
+    }
+
+    /// Saves "Manage charging" as off after CellKeeper kept a Charge Limit
+    /// set outside it, so the next launch does not override it either.
+    func keepManagementOffAfterOutsideChange() {
+        updateSettings { $0.isManagementEnabled = false }
     }
 
     // MARK: - User intents
@@ -326,6 +337,17 @@ final class AppModel {
         case .discardUnreadableRecord:
             status = await controller.discardUnreadableOwnershipRecord()
         }
+        noteAdoptedChanges()
+    }
+
+    /// When the controller kept a Charge Limit set outside CellKeeper, it
+    /// turned management off; save that too. Going through the command queue
+    /// keeps the app's settings, the saved settings and the controller's in
+    /// step, even if the user changed something meanwhile.
+    private func noteAdoptedChanges() {
+        guard let status, status.adoptionCount > handledAdoptionCount else { return }
+        handledAdoptionCount = status.adoptionCount
+        keepManagementOffAfterOutsideChange()
     }
 
     // MARK: - Presentation

@@ -189,7 +189,7 @@ private struct ControlSettingsTab: View {
                 .confirmationDialog("Let CellKeeper change macOS's Charge Limit?", isPresented: $isConfirmingNativeLimit) {
                     Button("Use macOS Charge Limit") { model.selectBackend(.nativeLimit) }
                 } message: {
-                    Text("CellKeeper will set macOS's own Charge Limit (80–100%) by running your “\(NativeChargeLimitBackend.defaultShortcutName)” shortcut, and macOS will enforce it. Before its first change CellKeeper records your current limit, and it restores exactly that value when you turn off management, switch backend, quit, or if anything fails. This backend is experimental.")
+                    Text("CellKeeper will set macOS's own Charge Limit (80–100%) by running your “\(NativeChargeLimitBackend.defaultShortcutName)” shortcut, and macOS will enforce it. Before its first change CellKeeper records your current limit, and it restores exactly that value when you turn off management, switch backend, quit, or if anything fails. If you change the limit yourself in System Settings, CellKeeper keeps your new value as your own and turns off Manage charging. This backend is experimental.")
                 }
             } footer: {
                 Text("Simulated records what CellKeeper would do without changing your Mac. Read-only performs no control. macOS Charge Limit lets macOS enforce the limit you choose here; it is the only real control in this version.")
@@ -243,8 +243,8 @@ private struct NativeLimitSetupSection: View {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Requires macOS Tahoe 26.4 or later on a Mac with Apple silicon, and a shortcut you create once:")
                 Text("1. In Shortcuts, create a shortcut named exactly “\(NativeChargeLimitBackend.defaultShortcutName)”.")
-                Text("2. Add the “Set Battery Charge Limit” action and set its limit to the Shortcut Input, so CellKeeper can pass 80–100.")
-                Text("3. Leave “Set Until Tomorrow” off.")
+                Text("2. Search the actions for “charge limit” and add the one that reads “Set charge limit to …”. Set its value to Shortcut Input, so CellKeeper can pass 80–100.")
+                Text("3. Shortcuts then adds “Receive … from Nowhere” at the top; leave it as it is. Leave “Set Until Tomorrow” off.")
                 Text("CellKeeper runs it with the shortcuts command-line tool, then reads the setting back to confirm the change.")
                     .foregroundStyle(.secondary)
             }

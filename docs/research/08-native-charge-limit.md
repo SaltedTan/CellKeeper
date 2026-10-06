@@ -200,9 +200,39 @@ The owner followed a scripted walk-through, starting on the Simulated backend. F
 
 **Change made afterwards:** requests sent to a backend that touches no hardware no longer count toward the rate limit once the backend changes. Real changes still count after a round trip through Simulated.
 
+**The owner's report afterwards:** the settings looked right overall but cluttered (to be tidied up separately).
+
 **Not covered here:**
-- The look of the settings (the limit picker, and the disabled settings with their explanations) is not in the log.
+- The look of the settings (the limit picker, and the disabled settings with their explanations) is not in the log; it rests on the owner's report.
 - Restoring a changed limit on a backend switch and on quit was not exercised in this walk-through, because management was off. Both are covered by O9; quitting is also covered by the end of O10.
+
+### O14 — How the owner's shortcut is built `[VERIFIED-EXPERIMENTALLY]`
+
+From the owner's screenshot of the Shortcuts editor (Shortcuts 10.0), the shortcut "CellKeeper Set Charge Limit" has two parts:
+
+1. **Receive Apps and 18 more from Nowhere**, with **If there's no input: Continue**. Shortcuts adds this block when an action uses Shortcut Input; the owner left it as it was.
+2. **Set charge limit to Shortcut Input**, with **Set Until Tomorrow** off. This is how the editor displays the action. Press coverage calls it "Set Battery Charge Limit" (S2); the name in the action library was not checked.
+
+"From Nowhere" means the shortcut is not offered in the Share sheet or Quick Actions. The command-line input in O1 and O3 reached it all the same.
+
+### O15 — A change made outside CellKeeper is kept `[VERIFIED-EXPERIMENTALLY]`
+
+**Setup:**
+- The Debug build of this branch, after the owner's decision to adopt outside changes (decision 5).
+- The owner's saved settings: native backend, CellKeeper limit 85%, management on.
+- The owner's own limit was 80%.
+- A change in System Settings was stood in for by running the owner's shortcut from Terminal with 90.
+
+| Time | What happened |
+|---|---|
+| 22:20:26 | CellKeeper recorded 80% and set 85%, confirmed by read-back. |
+| 22:20:35 | `shortcuts run "CellKeeper Set Charge Limit" -i <file with 90>` exited 0; `pmset -g battlimit` read 90%. |
+| 22:20:36 | macOS sent a power-source notification, and CellKeeper evaluated at once. It kept 90% as the owner's own limit, deleted its record, wrote nothing, and turned off Manage charging. The saved settings then had management off. |
+| 22:20:47 | Quit: "Nothing to restore … macOS reports 90%". Nothing was run, and the limit stayed at 90%. |
+
+**Afterwards:** the owner's 80% was set again with the shortcut and read back, and the owner's saved settings were put back as they were.
+
+**Also observed:** changing the Charge Limit produced a power-source change notification, so CellKeeper noticed the change within about a second, not at its next periodic check.
 
 ---
 
@@ -245,6 +275,10 @@ Planned procedure:
    - Anything else is "unrecognised": CellKeeper then records nothing and sets no new limit. It still attempts to restore a limit it already recorded, and treats that restore as unconfirmed until it reads it back.
 3. **Sandbox:** stays on, with no new entitlements (O3). Keeping it also blocks pmset's SMC user-client attempt (O7).
 4. **Confirmation:** only a read-back equal to the requested value. The exit status never confirms (O2).
+5. **Outside changes (owner decision, 2026-10-06):** a recognised limit that CellKeeper did not set is adopted as the owner's own limit, and nothing is written. CellKeeper then turns off "Manage charging", so it does not override the change later. This replaces the first design, which restored the recorded limit and faulted.
+   - CellKeeper cannot tell who made a change, so a change by another tool or by macOS is adopted too.
+   - A "no limit" report might be a temporary full charge (open question 3), so the earlier limit is named in the log and the menu.
+   - The owner's longer-term direction is that CellKeeper itself controls charging, with macOS's own Charge Limit turned off. That needs a different backend and is not part of milestone 2.
 
 ---
 

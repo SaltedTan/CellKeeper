@@ -223,19 +223,16 @@ struct NativeLimitControllerTests {
     }
 
     @Test("A restore that does not take effect is retried after a minute")
-    func ineffectiveRestoreRetried() async {
+    func ineffectiveRestoreRetried() async throws {
         let (controller, _) = makeController(limit: 90)
         await controller.evaluate(.launch)
         #expect(system.reading == .limit(90))
 
-        // The next change reports an error but leaves the limit at 95%.
+        // The shortcut reports success but leaves CellKeeper's 90% in place.
         system.runBehaviour = .hasNoEffect
-        system.changeExternally(to: 95)
-        clock.advance(by: 120)
-        // An outside change is detected first: fault, then restore.
-        let status = await controller.evaluate(.periodic)
-        #expect(status.isBackendFaulted)
-        #expect(status.nativeLimit?.ownerLimit == 80)
+        let off = try await controller.apply(settings: settings(limit: 90, managed: false))
+        #expect(off.nativeLimit?.ownerLimit == 80)
+        #expect(system.reading == .limit(90))
         system.runBehaviour = .applies
         clock.advance(by: ChargingPolicy.minimumRestoreRetryInterval)
         let recovered = await controller.evaluate(.periodic)
@@ -246,23 +243,111 @@ struct NativeLimitControllerTests {
 
     // MARK: - Outside changes
 
-    @Test("A change made outside CellKeeper faults the backend and restores the user's limit once")
+    @Test("A change made outside CellKeeper is kept as the user's own limit, and management turns off")
     func externalChange() async {
         let (controller, _) = makeController(limit: 90)
         await controller.evaluate(.launch)
         system.changeExternally(to: 95)
         let status = await controller.evaluate(.periodic)
-        #expect(status.isBackendFaulted)
-        #expect(system.reading == .limit(80))
-        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("changed outside CellKeeper") })
+        #expect(!status.isBackendFaulted)
+        #expect(system.reading == .limit(95))
+        #expect(system.runInputs == ["90"])
+        #expect(status.currentMode == .normal)
+        #expect(status.nativeLimit?.ownerLimit == nil)
+        #expect(store.data == nil)
+        #expect(!status.settings.isManagementEnabled)
+        #expect(status.decision?.state == .unmanaged)
+        #expect(status.adoptedChange?.limit == 95)
+        #expect(status.adoptedChange?.previousOwnerLimit == 80)
+        #expect(status.adoptedChange?.expectedLimit == 90)
+        #expect(status.adoptionCount == 1)
+        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("kept it as your own limit") && $0.message.contains("turned off Manage charging") })
 
-        // Faulted: CellKeeper makes no further changes until the user clears it.
+        // Nothing is written afterwards, not even when quitting.
         clock.advance(by: 600)
         await controller.evaluate(.periodic)
-        #expect(system.runInputs == ["90", "80"])
+        let stopped = await controller.shutdown(reason: "quit")
+        #expect(system.runInputs == ["90"])
+        #expect(system.reading == .limit(95))
+        #expect(stopped.adoptionCount == 1)
     }
 
-    @Test("After a read failure, a later outside change is still detected rather than overwritten")
+    @Test("Turning management on again records the adopted limit as the user's own")
+    func managingAgainAfterAdoption() async throws {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        system.changeExternally(to: 95)
+        await controller.evaluate(.periodic)
+
+        clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
+        let resumed = try await controller.apply(settings: settings(limit: 90))
+        #expect(resumed.adoptedChange == nil)
+        #expect(resumed.nativeLimit?.ownerLimit == 95)
+        #expect(system.reading == .limit(90))
+        await controller.shutdown(reason: "quit")
+        #expect(system.reading == .limit(95))
+        #expect(system.runInputs == ["90", "90", "95"])
+    }
+
+    @Test("A change found just before writing is adopted and does not use up the rate limit")
+    func outsideChangeBeforeWriteAdopted() async throws {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
+        // The evaluation still reads 90%; the change lands before the write.
+        system.changeExternally(to: 85, afterReads: 1)
+        let status = try await controller.apply(settings: settings(limit: 95))
+        #expect(status.lastExecution?.result == .adoptedOutsideChange)
+        #expect(system.reading == .limit(85))
+        #expect(system.runInputs == ["90"])
+        #expect(status.adoptedChange?.limit == 85)
+        #expect(!status.settings.isManagementEnabled)
+        #expect(!status.isBackendFaulted)
+
+        let resumed = try await controller.apply(settings: settings(limit: 95))
+        #expect(resumed.nativeLimit?.ownerLimit == 85)
+        #expect(system.runInputs == ["90", "95"])
+    }
+
+    @Test("A change made just before quitting is kept, not overwritten by the restore")
+    func quitKeepsOutsideChange() async {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        system.changeExternally(to: 85)
+        let stopped = await controller.shutdown(reason: "quit")
+        #expect(system.reading == .limit(85))
+        #expect(system.runInputs == ["90"])
+        #expect(store.data == nil)
+        #expect(stopped.adoptedChange?.limit == 85)
+        #expect(!stopped.settings.isManagementEnabled)
+    }
+
+    @Test("A change made just before switching backend is kept, and the switch completes")
+    func switchKeepsOutsideChange() async {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        system.changeExternally(to: 85)
+        let status = await controller.switchBackend(to: MockChargingBackend())
+        #expect(status.backend.identifier == "simulated")
+        #expect(system.reading == .limit(85))
+        #expect(system.runInputs == ["90"])
+        #expect(status.adoptionCount == 1)
+        #expect(!status.settings.isManagementEnabled)
+    }
+
+    @Test("\"No limit\" set outside CellKeeper is kept, and the earlier limit is named in case it was temporary")
+    func noLimitAdopted() async {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        system.changeExternally(to: 100)
+        let status = await controller.evaluate(.periodic)
+        #expect(system.reading == .noLimit)
+        #expect(system.runInputs == ["90"])
+        #expect(status.adoptedChange?.isNoLimit == true)
+        #expect(status.events.contains { $0.message.contains("no limit (100%)") && $0.message.contains("your earlier limit was 80%") })
+    }
+
+    @Test("After a read failure, a later outside change is still recognised and kept rather than overwritten")
     func detectionSurvivesReadFailure() async {
         let (controller, _) = makeController(limit: 90)
         await controller.evaluate(.launch)
@@ -276,9 +361,11 @@ struct NativeLimitControllerTests {
         system.runBehaviour = .applies
         clock.advance(by: 120)
         let status = await controller.evaluate(.periodic)
-        #expect(status.isBackendFaulted)
-        #expect(system.reading == .limit(80))
-        #expect(system.runInputs.filter { $0 == "90" }.count == 1)
+        #expect(!status.isBackendFaulted)
+        #expect(status.adoptedChange?.limit == 95)
+        #expect(system.reading == .limit(95))
+        // Only the launch and the failed restore attempt ran the shortcut.
+        #expect(system.runInputs == ["90", "80"])
     }
 
     @Test("A change CellKeeper made without confirming it is not mistaken for an outside change")
@@ -317,9 +404,10 @@ struct NativeLimitControllerTests {
         system.runBehaviour = .applies
         clock.advance(by: ChargingPolicy.minimumRestoreRetryInterval)
         let status = await controller.evaluate(.periodic)
-        #expect(status.isBackendFaulted)
         #expect(!status.events.contains { $0.message.contains("Now confirmed") })
-        #expect(system.reading == .limit(80))
+        #expect(status.adoptedChange?.limit == 95)
+        #expect(system.reading == .limit(95))
+        #expect(system.runInputs == ["90", "80"])
     }
 
     @Test("A restore that failed when quitting is finished at the next launch")
@@ -377,7 +465,7 @@ struct NativeLimitControllerTests {
         #expect(status.nativeLimit?.ownerLimit == nil)
     }
 
-    @Test("An outside change found by the backend just before writing faults it and restores")
+    @Test("A backend that reports an outside change without adopting it is faulted and restored")
     func outsideChangeFoundByBackend() async {
         let backend = ChangedOutsideBackend()
         let clock = clock
@@ -490,15 +578,19 @@ struct NativeLimitControllerTests {
         #expect(system.reading == .limit(80))
     }
 
-    @Test("A change made while CellKeeper was not running is treated as an outside change")
+    @Test("A change made while CellKeeper was not running is kept as the user's own limit")
     func relaunchAfterOutsideChange() async {
         storeOwnershipRecord(owner: 80, target: 90, in: store)
         system.reading = .limit(95)
         let (controller, _) = makeController(limit: 90)
         let status = await controller.evaluate(.launch)
-        #expect(status.isBackendFaulted)
-        #expect(system.reading == .limit(80))
-        #expect(system.runInputs == ["80"])
+        #expect(!status.isBackendFaulted)
+        #expect(system.reading == .limit(95))
+        #expect(system.runInputs.isEmpty)
+        #expect(store.data == nil)
+        #expect(status.adoptedChange?.limit == 95)
+        #expect(!status.settings.isManagementEnabled)
+        #expect(!status.events.contains { $0.message.contains("finish restoring") })
     }
 
     @Test("A restore that completed after the last session stopped waiting is recognised")

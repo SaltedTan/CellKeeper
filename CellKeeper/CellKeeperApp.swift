@@ -39,12 +39,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// not run until it returns.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let controller = model.stopForTermination()
+        let model = model
         Task.detached {
             let outcome = await AppModel.shutDown(controller, timeout: AppModel.terminationTimeout)
             RunLoop.main.perform(inModes: [.common]) {
                 MainActor.assumeIsolated {
-                    if case .unresolved(let ownerLimit) = outcome {
+                    switch outcome {
+                    case .unresolved(let ownerLimit):
                         Self.warnUnrestoredLimit(ownerLimit)
+                    case .restored(let keptOutsideChange):
+                        if keptOutsideChange {
+                            model.keepManagementOffAfterOutsideChange()
+                        }
                     }
                     NSApplication.shared.reply(toApplicationShouldTerminate: true)
                 }

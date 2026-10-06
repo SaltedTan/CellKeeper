@@ -89,6 +89,7 @@ extension ExecutionRecord.Result {
         case .applied: "Applied and confirmed"
         case .unchanged: "Already in effect — nothing changed"
         case .simulated: "Simulated — hardware unchanged"
+        case .adoptedOutsideChange: "Kept your change made outside CellKeeper — nothing changed"
         case .failed(let message): "Failed: \(message)"
         case .refused(let reason): "Refused: \(reason)"
         }

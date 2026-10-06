@@ -154,6 +154,34 @@ public enum ControlOutcome: String, Sendable, Equatable {
     /// The request was recorded by a simulated backend. Hardware was not
     /// changed. Simulated backends must never report `.applied`.
     case simulated
+    /// Native-limit backends: before changing anything, the backend found a
+    /// limit that CellKeeper did not set and adopted it as the user's own
+    /// limit. Nothing was changed, and the request was not carried out;
+    /// ``ChargingBackend/takeAdoptedLimitChange()`` describes the change.
+    case adoptedOutsideChange
+}
+
+/// A change to macOS's Charge Limit made outside CellKeeper (for example in
+/// System Settings) that a native-limit backend adopted as the user's own
+/// limit instead of overwriting it.
+public struct AdoptedLimitChange: Sendable, Equatable {
+    /// The limit macOS reported, now the user's own (100 for no limit).
+    public var limit: Int
+    /// True if macOS reported no limit rather than a percentage.
+    public var isNoLimit: Bool
+    /// The user's own limit as CellKeeper had recorded it before.
+    public var previousOwnerLimit: Int
+    /// The limit CellKeeper had set.
+    public var expectedLimit: Int
+    public var date: Date
+
+    public init(limit: Int, isNoLimit: Bool, previousOwnerLimit: Int, expectedLimit: Int, date: Date) {
+        self.limit = limit
+        self.isNoLimit = isNoLimit
+        self.previousOwnerLimit = previousOwnerLimit
+        self.expectedLimit = expectedLimit
+        self.date = date
+    }
 }
 
 public enum BackendError: Error, Sendable, Equatable, CustomStringConvertible {
@@ -163,7 +191,8 @@ public enum BackendError: Error, Sendable, Equatable, CustomStringConvertible {
     /// The backend reported success but a read-back did not match.
     case verificationFailed(expected: ChargeControlMode, actual: ChargeControlMode?)
     /// Before making a change, the backend found a state CellKeeper did not
-    /// set: someone else changed it.
+    /// set: someone else changed it. Native-limit backends adopt such a
+    /// change instead (``ControlOutcome/adoptedOutsideChange``).
     case changedOutside(expected: ChargeControlMode, found: ChargeControlMode?)
 
     public var description: String {
@@ -277,8 +306,13 @@ public struct NativeLimitStatus: Sendable, Equatable {
 ///   it. It never maps `.normal` to a fixed value such as 100%. With nothing
 ///   recorded there is nothing to restore.
 /// - `currentMode()` reports `.normal` while nothing is recorded, and
-///   otherwise `.nativeLimit` with the value macOS reports, read afresh. A
-///   value other than the one CellKeeper set means someone else changed it.
+///   otherwise `.nativeLimit` with the value macOS reports, read afresh.
+/// - A recognised value that CellKeeper did not set means someone else
+///   changed the limit, usually the user in System Settings. The backend
+///   adopts it as the user's own limit: it forgets its record without
+///   writing anything, so `currentMode()` reports `.normal` and `setMode`
+///   returns ``ControlOutcome/adoptedOutsideChange``. The adoption is then
+///   reported once by ``takeAdoptedLimitChange()``.
 /// - Only a fresh read of the setting from macOS confirms a change. A
 ///   shortcut or command finishing successfully does not.
 public protocol ChargingBackend: Sendable {
@@ -294,8 +328,13 @@ public protocol ChargingBackend: Sendable {
     /// State of macOS's Charge Limit for native-limit backends; nil for
     /// others. Returns what is already known, without new I/O.
     func nativeLimitStatus() async -> NativeLimitStatus?
+
+    /// Native-limit backends: the outside change adopted as the user's own
+    /// limit since the last call, if any. Each adoption is returned once.
+    func takeAdoptedLimitChange() async -> AdoptedLimitChange?
 }
 
 extension ChargingBackend {
     public func nativeLimitStatus() async -> NativeLimitStatus? { nil }
+    public func takeAdoptedLimitChange() async -> AdoptedLimitChange? { nil }
 }

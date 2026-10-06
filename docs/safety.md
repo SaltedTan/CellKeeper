@@ -60,7 +60,7 @@ All of these are enforced in `CellKeeperCore` and covered by unit tests.
 | After a failed restricting request, normal charging is requested immediately and confirmed | R1 | `ChargeController` |
 | Mode-read failures count as failures; 3 failures fault the backend (a successful request or a failure-free hour resets the count). While faulted, normal charging is actively requested until confirmed, nothing else is requested, and the fault persists until the user clears it | R11 | `ChargeController`, `ChargingPolicy.action` |
 | A backend that does not affect hardware can never report an action as applied to hardware | R30 | `ChargeController.request` |
-| A mode change CellKeeper did not make faults the backend at once and restores normal charging | R27 | `ChargeController.observeBackendMode` |
+| A mode change CellKeeper did not make faults the backend at once and restores normal charging. With the native Charge Limit it is adopted as your own limit instead (see below and the deviations) | R27 | `ChargeController.observeBackendMode` |
 | Backend switch only after normal charging is confirmed on the old backend; otherwise the switch stays pending and normal charging keeps being requested until it is confirmed | R4 | `ChargeController.switchBackend` |
 | On quit the controller restores normal charging and then shuts down; commands still queued become no-ops (deadlock-free) | R19 | `ChargeController.shutdown`, `AppDelegate` |
 | All commands serialized under one FIFO lock; user commands applied in order | — | `ChargeController`, `AppModel` command queue |
@@ -77,10 +77,10 @@ All of these are enforced in `CellKeeperCore` and covered by unit tests.
 | Before the first change, your own limit is read from macOS and stored durably (written, flushed to disk, read back). If it cannot be read, recognised, or stored, nothing is changed. No value is ever assumed: "no limit" is recorded as 100% only after you confirm your limit is 100% | `NativeChargeLimitBackend.setLimit`, `FileOwnershipRecordStore` |
 | Your recorded limit is restored exactly, and confirmed, when you quit, turn off management, switch backend, after any failed request, when CellKeeper cannot read back the state it set, and when the backend is faulted. The record is deleted only after the restore is read back | `ChargeController.restoreNormal`, `NativeChargeLimitBackend.restoreOwnerLimit` |
 | A restore that fails stays owed until it is confirmed: CellKeeper makes no other change until then, retries (automatically at most once a minute), and finishes it at the next launch if needed. A backend switch whose restore fails stays pending; quitting cancels in-flight work, waits up to 10 s, and warns you with the value to set if your limit is not confirmed restored | `ChargeController`, `NativeChargeLimitBackend`, `AppDelegate` |
-| The record survives crashes, and is checked at every launch whichever backend is selected. A record found at launch means an earlier session did not finish, so CellKeeper first restores your own limit (or, if someone else changed the limit meanwhile, faults and restores), and only then resumes. An unreadable record blocks all changes and is never treated as "nothing to restore" | `NativeChargeLimitBackend`, `ChargeController.observeBackendMode`, `AppModel` |
+| The record survives crashes, and is checked at every launch whichever backend is selected. A record found at launch means an earlier session did not finish, so CellKeeper first restores your own limit (or, if someone else changed the limit meanwhile, keeps that value as yours and turns management off), and only then resumes. An unreadable record blocks all changes and is never treated as "nothing to restore" | `NativeChargeLimitBackend`, `ChargeController.observeBackendMode`, `AppModel` |
 | Every change is confirmed by reading the setting back from macOS; a shortcut exiting successfully never counts | `NativeChargeLimitBackend.confirm`, `ChargeController.setAndConfirm` |
 | Only the values the Charge Limit accepts (80, 85, 90, 95, 100) are ever requested; others are refused, and a limit outside them makes the policy keep your own limit | `NativeChargeLimitBackend.setLimit`, `ChargingPolicy.evaluateNativeLimit` |
-| A change made outside CellKeeper (System Settings, another tool) faults the backend, whether CellKeeper notices it when reading or just before writing; your recorded limit is restored once and nothing more is changed until you clear the fault | `ChargeController.observeBackendMode`, `NativeChargeLimitBackend.setLimit` |
+| A change made outside CellKeeper (System Settings, another tool) is kept as your own limit, whether CellKeeper notices it when reading, just before writing, or just before restoring: nothing is written, the old record is deleted, and Manage charging is turned off and saved, so CellKeeper changes nothing more until you turn it on again. The menu and the log say what was kept; if macOS reported "no limit", they also name your earlier limit in case it was a temporary full charge | `ChargeController.adopt`, `NativeChargeLimitBackend.adopt`, `AppModel` |
 | Changes are rate-limited (≥ 60 s apart, ≤ 20 per hour), and real changes still count after a switch to Simulated and back; simulated requests are dropped when the backend changes; a take-over that needs no change runs nothing | `ChargingPolicy.rateLimitRetryTime`, `ChargeController.request`, `ChargeController.completePendingSwitch` |
 | The read-back uses `pmset -g battlimit` with fixed arguments, read-only, through a strict parser; anything unrecognised is never guessed | `PmsetChargeLimitReader`, `ChargeLimitReportParser` |
 | Tools are run directly (no shell), with standard input closed, a deadline (shortcut 20 s, pmset 5 s), bounded output, and cancellation; incomplete output is never parsed | `ProcessRunner` |
@@ -181,8 +181,9 @@ hardware writes and a helper, and do not apply. For the rest:
   confirmation.
 - **6, debounce and dwell:** macOS applies its own hysteresis; CellKeeper's
   rate limit bounds how often the setting changes.
-- **7, external-writer detection:** implemented. An outside change faults
-  the backend.
+- **7, external-writer detection:** implemented. An outside change is
+  detected and adopted as your own limit; CellKeeper then stops managing
+  (see the deviations below).
 - **8, monotonic time:** used for rate limits, retries and overrides.
 - **10, opt-in:** off by default, marked experimental, with a confirmation.
 - **11, independent recovery:** System Settings › Battery › Charging can
@@ -213,6 +214,13 @@ hardware writes and a helper, and do not apply. For the rest:
   Releasing would only restore and re-apply the setting after every wake.
 - **Restore retries.** An automatic retry of a failed restore waits 60 s
   (user actions retry at once), so a broken backend is not run in a loop.
+- **Outside changes with the native Charge Limit (R27).** R27 asks for a
+  fault. With the native Charge Limit, a recognised value that CellKeeper did
+  not set is instead adopted as your own limit: nothing is written, not even
+  a restore, and management is turned off. This is the owner's decision
+  (2026-10-06): a change made in System Settings is usually deliberate.
+  CellKeeper cannot tell who made the change, so a change by another tool or
+  by macOS is adopted too. An unrecognised report is never adopted.
 
 ## What CellKeeper will never do
 

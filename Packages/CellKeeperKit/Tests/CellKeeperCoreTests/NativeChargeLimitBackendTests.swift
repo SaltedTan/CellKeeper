@@ -254,12 +254,53 @@ struct NativeChargeLimitBackendTests {
         #expect(await backend.nativeLimitStatus()?.readProblem != nil)
     }
 
-    @Test("Another change to the setting shows up as a different limit")
-    func externalChangeVisible() async throws {
+    @Test("A limit someone else set is adopted as the user's own, and reported once")
+    func externalChangeAdopted() async throws {
         let backend = makeBackend()
         _ = try await backend.setMode(.nativeLimit(percent: 90))
         system.changeExternally(to: 95)
-        #expect(try await backend.currentMode() == .nativeLimit(percent: 95))
+        #expect(try await backend.currentMode() == .normal)
+        #expect(await backend.nativeLimitStatus()?.ownerLimit == nil)
+        #expect(store.data == nil)
+        let adopted = await backend.takeAdoptedLimitChange()
+        #expect(adopted == AdoptedLimitChange(limit: 95, isNoLimit: false, previousOwnerLimit: 80, expectedLimit: 90, date: clock.now))
+        #expect(await backend.takeAdoptedLimitChange() == nil)
+
+        // There is nothing left to give back.
+        #expect(try await backend.setMode(.normal) == .unchanged)
+        #expect(system.reading == .limit(95))
+        #expect(system.runInputs == ["90"])
+    }
+
+    @Test("A restore never overwrites a limit someone else chose")
+    func restoreAdoptsOutsideChange() async throws {
+        let backend = makeBackend()
+        _ = try await backend.setMode(.nativeLimit(percent: 90))
+        system.changeExternally(to: 85)
+        #expect(try await backend.setMode(.normal) == .adoptedOutsideChange)
+        #expect(system.reading == .limit(85))
+        #expect(system.runInputs == ["90"])
+        #expect(store.data == nil)
+        #expect(await backend.takeAdoptedLimitChange()?.limit == 85)
+    }
+
+    @Test("\"No limit\" set outside CellKeeper is adopted, but not recorded as 100% without confirmation")
+    func noLimitAdoptedWithoutAssuming100() async throws {
+        let backend = makeBackend()
+        _ = try await backend.setMode(.nativeLimit(percent: 90))
+        system.changeExternally(to: 100)
+        #expect(try await backend.currentMode() == .normal)
+        let adopted = await backend.takeAdoptedLimitChange()
+        #expect(adopted?.isNoLimit == true)
+        #expect(adopted?.limit == 100)
+        #expect(adopted?.previousOwnerLimit == 80)
+
+        // Managing again needs the usual confirmation that 100% is the user's.
+        await #expect(throws: BackendError.self) {
+            try await backend.setMode(.nativeLimit(percent: 90))
+        }
+        #expect(system.runInputs == ["90"])
+        #expect(system.reading == .noLimit)
     }
 
     // MARK: - Persistence
@@ -444,18 +485,16 @@ struct NativeChargeLimitBackendTests {
         #expect(unreadable?.ownerLimit == nil)
     }
 
-    @Test("A change made by someone else is caught before writing over it")
+    @Test("A change made by someone else is caught before writing over it, and adopted")
     func outsideChangeBeforeWrite() async throws {
         let backend = makeBackend()
         _ = try await backend.setMode(.nativeLimit(percent: 90))
         system.changeExternally(to: 95)
-        await #expect(throws: BackendError.changedOutside(expected: .nativeLimit(percent: 90), found: .nativeLimit(percent: 95))) {
-            try await backend.setMode(.nativeLimit(percent: 85))
-        }
+        #expect(try await backend.setMode(.nativeLimit(percent: 85)) == .adoptedOutsideChange)
         #expect(system.runInputs == ["90"])
-        // The user's own limit can still be restored.
-        _ = try await backend.setMode(.normal)
-        #expect(system.reading == .limit(80))
+        #expect(system.reading == .limit(95))
+        #expect(store.data == nil)
+        #expect(await backend.takeAdoptedLimitChange()?.expectedLimit == 90)
     }
 
     @Test("The restore runs even if the setting cannot be read first")

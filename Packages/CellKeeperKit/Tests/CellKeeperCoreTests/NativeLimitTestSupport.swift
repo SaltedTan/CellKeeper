@@ -29,6 +29,7 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
     private var _listFails = false
     private var _runInputs: [String] = []
     private var _listCalls = 0
+    private var _delayedChange: (remainingReads: Int, reading: NativeChargeLimitReading)?
 
     init(reading: NativeChargeLimitReading = .limit(80), shortcutNames: [String] = [NativeChargeLimitBackend.defaultShortcutName]) {
         _reading = reading
@@ -80,6 +81,12 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
         reading = percent >= 100 ? .noLimit : .limit(percent)
     }
 
+    /// Changes the limit from outside after `count` more successful reads,
+    /// for example between CellKeeper's read and its write.
+    func changeExternally(to percent: Int, afterReads count: Int) {
+        lock.withLock { _delayedChange = (count, percent >= 100 ? .noLimit : .limit(percent)) }
+    }
+
     func shortcutNames() async throws -> [String] {
         try lock.withLock {
             _listCalls += 1
@@ -114,6 +121,14 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
             if _failingReads > 0 {
                 _failingReads -= 1
                 throw FakeError(description: "read failed")
+            }
+            if let delayed = _delayedChange {
+                if delayed.remainingReads == 0 {
+                    _reading = delayed.reading
+                    _delayedChange = nil
+                } else {
+                    _delayedChange = (delayed.remainingReads - 1, delayed.reading)
+                }
             }
             return _reading
         }

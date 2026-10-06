@@ -38,8 +38,10 @@ Done: the policy computes the native limit; ownership with restore on quit,
 management off, backend switch and failure; Shortcuts write path verified
 from the App Sandbox with no new entitlements; read-back through
 `pmset -g battlimit` (read-only); rate limiting and logging; UI for
-80/85/90/95/100 with unsupported features disabled. Still open: sleep,
-restart and shutdown observations, and schedules (below).
+80/85/90/95/100 with unsupported features disabled; a limit changed in
+System Settings is kept as the user's own and management turns off (owner
+decision). Observed on the maintainer's Mac: the walk-through and one sleep
+run. Still open: restart and shutdown observations, and schedules (below).
 
 - Model "OS-managed limit" as a backend capability: the policy computes a
   desired native limit (80/85/90/95/100) instead of toggling charging.
@@ -93,6 +95,10 @@ Then:
   test the protocol.
 - Non-sandboxed, notarized app (see research 05); experimental backend behind
   explicit opt-in, per verified model; every precondition in `safety.md`.
+- Owner's direction (2026-10-06): in the long run CellKeeper controls
+  charging itself, and the user turns macOS's own Charge Limit off. The app
+  should then guide the user through turning it off, and detect it if it is
+  turned back on, so two limits never compete.
 
 ## Later
 

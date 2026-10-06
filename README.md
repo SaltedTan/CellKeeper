@@ -56,19 +56,24 @@ Requirements: macOS Tahoe 26.4 or later on a Mac with Apple silicon.
 
 1. In the **Shortcuts** app, create a shortcut named exactly
    **CellKeeper Set Charge Limit**.
-2. Add the **Set Battery Charge Limit** action and set its limit to the
-   **Shortcut Input**, so CellKeeper can pass a value from 80 to 100. Leave
-   **Set Until Tomorrow** off.
-3. In CellKeeper, open **Settings… › Control**, choose **macOS Charge Limit
+2. Search the actions for "charge limit" and add the one that reads **Set
+   charge limit to …**. Set its value to **Shortcut Input**, so CellKeeper
+   can pass a value from 80 to 100. Leave **Set Until Tomorrow** off.
+3. Shortcuts then adds **Receive … from Nowhere** at the top, with **If
+   there's no input: Continue**. Leave it as it is: CellKeeper passes the
+   value from the command line, which does not need the Share sheet or
+   Quick Actions.
+4. In CellKeeper, open **Settings… › Control**, choose **macOS Charge Limit
    (through Shortcuts)**, and confirm.
-4. Pick a limit (80, 85, 90, 95 or 100%) in the menu bar.
+5. Pick a limit (80, 85, 90, 95 or 100%) in the menu bar.
 
 What happens:
 - **Before its first change**, CellKeeper reads your current Charge Limit
   and records it durably. If macOS reports "no limit", CellKeeper first asks
   you to confirm that your limit is 100%.
 - **It restores exactly that value** when you turn off **Manage charging**,
-  switch backend, quit, or if anything fails. If it cannot confirm the
+  switch backend, quit, or if anything fails, unless you have changed the
+  limit yourself meanwhile (see below). If it cannot confirm the
   restore when quitting, it tells you which value to set, and it tries
   again the next time it starts.
 - **Every change is confirmed** by reading the setting back from macOS.
@@ -79,9 +84,12 @@ What happens:
 - **Features macOS's Charge Limit cannot express are disabled:** a custom
   resume threshold (macOS resumes after a drop of more than 5%), the
   temperature pause, and discharging.
-- **While CellKeeper manages the limit**, change it in CellKeeper, not in
-  System Settings. A change made elsewhere makes CellKeeper restore your
-  recorded limit and stop.
+- **If you change the limit in System Settings** while CellKeeper manages
+  it, CellKeeper keeps your new value as your own limit, changes nothing,
+  and turns off **Manage charging**. Turn it on again to let CellKeeper
+  manage the limit; your new value is then the one it restores. CellKeeper
+  cannot tell who changed the limit, so it does the same if another tool
+  changes it.
 
 You can always set the limit yourself in **System Settings › Battery › ⓘ
 next to Charging**. See [docs/safety.md](docs/safety.md#getting-your-own-charge-limit-back).

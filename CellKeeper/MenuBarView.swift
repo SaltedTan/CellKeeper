@@ -154,6 +154,14 @@ private struct NativeLimitSummary: View {
                 } else {
                     Text("This is your own setting; CellKeeper has not changed it.")
                 }
+                if let adopted = status.adoptedChange, !status.settings.isManagementEnabled {
+                    Text("The limit was changed outside CellKeeper to \(Format.chargeLimit(adopted.limit)), so CellKeeper kept it as your own and turned off Manage charging. Turn it on to let CellKeeper manage the limit again.")
+                        .foregroundStyle(.orange)
+                    if adopted.isNoLimit, adopted.previousOwnerLimit != adopted.limit {
+                        Text("If that was a temporary full charge rather than your choice, your earlier limit was \(Format.chargeLimit(adopted.previousOwnerLimit)).")
+                            .foregroundStyle(.orange)
+                    }
+                }
                 if native?.needsNoLimitConfirmation == true {
                     Text("macOS reports no limit. If your own limit is 100%, confirm it in Settings › Control before CellKeeper changes anything.")
                         .foregroundStyle(.orange)

@@ -65,6 +65,11 @@ public enum NativeChargeLimitReading: Sendable, Equatable {
 /// Confirmation: running a shortcut proves nothing. Every change is
 /// confirmed by reading the setting back from macOS.
 ///
+/// Outside changes: a recognised limit that CellKeeper did not set (for
+/// example one the user chose in System Settings) is adopted as the user's
+/// own limit. The record is forgotten and nothing is written, so a
+/// deliberate change is never overwritten, not even by a restore.
+///
 /// The backend is an actor, but its operations contain suspension points.
 /// The controller serialises all calls into it, which the record logic
 /// relies on.
@@ -153,6 +158,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     private var lastReadAt: Date?
     private var lastReadProblem: String?
     private var isLastReportedStateOwn = false
+    private var adoptedChange: AdoptedLimitChange?
 
     /// - Parameters:
     ///   - store: where the user's own limit is recorded.
@@ -280,7 +286,11 @@ public actor NativeChargeLimitBackend: ChargingBackend {
                 isLastReportedStateOwn = true
                 return .normal
             }
-            isLastReportedStateOwn = owned.accepts(percent)
+            guard owned.accepts(percent) else {
+                adopt(reading, replacing: owned)
+                return .normal
+            }
+            isLastReportedStateOwn = true
             if owned.pendingTargets.contains(percent) {
                 // An interrupted change took effect after all. The stored
                 // record already accepts this value, so a failed save loses
@@ -318,6 +328,11 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         }
         status.isReportedStateOwn = isLastReportedStateOwn
         return status
+    }
+
+    public func takeAdoptedLimitChange() async -> AdoptedLimitChange? {
+        defer { adoptedChange = nil }
+        return adoptedChange
     }
 
     /// Forgets the cached result of the shortcut check, so the next
@@ -375,7 +390,8 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             CellKeeperLog.backend.notice("Recording the user's own Charge Limit: \(currentPercent)%")
         case .owned(let existing):
             guard existing.accepts(currentPercent) else {
-                throw BackendError.changedOutside(expected: .nativeLimit(percent: existing.target), found: .nativeLimit(percent: currentPercent))
+                adopt(current, replacing: existing)
+                return .adoptedOutsideChange
             }
             owned = existing
             owned.confirm(currentPercent)
@@ -407,9 +423,17 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         case .owned(var owned):
             // Restoring is attempted even if the setting cannot be read first;
             // only the read-back afterwards can confirm it.
-            if let current = try? await read(), current.percent == owned.ownerLimit {
-                clearRecord(reason: "\(owned.ownerLimit)% already in effect")
-                return .unchanged
+            if let current = try? await read(), let percent = current.percent {
+                if percent == owned.ownerLimit {
+                    clearRecord(reason: "\(owned.ownerLimit)% already in effect")
+                    return .unchanged
+                }
+                if !owned.accepts(percent) {
+                    // The user (or another tool) chose a new limit: that is
+                    // now their own, so there is nothing to give back.
+                    adopt(current, replacing: owned)
+                    return .adoptedOutsideChange
+                }
             }
             // Mark the restore as in progress, so a later reading of the
             // user's limit is recognised as CellKeeper's own doing. Restoring
@@ -502,6 +526,21 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         } catch {
             CellKeeperLog.backend.error("Could not update the Charge Limit record: \(String(describing: error), privacy: .public)")
         }
+    }
+
+    /// Adopts a recognised limit that CellKeeper did not set as the user's
+    /// own: the record is forgotten and nothing is written.
+    private func adopt(_ reading: NativeChargeLimitReading, replacing owned: OwnershipRecord) {
+        guard let percent = reading.percent else { return }
+        adoptedChange = AdoptedLimitChange(
+            limit: percent,
+            isNoLimit: reading == .noLimit,
+            previousOwnerLimit: owned.ownerLimit,
+            expectedLimit: owned.target,
+            date: now()
+        )
+        isLastReportedStateOwn = false
+        clearRecord(reason: "adopted \(percent)%, set outside CellKeeper, as the user's own limit (CellKeeper had set \(owned.target)%; the recorded limit was \(owned.ownerLimit)%)")
     }
 
     private func clearRecord(reason: String) {
