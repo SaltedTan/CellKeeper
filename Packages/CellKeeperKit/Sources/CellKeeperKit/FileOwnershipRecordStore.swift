@@ -51,7 +51,14 @@ public struct FileOwnershipRecordStore: OwnershipRecordStore {
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let temporary = directory.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString)")
-        try Self.writeDurably(data, to: temporary)
+        do {
+            try Self.writeDurably(data, to: temporary)
+        } catch {
+            // Saves are retried at every evaluation; a lasting failure must
+            // not leave a file behind each time.
+            unlink(temporary.path)
+            throw error
+        }
         guard rename(temporary.path, url.path) == 0 else {
             let code = errno
             unlink(temporary.path)
@@ -112,9 +119,15 @@ public struct FileOwnershipRecordStore: OwnershipRecordStore {
     }
 
     /// `F_FULLFSYNC` asks the drive itself to flush; fall back to `fsync`
-    /// where the file system does not support it.
+    /// only where the file system does not support it. Any other error
+    /// (for example `EIO`) fails the save: `fsync` alone would not flush the
+    /// drive's cache.
     private static func flush(_ descriptor: Int32) throws {
         if fcntl(descriptor, F_FULLFSYNC) == 0 { return }
+        let code = errno
+        guard [ENOTSUP, EOPNOTSUPP, EINVAL, ENOTTY].contains(code) else {
+            throw FileOwnershipRecordStoreError.system(operation: "F_FULLFSYNC", errno: code)
+        }
         guard fsync(descriptor) == 0 else {
             throw FileOwnershipRecordStoreError.system(operation: "fsync", errno: errno)
         }
