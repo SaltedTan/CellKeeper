@@ -91,7 +91,10 @@ public actor ChargeController {
     private var lastFailureUptime: TimeInterval?
     private var sleepAnnouncedAtUptime: TimeInterval?
     private var isShutDown = false
-    private var restrictingRequestTimes: [TimeInterval] = []
+    /// Recent restricting requests, for rate limiting. Those sent to a
+    /// backend that touches no hardware are dropped when the backend changes,
+    /// so simulated activity never delays a real backend's first change.
+    private var restrictingRequests: [(uptime: TimeInterval, touchedHardware: Bool)] = []
     private var events: [ControlEvent] = []
     private var nextEventID = 0
     private var lastEvaluation: Date?
@@ -302,6 +305,7 @@ public actor ChargeController {
         consecutiveFailures = 0
         lastFailureUptime = nil
         lastFailedRestoreUptime = nil
+        restrictingRequests.removeAll { !$0.touchedHardware }
         currentMode = nil
         ownedMode = nil
         unconfirmedRequests = []
@@ -398,14 +402,14 @@ public actor ChargeController {
             currentMode: currentMode,
             memory: memory,
             isBackendFaulted: isBackendFaulted,
-            recentRestrictingRequests: restrictingRequestTimes,
+            recentRestrictingRequests: restrictingRequests.map(\.uptime),
             isSleepImminent: sleepAnnouncedAtUptime != nil,
             restoreRetryNotBefore: trigger.isAutomatic
                 ? lastFailedRestoreUptime.map { $0 + ChargingPolicy.minimumRestoreRetryInterval }
                 : nil,
             releaseReason: releaseReason
         )
-        restrictingRequestTimes.removeAll { input.uptime - $0 >= 60 * 60 }
+        restrictingRequests.removeAll { input.uptime - $0.uptime >= 60 * 60 }
         let newDecision = ChargingPolicy.evaluate(input)
         memory = newDecision.memory
         lastEvaluation = input.now
@@ -522,7 +526,7 @@ public actor ChargeController {
         if isRestricting {
             // Attempts count, not just successes, so failures cannot cause
             // a burst of writes.
-            restrictingRequestTimes.append(uptime())
+            restrictingRequests.append((uptime(), capabilities.availability.affectsHardware))
         }
         let target = describeTarget(mode)
         let ownerLimitBefore = nativeLimit?.ownerLimit
@@ -530,7 +534,7 @@ public actor ChargeController {
         do {
             var outcome = try await setAndConfirm(mode)
             if ownerLimitBefore == nil, let ownerLimit = nativeLimit?.ownerLimit {
-                record(.safety, "Recorded your own macOS Charge Limit of \(ownerLimit)% before changing it; it is restored when CellKeeper stops managing it.")
+                record(.safety, "Recorded your own macOS Charge Limit of \(ownerLimit)%; it will be restored when CellKeeper stops managing the limit.")
             }
             // A fault persists until the user clears it, even if restoring
             // normal charging succeeds.
@@ -548,8 +552,8 @@ public actor ChargeController {
                 record(.result, "Applied \(target) (confirmed by read-back\(confirmationDetail(mode))).")
             case .unchanged:
                 // Nothing was written, so it does not count toward the limit.
-                if isRestricting, !restrictingRequestTimes.isEmpty {
-                    restrictingRequestTimes.removeLast()
+                if isRestricting, !restrictingRequests.isEmpty {
+                    restrictingRequests.removeLast()
                 }
                 lastExecution = ExecutionRecord(date: now(), action: action, result: .unchanged)
                 record(.result, "Already in effect: \(target); nothing changed (confirmed by read-back\(confirmationDetail(mode))).")
@@ -661,11 +665,13 @@ public actor ChargeController {
         do {
             let outcome = try await setAndConfirm(.normal)
             if isNative {
-                let suffix = outcome == .unchanged ? " (already in effect)" : ""
-                let what = ownerLimit.map { "Restored your own macOS Charge Limit of \($0)%" }
-                    ?? "Nothing to restore: CellKeeper had not changed macOS's Charge Limit"
                 let reported = nativeLimit?.reportedLimit.map { "; macOS reports \($0)%" } ?? ""
-                record(.safety, "\(what) (\(reason))\(suffix)\(reported).")
+                if let ownerLimit {
+                    let suffix = outcome == .unchanged ? " (already in effect)" : ""
+                    record(.safety, "Restored your own macOS Charge Limit of \(ownerLimit)% (\(reason))\(suffix)\(reported).")
+                } else {
+                    record(.safety, "Nothing to restore: CellKeeper holds no change to macOS's Charge Limit (\(reason))\(reported).")
+                }
             } else {
                 let suffix = outcome == .simulated ? " (simulated; hardware unchanged)" : ""
                 record(.safety, "Restored normal charging (\(reason))\(suffix).")

@@ -26,7 +26,7 @@ Tags follow the [classification legend](README.md#classification-legend). Each f
 | Can a sandboxed app launch `/usr/bin/shortcuts`? | **Yes.** An App-Sandboxed probe with no other entitlement listed shortcuts and changed the limit 80 → 85 → 80. **No entitlement or design change is needed.** | `[PUBLIC-API]` `[VERIFIED-EXPERIMENTALLY]` (ad-hoc-signed probe) |
 | How can the current limit be read back? | Only through `pmset -g battlimit`. It works unprivileged and inside the sandbox, and it reflected each change as soon as `shortcuts run` exited. It is undocumented, so CellKeeper uses it read-only and refuses to act on anything it does not recognise. | `[PRIVATE/UNDOCUMENTED][VERIFIED-EXPERIMENTALLY]` (read) |
 | Is a shortcut finishing a confirmation? | **No.** A run exited 0 and changed nothing (O2). | `[VERIFIED-EXPERIMENTALLY]` |
-| Does the limit hold through sleep and restart? | **Pending:** needs owner-performed steps; see "Sleep and restart" below. | — |
+| Does the limit hold through sleep and restart? | **Sleep: yes, in one owner-performed run.** An 85% limit set by CellKeeper was still in effect after about 12 minutes of clamshell sleep on AC, with five maintenance wakes and a full wake, and was not re-applied (O10). **Restart: pending.** See "Sleep and restart" below. | `[VERIFIED-EXPERIMENTALLY]` (one run; read back with the undocumented report) |
 
 ---
 
@@ -136,6 +136,73 @@ A missing shortcut exits 1 with `Error: The operation couldn’t be completed. C
 
 All runs ended with the owner's 80% in effect and no record left behind. The CellKeeper preferences used for these runs were deleted afterwards.
 
+### O10 — The limit held through sleep (owner-performed) `[VERIFIED-EXPERIMENTALLY]`
+
+**Setup:**
+- The owner ran the Debug build on the native backend with a CellKeeper limit of 85%, on AC, and closed the lid.
+- Readings come from:
+  - `pmset -g log`, which is documented and was read-only;
+  - CellKeeper's unified log, including its telemetry;
+  - `pmset -g batt`, and `pmset -g battlimit` after wake.
+- Times are local, on 2026-10-06.
+
+| Time | Event | Charge Limit | Battery |
+|---|---|---|---|
+| 21:31:23 | CellKeeper's will-sleep evaluation. The change to 85% was still rate-limited (O11). | 80% (the owner's) | — |
+| 21:31:28 | Clamshell sleep | 80% | 81%, AC |
+| 21:32:43 | Maintenance dark wake. CellKeeper recorded 80% and set 85%, confirmed by read-back. | 85% | 81% |
+| 21:33:11–21:41:23 | Asleep (492 s) | — | — |
+| 21:41:23 | Maintenance dark wake | — | 85%, AC, not charging (CellKeeper's telemetry; `pmset -g log`'s line for this wake still showed 81%) |
+| 21:42:24–21:45:11 | Asleep, apart from one 10 s dark wake | — | 85% |
+| 21:45:11 | Full wake (lid opened) | — | 85% |
+| 21:46:21 | Read after wake | 85%, both entries as in O4 | 85%, AC attached, not charging |
+| 21:49:20 | CellKeeper quit | 80% restored and confirmed; record deleted | — |
+
+CellKeeper made no change between 21:32:43 and quitting. So the 85% read at 21:46 is the value set before the Mac went back to sleep, not a value re-applied after wake.
+
+**Observed:**
+- The 85% limit survived about 12.5 minutes of sleep, five maintenance dark wakes and a full wake.
+- On AC, the battery rose from 81% to 85% while the Mac was asleep, and was reported "not charging" at 85% from then on.
+
+**Inferred, not observed:**
+- That macOS stopped charging at the limit while asleep. The charge stopping at exactly the limit fits that.
+- One run cannot separate charging during sleep from charging during a dark wake.
+- It says nothing about longer sleeps or sleep on battery power.
+
+### O11 — The shortcut runs during a maintenance dark wake `[VERIFIED-EXPERIMENTALLY]`
+
+**What happened:**
+- The owner turned "Manage charging" off and on again less than a minute before closing the lid. So CellKeeper's rate limit refused the change to 85% at will-sleep.
+- CellKeeper's periodic evaluation then ran during a maintenance dark wake, with the lid closed, at 21:32:43.
+- The shortcut ran in 0.21 s, and the read-back confirmed 85%.
+- The rate limit had expired while the Mac slept. Its clock keeps counting during sleep.
+
+**What it means:** CellKeeper can change the limit while the lid is closed. That is an ordinary setting change, and every restore path still applies.
+
+### O12 — Telemetry was briefly missing at a dark wake `[VERIFIED-EXPERIMENTALLY]`
+
+At 21:41:23.644, during a dark wake, CellKeeper's evaluation found no battery telemetry. It left macOS's limit unchanged, as designed ([architecture](../architecture.md), "Missing or stale telemetry"). The reading arrived 134 ms later.
+
+If missing telemetry released the limit, this wake would have restored 80% and a later evaluation would have set 85% again.
+
+### O13 — The owner's walk-through of the app `[VERIFIED-EXPERIMENTALLY]`
+
+The owner followed a scripted walk-through, starting on the Simulated backend. From CellKeeper's log:
+
+| Step | What happened |
+|---|---|
+| Choose the macOS Charge Limit backend | The switch completed. The first evaluation was rate-limited for 27 s by requests made on the Simulated backend a minute earlier. After that, CellKeeper recorded 80% and ran nothing, because CellKeeper's limit was also 80%. |
+| Pick 85% | The shortcut ran in 0.23 s; read-back 85%. |
+| Turn "Manage charging" off | 80% restored and confirmed. |
+| Switch to Simulated, back again, and quit, with management still off | Each time: nothing to restore, which is correct because CellKeeper held no change. |
+| Second session: management on, off, on | 85% set, then 80% restored. The third change was rate-limited as designed and was applied later, during sleep (O11). |
+
+**Change made afterwards:** requests sent to a backend that touches no hardware no longer count toward the rate limit once the backend changes. Real changes still count after a round trip through Simulated.
+
+**Not covered here:**
+- The look of the settings (the limit picker, and the disabled settings with their explanations) is not in the log.
+- Restoring a changed limit on a backend switch and on quit was not exercised in this walk-through, because management was off. Both are covered by O9; quitting is also covered by the end of O10.
+
 ---
 
 ## Inferences `[INFERRED/UNVERIFIED]`
@@ -150,19 +217,20 @@ All runs ended with the owner's 80% in effect and no record left behind. The Cel
 
 ## Sleep and restart
 
-**Status: pending owner-performed steps.** Nothing below has been observed yet. The design does not depend on the outcome:
+**Status:** sleep observed once (O10–O12); restart still pending. The design does not depend on the outcome:
 - CellKeeper re-reads the limit after every wake and at launch.
 - It treats any value it did not set as an outside change.
 - It keeps the user's own limit in a persisted record until it has been restored and read back.
 
 Planned procedure:
-1. **Sleep:**
+1. **Sleep (done, O10):**
    - CellKeeper sets 85% (recording 80%).
    - The owner sleeps the Mac with the lid closed for at least 2 minutes, then wakes it.
    - Compare `pmset -g battlimit` before and after, and `pmset -g log` for the sleep/wake entries and their charge readings.
    - Then restore 80%.
-2. **Restart:** with the owner's own 80% (no CellKeeper change), restart and read `pmset -g battlimit`. Optionally repeat with a CellKeeper-set value, which also exercises the launch-time recovery path.
-3. **Enforcement during sleep:** this needs the battery below the limit while plugged in and a long sleep. It is deferred to a later observation run.
+   - In the run, the 85% was set during a dark wake just after the lid closed (O11), rather than before.
+2. **Restart (pending):** with the owner's own 80% (no CellKeeper change), restart and read `pmset -g battlimit`. Optionally repeat with a CellKeeper-set value, which also exercises the launch-time recovery path.
+3. **Enforcement during sleep:** partly seen in O10, where charging rose to the limit and stopped there while the Mac was asleep on AC. A longer sleep, and sleep on battery power, are deferred to a later observation run.
 
 ---
 
@@ -185,7 +253,7 @@ Planned procedure:
 2. How does "Set Until Tomorrow" (S4) appear in `battlimit`, and does macOS revert it in a way CellKeeper would see as an outside change?
 3. How does "Charge to Full Now" appear in `battlimit`: an empty list, `Terminated = 1`, or another reason?
 4. Does Optimized Battery Charging add entries with another `chargeSocLimitReason`?
-5. Sleep, restart and shutdown behaviour (above). Apple Community users report that the limit is not enforced while the Mac is shut down (02 §4).
+5. Restart and shutdown behaviour, and longer sleeps (above); one sleep run is recorded in O10. Apple Community users report that the limit is not enforced while the Mac is shut down (02 §4).
 6. Is the `battlimit` report stable across macOS 27.x and on macOS 26.4–26.x?
 
 ---

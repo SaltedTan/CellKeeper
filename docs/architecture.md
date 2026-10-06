@@ -407,7 +407,10 @@ confirmed.
 
 How often the shortcut can run:
 - Changes to a CellKeeper-chosen limit share the restricting budget
-  (≥ 60 s apart, ≤ 20 per hour).
+  (≥ 60 s apart, ≤ 20 per hour). Requests made on the Simulated backend are
+  dropped from the budget when the backend changes, so they never delay the
+  first real change; real changes still count after a round trip through
+  Simulated.
 - A restore always follows a change, or retries a failed restore (≥ 60 s
   apart when automatic).
 - Taking over a limit that is already in effect runs nothing.

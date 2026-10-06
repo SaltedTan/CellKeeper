@@ -543,6 +543,45 @@ struct NativeLimitControllerTests {
         #expect(system.runInputs == ["90"])
     }
 
+    @Test("Simulated requests do not delay the first real change after switching")
+    func simulatedRequestsNotCounted() async {
+        let clock = clock
+        let controller = ChargeController(
+            telemetry: StubTelemetry(snapshot(percent: 92), clock: clock),
+            backend: MockChargingBackend(),
+            settings: settings(limit: 90),
+            now: { clock.now },
+            uptime: { clock.uptime }
+        )
+        let simulated = await controller.evaluate(.launch)
+        #expect(simulated.lastExecution?.result == .simulated)
+
+        clock.advance(by: 5)
+        let status = await controller.switchBackend(to: makeNativeBackend(system: system, store: store, clock: clock))
+        #expect(status.backend.identifier == NativeChargeLimitBackend.identifier)
+        #expect(status.currentMode == .nativeLimit(percent: 90))
+        #expect(system.runInputs == ["90"])
+    }
+
+    @Test("Real changes still count after a round trip through Simulated")
+    func realRequestsCountedAcrossSwitches() async {
+        let (controller, _) = makeController(limit: 90)
+        await controller.evaluate(.launch)
+        await controller.switchBackend(to: MockChargingBackend())
+        #expect(system.runInputs == ["90", "80"])
+
+        let back = await controller.switchBackend(to: makeNativeBackend(system: system, store: store, clock: clock))
+        guard case .refuse(.rateLimited) = back.decision?.action else {
+            Issue.record("expected rate limiting, got \(String(describing: back.decision?.action))")
+            return
+        }
+        #expect(system.runInputs == ["90", "80"])
+
+        clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
+        await controller.evaluate(.periodic)
+        #expect(system.runInputs == ["90", "80", "90"])
+    }
+
     @Test("A failing restore is retried automatically at most once a minute, but at once on a user action")
     func restoreRetriesSpaced() async throws {
         let (controller, _) = makeController(limit: 90)
