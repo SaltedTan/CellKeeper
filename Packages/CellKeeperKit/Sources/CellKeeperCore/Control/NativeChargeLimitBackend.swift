@@ -598,9 +598,13 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         return decodeAdoptionMarker(data)
     }
 
+    /// The adopted value is whatever macOS reported, which need not be one
+    /// CellKeeper could set (another tool, or a later macOS, may use other
+    /// steps); it is never restored. The values CellKeeper recorded or set
+    /// must be supported steps.
     private static func decodeAdoptionMarker(_ data: Data) -> AdoptionMarker? {
         guard let marker = try? JSONDecoder().decode(AdoptionMarker.self, from: data),
-              supportedLimits.contains(marker.adoptedLimit), supportedLimits.contains(marker.previousOwnerLimit),
+              (1...100).contains(marker.adoptedLimit), supportedLimits.contains(marker.previousOwnerLimit),
               supportedLimits.contains(marker.expectedLimit)
         else { return nil }
         return marker

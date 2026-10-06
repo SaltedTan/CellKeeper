@@ -296,6 +296,10 @@ The native-limit extension of the contract:
       backend switch waits; turning management on removes the old record
       (it is no longer owed), or stays off if it cannot.
     - Removing a marker never deletes a record of the user's limit.
+    - The kept value may be any percentage macOS reports, including one
+      CellKeeper cannot set (another tool, or a later macOS with other
+      steps); it is never restored. The values CellKeeper recorded or set
+      must be Charge Limit steps, or the marker counts as unreadable.
 - **Confirmation.** Only a fresh read of the setting from macOS confirms a
   change. A shortcut or command exiting successfully does not: one did so
   while changing nothing (research note 08, O2).

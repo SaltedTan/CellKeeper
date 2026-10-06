@@ -363,6 +363,36 @@ struct NativeChargeLimitBackendTests {
         #expect(NativeChargeLimitBackend.outstandingRecord(in: store)?.ownerLimit == 95)
     }
 
+    @Test("A limit kept at a value CellKeeper cannot set is still a marker after a relaunch, not an unreadable record")
+    func adoptionMarkerOutsideSteps() async throws {
+        let backend = makeBackend()
+        _ = try await backend.setMode(.nativeLimit(percent: 85))
+        system.changeExternally(to: 60)
+        #expect(try await backend.currentMode() == .normal)
+        #expect(await backend.takeAdoptedLimitChange()?.limit == 60)
+
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store) == nil)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store)?.limit == 60)
+        let relaunched = makeBackend()
+        #expect(await relaunched.takeAdoptedLimitChange()?.limit == 60)
+        #expect(await relaunched.nativeLimitStatus()?.isRecordUnreadable == false)
+        #expect(try await relaunched.currentMode() == .normal)
+
+        try NativeChargeLimitBackend.removeAdoptionMarker(in: store)
+        #expect(store.data == nil)
+        // A value CellKeeper cannot set is never recorded as the user's own.
+        await #expect(throws: BackendError.self) { try await relaunched.setMode(.nativeLimit(percent: 80)) }
+        #expect(system.runInputs == ["85"])
+    }
+
+    @Test("A marker whose recorded values are not Charge Limit steps is unreadable")
+    func adoptionMarkerWithInvalidRecordedValues() async {
+        let json = #"{"adoptedLimit":90,"isNoLimit":false,"previousOwnerLimit":70,"expectedLimit":85,"adoptedAt":0}"#
+        store.data = Data(json.utf8)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: store) == nil)
+        #expect(await makeBackend().nativeLimitStatus()?.isRecordUnreadable == true)
+    }
+
     @Test("\"No limit\" set outside CellKeeper is adopted, but not recorded as 100% without confirmation")
     func noLimitAdoptedWithoutAssuming100() async throws {
         let backend = makeBackend()
