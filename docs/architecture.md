@@ -137,7 +137,9 @@ The policy's only memory is `PolicyMemory`:
 
 - `limitReached` — set when charge ≥ limit, cleared when charge ≤ resume
   threshold, unchanged in between (the hysteresis band). Never set when the
-  limit is 100%.
+  limit is 100%. Raising the limit above the one it was set at
+  (`latchedLimit`) clears it, so charging resumes toward the new limit; it
+  sets again at once if the charge has already reached it.
 - `temperatureTripped` — set at ≥ pause temperature, cleared at ≤ resume
   temperature, and cleared when temperature is unknown so a lost sensor can
   never hold charging off.

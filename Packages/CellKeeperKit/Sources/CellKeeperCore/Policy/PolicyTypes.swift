@@ -279,7 +279,8 @@ public struct ChargeOverride: Sendable, Equatable {
     }
 }
 
-/// The policy's only memory between evaluations: three hysteresis latches.
+/// The policy's only memory between evaluations: three hysteresis latches,
+/// and the limit the first one was set at.
 public struct PolicyMemory: Sendable, Equatable {
     /// Set when the charge reaches the limit; cleared when it falls to the
     /// resume threshold. While set, charging stays paused.
@@ -290,11 +291,15 @@ public struct PolicyMemory: Sendable, Equatable {
     /// Set when the charge falls to the safety floor; cleared once it is five
     /// points above the floor.
     public var belowSafetyFloor: Bool
+    /// The charge limit in force while ``limitReached`` was last set, so that
+    /// raising the limit can end the hold; nil while it is clear.
+    public var latchedLimit: Int?
 
-    public init(limitReached: Bool = false, temperatureTripped: Bool = false, belowSafetyFloor: Bool = false) {
+    public init(limitReached: Bool = false, temperatureTripped: Bool = false, belowSafetyFloor: Bool = false, latchedLimit: Int? = nil) {
         self.limitReached = limitReached
         self.temperatureTripped = temperatureTripped
         self.belowSafetyFloor = belowSafetyFloor
+        self.latchedLimit = latchedLimit
     }
 }
 
