@@ -51,18 +51,28 @@ public struct PmsetChargeLimitReader: ChargeLimitReading {
 ///
 /// - With a Charge Limit below 100%: `Battery level limits:` followed by a
 ///   parenthesised list of `{ key = value; … }` entries. Every non-terminated
-///   entry had `chargeSocLimitReason = manualChargeLimit` and the limit in
-///   `chargeSocLimitSoc`.
+///   entry had `chargeSocLimitReason = manualChargeLimit`, the flags in
+///   `observedFlags`, and the limit in `chargeSocLimitSoc`.
 /// - With the Charge Limit at 100%: the single line
 ///   `No battery level limits set`.
 ///
 /// The parser accepts only these shapes, rejects repeated keys, requires
-/// every active entry to be a manual Charge Limit, and requires them to
-/// agree. Anything else is `.unrecognized`.
+/// every active entry to be a manual Charge Limit with the observed flags,
+/// and requires them to agree. Anything else is `.unrecognized`. Keys it
+/// does not check, such as `chargeSocLimitOwner`, are ignored.
 public enum ChargeLimitReportParser {
     static let noLimitLine = "No battery level limits set"
     static let header = "Battery level limits:"
     static let manualReason = "manualChargeLimit"
+    /// The flags of every active entry observed so far. How temporary states
+    /// ("Set Until Tomorrow", "Charge to Full Now", Optimized Battery
+    /// Charging) appear has not been observed; if one differs only in these
+    /// flags, it must not be read as the user's own limit (#14).
+    static let observedFlags: KeyValuePairs = [
+        "chargeSocLimitDrain": "1",
+        "chargeSocLimitIsEOC": "1",
+        "chargeSocLimitNoChargeToFull": "0",
+    ]
 
     public static func parse(_ text: String) -> NativeChargeLimitReading {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -111,6 +121,9 @@ public enum ChargeLimitReportParser {
             case "0":
                 guard item["chargeSocLimitReason"] == manualReason else {
                     return .unrecognized("a limit with reason \(item["chargeSocLimitReason"] ?? "missing")")
+                }
+                for (key, expected) in observedFlags where item[key] != expected {
+                    return .unrecognized(item[key].map { "a limit with \(key) = \($0)" } ?? "a limit without \(key)")
                 }
                 guard let soc = item["chargeSocLimitSoc"].flatMap({ Int($0) }), (1...100).contains(soc) else {
                     return .unrecognized("a limit without a valid percentage")

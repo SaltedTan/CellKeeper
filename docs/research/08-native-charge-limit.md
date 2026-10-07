@@ -328,7 +328,7 @@ The other denials were the ones already seen in O3 and O7: `BackgroundShortcutRu
 
 - **I1:** Standard input probably reaches the shortcut as untyped data that "Set Battery Charge Limit" cannot use as a number, while a `.txt` file is coerced to text and then to a number. Only the outcome (O1, O2) was observed.
 - **I2:** "No battery level limits set" probably means the Charge Limit is at 100%: that is what the report showed after setting 100%. It might also appear in other states, such as a temporary "Charge to Full Now" (open question 3). CellKeeper therefore records it as the user's 100% limit only after the user confirms that their limit is 100%. It never maps "no limit" or an unknown state to 100% by itself.
-- **I3:** Entries with a reason other than `manualChargeLimit` (for example from Optimized Battery Charging) or with disagreeing values may exist. CellKeeper treats them as unrecognised and changes nothing.
+- **I3:** Entries with a reason other than `manualChargeLimit` (for example from Optimized Battery Charging), with flags other than those in O4, or with disagreeing values may exist. CellKeeper treats them as unrecognised and changes nothing.
 - **I4:** `chargeSocLimitDrain = 1` is consistent with third-party reports that macOS drains a battery above the limit down to it (02 §3.7, unverified).
 - **I5:** The 80% limit observed throughout was the owner's own setting. The owner confirmed this; the observations are consistent with it.
 
@@ -359,7 +359,8 @@ Planned procedure:
 2. **Read-back:** `pmset -g battlimit`, labelled undocumented and used read-only.
    - The arguments are fixed.
    - The parser accepts only the shapes in O4.
-   - Every active entry must be a manual Charge Limit, and they must agree.
+   - Every active entry must be a manual Charge Limit with the flags seen in O4 (`chargeSocLimitDrain = 1`, `chargeSocLimitIsEOC = 1`, `chargeSocLimitNoChargeToFull = 0`), and they must agree.
+   - Other keys, such as the owner PID, are not checked, so a key added by a macOS update does not stop the backend (owner decision, 2026-10-07, #14). A temporary state that differs only in its flags (open questions 2–4) is therefore unrecognised rather than recorded as the user's own limit.
    - Anything else is "unrecognised": CellKeeper then records nothing and sets no new limit. It still attempts to restore a limit it already recorded, and treats that restore as unconfirmed until it reads it back.
 3. **Sandbox:** stays on, with no new entitlements (O3). Keeping it also blocks pmset's SMC user-client attempt (O7).
 4. **Confirmation:** only a read-back equal to the requested value. The exit status never confirms (O2).
