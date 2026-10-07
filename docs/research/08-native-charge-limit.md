@@ -24,7 +24,7 @@ Tags follow the [classification legend](README.md#classification-legend). Each f
 |---|---|---|
 | Can the shortcut take the limit as input? | **Yes, as a text file** (`shortcuts run "<name>" -i <file containing 85>`). The same value piped through standard input ran without error and **changed nothing**. | `[PUBLIC-API]` (CLI) `[VERIFIED-EXPERIMENTALLY]` |
 | Can a sandboxed app launch `/usr/bin/shortcuts`? | **Yes.** An App-Sandboxed probe with no other entitlement listed shortcuts and changed the limit 80 → 85 → 80. **No entitlement or design change is needed.** | `[PUBLIC-API]` `[VERIFIED-EXPERIMENTALLY]` (ad-hoc-signed probe) |
-| How can the current limit be read back? | With `pmset -g battlimit`, which CellKeeper uses now. It works unprivileged and inside the sandbox, and it reflected each change as soon as `shortcuts run` exited. It is undocumented, so CellKeeper uses it read-only and refuses to act on anything it does not recognise. Shortcuts also has a "Get charge limit" action (O16). Run from Terminal, it returned the same value as `pmset` for 80, 85 and 100%, and plain `100` for no limit (O18), so it could replace `pmset` as a documented read-back. Not yet tried from the sandbox. | `[PRIVATE/UNDOCUMENTED][VERIFIED-EXPERIMENTALLY]` (pmset read); getter `[PUBLIC-API][VERIFIED-EXPERIMENTALLY]` (Terminal only) |
+| How can the current limit be read back? | With `pmset -g battlimit`, which CellKeeper uses now. It works unprivileged and inside the sandbox, and it reflected each change as soon as `shortcuts run` exited. It is undocumented, so CellKeeper uses it read-only and refuses to act on anything it does not recognise. Shortcuts also has a "Get charge limit" action (O16). Run from Terminal, it returned the same value as `pmset` for 80, 85 and 100%, and plain `100` for no limit (O18), but from the App Sandbox it exits 0 and returns nothing (O19), so it cannot replace `pmset` while CellKeeper is sandboxed. | `[PRIVATE/UNDOCUMENTED][VERIFIED-EXPERIMENTALLY]` (pmset read); getter `[PUBLIC-API][VERIFIED-EXPERIMENTALLY]` (works from Terminal, returns nothing in the sandbox) |
 | Is a shortcut finishing a confirmation? | **No.** A run exited 0 and changed nothing (O2). | `[VERIFIED-EXPERIMENTALLY]` |
 | Does the limit hold through sleep and restart? | **Sleep: yes, in one owner-performed run.** An 85% limit set by CellKeeper was still in effect after about 12 minutes of clamshell sleep on AC, with five maintenance wakes and a full wake, and was not re-applied (O10). **Restart: yes, in one owner-performed run.** The owner's own 80% was still in effect after a restart, both in `pmset -g battlimit` and in System Settings (O17). See "Sleep and restart" below. | `[VERIFIED-EXPERIMENTALLY]` (one run each) |
 
@@ -294,7 +294,33 @@ A shortcut containing only that action, run with `-o`, would answer these withou
 - The getter reports the configured Charge Limit.
 - It reports 100 where `pmset` reports no limit, which supports I2 for this state.
 - What it returns during a temporary state ("Charge to Full Now", "Set Until Tomorrow") is unknown. Unlike `pmset`'s entries, a single number cannot show that such a state exists.
-- Whether it works from the App Sandbox (writing its output into the container) is untested. The setter does work from the sandbox (O3).
+- From the App Sandbox it returns nothing; that was observed later (O19). The setter does work from the sandbox (O3).
+
+### O19 — From the App Sandbox the getter returns nothing `[PUBLIC-API][VERIFIED-EXPERIMENTALLY]`
+
+**Setup (2026-10-07):**
+- A Swift command-line probe made like O3's: embedded `Info.plist` with bundle ID `io.github.saltedtan.CellKeeper.spike.getter`, ad-hoc signed with Hardened Runtime and only `com.apple.security.app-sandbox`. `APP_SANDBOX_CONTAINER_ID` was set at run time.
+- It ran the getter from O18 with `Process`, standard input from `/dev/null`. Nothing was set: the owner's own 80% was in effect throughout, and `pmset -g battlimit` read 80 before and after.
+- Control: the same binary, re-signed without the sandbox entitlement.
+
+| Command | Sandboxed | Unsandboxed control |
+|---|---|---|
+| `shortcuts list` | exit 0, getter listed | the same |
+| `shortcuts run "CellKeeper Get Charge Limit" -o <temporary directory>/<uuid>.txt --output-type public.plain-text`, three times | exit 0 in 0.22–0.29 s, **no file** | exit 0 in 0.24 s, file holds `80` |
+| the same with no file extension | exit 0, **no file** | file holds `80` |
+| the same with `-o -` | exit 0, **empty standard output** | `80` |
+| a shortcut name that does not exist | exit 1, `Couldn’t find shortcut` | the same |
+
+**Sandbox denials** (`log stream`, kernel `Sandbox` messages): exactly one per getter run, five in five runs:
+- `shortcuts(<pid>) deny(1) file-write-create ~/Library/Group Containers/group.com.apple.shortcuts.storage.ShortcutsCommandLine/Temporary/com.apple.shortcuts.ShortcutsCommandLine/<UUID>`
+
+The other denials were the ones already seen in O3 and O7: `BackgroundShortcutRunner`'s cache and `cloudd`, `pmset`'s `AppleSMCClient`, and `vfs.disk-space`.
+
+**Inferred, not observed:**
+- `shortcuts` runs inside the caller's sandbox. It apparently receives a shortcut's output through a file it creates in Shortcuts' group container. The sandbox denies that, the output is dropped without an error, and the tool still exits 0.
+- The setter is unaffected (O3) because it produces no output.
+- A sandboxed CellKeeper therefore cannot read the limit with the getter as it is. Exit 0 with no output must count as a failure, as O18 already requires.
+- Possible ways around it, none tried: a sandbox exception for that group-container path (a new entitlement, against decision 3, inside another app's container); a getter shortcut that saves its result to a file CellKeeper can read; or the non-sandboxed app that a privileged helper needs anyway (roadmap milestone 4).
 
 ---
 
@@ -346,7 +372,7 @@ Planned procedure:
 
 ## Open questions
 
-1. ~~Is there a "Get Battery Charge Limit" Shortcuts action?~~ Yes (O16), as one beta-era report suggested (S3), and its output matches `pmset` (O18). Should it replace `pmset -g battlimit` as the read-back? It would mean a second shortcut, and it cannot show temporary states. Does it work from the sandbox, and what does it return during a temporary full charge?
+1. ~~Is there a "Get Battery Charge Limit" Shortcuts action?~~ Yes (O16), as one beta-era report suggested (S3), and its output matches `pmset` (O18). Should it replace `pmset -g battlimit` as the read-back? Not while CellKeeper is sandboxed: there it returns nothing (O19). It would also mean a second shortcut, and it cannot show temporary states. What does it return during a temporary full charge?
 2. How does "Set Until Tomorrow" (S4) appear in `battlimit`, and does macOS revert it in a way CellKeeper would see as an outside change?
 3. How does "Charge to Full Now" appear in `battlimit`: an empty list, `Terminated = 1`, or another reason?
 4. Does Optimized Battery Charging add entries with another `chargeSocLimitReason`?
@@ -365,4 +391,4 @@ Planned procedure:
 - **S6:** Local `man pmset`. `battlimit` is absent; `-g log` is documented.
 - **S7:** Local read-only commands on this Mac: `pmset -g battlimit`, `pmset -g batt`, `ps -o pid,user,comm` (to name the owner process), `log stream` (sandbox messages), `sysctl hw.optional.arm64`, `sw_vers`, `system_profiler SPHardwareDataType`, and `defaults read` of the Shortcuts app's `Info.plist` (version only).
 
-The spike's probes and input files were built in `/tmp` and are not part of the repository. Running the probe left the empty sandbox containers `~/Library/Containers/io.github.saltedtan.CellKeeper.spike.shortcuts` and `…spike.pmset`; the owner can delete them in Finder.
+The spike's probes and input files were built in `/tmp` and are not part of the repository. Running the probes left the empty sandbox containers `~/Library/Containers/io.github.saltedtan.CellKeeper.spike.shortcuts`, `…spike.pmset` and, from O19, `…spike.getter`; the owner can delete them in Finder.
