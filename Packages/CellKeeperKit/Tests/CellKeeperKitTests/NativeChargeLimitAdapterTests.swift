@@ -65,12 +65,39 @@ struct ChargeLimitReportParserTests {
         #expect(ChargeLimitReportParser.parse(text) == .unrecognized("no active limit"))
     }
 
-    @Test("Keys other than those CellKeeper checks are ignored today")
+    @Test("Keys other than those CellKeeper checks are ignored")
     func extraKeysIgnored() {
-        // Pins the current behaviour; whether unexpected flags should make the
-        // report unrecognised is an open question (#14).
+        // Owner decision (#14): only the observed flags are pinned, so a key
+        // added by a macOS update does not make the backend unavailable.
         let text = Self.report(85).replacingOccurrences(of: "chargeSocLimitOwner = 0;", with: "chargeSocLimitOwner = 0;\n        chargeSocLimitSomethingNew = 1;")
         #expect(text.contains("chargeSocLimitSomethingNew"))
+        #expect(ChargeLimitReportParser.parse(text) == .limit(85))
+    }
+
+    @Test("An active limit with any other value of an observed flag is unrecognised", arguments: [
+        "chargeSocLimitDrain = 0", "chargeSocLimitIsEOC = 0", "chargeSocLimitNoChargeToFull = 1",
+    ])
+    func unexpectedFlagValue(flag: String) {
+        // A temporary state might differ from the user's own limit only in
+        // its flags (#14). One entry is enough.
+        let key = String(flag.prefix { $0 != " " })
+        let text = Self.report(85).replacingOne("\(key) = [0-9]+;", with: "\(flag);", options: .regularExpression)
+        #expect(ChargeLimitReportParser.parse(text) == .unrecognized("a limit with \(flag)"))
+    }
+
+    @Test("An active limit without one of the observed flags is unrecognised", arguments: [
+        "chargeSocLimitDrain", "chargeSocLimitIsEOC", "chargeSocLimitNoChargeToFull",
+    ])
+    func missingFlag(key: String) {
+        let text = Self.report(85).replacingOne("\(key) = [0-9]+;", with: "", options: .regularExpression)
+        #expect(ChargeLimitReportParser.parse(text) == .unrecognized("a limit without \(key)"))
+    }
+
+    @Test("The flags of terminated entries are not checked")
+    func terminatedFlagsIgnored() {
+        let text = Self.report(85, secondTerminated: 1, secondLimit: 95)
+            .replacingOne("chargeSocLimitNoChargeToFull = 0;", with: "chargeSocLimitNoChargeToFull = 1;", options: .backwards)
+        #expect(text.contains("chargeSocLimitNoChargeToFull = 1;"))
         #expect(ChargeLimitReportParser.parse(text) == .limit(85))
     }
 
@@ -93,6 +120,15 @@ struct ChargeLimitReportParserTests {
             Issue.record("expected unrecognised for \(text.debugDescription)")
             return
         }
+    }
+}
+
+private extension String {
+    /// Replaces one occurrence, so a change affects one entry of a report:
+    /// the first, or the last with `.backwards`.
+    func replacingOne(_ target: String, with replacement: String, options: CompareOptions = []) -> String {
+        guard let range = range(of: target, options: options) else { return self }
+        return replacingCharacters(in: range, with: replacement)
     }
 }
 
