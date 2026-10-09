@@ -114,8 +114,11 @@ struct HelperEngineStartTests {
             helperProtocolVersion: HelperProtocolVersion.current,
             build: 42,
             capabilities: [.chargingInhibit],
-            isSimulated: true
+            isSimulated: true,
+            sessionID: UInt64(session.id.rawValue),
+            helperInstance: reply.helperInstance
         ))
+        #expect(reply.helperInstance != 0)
     }
 
     @Test("Unknown hardware is monitor-only: no capabilities, no writes (R12a)")

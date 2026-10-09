@@ -10,7 +10,7 @@ struct MenuBarView: View {
             if let status = model.status {
                 BatteryHeader(snapshot: status.snapshot, telemetryError: status.telemetryError, nativeLimit: status.nativeLimit)
                 Divider()
-                ControlSummary(status: status)
+                ControlSummary(status: status, selectBackend: { model.selectBackend($0) })
                 Divider()
                 ChargeLimitControl(model: model)
                 FullChargeControl(model: model, status: status)
@@ -79,6 +79,8 @@ private struct BatteryHeader: View {
 
 private struct ControlSummary: View {
     let status: ControllerStatus
+    /// Selects a backend, to cancel a pending switch.
+    let selectBackend: (ControlBackendChoice) -> Void
 
     var body: some View {
         // When macOS's Charge Limit is settled, its summary says it all; the
@@ -102,11 +104,12 @@ private struct ControlSummary: View {
             if status.capabilities.isEnforcedByMacOS {
                 NativeLimitSummary(status: status)
             }
+            PendingSwitchNotice(status: status, select: selectBackend)
 
             if let decision = status.decision, !isSettled {
                 LabeledContent("Policy", value: decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS))
                 LabeledContent("Wants", value: decision.desiredMode.intentTitle(nativeLimit: status.capabilities.isEnforcedByMacOS))
-                Text(decision.reason.description)
+                Text(status.displayedReason ?? decision.reason.description)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -179,10 +182,6 @@ private struct NativeLimitSummary: View {
                 }
                 if native?.needsNoLimitConfirmation == true {
                     Text("macOS reports no limit. If your own limit is 100%, confirm it in Settings › Control before CellKeeper changes anything.")
-                        .foregroundStyle(.orange)
-                }
-                if let pending = status.pendingBackend {
-                    Text(Format.pendingSwitch(to: pending.displayName, nativeLimit: native))
                         .foregroundStyle(.orange)
                 }
                 if let problem = native?.readProblem {

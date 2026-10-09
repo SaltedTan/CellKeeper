@@ -144,12 +144,21 @@ enum Format {
         value >= 100 ? "100% (no limit)" : "\(value)%"
     }
 
-    /// Why a backend switch is still waiting.
-    static func pendingSwitch(to name: String, nativeLimit: NativeLimitStatus?) -> String {
+    /// Why a backend switch is still waiting: the backend still in charge,
+    /// the one asked for, and what the switch waits for. Only macOS's Charge
+    /// Limit speaks of the user's own limit.
+    static func pendingSwitch(from active: BackendDescriptor, to requested: BackendDescriptor, nativeLimit: NativeLimitStatus?, isNative: Bool) -> String {
+        let switching = "\(active.displayName) is still in charge. CellKeeper switches to \(requested.displayName) once"
         if nativeLimit?.isAdoptionUnsaved == true {
-            return "Switching to \(name) once CellKeeper has stored its record of the limit it kept; it could not write to its storage yet."
+            return "\(switching) it has stored its record of the limit it kept; it could not write to its storage yet."
         }
-        return "Switching to \(name) once your own limit is confirmed restored."
+        if isNative {
+            return "\(switching) your own limit is confirmed restored, and keeps trying until then."
+        }
+        if ControlBackendChoice(backendIdentifier: active.identifier) == .simulatedHelper {
+            return "\(switching) the simulated helper confirms that nothing CellKeeper set there is still in effect; until then it keeps asking for normal charging. Your Mac's charging is not affected."
+        }
+        return "\(switching) \(active.displayName) confirms normal charging; until then it keeps asking for it."
     }
 
     static func celsius(_ value: Double?) -> String {
@@ -175,6 +184,48 @@ enum Format {
             return "\(full) mAh"
         }
         return "\(full) of \(design) mAh (\(ratio.formatted(.number.precision(.fractionLength(0))))%)"
+    }
+}
+
+extension ControllerStatus {
+    /// The policy's reason as shown for the backend in charge: macOS's
+    /// Charge Limit restores the user's own limit, and the Simulated
+    /// helper's controls are simulated.
+    var displayedReason: String? {
+        guard let reason = decision?.reason else { return nil }
+        if capabilities.isEnforcedByMacOS {
+            return reason.description(restoring: "your own macOS Charge Limit")
+        }
+        if ControlBackendChoice(backendIdentifier: backend.identifier) == .simulatedHelper {
+            return reason.description(restoring: "normal charging on the simulated helper's controls (simulated; your Mac's charging is not changed)")
+        }
+        return reason.description
+    }
+}
+
+/// A backend switch that waits for the backend in charge, with the way to
+/// cancel it: choosing that backend again.
+struct PendingSwitchNotice: View {
+    let status: ControllerStatus
+    /// Selects a backend; nil shows no cancel button.
+    let select: ((ControlBackendChoice) -> Void)?
+
+    var body: some View {
+        if let requested = status.pendingBackend {
+            let active = status.backend
+            let activeChoice = ControlBackendChoice(backendIdentifier: active.identifier)
+            VStack(alignment: .leading, spacing: 6) {
+                Label(Format.pendingSwitch(from: active, to: requested, nativeLimit: status.nativeLimit, isNative: status.capabilities.isEnforcedByMacOS),
+                      systemImage: "arrow.triangle.2.circlepath")
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let select, let activeChoice {
+                    Button("Stay with \(active.displayName)") { select(activeChoice) }
+                        .help("Cancels the switch to \(requested.displayName); the same as choosing \(active.displayName) again.")
+                }
+            }
+            .font(.caption)
+        }
     }
 }
 

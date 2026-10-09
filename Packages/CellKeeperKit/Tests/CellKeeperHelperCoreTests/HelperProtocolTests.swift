@@ -38,11 +38,25 @@ struct HelperProtocolTests {
             (.ok, 0), (.incompatibleProtocol, 1), (.notIntroduced, 2), (.unsupportedControl, 3),
             (.invalidArgument, 4), (.noLease, 5), (.leaseHeldByOtherClient, 6), (.rateLimited, 7),
             (.blockedByInterlock, 8), (.hardwareError, 9), (.shuttingDown, 10), (.notReady, 11),
+            (.controlChanged, 12),
         ]
         #expect(statuses.count == HelperStatus.allCases.count)
         for (status, raw) in statuses {
             #expect(status.rawValue == raw, "\(status)")
         }
+
+        // 0 on the wire means no change since start.
+        let causes: [(HelperChangeCause, Int)] = [
+            (.setByClient, 1), (.clearedByClient, 2), (.clearedByRestore, 3), (.leaseExpired, 4), (.interlock, 5),
+            (.sessionEnded, 6), (.sessionRevoked, 7), (.shutdown, 8), (.start, 9), (.changedOutside, 10),
+            (.restoredAfterOutsideChange, 11), (.restoredAfterWriteFailure, 12), (.restoredAfterReadBackFailure, 13),
+            (.restoreRetried, 14), (.activationLimited, 15),
+        ]
+        #expect(causes.count == HelperChangeCause.allCases.count)
+        for (cause, raw) in causes {
+            #expect(cause.rawValue == raw, "\(cause)")
+        }
+        #expect(HelperChangeCause(rawValue: 0) == nil)
     }
 
     @Test("Unknown raw values are not controls", arguments: [0, 3, -1, Int.max])

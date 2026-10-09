@@ -45,8 +45,10 @@ public struct HelperSession: Sendable {
         await engine.hello(id, clientProtocolVersion: clientProtocolVersion)
     }
 
-    /// The controls read back from the hardware, the leases, the
-    /// interlocks and the last hardware error. Runs the engine's checks
+    /// The controls read back from the hardware, the leases, the interlocks,
+    /// each control's latest change (generation, cause, interlocks and
+    /// session), and the last hardware error with the number of errors so
+    /// far. Runs the engine's checks
     /// first, as every request except `hello` and the restores does.
     public func readState() async -> HelperStateReply {
         await engine.readState(id)
@@ -76,6 +78,22 @@ public struct HelperSession: Sendable {
     /// request for the state already in effect writes nothing.
     public func setControl(control: Int, active: Bool) async -> HelperStatus {
         await engine.setControl(id, control: control, active: active)
+    }
+
+    /// Deactivates `control` (a raw ``HelperControl``) only if its latest
+    /// change is still the one the caller names: `generation`
+    /// (``HelperControlChange/generation``) on the helper process
+    /// `helperInstance` (``HelperHelloReply/helperInstance``). The engine
+    /// compares them after its checks and right before it clears, with
+    /// nothing in between; on a mismatch it writes nothing and returns
+    /// `controlChanged`. Otherwise it is a deactivation like
+    /// `setControl(control, false)`: no lease needed, not refused by the
+    /// request budget (unless the request revokes the session), and it
+    /// clears only what the engine set. A client releasing a control it set
+    /// uses this, so it never clears a control that has changed hands since
+    /// it last looked.
+    public func clearControlIfUnchanged(control: Int, generation: UInt64, helperInstance: UInt64) async -> HelperStatus {
+        await engine.clearControlIfUnchanged(id, control: control, generation: generation, helperInstance: helperInstance)
     }
 
     /// Ends every lease and returns every control to macOS's default,

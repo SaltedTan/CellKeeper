@@ -367,7 +367,6 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         case .unreadable:
             status.isRecordUnreadable = true
         }
-        status.isReportedStateOwn = isLastReportedStateOwn
         status.isAdoptionUnsaved = unsavedMarker != nil
         status.isShortcutFound = isShortcutFound
         return status
@@ -376,6 +375,13 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     public func takeAdoptedLimitChange() async -> AdoptedLimitChange? {
         defer { adoptedChange = nil }
         return adoptedChange
+    }
+
+    /// ``ReportedModeOrigin/cellKeeper`` when the value last reported is one
+    /// CellKeeper set or restored, by its record, even if it could not
+    /// confirm it at the time.
+    public func reportedModeOrigin() async -> ReportedModeOrigin? {
+        isLastReportedStateOwn ? .cellKeeper : nil
     }
 
     /// Forgets the cached result of the shortcut check, so the next

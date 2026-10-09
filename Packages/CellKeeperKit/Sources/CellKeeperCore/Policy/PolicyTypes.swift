@@ -131,16 +131,25 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
     /// The charge limit cannot be expressed as macOS's Charge Limit.
     case nativeLimitUnsupported(limit: Int, steps: [Int])
 
+    /// The reason, independent of the backend: what CellKeeper restores is
+    /// called normal charging. ``description(restoring:)`` names it for the
+    /// backend in charge.
     public var description: String {
+        description(restoring: "normal charging")
+    }
+
+    /// The reason, with `target` naming what CellKeeper restores (`.normal`)
+    /// on the backend in charge, for example "your own macOS Charge Limit".
+    public func description(restoring target: String) -> String {
         switch self {
         case .invalidConfiguration(let issues):
-            "Settings are invalid (\(issues.count) issue(s)); using macOS default charging (with macOS's Charge Limit, your own limit)."
+            "Settings are invalid (\(issues.count) issue(s)); CellKeeper restores \(target)."
         case .releaseRequired(.backendSwitch):
-            "Switching backend: restoring macOS defaults (with macOS's Charge Limit, your own limit) first."
+            "Switching backend: CellKeeper restores \(target) first."
         case .releaseRequired(.restoreUnfinished):
-            "An earlier restore of macOS defaults (with macOS's Charge Limit, your own limit) has not been confirmed; CellKeeper keeps trying before making any other change."
+            "An earlier restore of \(target) has not been confirmed; CellKeeper keeps trying before making any other change."
         case .releaseRequired(.stateUnverified):
-            "CellKeeper could not read back the state it set, so it is restoring macOS defaults (with macOS's Charge Limit, your own limit)."
+            "CellKeeper could not read back the state it set, so it restores \(target)."
         case .telemetryUnavailable:
             "Battery telemetry is unavailable; using macOS default charging."
         case .telemetryStale(let age) where age < 0:

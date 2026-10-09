@@ -556,7 +556,7 @@ struct NativeChargeLimitBackendTests {
         let status = await backend.nativeLimitStatus()
         #expect(status?.target == 90)
         #expect(status?.isRestoreUnfinished == true)
-        #expect(status?.isReportedStateOwn == true)
+        #expect(await backend.reportedModeOrigin() == .cellKeeper)
     }
 
     @Test("A value CellKeeper never set is not reported as its own")
@@ -565,7 +565,7 @@ struct NativeChargeLimitBackendTests {
         _ = try await backend.setMode(.nativeLimit(percent: 90))
         system.changeExternally(to: 95)
         _ = try await backend.currentMode()
-        #expect(await backend.nativeLimitStatus()?.isReportedStateOwn == false)
+        #expect(await backend.reportedModeOrigin() == nil)
     }
 
     @Test("A restore that took effect without confirmation is recognised later")

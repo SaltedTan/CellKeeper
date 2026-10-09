@@ -1,6 +1,6 @@
 # CellKeeper architecture
 
-Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit), plus the logic of the future privileged helper with a simulated control only. Last reviewed 2026-10-09.
+Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper). Last reviewed 2026-10-09.
 
 This document describes how CellKeeper is put together and why. Research that
 informed these decisions is in [`docs/research/`](research/README.md); safety
@@ -13,8 +13,9 @@ rules are in [`docs/safety.md`](safety.md).
    interfaces, so every rule is unit-testable without a Mac battery.
 2. **Control is a narrow, swappable boundary.** All charging control goes
    through the `ChargingBackend` protocol. The implementations are a
-   simulated backend, a read-only backend, and a backend that sets macOS's
-   own Charge Limit through a user-created shortcut. Anything that touches
+   simulated backend, a read-only backend, a backend that sets macOS's
+   own Charge Limit through a user-created shortcut, and a backend that
+   drives CellKeeper's helper (simulated only so far). Anything that touches
    undocumented or privileged interfaces lives behind this protocol (and,
    for root operations, would live behind a separate helper process).
 3. **Fail toward macOS defaults.** The only "safe state" is `.normal`: macOS
@@ -47,6 +48,8 @@ rules are in [`docs/safety.md`](safety.md).
 │  ProcessRunner             – no shell, stdin closed, deadline, bounded output ││
 │  NativeChargeLimitSupport  – platform check; `NativeChargeLimitBackend.system`││
 │  FileOwnershipRecordStore  – durable record of the user's own Charge Limit    ││
+│  SystemHelperPowerReading  – the helper's own read-only power state;          ││
+│                              `HelperChargingBackend.simulatedHelper()`        ││
 └───────────────┬──────────────────────────────────────────────────────────────┘│
                 │ depends on                                                    │
 ┌───────────────▼──────────────── CellKeeperCore (pure Swift, no IOKit) ────────▼───────────────┐
@@ -55,12 +58,13 @@ rules are in [`docs/safety.md`](safety.md).
 │  Policy:     ChargingPolicy (pure state machine), PolicyInput/Decision/Memory, ChargeOverride  │
 │  Control:    ChargingBackend (protocol), MockChargingBackend, ReadOnlyChargingBackend,         │
 │              NativeChargeLimitBackend (+ ShortcutRunning / ChargeLimitReading /                │
-│              OwnershipRecordStore protocols)                                                   │
+│              OwnershipRecordStore protocols), HelperChargingBackend (+ HelperTransport /       │
+│              HelperConnection protocols, InProcessHelperTransport)                             │
 │  Controller: ChargeController (actor: telemetry → policy → backend, safety fallbacks, log)     │
 │  Support:    CellKeeperLog (os.Logger categories)                                              │
-└────────────────────────────────────────────────────────────────────────────────────────────────┘
-
-┌──────────────── CellKeeperHelperCore (pure Swift, Foundation only; not used yet) ──────────────┐
+└───────────────┬────────────────────────────────────────────────────────────────────────────────┘
+                │ depends on (Kit too)
+┌───────────────▼ CellKeeperHelperCore (pure Swift, Foundation only; run in process by the app) ─┐
 │  Wire:     HelperProtocolVersion, HelperControl, HelperControlSet, HelperCapabilities,         │
 │            HelperInterlocks, HelperStatus, reply values (primitives only, for NSXPC)           │
 │  Engine:   HelperEngine (actor: sessions, per-control leases, rate limits, interlocks,         │
@@ -79,16 +83,18 @@ rules are in [`docs/safety.md`](safety.md).
   `objectVersion = 77` (Xcode 16+); CI fails if a newer Xcode rewrites it.
 - The boundary is enforced by dependency direction: `CellKeeperCore` cannot
   import `CellKeeperKit`, so policy code cannot reach IOKit.
-- `CellKeeperHelperCore` depends on nothing, and nothing depends on it yet.
-  It holds the logic of the future privileged helper and the vocabulary the
-  app and the helper will share (see "Helper engine" below).
+- `CellKeeperHelperCore` depends on nothing. It holds the logic of the
+  future privileged helper and the vocabulary the app and the helper share
+  (see "Helper engine" below). `CellKeeperCore` depends on it for that
+  vocabulary, and the app runs its engine in process for the Simulated
+  helper (see "Helper backend").
 
 Requirement → location:
 
 | Concern | Where | Status |
 |---|---|---|
 | Telemetry | `TelemetryProvider` (Core), `SystemTelemetryProvider` (Kit) | Implemented, read-only |
-| Hardware/control backend | `ChargingBackend` (Core) | Simulated, read-only, native Charge Limit (experimental, opt-in) |
+| Hardware/control backend | `ChargingBackend` (Core) | Simulated, read-only, native Charge Limit (experimental, opt-in), Simulated helper |
 | Charging policy & state machine | `ChargingPolicy` (Core) | Implemented |
 | Orchestration & safety fallbacks | `ChargeController` (Core) | Implemented |
 | Persistence/settings | `ChargingSettings`, `SettingsStore` (Core) | Implemented |
@@ -96,7 +102,7 @@ Requirement → location:
 | Scheduler | — | Future: will feed overrides into `PolicyInput` |
 | Notifications | — | Future: driven from `ControlEvent`s |
 | Shortcuts/automation | — | Future: App Intents calling `AppModel` intents |
-| Privileged operations | `HelperEngine` (HelperCore) | Helper logic implemented with a simulated control only; no hardware control, and the app does not use it yet. The daemon, its XPC transport and the app's backend are future work |
+| Privileged operations | `HelperEngine` (HelperCore), `HelperChargingBackend` (Core) | Helper logic and the app's backend implemented, with a simulated control only, in process (the Simulated helper); no hardware control. The daemon and its XPC transport are future work |
 
 ## Data flow
 
@@ -279,6 +285,9 @@ public protocol ChargingBackend: Sendable {
     func capabilities() async -> ControlCapabilities     // availability, style, supported modes
     func currentMode() async throws -> ChargeControlMode? // nil = unknown
     func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome
+    func reportedModeOrigin() async -> ReportedModeOrigin? // default nil; no I/O
+    func renewHold(_ mode: ChargeControlMode) async throws // default: nothing
+    func resetAfterFault() async throws                     // default: nothing
     func nativeLimitStatus() async -> NativeLimitStatus?  // default nil; no I/O
     func takeAdoptedLimitChange() async -> AdoptedLimitChange? // native only; each adoption once
 }
@@ -303,6 +312,26 @@ public protocol ChargingBackend: Sendable {
 - `.normal` must always be accepted by a backend that accepts requests.
 - A backend that accepts requests must report its mode. `nil` ("unknown") or
   an error from `currentMode()` counts as a failure.
+- `reportedModeOrigin()` says how the mode last reported came about, when
+  the backend knows more than the controller's comparison with the mode
+  CellKeeper last confirmed: `cellKeeper` (CellKeeper set or restored it,
+  even if it could not confirm it then; the native backend decides this from
+  its record), `releasedByBackend(HoldRelease)` (the backend ended
+  CellKeeper's hold under its own safety rules: a lapsed lease, an
+  interlock, a lost connection, the backend stopping or restarting),
+  `changedOutside(detail)` (the backend found a change CellKeeper did not
+  make), or `needsAcknowledgement(detail)` (the backend stopped making
+  changes until someone acknowledges a problem it found itself, such as a
+  failed write). The last two are reported for as long as the backend sees
+  them, also by a `currentMode()` that throws; an outside change the backend
+  found earlier (while releasing a hold, say) is reported once, by the next
+  read, even if the request that found it succeeded.
+- Backends whose holds lapse unless renewed implement `renewHold(_:)`; the
+  others keep the default, which does nothing. A backend never overrides
+  another tool's change by itself; `resetAfterFault()` is called only when
+  the user clears the fault, and is where a backend that waits for an
+  acknowledgement (the helper after an outside change) may restore macOS
+  defaults.
 
 The native-limit extension of the contract:
 
@@ -391,7 +420,12 @@ The controller adds, independent of the backend:
   policy is then told to release (`ReleaseReason.backendSwitch`) whatever
   the settings say, so `.normal` keeps being requested (automatic retries
   60 s apart), and the switch completes as soon as it is confirmed.
-  Choosing the current kind of backend again cancels the pending switch;
+  Choosing the current kind of backend again cancels the pending switch.
+  The app shows a pending switch for every backend, in the menu and in
+  Settings › Control: which backend is still in charge, which one was
+  chosen, and what the switch waits for (the user's own limit for macOS's
+  Charge Limit, confirmed normal charging otherwise), with a button that
+  stays with the backend in charge;
 - if a read fails while CellKeeper holds a non-normal state, `.normal` is
   requested (`ReleaseReason.stateUnverified`). The last confirmed mode stays
   the expectation, so a reading that differs from it after reads recover is
@@ -399,7 +433,31 @@ The controller adds, independent of the backend:
   that could not be confirmed is remembered, so finding it later confirms it
   rather than counting as an outside change. A request the backend rejected
   is not remembered. Native backends decide this from their record and
-  report it as `isReportedStateOwn`;
+  report it as `reportedModeOrigin() == .cellKeeper`;
+- a hold the backend reports it ended itself (`releasedByBackend`: a
+  helper's lapsed lease, one of its interlocks, a lost connection, a helper
+  that stopped or restarted) is not an outside change: the controller logs
+  that the backend released the hold and why, takes the reported mode as its
+  own, and evaluates as usual. An outside change the backend reports
+  (`changedOutside`) faults it at once, like the controller's own detection,
+  also while CellKeeper holds nothing; so does a backend that waits for an
+  acknowledgement (`needsAcknowledgement`), with its own message, so the
+  user is offered the fault reset. The controller looks for these after
+  every read, not only an evaluation's: also when it confirms a request
+  (including a successful `.normal`, which still counts as confirmed), in a
+  fallback, and when the read itself fails, which then counts as no further
+  failure. Each is logged once for as long as the backend keeps reporting
+  it;
+- renewal of the hold at the end of every evaluation in which CellKeeper
+  holds a confirmed non-normal mode that the policy still wants, including
+  evaluations whose action is "no change", and only if the backend accepts
+  requests and is not faulted (`renewHold(_:)`). Nothing else renews, so a
+  hung or stalled loop lets a helper's lease lapse (research rule R3). A
+  failed renewal is counted like a failed request, and `.normal` is
+  requested at once;
+- clearing the fault (`resetBackendFault()`) calls the backend's
+  `resetAfterFault()` before evaluating: the user's deliberate
+  acknowledgement;
 - a restore of `.normal` that was attempted and not confirmed stays owed
   (`ReleaseReason.restoreUnfinished`) until it is confirmed, whatever the
   settings say. The native backend persists this (`isRestoring`), so the
@@ -435,6 +493,7 @@ Implementations today:
 | `MockChargingBackend` (default) | `simulated` | Records requests, tracks a simulated mode, supports failure injection for tests. Never touches hardware. |
 | `ReadOnlyChargingBackend` | `unavailable` | Accepts nothing; CellKeeper still computes and shows what it would do. |
 | `NativeChargeLimitBackend` (opt-in) | `experimental`, or `unavailable(reason)` | Sets macOS's Charge Limit by running the user's “CellKeeper Set Charge Limit” shortcut; reads it back with `pmset -g battlimit`. See below. |
+| `HelperChargingBackend` (Simulated helper) | `simulated`, or `unavailable(reason)` | CellKeeper's own charge control at any limit through the helper's logic, run in process on a simulated control: nothing on the Mac changes. See "Helper backend". |
 
 ## Native Charge Limit backend
 
@@ -516,6 +575,208 @@ How often the shortcut can run:
   apart when automatic).
 - Taking over a limit that is already in effect runs nothing.
 
+## Helper backend
+
+`HelperChargingBackend` (Core) controls charging through CellKeeper's helper
+(`HelperEngine`, see "Helper engine" below), reached through a
+`HelperTransport`. Its style is `chargingModes`, so the policy offers every
+limit from 20 to 100% with its resume threshold, temperature pause and
+discharge sessions. Today the only helper is the Simulated helper, which
+runs in process on a simulated control: nothing on the Mac changes.
+
+**Transport.** `HelperTransport.connect()` opens a `HelperConnection`: the
+helper's operations, with the same primitive arguments and reply types as
+`HelperSession`. A method throws only for a transport failure; the helper's
+refusals are reply statuses. `HelperSession` is a connection whose transport
+never fails. `InProcessHelperTransport` builds an engine and runs it inside
+the app: it starts it (restoring defaults) before serving the first
+connection, ticks it every 5 s while the transport exists (the ticking task
+holds the engine weakly and is cancelled with the transport), and forwards
+sleep and wake. When the engine revokes a session, the transport closes that
+connection: the request that caused it and every later one throw
+`HelperTransportError.sessionRevoked`. An NSXPC transport will be a drop-in
+whose connection throws on interruption or timeout.
+
+| Mode | Helper control | Lease |
+|---|---|---|
+| `.normal` | neither | none |
+| `.inhibitCharging` | `chargingInhibited` | 900 s, renewed by evaluations |
+| `.forceDischarge` | `adapterDisabled` | 120 s, renewed by evaluations |
+| (both read back) | — | unknown: an error, so the controller fails safe |
+
+- **Connection.** The backend connects lazily and introduces itself with
+  `hello` at the current protocol version. A transport failure (including a
+  connection closed after a revocation), or a session the helper no longer
+  knows (`notIntroduced`, `shuttingDown`), drops the connection; the next
+  request connects again, says hello and reads the state. Nothing is assumed
+  after reconnecting.
+- **Availability.** A helper that cannot be reached is `unavailable` (not
+  installed or not running); so is one with an incompatible protocol (update
+  needed) and one with no capabilities (it does not support this Mac yet:
+  monitor-only, R12a). A simulated helper is `simulated`; any other would be
+  `experimental` (not reached today). The supported modes follow the
+  capability bits, minus every mode an interlock the helper reports blocks
+  right now, so the policy refuses them as unsupported instead of counting
+  failures.
+- **Reading.** `currentMode()` comes from a fresh `readState`, never from
+  what CellKeeper asked for. A read-back the helper could not make is an
+  error, but the interlocks and error count in that reply are still read, so
+  a fault the helper reports is reported with it (below). A helper that
+  cannot be reached while CellKeeper is responsible for nothing there
+  reports an unknown mode, like a backend that accepts no requests, so it is
+  not counted as failing.
+- **Pending activations.** Before it sends an activation, the backend
+  records it as pending: the control, the helper instance, the session it
+  is sent on and the control's generation before. From then on the
+  activation may take effect whatever happens to the reply, so CellKeeper
+  stays responsible for the control. The next successful read settles it:
+  if the helper names it as the control's latest change (`setByClient`, on
+  that session, after that generation) and the control is active, it
+  becomes a hold; otherwise nothing of it is still in effect (it did not
+  take effect, it has ended since, or the helper restarted), and an active
+  control is someone else's. If the control changed since the generation
+  before, the latest change is classified as for the end of a hold (below):
+  another client's clear or restore, or any other outside change, is
+  reported as `changedOutside`, so the controller faults and does not set
+  the control again (R27); one of the helper's own releases is not
+  reported. A pending activation grants no ownership: nothing is ever
+  cleared on its account.
+- **Ownership.** A hold records the generation of CellKeeper's activation.
+  The control stays CellKeeper's only while that generation is current.
+  Holds are kept across disconnects until a fresh read explains how they
+  ended.
+- **Setting.** The backend takes the control's longest lease, activates the
+  control, confirms by a fresh read that the helper names the activation as
+  the latest change, and only then clears the other control (if it is still
+  CellKeeper's) and ends its lease, so switching between inhibit and
+  discharge never allows charging the policy did not ask for. A final read
+  must then show exactly that control (`verificationFailed` otherwise). The
+  outcome is `simulated` for a simulated helper, otherwise `applied`, or
+  `unchanged` if it was already in effect. An outside change found just
+  before writing is `changedOutside`, and nothing is written.
+- **`.normal`.** The backend reads the state, then clears each control it
+  holds with `clearControlIfUnchanged`, naming the generation and helper
+  instance of its own activation, ends only leases it holds, and confirms
+  that nothing is active. The helper compares the change right before it
+  clears, so a control that changed hands since the read (CellKeeper's lease
+  ran out and another client set it) is never cleared: the helper writes
+  nothing (`controlChanged`), and the next read shows the control as someone
+  else's, so the request fails with `changedOutside`, which faults the
+  controller (R26, R27). A control CellKeeper did not set is never touched
+  either. The backend never asks the helper to restore defaults by itself.
+  If the helper flags an outside change but nothing is active, `.normal` is
+  in effect and confirmed, so quitting and switching backend are not
+  blocked. An outside change found on the way is kept until a read reports
+  it through `reportedModeOrigin()`, even when the release succeeds, so the
+  controller faults (the confirmation of the `.normal` request is such a
+  read).
+- **Unresolved responsibility.** While CellKeeper may still hold a control it
+  cannot confirm released, or one a pending activation may have set (the
+  helper cannot be reached, cannot read its controls back, refuses to
+  introduce CellKeeper because it is shutting down, or a release failed),
+  the backend still accepts requests with only `.normal` supported, and
+  `currentMode()` throws. The controller then keeps asking for `.normal`,
+  counts the failures, and a backend switch stays pending, until a fresh
+  read explains it: for example the restarted helper's start restored
+  defaults.
+- **Renewal.** `renewHold(_:)` renews CellKeeper's lease for the longest the
+  helper grants. The backend keeps a deadline for each lease that is never
+  later than the helper's (the time before the request plus the seconds
+  granted). A lease past it is not renewed: a new lease would not bring back
+  a control the helper has cleared, and the next read reports the lapse.
+- **How a hold ended** is a lookup in the helper's history, not an
+  inference from the state:
+
+  | The helper's history shows | Reported as |
+  |---|---|
+  | The same generation | still CellKeeper's |
+  | The next generation, control off, `leaseExpired` | `releasedByBackend(.leaseExpired)` |
+  | The next generation, control off, `interlock` with only power and sleep interlocks (as they were then, even if lifted since) | `releasedByBackend(.interlock(…))`, named |
+  | The next generation, control off, `sessionEnded` or `sessionRevoked` of a CellKeeper session | `releasedByBackend(.connectionLost)` |
+  | The next generation, control off, `shutdown` or `start`; or a hold made with an earlier helper process, now off | `releasedByBackend(.backendStopped)` |
+  | The next generation, control off, cleared by one of CellKeeper's sessions (also an earlier one, after a reconnect) | `cellKeeper`: CellKeeper's own release |
+  | The next generation, control off, a restore after a failed write or read-back, or an interlock that needs an acknowledgement | a failure, reported by `currentMode()` |
+  | The next generation, control off, cleared by another session (a deactivation or a restore), `changedOutside` or the restore after it | `changedOutside` |
+  | Any other generation, or the control active again | `changedOutside`, and CellKeeper no longer owns the control |
+
+  Releases are reported until CellKeeper's next request; an outside change
+  found in the history is kept until a read reports it. The helper's
+  `externalModification` interlock and any active control CellKeeper does
+  not own are reported as `changedOutside` for as long as the backend sees
+  them. An outside change takes precedence over everything else.
+- **Helper failures.** A helper that waits for an acknowledgement (an
+  interlock other than the power and sleep conditions and an outside change:
+  `writeFailed`, `hardwareFault`, or one this version does not know) is
+  reported as `needsAcknowledgement`, which faults the controller at once so
+  the user is offered the fault reset; the helper's hour of backoff for
+  `writeFailed` stays as the fallback. This holds also when the helper
+  cannot read its controls back: the mode is then unknown and the read
+  fails, but the fault is reported with it, and the controller does not
+  count the failed read on top. A hardware error the helper had not
+  reported before (its count grew) is reported by the next `currentMode()`
+  as a failure, whatever else that read shows, unless a fault is reported
+  instead.
+- **Acknowledgement.** `resetAfterFault()`, called only when the user clears
+  the fault, asks the helper to restore defaults if it waits for a client to
+  acknowledge something: an interlock other than the power and sleep
+  conditions (an outside change, `writeFailed`, an owed restore), a control
+  CellKeeper did not set, or a failed read-back. That ends every lease and
+  may undo another tool's change, once, at the user's request. If the
+  session ended before the restore arrived (`notIntroduced`, or a closed
+  connection), the backend connects again, says hello, and tries once more.
+  With the Simulated helper this resets only simulated controls.
+- **Request budget.** Requests are paced against a copy of the session's
+  request budget (with one token in reserve). Requests the budget may refuse
+  wait for a token. Requests that only move toward safety (deactivations,
+  lease releases, restores) go at once, but never more than 4 in a row
+  beyond the budget, far below the 20 after which the helper revokes a
+  session.
+- **App Nap.** While CellKeeper holds a control through a live session and
+  has not asked to release it, the backend holds a `ProcessInfo` activity
+  (`userInitiatedAllowingIdleSystemSleep`, through `LeaseActivity`), so
+  macOS does not nap the app, which makes a late renewal less likely but
+  does not rule it out; an idle Mac may still sleep. It ends when CellKeeper releases the control,
+  when a read shows the hold ended, and when the session ends, also while
+  the hold stays unresolved (research note 04, §3.4).
+
+**Simulated helper** (Kit). `HelperChargingBackend.simulatedHelper()` builds
+an engine on `SimulatedChargeControl` and `SystemHelperPowerReading`, with
+`HelperEngine.continuousUptime` as the one clock of the engine, the power
+reading and the backend. Releasing the backend (after a backend switch) ends
+its session and stops the ticking. The app forwards NSWorkspace's will-sleep
+and did-wake to the engine; unlike the daemon's, these are not acknowledged
+sleep notifications.
+
+`SystemHelperPowerReading` reads, read-only:
+- the charge and the power source from IOPowerSources;
+- adapter presence from `IOPSCopyExternalPowerAdapterDetails`, which is
+  documented to describe the attached adapter and to return nothing when
+  none is attached or on an error: present when it returns details, absent
+  when it returns none on battery, unknown when it returns none on external
+  power. Whether it still describes an adapter that a control has disabled is
+  unverified (safety precondition 12); reading such an adapter as absent
+  makes the helper clear the adapter-disable, the safe direction;
+- thermal pressure: `ProcessInfo.thermalState` serious or critical.
+
+Known limitations:
+- Evaluations run every 60 s and on events; the adapter-disable lease is
+  120 s. App Nap is prevented while CellKeeper holds a control through a
+  live session, but a long
+  command (a slow user action ahead in the queue) can still delay an
+  evaluation and let a discharge's lease lapse. That is logged as the
+  helper's release, and the discharge is requested again when the rate
+  limits allow.
+- The helper's activation limit also counts activations that the policy
+  treats as relaxing (from discharge back to inhibit). In rare sequences the
+  helper refuses an activation the policy allowed; that is a failed request.
+- A helper that stops while CellKeeper is responsible for a control and
+  cannot confirm defaults keeps the backend unresolved until the helper is
+  reachable again; meanwhile each evaluation counts failures, and the
+  backend faults.
+- A lease release still clears the control if CellKeeper holds the lease;
+  only the holder's session can have set a control under it, so this never
+  clears another client's.
+
 ## Future control backends
 
 Research ([02](research/02-charging-control-apple-silicon.md)) found no public
@@ -537,15 +798,17 @@ candidates, in the order we intend to evaluate them:
    daemon; XPC with code-signing requirements on both sides; a fixed set of
    typed operations (no raw keys, no command execution); a lease that restores
    `.normal` if not renewed, on client disconnect, at helper start, and on
-   SIGTERM; per-model allowlist and read-back. The helper would expose itself
-   to the app as another `ChargingBackend`. Apple's published power-management
+   SIGTERM; per-model allowlist and read-back. The helper exposes itself to
+   the app as another `ChargingBackend` (`HelperChargingBackend`, above).
+   Apple's published power-management
    source releases its private charge-inhibit assertions when the owning
    process exits, which would be a valuable fail-safe, but whether that holds
    on shipping Apple silicon is unverified.
 
 The helper's logic exists as `CellKeeperHelperCore` (below), with a
-simulated control only. There is no daemon, no XPC, and no hardware control,
-and the app does not use it yet. Real control will not be enabled without the
+simulated control only, and the app runs it in process as the Simulated
+helper. There is no daemon, no XPC, and no hardware control. Real control
+will not be enabled without the
 hardware verification protocol in research note 02 §7 and the rules in
 `safety.md`.
 
@@ -555,8 +818,9 @@ hardware verification protocol in research note 02 §7 and the rules in
 touch the system. It is pure Swift on Foundation: no IOKit, XPC, processes,
 files or network. The layers, from the client down:
 
-1. **Transport** (future). The app's in-process backend first, then an NSXPC
-   listener in the daemon. It opens one `HelperSession` per connection,
+1. **Transport.** In process today (`InProcessHelperTransport`, for the
+   Simulated helper), an NSXPC listener in the daemon later. It opens one
+   `HelperSession` per connection,
    forwards each request with its raw wire values, and invalidates the
    session when the connection ends. It must deliver one connection's
    requests in order; the engine itself is an actor. When the engine revokes
@@ -583,12 +847,13 @@ reply block. Raw values never change and are never reused. Protocol version
 
 | Request | Before `hello` | Lease | Request budget | Effect |
 |---|---|---|---|---|
-| `hello(clientProtocolVersion)` | — | no | yes | Status, helper protocol version, build, capabilities, whether simulated. Any failed `hello` withdraws the introduction |
-| `readState()` | refused | no | yes | Read-back controls, seconds left on each lease, whether the caller holds them, interlocks, last hardware error |
+| `hello(clientProtocolVersion)` | — | no | yes | Status, helper protocol version, build, capabilities, whether simulated, the caller's session number and the helper's instance. Any failed `hello` withdraws the introduction |
+| `readState()` | refused | no | yes | Read-back controls, seconds left on each lease, whether the caller holds them, each control's latest change (below), interlocks, the last hardware error and the number of hardware errors since start |
 | `acquireOrRenewLease(control, seconds)` | refused | — | yes | Grants or renews, clamped to 900 s (inhibit) or 120 s (adapter); one session holds leases at a time |
 | `releaseLease(control)` | refused | holder | not refused¹ | Ends the lease and clears the control |
 | `setControl(control, true)` | refused | yes | yes | Capability, then the checks, which end with every lease and the power state's age judged on a fresh clock reading; then, on that reading, the lease, interlocks and activation limits; then write and read-back |
 | `setControl(control, false)` | refused | no | not refused¹ | Clears the control if the engine set it |
+| `clearControlIfUnchanged(control, generation, helperInstance)` | refused | no | not refused¹ | Clears the control if the engine set it and its latest change is still `generation` on the helper process `helperInstance`; otherwise writes nothing and returns `controlChanged` |
 | `restoreDefaults()` | allowed | no | not refused¹ | Ends every lease and restores defaults. Reads the hardware afresh and writes nothing if it shows defaults and no restore is owed; an owed restore is written even if defaults may already be in effect. Also served before start and during shutdown |
 | `restoreDefaultsAndExit()` | allowed | no | not refused¹ | Restores defaults, then shuts down so the host can exit (update, uninstall). During shutdown, the same as `restoreDefaults()` |
 
@@ -601,11 +866,55 @@ Only a live session is served. An invalidated or revoked session gets
 Requests the budget does not refuse still spend a token when one is left,
 and still count toward revocation.
 
+The engine knows why each control changes, so `readState` reports it
+instead of leaving clients to infer it. Per control (`HelperControlChange`,
+four primitive fields on the wire):
+
+- `generation`: how many times the control has turned on or off since
+  start, as read-backs saw it;
+- `cause` (a raw `HelperChangeCause`, 0 for none): `setByClient`,
+  `clearedByClient` (a deactivation or a lease release), `clearedByRestore`,
+  `leaseExpired`, `interlock`, `sessionEnded`, `sessionRevoked`, `shutdown`,
+  `start`, `changedOutside`, `restoredAfterOutsideChange`,
+  `restoredAfterWriteFailure`, `restoredAfterReadBackFailure`,
+  `restoreRetried` or `activationLimited`;
+- `interlocks`: for `interlock`, the interlocks that cleared it, as they were
+  then;
+- `session`: the session that made the change or whose end made it, by the
+  number `hello` gave it; 0 for the engine's own changes and outside ones.
+
+A change is recorded by the read-back that first shows it, for what the
+engine was doing: a write records the change of the control it wrote, a
+restore the changes of every control, and any other change a read-back finds
+is `changedOutside`. The checks record each clear for the lease that ran out
+or the interlocks that made it, also when the time limits are settled again
+after a slow write, in the same check or at the end of the call. A lease
+ending is not a change, so a later expiry never hides an earlier
+deactivation. `hello` also returns the caller's session number and the
+helper's instance (random, fixed for the process), so a client recognises
+its own sessions' changes after reconnecting, and a restarted helper, whose
+generations and session numbers start again. The host can read the same
+history with `latestChange(of:)`, also during shutdown.
+
+A client that releases a control it set names the change it set with
+`clearControlIfUnchanged`: the engine compares the generation and the
+helper instance with the latest change after its checks and right before
+it clears, with nothing in between, so a control that changed hands since
+the client last read it (its lease ran out, and another client set it) is
+never cleared by mistake. Over the request budget it skips the checks, as a
+deactivation does; every change made through the engine is already in the
+history then, because each write is read back at once. Any live session may
+still clear a control toward safety unconditionally, with
+`setControl(control, false)` or a restore; the history names it.
+`hardwareErrorCount` counts every hardware error since start, so a client
+can tell a new error from an old one with the same code.
+
 Statuses: `ok`, `incompatibleProtocol`, `notIntroduced`,
 `unsupportedControl`, `invalidArgument` (unknown control, lease of 0 s or
 less), `noLease`, `leaseHeldByOtherClient`, `rateLimited`,
 `blockedByInterlock`, `hardwareError`, `shuttingDown`, `notReady` (before
-the start-up restore).
+the start-up restore), `controlChanged` (`clearControlIfUnchanged` found
+another change; nothing written).
 
 Interlocks are reported in `readState` and can never be set by a client:
 
@@ -792,8 +1101,8 @@ Remaining limitations:
   for every client.
 
 Not there yet: the daemon (SMAppService, launchd, SIGTERM), the NSXPC
-transport and code-signing requirements, the IOKit power reading and
-acknowledged sleep notifications, the app's backend, and any real control.
+transport and code-signing requirements, the daemon's own power reading and
+acknowledged sleep notifications, and any real control.
 
 ## Known limitations
 
@@ -953,3 +1262,15 @@ decisions.
 | D35 | The helper's clock is the system's `CLOCK_MONOTONIC`, and a new engine takes the activation history of the previous one in the same boot | A relaunch the client asks for must not reset the activation limits; the daemon persists the history and discards it at a new boot |
 | D36 | The helper engine queues its events and delivers them, in order, when each operation has ended (lead's decision, 2026-10-09). Lease expiry and the power state's age are judged on a clock reading taken after every read they depend on, and again after any write, including the last write of a request, before the call returns; an activation follows on that reading with only pure checks, and `activationRecorded` reports the write with its time | A sink that ran mid-operation could block or re-enter the engine between a check and a write; removing that class of bug beats re-checking after every callback. A time limit judged on a reading taken before a slow read or write could let an expired lease or a stale power state stay in force |
 | D37 | A control that a failed or wrong restore may have made active counts as the engine's until it reads back inactive; a control active before and after a restore keeps its owner, and the state before is read afresh, falling back to the controls last known to be another tool's | A restore that went wrong must not leave a restriction that nothing retries, while another tool's control must not become the engine's to fight over. A tool that sets an inactive control during each restore still looks like a wrong restore (a known limitation) |
+| D38 | `readState` reports, per control, a change generation and the cause, interlocks and session of its latest change, and how many hardware errors there have been; `hello` gives the caller's session number and the helper's instance. Any live session may still clear a control toward safety (lead's decisions, 2026-10-09) | Snapshots of active bits, current interlocks and lease state cannot establish why a control changed; the engine knows, so a client's classification becomes a lookup. Limiting deactivation to the lease holder would make a move toward safety depend on who asks |
+| D39 | The app renews a helper lease only at the end of an evaluation that still wants the mode it holds, including one that changes nothing; a failed renewal is a failure and `.normal` is requested at once | Safety precondition 3 and rule R3: a hung or stalled policy loop must let the restriction lapse, and a renewal that cannot be made must not leave one in place |
+| D40 | The helper backend owns a control only while the change generation it recorded at activation is current, and classifies how a hold ended by the cause the helper recorded for the next change. An expired lease, a power or sleep interlock (as raised then), the end of one of CellKeeper's sessions, or a helper shutdown or start is logged as the helper's release; CellKeeper's own deactivation, also from an earlier session, is its own; anything else, including any later generation, another client's restore or deactivation and `externalModification`, faults the backend at once | Only the helper knows why a control changed; inferring it from active bits, current interlocks or lease state misreads handoffs, later expiries and lifted interlocks. The helper's releases are its safety rules working, and faulting on them would stop control for nothing; anything else may be another tool, which R27 says to stop for |
+| D41 | The helper backend never asks the helper to restore defaults by itself; `.normal` clears only controls CellKeeper still owns, each with `clearControlIfUnchanged` naming its own activation (D48), ends only leases it holds, and succeeds when nothing is active, even after an outside change, which faults the controller through `reportedModeOrigin()`. Only the user clearing the fault restores defaults, and only if the helper waits for that (lead's decision, 2026-10-09) | A restore or deactivation may undo another tool's change (R26, R27), so it must be a deliberate act; and quitting or switching backend must not be blocked while macOS's defaults are in effect |
+| D42 | Modes an interlock of the helper blocks are not offered by the backend's capabilities | The policy then refuses them as unsupported instead of counting each refusal as a failure, which would fault the backend for conditions such as a warm Mac or a low battery |
+| D43 | The helper backend paces its requests against a copy of the session's request budget, and sends at most 4 requests in a row beyond it | A well-behaved client must never be refused or revoked (20 in a row), including during bursts of user actions; moves toward safety must not wait for a token |
+| D44 | While CellKeeper holds a control through a live helper session and has not asked to release it, the app holds a `ProcessInfo` activity that prevents App Nap but allows idle system sleep; it ends with the session, also while the hold is unresolved | A napped app renews late and lets the lease lapse, which toggles charging for nothing; idle sleep is fine, because the lease counts sleep and the helper handles it (research note 04, §3.4). Without a session there is nothing to renew, and keeping the app awake would only cost energy |
+| D45 | The Simulated helper reads adapter presence from `IOPSCopyExternalPowerAdapterDetails`: present with details, absent without on battery, unknown without on external power | It is documented to describe the attached adapter; behaviour with a disabled adapter is unverified (safety precondition 12), and an adapter wrongly read as absent only makes the helper clear the adapter-disable |
+| D46 | CellKeeper stays responsible for a control from the moment it sends an activation (recorded as pending, with the helper instance, the session and the generation before) and for a hold it cannot confirm released, across failed replies, disconnects, failed releases and helper shutdowns: until a fresh read settles it from the helper's history, the backend accepts only `.normal` and reports its mode as an error, so a backend switch stays pending. A pending activation becomes a hold only when the helper names it as the latest change; it never grants ownership by itself, but a later change by another client or tool is reported as an outside change | An activation may take effect even if its reply or the read after it is lost, and a helper that cannot be asked may still enforce CellKeeper's restriction; completing a switch then would leave it in place with nothing renewing or releasing it. Owning on a guess could clear another client's control |
+| D47 | A helper that waits for an acknowledgement because of its own failure (`writeFailed`, an owed restore, or an interlock this version does not know) faults the backend at once with that reason, also when the helper cannot read its controls back (the mode is then unknown); a hardware error the helper had not reported before is a failure of the next read, whatever else it shows | The user must learn of a broken control when it happens, not after a lease expiry, an hour of backoff or three failed reads, and only the fault reset offers the restore the helper waits for; a recovered error must still be counted |
+| D48 | The helper's wire API has a conditional deactivation, `clearControlIfUnchanged(control, generation, helperInstance)`, which the engine checks after its checks and right before clearing, and which writes nothing on a mismatch (`controlChanged`, raw value 12); `setControl(control, false)` and the restores stay unconditional (lead's decision, 2026-10-10) | A client that checks ownership and then clears in a second request can clear a control that changed hands in between; only the engine can compare and clear atomically. Deliberate clears and safety restores must not depend on what a client last saw |
+| D49 | An outside change a backend finds is kept until a read reports it, even if the request that found it succeeds, and the controller handles faults a backend reports after every read: request confirmations, fallbacks, recovery reads and reads that fail, not only an evaluation's | Otherwise a successful `.normal` could erase the only notice of another tool's change, and the next evaluation would set the restriction again without a fault (R27) |

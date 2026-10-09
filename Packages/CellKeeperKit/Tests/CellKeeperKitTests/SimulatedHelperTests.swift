@@ -1,0 +1,154 @@
+@testable import CellKeeperKit
+import CellKeeperCore
+import CellKeeperHelperCore
+import Foundation
+import Testing
+
+@Suite("Helper power reading")
+struct SystemHelperPowerReadingTests {
+    private func raw(
+        percent: Int? = 70,
+        state: String? = "AC Power",
+        present: Bool = true,
+        adapter: [String: Any]? = ["Watts": 68]
+    ) -> RawPowerData {
+        var source: [String: Any] = ["Type": "InternalBattery", "Is Present": present]
+        if let percent {
+            source["Current Capacity"] = percent
+            source["Max Capacity"] = 100
+        }
+        if let state {
+            source["Power Source State"] = state
+        }
+        return RawPowerData(powerSource: source, providingPowerSourceType: state, adapter: adapter)
+    }
+
+    @Test("Charge, power source and an attached adapter are read from IOPowerSources")
+    func onAdapter() {
+        let state = SystemHelperPowerReading.powerState(from: raw(), thermalState: .nominal, readAtUptime: 42)
+        #expect(state == HelperPowerState(stateOfCharge: 70, isOnExternalPower: true, isAdapterPresent: true, isThermalPressureHigh: false, readAtUptime: 42))
+    }
+
+    @Test("On battery without adapter details, no adapter is attached")
+    func onBattery() {
+        let state = SystemHelperPowerReading.powerState(from: raw(state: "Battery Power", adapter: nil), thermalState: .nominal, readAtUptime: 1)
+        #expect(state?.isOnExternalPower == false)
+        #expect(state?.isAdapterPresent == false)
+    }
+
+    @Test("Adapter details missing while on external power leave presence unknown")
+    func presenceUnknown() {
+        let state = SystemHelperPowerReading.powerState(from: raw(adapter: nil), thermalState: .nominal, readAtUptime: 1)
+        #expect(state?.isOnExternalPower == true)
+        #expect(state?.isAdapterPresent == nil)
+    }
+
+    @Test("Adapter details while on battery mean an adapter is attached")
+    func adapterWhileOnBattery() {
+        // What a disabled adapter would look like, if macOS still describes it.
+        let state = SystemHelperPowerReading.powerState(from: raw(state: "Battery Power"), thermalState: .nominal, readAtUptime: 1)
+        #expect(state?.isOnExternalPower == false)
+        #expect(state?.isAdapterPresent == true)
+    }
+
+    @Test("Serious or critical thermal state is high thermal pressure", arguments: [
+        (ProcessInfo.ThermalState.nominal, false), (.fair, false), (.serious, true), (.critical, true),
+    ])
+    func thermal(thermalState: ProcessInfo.ThermalState, isHigh: Bool) {
+        #expect(SystemHelperPowerReading.powerState(from: raw(), thermalState: thermalState, readAtUptime: 1)?.isThermalPressureHigh == isHigh)
+    }
+
+    @Test("Unknown charge, power source or battery are reported as unknown")
+    func unknowns() {
+        let noCharge = SystemHelperPowerReading.powerState(from: raw(percent: nil), thermalState: .nominal, readAtUptime: 1)
+        #expect(noCharge?.stateOfCharge == nil)
+        let noSource = SystemHelperPowerReading.powerState(from: raw(state: nil), thermalState: .nominal, readAtUptime: 1)
+        #expect(noSource?.isOnExternalPower == nil)
+        let noBattery = SystemHelperPowerReading.powerState(from: raw(present: false), thermalState: .nominal, readAtUptime: 1)
+        #expect(noBattery?.stateOfCharge == nil)
+        #expect(SystemHelperPowerReading.powerState(from: RawPowerData(), thermalState: .nominal, readAtUptime: 1) == nil)
+    }
+}
+
+/// Refers to an object without keeping it alive.
+final class WeakReference<Object: AnyObject>: @unchecked Sendable {
+    weak var object: Object?
+
+    init(_ object: Object?) {
+        self.object = object
+    }
+}
+
+/// Counts reads; each is stamped with the engine's clock.
+final class CountingPower: HelperPowerReading, @unchecked Sendable {
+    private let lock = NSLock()
+    private var reads = 0
+    let uptime: @Sendable () -> TimeInterval
+
+    init(uptime: @escaping @Sendable () -> TimeInterval) {
+        self.uptime = uptime
+    }
+
+    var count: Int {
+        lock.withLock { reads }
+    }
+
+    func latestPowerState() -> HelperPowerState? {
+        lock.withLock { reads += 1 }
+        return HelperPowerState(stateOfCharge: 60, isOnExternalPower: true, isAdapterPresent: true, isThermalPressureHigh: false, readAtUptime: uptime())
+    }
+}
+
+@Suite("Simulated helper")
+struct SimulatedHelperTests {
+    @Test("The Simulated helper is simulated, offers both charging modes, and changes nothing")
+    func simulatedHelper() async throws {
+        let power = CountingPower(uptime: HelperEngine.continuousUptime)
+        let backend = HelperChargingBackend.simulatedHelper(power: power)
+        #expect(backend.descriptor.identifier == HelperChargingBackend.simulatedHelperIdentifier)
+        #expect(backend.descriptor.displayName == "Simulated helper")
+        let capabilities = await backend.capabilities()
+        #expect(capabilities.availability == .simulated)
+        #expect(capabilities.supportedModes == ChargeControlMode.chargingModes)
+        #expect(try await backend.setMode(.inhibitCharging) == .simulated)
+        #expect(try await backend.currentMode() == .inhibitCharging)
+        #expect(try await backend.setMode(.normal) == .simulated)
+    }
+
+    @Test("The engine is ticked while the backend lives, and released with it")
+    func noLeakedTicking() async throws {
+        let power = CountingPower(uptime: HelperEngine.continuousUptime)
+        var backend: HelperChargingBackend? = HelperChargingBackend.simulatedHelper(power: power, tickInterval: .milliseconds(5))
+        let engine = WeakReference((backend?.transport as? InProcessHelperTransport)?.engine)
+        #expect(engine.object != nil)
+        _ = try await backend?.setMode(.inhibitCharging)
+
+        let before = power.count
+        for _ in 0..<200 where power.count < before + 3 {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(power.count >= before + 3)
+
+        backend = nil
+        for _ in 0..<200 where engine.object != nil {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(engine.object == nil)
+        let afterRelease = power.count
+        try await Task.sleep(for: .milliseconds(50))
+        #expect(power.count == afterRelease)
+    }
+
+    @Test("Sleep and wake reach the in-process engine")
+    func sleepAndWake() async throws {
+        let backend = HelperChargingBackend.simulatedHelper(power: CountingPower(uptime: HelperEngine.continuousUptime))
+        _ = try await backend.setMode(.forceDischarge)
+        let transport = try #require(backend.transport as? InProcessHelperTransport)
+        await transport.systemWillSleep()
+        #expect(try await backend.currentMode() == .normal)
+        #expect(await backend.reportedModeOrigin() == .releasedByBackend(.interlock("the Mac is about to sleep")))
+        #expect(await backend.capabilities().supportedModes == [.normal, .inhibitCharging])
+        await transport.systemDidWake()
+        #expect(await backend.capabilities().supportedModes == ChargeControlMode.chargingModes)
+    }
+}

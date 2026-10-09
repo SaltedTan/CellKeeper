@@ -193,7 +193,7 @@ struct HelperRateLimitTests {
 
         #expect(await session.readState().status == .rateLimited)
         #expect(h.recorder.contains(.sessionRevoked(session.id)))
-        #expect(h.recorder.contains(.leaseEnded(session.id, .chargingInhibited, .sessionInvalidated)))
+        #expect(h.recorder.contains(.leaseEnded(session.id, .chargingInhibited, .revoked)))
         #expect(h.control.activeControls.isEmpty)
         h.clock.advance(by: 60)
         #expect(await session.hello(clientProtocolVersion: HelperProtocolVersion.current).status == .notIntroduced)

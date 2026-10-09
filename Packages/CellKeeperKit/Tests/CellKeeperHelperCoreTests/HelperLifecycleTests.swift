@@ -333,7 +333,13 @@ struct HelperHardwareFailureTests {
             adapterDisabledLeaseSeconds: 0,
             isLeaseHolder: true,
             interlocks: [],
-            lastHardwareError: simulatedFailure
+            lastHardwareError: simulatedFailure,
+            // The tick's read, then the check's read, the restore's read
+            // before it, and its read-back.
+            hardwareErrorCount: 4,
+            // Set, then cleared by the restore after the failed read-back.
+            chargingInhibitedChange: HelperControlChange(generation: 2, cause: .restoredAfterReadBackFailure, interlocks: [], session: 0),
+            adapterDisabledChange: HelperControlChange(generation: 0, cause: nil, interlocks: [], session: 0)
         ))
     }
 

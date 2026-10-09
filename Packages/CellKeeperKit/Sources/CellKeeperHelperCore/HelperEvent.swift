@@ -29,14 +29,34 @@ public enum HelperChangeReason: Sendable, Equatable {
     case terminate
 }
 
-/// Why a lease ended.
-public enum HelperLeaseEndReason: Sendable, Equatable {
+/// Why a lease ended, for the audit log. A client learns why a control
+/// changed from ``HelperControlChange`` instead: a lease ending is not a
+/// control change.
+public enum HelperLeaseEndReason: Sendable, Equatable, CustomStringConvertible {
+    /// Its holder released it.
     case released
+    /// It ran out before its holder renewed it.
     case expired
+    /// A client restored defaults, which ends every lease.
     case restoredDefaults
-    /// The session's connection ended, or the engine revoked it.
+    /// The holder's connection ended.
     case sessionInvalidated
+    /// The engine revoked the holder's session for exceeding its request
+    /// budget.
+    case revoked
+    /// The engine shut down.
     case shutdown
+
+    public var description: String {
+        switch self {
+        case .released: "released"
+        case .expired: "expired"
+        case .restoredDefaults: "restoredDefaults"
+        case .sessionInvalidated: "sessionInvalidated"
+        case .revoked: "revoked"
+        case .shutdown: "shutdown"
+        }
+    }
 }
 
 /// The requests a session can make, for audit.
@@ -46,6 +66,7 @@ public enum HelperRequestKind: Sendable, Equatable {
     case acquireOrRenewLease
     case releaseLease
     case setControl
+    case clearControlIfUnchanged
     case restoreDefaults
     case restoreDefaultsAndExit
 }

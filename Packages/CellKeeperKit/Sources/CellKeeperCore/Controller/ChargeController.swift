@@ -28,7 +28,14 @@ import os
 ///   Native-limit backends instead adopt a changed Charge Limit as the
 ///   user's own (usually the user changed it in System Settings): nothing is
 ///   written, and management is turned off so CellKeeper does not override
-///   the change.
+///   the change. A hold the backend ended itself under its own safety rules
+///   (a helper's lapsed lease or interlock) is not an outside change: it is
+///   logged and the evaluation goes on as usual.
+/// - At the end of every evaluation in which CellKeeper holds a confirmed
+///   non-normal mode that the policy still wants, the hold is renewed
+///   (``ChargingBackend/renewHold(_:)``), and at no other time, so a stalled
+///   loop lets a helper's lease lapse. A failed renewal counts as a failure
+///   and `.normal` is requested at once.
 /// - Switching backends requires a confirmed restore of `.normal` first. If
 ///   it cannot be confirmed, the old backend is kept and the switch stays
 ///   pending: `.normal` keeps being requested until it is confirmed, and the
@@ -92,6 +99,11 @@ public actor ChargeController {
     private var pendingBackend: (any ChargingBackend)?
     /// Set for an evaluation in which a non-normal state could not be read.
     private var isOwnedStateUnverified = false
+    /// The fault the backend keeps reporting
+    /// (``ReportedModeOrigin/changedOutside(_:)`` or
+    /// ``ReportedModeOrigin/needsAcknowledgement(_:)``) has faulted it
+    /// already.
+    private var isReportedFaultHandled = false
     private var decision: PolicyDecision?
     private var lastExecution: ExecutionRecord?
     private var consecutiveFailures = 0
@@ -354,6 +366,7 @@ public actor ChargeController {
         unconfirmedRequests = []
         isRestoreOutstanding = false
         hasSeededOwnership = false
+        isReportedFaultHandled = false
         nativeLimit = nil
         lastExecution = nil
         record(.settings, "Control backend changed from \(previousName) to \(newBackend.descriptor.displayName).")
@@ -384,13 +397,23 @@ public actor ChargeController {
     }
 
     /// Clears the faulted state so non-normal modes may be requested again.
+    /// This is the user's deliberate acknowledgement: a backend that stopped
+    /// making changes after a problem it found (a helper after an outside
+    /// change) may restore macOS defaults now
+    /// (``ChargingBackend/resetAfterFault()``).
     @discardableResult
     public func resetBackendFault() async -> ControllerStatus {
         await exclusively {
             guard consecutiveFailures > 0 else { return }
             consecutiveFailures = 0
             lastFailureUptime = nil
+            isReportedFaultHandled = false
             record(.safety, "Backend fault cleared by user.")
+            do {
+                try await backend.resetAfterFault()
+            } catch {
+                registerFailure("\(backend.descriptor.displayName) backend could not recover after the fault was cleared: \(error)")
+            }
             await performEvaluation(.manual)
         }
     }
@@ -485,7 +508,7 @@ public actor ChargeController {
             record(.override, "\(Self.describe(override.kind)) \(ended).")
         }
         if Self.isMeaningfulChange(from: decision, to: newDecision) {
-            record(.decision, "[\(trigger.rawValue)] \(newDecision.state.rawValue): want \(newDecision.desiredMode), action \(Self.describe(newDecision.action, nativeLimit: capabilities.isEnforcedByMacOS)). \(newDecision.reason)")
+            record(.decision, "[\(trigger.rawValue)] \(newDecision.state.rawValue): want \(newDecision.desiredMode), action \(Self.describe(newDecision.action, nativeLimit: capabilities.isEnforcedByMacOS)). \(newDecision.reason.description(restoring: restoreTarget))")
         }
         for note in newDecision.notes where !(decision?.notes.contains(note) ?? false) {
             record(.decision, "Note: \(note)")
@@ -494,6 +517,7 @@ public actor ChargeController {
 
         await execute(newDecision.action)
         nativeLimit = await backend.nativeLimitStatus()
+        await renewHoldIfStillWanted(newDecision)
 
         if pendingBackend != nil, currentMode == .normal, !(nativeLimit?.hasUnresolvedOwnership ?? false), !isAdoptionUnsaved {
             await completePendingSwitch()
@@ -513,7 +537,11 @@ public actor ChargeController {
             // what CellKeeper last confirmed.
             currentMode = nil
             nativeLimit = await backend.nativeLimitStatus()
-            registerFailure("Could not read the backend's mode: \(error)")
+            // A fault reported with the failed read has faulted the backend
+            // already (`readBackendMode()`).
+            if !isReportedFaultHandled {
+                registerFailure("Could not read the backend's mode: \(error)")
+            }
             isOwnedStateUnverified = holdsNonNormalState
             return
         }
@@ -536,6 +564,10 @@ public actor ChargeController {
         // A change adopted while reading has been handled by `adopt(_:)`.
         guard adoptionCount == adoptionsBefore else { return }
         guard capabilities.availability.acceptsRequests else { return }
+        // A fault the backend found itself, possibly while CellKeeper held
+        // nothing, has been handled by `readBackendMode()`.
+        guard !isReportedFaultHandled else { return }
+        let origin = await backend.reportedModeOrigin()
         guard let observed else {
             registerFailure("The backend did not report its mode.")
             isOwnedStateUnverified = holdsNonNormalState
@@ -544,11 +576,16 @@ public actor ChargeController {
         if observed == .normal, !(nativeLimit?.hasUnresolvedOwnership ?? false) {
             isRestoreOutstanding = false
         }
-        let isOwnDoing = nativeLimit?.isReportedStateOwn == true || unconfirmedRequests.contains(observed)
+        let isOwnDoing = origin == .cellKeeper || unconfirmedRequests.contains(observed)
         if let owned = ownedMode, owned != observed, isOwnDoing {
             ownedMode = observed
             unconfirmedRequests = []
             record(.result, "Now confirmed: \(describeTarget(observed)), requested earlier but not confirmed then.")
+        } else if let owned = ownedMode, owned != observed, case .releasedByBackend(let release)? = origin {
+            // The backend's own safety rules, not another tool: no fault.
+            ownedMode = observed
+            unconfirmedRequests = []
+            record(.safety, "\(backend.descriptor.displayName) ended CellKeeper's \(describeTarget(owned)) itself: \(release). Not an outside change; now \(describeTarget(observed)).", level: release == .leaseExpired ? .error : .default)
         } else if ownedMode == observed {
             unconfirmedRequests = []
         } else if let owned = ownedMode {
@@ -566,6 +603,26 @@ public actor ChargeController {
     /// True if CellKeeper may have a non-normal state in effect.
     private var holdsNonNormalState: Bool {
         (ownedMode.map { $0 != .normal } ?? false) || (nativeLimit?.hasUnresolvedOwnership ?? false)
+    }
+
+    /// Renews CellKeeper's hold at the end of an evaluation, only if it holds
+    /// a confirmed non-normal mode that `decision` still wants and the
+    /// backend is not faulted (research rule R3; `safety.md` precondition 3).
+    /// Evaluations are the only caller, so a hung or stalled loop lets a
+    /// helper's lease lapse. A failed renewal is a failure like a failed
+    /// request: it is counted and `.normal` is requested at once.
+    private func renewHoldIfStillWanted(_ decision: PolicyDecision) async {
+        guard !isBackendFaulted, capabilities.availability.acceptsRequests,
+              let held = ownedMode, held != .normal, currentMode == held,
+              decision.desiredMode == held
+        else { return }
+        do {
+            try await backend.renewHold(held)
+        } catch {
+            lastExecution = ExecutionRecord(date: now(), action: ChargingAction(requesting: held), result: .failed(String(describing: error)))
+            registerFailure("Could not renew \(describeTarget(held)) with the \(backend.descriptor.displayName) backend: \(error)")
+            _ = await restoreNormal(reason: "safety fallback after a failed renewal")
+        }
     }
 
     private func execute(_ action: ChargingAction) async {
@@ -654,6 +711,12 @@ public actor ChargeController {
         }
     }
 
+    /// What `.normal` is called in the activity log's reasons: the user's
+    /// own limit for macOS's Charge Limit, normal charging otherwise.
+    private var restoreTarget: String {
+        capabilities.isEnforcedByMacOS ? describeTarget(.normal) : "normal charging"
+    }
+
     /// How a requested mode is described in the activity log.
     private func describeTarget(_ mode: ChargeControlMode) -> String {
         guard capabilities.isEnforcedByMacOS else { return mode.description }
@@ -684,8 +747,17 @@ public actor ChargeController {
     /// Reads the backend's mode. A native backend may adopt an outside change
     /// during any read; it is handled here at once, so no read can leave an
     /// adoption unreported. Callers compare ``adoptionCount`` to notice it.
+    /// So is a fault the backend reports with the read, also when the read
+    /// fails: every read, including a request's confirmation, a fallback's
+    /// and a recovery's, faults the backend at once for it.
     private func readBackendMode() async throws -> ChargeControlMode? {
-        let mode = try await backend.currentMode()
+        let mode: ChargeControlMode?
+        do {
+            mode = try await backend.currentMode()
+        } catch {
+            await handleReportedFault()
+            throw error
+        }
         if let change = await backend.takeAdoptedLimitChange() {
             nativeLimit = await backend.nativeLimitStatus()
             // A marker from an earlier session needs nothing more if
@@ -694,7 +766,34 @@ public actor ChargeController {
                 adopt(change)
             }
         }
+        await handleReportedFault()
         return mode
+    }
+
+    /// Faults the backend for a fault it reported with its last read
+    /// (``ReportedModeOrigin/changedOutside(_:)`` or
+    /// ``ReportedModeOrigin/needsAcknowledgement(_:)``), once for as long as
+    /// it keeps reporting it. Afterwards ``isReportedFaultHandled`` says
+    /// whether the last read reported one.
+    private func handleReportedFault() async {
+        let reportedFault: String? = switch await backend.reportedModeOrigin() {
+        case .changedOutside(let detail)?:
+            "Charging control changed outside CellKeeper: \(detail). Backend faulted; CellKeeper releases its own restrictions and does not override the change."
+        case .needsAcknowledgement(let detail)?:
+            "\(detail). Backend faulted: clear the fault to acknowledge it; until then only normal charging is requested."
+        default:
+            nil
+        }
+        guard let reportedFault else {
+            isReportedFaultHandled = false
+            return
+        }
+        guard !isReportedFaultHandled else { return }
+        isReportedFaultHandled = true
+        ownedMode = nil
+        unconfirmedRequests = []
+        consecutiveFailures = max(consecutiveFailures, Self.maximumConsecutiveFailures)
+        record(.safety, reportedFault, level: .fault)
     }
 
     /// Sets a mode and confirms it by read-back. On success the mode is
@@ -708,7 +807,7 @@ public actor ChargeController {
         do {
             // If the backend throws, the request is not counted as possibly in
             // effect: native backends track that themselves, through their
-            // record (`isReportedStateOwn`).
+            // record (`reportedModeOrigin()`).
             let outcome = try await backend.setMode(mode)
             if outcome == .adoptedOutsideChange {
                 // Nothing was written: the user's new limit stays in effect.

@@ -20,6 +20,11 @@ import Foundation
 ///   stale power state in force. An activation then needs only pure checks
 ///   on that same reading before its write, and any call that writes after
 ///   its checks settles the time limits again before it returns.
+/// - The engine records why each control changed (``HelperControlChange``).
+///   A client releasing a control it set can name that change
+///   (`clearControlIfUnchanged`): the engine compares it with its history
+///   right before clearing, and writes nothing if the control has changed
+///   since.
 /// - Every write that returns is read back. A write that throws, a failed
 ///   read-back or a mismatch restores defaults and raises `writeFailed`,
 ///   which refuses activations until a client restores defaults or an hour
@@ -160,11 +165,33 @@ public actor HelperEngine {
     private var powerStateReadAt: TimeInterval?
     private var activations: ActivationHistory
     private var lastHardwareError = 0
+    /// Hardware errors since start, so a client sees each one.
+    private var hardwareErrorCount = 0
     /// Calls into the control so far; each takes time.
     private var hardwareCalls = 0
     /// ``hardwareCalls`` when the time limits were last settled.
     private var hardwareCallsWhenSettled = 0
     private var writeFailedAt: TimeInterval?
+    /// Fixed for the life of the engine; see ``HelperHelloReply/helperInstance``.
+    private let instance = UInt64.random(in: 1...UInt64.max)
+
+    /// Why the engine is about to change the hardware, for the history of
+    /// each control's changes.
+    private struct ChangeContext {
+        var cause: HelperChangeCause
+        var session: HelperSessionID?
+        var interlocks: HelperInterlocks = []
+    }
+
+    /// The latest change of each control, as the read-backs saw it.
+    private var history: [HelperControl: HelperControlChange] = [:]
+    /// What the engine is doing while it writes; nil when it is not
+    /// writing, so that a change a read-back finds is an outside one.
+    private var context: ChangeContext?
+    /// Writes whose effect no read-back has shown yet (they threw, or the
+    /// read-back after them failed), by control: the next read that sees a
+    /// change of that control records it for the write.
+    private var unconfirmedWrites: [HelperControl: ChangeContext] = [:]
 
     /// - Parameters:
     ///   - control: the only access to charging hardware.
@@ -315,6 +342,12 @@ public actor HelperEngine {
         }
     }
 
+    /// The latest change of `control`, as clients see it in `readState`, for
+    /// the host's log; it is served also during shutdown.
+    public func latestChange(of control: HelperControl) -> HelperControlChange {
+        history[control] ?? HelperControlChange(generation: 0, cause: nil, interlocks: [], session: 0)
+    }
+
     /// True once shutdown was requested; only restores are served.
     public var isShuttingDown: Bool {
         phase == .shuttingDown
@@ -354,7 +387,9 @@ public actor HelperEngine {
             helperProtocolVersion: HelperProtocolVersion.current,
             build: build,
             capabilities: probe.capabilities,
-            isSimulated: probe.isSimulated
+            isSimulated: probe.isSimulated,
+            sessionID: UInt64(id.rawValue),
+            helperInstance: instance
         )
     }
 
@@ -368,13 +403,19 @@ public actor HelperEngine {
                 adapterDisabledLeaseSeconds: 0,
                 isLeaseHolder: false,
                 interlocks: [],
-                lastHardwareError: 0
+                lastHardwareError: 0,
+                hardwareErrorCount: 0,
+                chargingInhibitedChange: HelperControlChange(generation: 0, cause: nil, interlocks: [], session: 0),
+                adapterDisabledChange: HelperControlChange(generation: 0, cause: nil, interlocks: [], session: 0)
             )
         }
         let now = refresh(.request)
         func remaining(_ control: HelperControl) -> Int {
             guard let deadline = leases[control] else { return 0 }
             return max(0, Int((deadline - now).rounded(.up)))
+        }
+        func change(_ control: HelperControl) -> HelperControlChange {
+            history[control] ?? HelperControlChange(generation: 0, cause: nil, interlocks: [], session: 0)
         }
         return HelperStateReply(
             status: lastReadBack == nil ? .hardwareError : .ok,
@@ -383,7 +424,10 @@ public actor HelperEngine {
             adapterDisabledLeaseSeconds: remaining(.adapterDisabled),
             isLeaseHolder: leaseHolder == id,
             interlocks: interlocks,
-            lastHardwareError: lastHardwareError
+            lastHardwareError: lastHardwareError,
+            hardwareErrorCount: hardwareErrorCount,
+            chargingInhibitedChange: change(.chargingInhibited),
+            adapterDisabledChange: change(.adapterDisabled)
         )
     }
 
@@ -432,7 +476,8 @@ public actor HelperEngine {
             return reject(id, .releaseLease, .noLease)
         }
         endLease(control, reason: .released)
-        return deactivate(control, reason: .leaseReleased) ? .ok : reject(id, .releaseLease, .hardwareError)
+        let isInactive = performing(.clearedByClient, by: id) { deactivate(control, reason: .leaseReleased) }
+        return isInactive ? .ok : reject(id, .releaseLease, .hardwareError)
     }
 
     func setControl(_ id: HelperSessionID, control rawControl: Int, active: Bool) -> HelperStatus {
@@ -453,7 +498,8 @@ public actor HelperEngine {
             if admission.hasToken {
                 refresh(.request)
             }
-            return deactivate(control, reason: .clientRequest) ? .ok : reject(id, .setControl, .hardwareError)
+            let isInactive = performing(.clearedByClient, by: id) { deactivate(control, reason: .clientRequest) }
+            return isInactive ? .ok : reject(id, .setControl, .hardwareError)
         }
         guard probe.capabilities.contains(control.requiredCapability) else {
             return reject(id, .setControl, .unsupportedControl)
@@ -476,13 +522,13 @@ public actor HelperEngine {
         guard activations.allows(control, at: now) else {
             // R13: the safe state, but no degraded mode (a deliberate
             // deviation; see architecture.md).
-            ensureDefaults(reason: .activationLimited)
+            performing(.activationLimited, by: id) { _ = ensureDefaults(reason: .activationLimited) }
             return reject(id, .setControl, .rateLimited)
         }
         // An attempted write counts, whatever its outcome, from the moment
         // it is made.
         let record = activations.record(control, at: now)
-        let failure = write(control, active: true)
+        let failure = write(control, active: true, as: ChangeContext(cause: .setByClient, session: id))
         emit(.activationRecorded(record))
         if let failure {
             noteWriteFailure()
@@ -491,6 +537,34 @@ public actor HelperEngine {
         }
         emit(.activated(control, by: id))
         return .ok
+    }
+
+    func clearControlIfUnchanged(_ id: HelperSessionID, control rawControl: Int, generation: UInt64, helperInstance: UInt64) -> HelperStatus {
+        defer { finishOperation() }
+        // Only moves toward safety, so the budget does not refuse it
+        // (unless this request revokes the session).
+        let admission = admit(id, .clearControlIfUnchanged, metered: false)
+        if let refusal = admission.refusal {
+            return refusal
+        }
+        guard let control = HelperControl(rawValue: rawControl) else {
+            return reject(id, .clearControlIfUnchanged, .invalidArgument)
+        }
+        // Over the budget it skips the checks, as a deactivation does. The
+        // history is then as of the last read: every change made through
+        // the engine is in it, because each write is read back and recorded
+        // at once, but a change by another tool since then is not, as for
+        // any request.
+        if admission.hasToken {
+            refresh(.request)
+        }
+        // Compared on the history the checks just updated, with nothing
+        // between the comparison and the clear.
+        guard helperInstance == instance, latestChange(of: control).generation == generation else {
+            return reject(id, .clearControlIfUnchanged, .controlChanged)
+        }
+        let isInactive = performing(.clearedByClient, by: id) { deactivate(control, reason: .clientRequest) }
+        return isInactive ? .ok : reject(id, .clearControlIfUnchanged, .hardwareError)
     }
 
     func restoreDefaults(_ id: HelperSessionID) -> HelperStatus {
@@ -516,7 +590,7 @@ public actor HelperEngine {
         defer { finishOperation() }
         guard sessions.removeValue(forKey: id) != nil else { return }
         emit(.sessionInvalidated(id))
-        endSession(id)
+        endSession(id, reason: .sessionInvalidated)
     }
 
     // MARK: - Ending an operation
@@ -626,22 +700,24 @@ public actor HelperEngine {
     private func revoke(_ id: HelperSessionID) {
         guard sessions.removeValue(forKey: id) != nil else { return }
         emit(.sessionRevoked(id))
-        endSession(id)
+        endSession(id, reason: .revoked)
     }
 
     /// Ends what an ended session held: its leases, and the controls set
     /// under them (R1, R3). If a restore is owed, retries it instead.
-    private func endSession(_ id: HelperSessionID) {
+    private func endSession(_ id: HelperSessionID, reason: HelperLeaseEndReason) {
         guard leaseHolder == id else { return }
-        endAllLeases(reason: .sessionInvalidated)
-        if isRestoreOwed {
-            if !owned.isEmpty {
-                restoreAll(reason: .sessionInvalidated)
+        endAllLeases(reason: reason)
+        performing(reason == .revoked ? .sessionRevoked : .sessionEnded, by: id) {
+            if isRestoreOwed {
+                if !owned.isEmpty {
+                    restoreAll(reason: .sessionInvalidated)
+                }
+                return
             }
-            return
-        }
-        for control in HelperControl.allCases where expected.contains(control) {
-            clear(control, reason: .sessionInvalidated)
+            for control in HelperControl.allCases where expected.contains(control) {
+                clear(control, reason: .sessionInvalidated)
+            }
         }
     }
 
@@ -653,7 +729,7 @@ public actor HelperEngine {
     /// is set.
     private func clientRestore(_ id: HelperSessionID, _ request: HelperRequestKind) -> HelperStatus {
         endAllLeases(reason: .restoredDefaults)
-        guard ensureDefaults(reason: .clientRequest) else {
+        guard performing(.clearedByRestore, by: id, { ensureDefaults(reason: .clientRequest) }) else {
             return reject(id, request, .hardwareError)
         }
         writeFailedAt = nil
@@ -846,13 +922,79 @@ public actor HelperEngine {
         interlocks.contains(.hardwareFault)
     }
 
+    // MARK: - Change history
+
+    /// Runs `body` as an operation of `session` with `cause`: the changes it
+    /// makes are recorded with them.
+    private func performing<Result>(_ cause: HelperChangeCause, by session: HelperSessionID? = nil, _ body: () -> Result) -> Result {
+        let saved = context
+        context = ChangeContext(cause: cause, session: session)
+        defer { context = saved }
+        return body()
+    }
+
+    /// The cause a write or restore for `reason` records when no operation
+    /// around it says more (who asked).
+    private static func context(for reason: HelperChangeReason) -> ChangeContext {
+        switch reason {
+        case .start: ChangeContext(cause: .start)
+        case .clientRequest, .leaseReleased: ChangeContext(cause: .clearedByClient)
+        case .leaseExpired: ChangeContext(cause: .leaseExpired)
+        case .sessionInvalidated: ChangeContext(cause: .sessionEnded)
+        case .interlock(let interlocks): ChangeContext(cause: .interlock, interlocks: interlocks)
+        case .writeFailed, .readBackMismatch: ChangeContext(cause: .restoredAfterWriteFailure)
+        case .readBackFailed: ChangeContext(cause: .restoredAfterReadBackFailure)
+        case .externalModification: ChangeContext(cause: .restoredAfterOutsideChange)
+        case .faultRetry: ChangeContext(cause: .restoreRetried)
+        case .activationLimited: ChangeContext(cause: .activationLimited)
+        case .exitRequested, .terminate: ChangeContext(cause: .shutdown)
+        }
+    }
+
+    /// True for the reasons that are the cause of a restore whatever
+    /// operation it happens in: a failure, an outside change, a retry,
+    /// start and shutdown.
+    private static func isOwnCause(_ reason: HelperChangeReason) -> Bool {
+        switch reason {
+        case .start, .writeFailed, .readBackMismatch, .readBackFailed, .externalModification, .faultRetry, .exitRequested, .terminate:
+            true
+        case .clientRequest, .leaseReleased, .leaseExpired, .sessionInvalidated, .interlock, .activationLimited:
+            false
+        }
+    }
+
+    /// Records every control whose read-back differs from the last
+    /// successful one (``lastKnownReadBack``): a control in `controls`
+    /// changed for `cause`; one an unconfirmed write targeted, for that
+    /// write; any other changed outside the engine. Called before
+    /// ``lastKnownReadBack`` is updated, and not for a failed read-back, so a
+    /// change during an unknown state is recorded at the next read that
+    /// sees it.
+    private func recordChanges(to readBack: Set<HelperControl>, of controls: Set<HelperControl>, for cause: ChangeContext?) {
+        defer { unconfirmedWrites = [:] }
+        for control in HelperControl.allCases where readBack.contains(control) != lastKnownReadBack.contains(control) {
+            let made = (controls.contains(control) ? cause : nil) ?? unconfirmedWrites[control] ?? ChangeContext(cause: .changedOutside)
+            let generation = (history[control]?.generation ?? 0) + 1
+            history[control] = HelperControlChange(
+                generation: generation,
+                cause: made.cause,
+                interlocks: made.cause == .interlock ? made.interlocks : [],
+                session: made.session.map { UInt64($0.rawValue) } ?? 0
+            )
+        }
+    }
+
+    // MARK: - Reading and writing
+
     /// Reads the controls back, recording a failure as nil. A control that
-    /// reads back inactive is no longer the engine's.
+    /// reads back inactive is no longer the engine's. Changes of `controls`
+    /// are recorded for `cause`; any other change is an outside one.
     @discardableResult
-    private func readHardware() -> Set<HelperControl>? {
+    private func readHardware(attributing controls: Set<HelperControl> = [], to cause: ChangeContext? = nil) -> Set<HelperControl>? {
         do {
             hardwareCalls += 1
             let readBack = try hardware.readBack()
+            recordChanges(to: readBack, of: controls, for: cause)
             lastReadBack = readBack
             lastKnownReadBack = readBack
             owned.formIntersection(readBack)
@@ -868,8 +1010,9 @@ public actor HelperEngine {
     /// Returns nil on success, or why it failed. What the write may have
     /// made active counts as the engine's: the target once confirmed; after
     /// a throw or a failed read-back, every control, because what took
-    /// effect is unknown; after a mismatch, whatever reads back active.
-    private func write(_ control: HelperControl, active: Bool) -> HelperChangeReason? {
+    /// effect is unknown; after a mismatch, whatever reads back active. A
+    /// change of `control` the read-back shows is recorded for `cause`.
+    private func write(_ control: HelperControl, active: Bool, as cause: ChangeContext) -> HelperChangeReason? {
         let target = active ? expected.union([control]) : expected.subtracting([control])
         func record(_ outcome: HelperWriteRecord.Outcome, _ readBack: Set<HelperControl>?) {
             emit(.write(HelperWriteRecord(target: .control(control, active: active), outcome: outcome, readBack: readBack)))
@@ -881,11 +1024,13 @@ public actor HelperEngine {
             let code = HelperHardwareError.code(for: error)
             recordHardwareError(code)
             owned.formUnion(HelperControl.allCases)
+            unconfirmedWrites[control] = cause
             record(.threw(code: code), nil)
             return .writeFailed
         }
-        guard let readBack = readHardware() else {
+        guard let readBack = readHardware(attributing: [control], to: cause) else {
             owned.formUnion(HelperControl.allCases)
+            unconfirmedWrites[control] = cause
             record(.readBackFailed(code: lastHardwareError), nil)
             return .writeFailed
         }
@@ -907,7 +1052,7 @@ public actor HelperEngine {
     @discardableResult
     private func clear(_ control: HelperControl, reason: HelperChangeReason) -> Bool {
         guard expected.contains(control) else { return true }
-        if let failure = write(control, active: false) {
+        if let failure = write(control, active: false, as: context ?? Self.context(for: reason)) {
             noteWriteFailure()
             restoreAll(reason: failure)
             return false
@@ -950,9 +1095,14 @@ public actor HelperEngine {
     /// before and after keeps its owner, so another tool's control does not
     /// become the engine's. If the state before cannot be read, the controls
     /// last known to be another tool's still count as active before, so a
-    /// failed read never makes them the engine's.
+    /// failed read never makes them the engine's. A change the read before
+    /// the restore finds is not the restore's; every change its read-back
+    /// shows is recorded for the reason's own cause (a failure, an outside
+    /// change, a retry, start or shutdown), or else for the operation around
+    /// it.
     @discardableResult
     private func restoreAll(reason: HelperChangeReason) -> Bool {
+        let cause = Self.isOwnCause(reason) ? Self.context(for: reason) : context ?? Self.context(for: reason)
         expected = []
         let before = readHardware() ?? lastKnownReadBack.subtracting(owned)
         let mayHaveBeenIntroduced = Set(HelperControl.allCases).subtracting(before)
@@ -966,10 +1116,12 @@ public actor HelperEngine {
             let code = HelperHardwareError.code(for: error)
             recordHardwareError(code)
             owned.formUnion(mayHaveBeenIntroduced)
+            for control in HelperControl.allCases { unconfirmedWrites[control] = cause }
             record(.threw(code: code), nil)
             return restoreFailed(reason)
         }
-        guard let readBack = readHardware() else {
+        guard let readBack = readHardware(attributing: Set(HelperControl.allCases), to: cause) else {
+            for control in HelperControl.allCases { unconfirmedWrites[control] = cause }
             owned.formUnion(mayHaveBeenIntroduced)
             record(.readBackFailed(code: lastHardwareError), nil)
             return restoreFailed(reason)
@@ -1006,6 +1158,7 @@ public actor HelperEngine {
 
     private func recordHardwareError(_ code: Int) {
         lastHardwareError = code
+        hardwareErrorCount += 1
         emit(.hardwareError(code: code))
     }
 

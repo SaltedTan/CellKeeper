@@ -189,7 +189,7 @@ private struct ControlSettingsTab: View {
                     Text("CellKeeper will set macOS's own Charge Limit (80–100%) by running your “\(NativeChargeLimitBackend.defaultShortcutName)” shortcut, and macOS will enforce it. Before its first change CellKeeper records your current limit, and it restores exactly that value when you turn off management, switch backend, quit, or if anything fails. If you change the limit yourself in System Settings, CellKeeper keeps your new value as your own and turns off Manage charging. This backend is experimental.")
                 }
             } footer: {
-                Text("Simulated records what CellKeeper would do without changing your Mac. Read-only performs no control. macOS Charge Limit lets macOS enforce the limit you choose here; it is the only real control in this version.")
+                Text("Simulated records what CellKeeper would do without changing your Mac. Read-only performs no control. macOS Charge Limit lets macOS enforce the limit you choose here; it is the only real control in this version. Simulated helper tries CellKeeper's own charge control at any limit from 20 to 100%, simulated: nothing on your Mac changes. Real control needs a signed helper and a verified mechanism (roadmap milestone 4).")
                     .footerParagraph()
             }
 
@@ -208,31 +208,77 @@ private struct ControlSettingsTab: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     if status.isBackendFaulted {
-                        Label(isNative
-                              ? "The control backend failed repeatedly. Until you clear the fault, CellKeeper only gives back your own Charge Limit."
-                              : "The control backend failed repeatedly. Until you clear the fault, only normal charging will be requested.",
+                        Label(faultExplanation(for: status),
                               systemImage: "exclamationmark.triangle")
                             .font(.caption)
                             .foregroundStyle(.red)
                             .fixedSize(horizontal: false, vertical: true)
                         Button("Clear fault and retry") { model.resetBackendFault() }
+                            .help(faultResetHelp(for: status))
                     }
+                    PendingSwitchNotice(status: status, select: { model.selectBackend($0) })
                 }
             }
 
-            if isNative {
+            if isNativeChosenOrActive {
                 NativeLimitSetupSection(model: model)
             }
 
             if let status = model.status {
-                ControlDetailsSection(status: status, isNative: isNative)
+                ControlDetailsSection(status: status, isNative: status.capabilities.isEnforcedByMacOS)
             }
         }
         .formStyle(.grouped)
     }
 
-    private var isNative: Bool {
+    /// The native backend is chosen or in charge: its setup is shown, also
+    /// while a switch to it is pending. Text about the backend in charge
+    /// follows `status.capabilities` instead.
+    private var isNativeChosenOrActive: Bool {
         model.backendChoice == .nativeLimit || model.status?.capabilities.isEnforcedByMacOS == true
+    }
+
+    /// How clearing the fault affects charging, for the backend in use.
+    private enum FaultReset {
+        case nativeLimit
+        /// The Simulated helper: its reset changes only simulated controls.
+        case simulatedHelper
+        /// A helper that controls hardware (not available yet): its reset
+        /// restores macOS's default charging.
+        case helper
+        case other
+    }
+
+    /// Follows the backend in charge, which the reset acts on, not the one
+    /// chosen in the picker (a switch may be pending).
+    private func faultReset(for status: ControllerStatus) -> FaultReset {
+        if status.capabilities.isEnforcedByMacOS { return .nativeLimit }
+        guard ControlBackendChoice(backendIdentifier: status.backend.identifier) == .simulatedHelper else { return .other }
+        return status.capabilities.availability.affectsHardware ? .helper : .simulatedHelper
+    }
+
+    private func faultExplanation(for status: ControllerStatus) -> String {
+        switch faultReset(for: status) {
+        case .nativeLimit:
+            "The control backend failed repeatedly. Until you clear the fault, CellKeeper only gives back your own Charge Limit."
+        case .simulatedHelper:
+            "The simulated helper failed, found its controls changed outside CellKeeper, or is waiting for you to acknowledge a problem. Until you clear the fault, only normal charging is requested. Clearing it also resets the simulated helper's controls if it is waiting for that; your Mac's charging is not changed."
+        case .helper:
+            "The helper failed, found charging changed outside CellKeeper, or is waiting for you to acknowledge a problem. Until you clear the fault, only normal charging is requested. Clearing it also has the helper restore macOS's default charging if it is waiting for that, which can undo another tool's change."
+        case .other:
+            "The control backend failed repeatedly. Until you clear the fault, only normal charging will be requested."
+        }
+    }
+
+    private func faultResetHelp(for status: ControllerStatus) -> String {
+        switch faultReset(for: status) {
+        case .simulatedHelper:
+            "Clears the fault and resets the simulated helper's controls if it is waiting for that. Your Mac's charging is not changed."
+        case .helper:
+            "Clears the fault. If the helper is waiting for it, this also restores macOS's default charging, which can undo another tool's change."
+        case .nativeLimit, .other:
+            "Clears the fault and lets CellKeeper manage charging again."
+        }
     }
 
     private func choose(_ choice: ControlBackendChoice) {
@@ -322,11 +368,6 @@ private struct NativeLimitSetupSection: View {
                 } message: {
                     Text("Only do this after setting your own limit in System Settings. CellKeeper will then treat the current limit as yours.")
                 }
-            }
-            if let pending = model.status?.pendingBackend {
-                Label(Format.pendingSwitch(to: pending.displayName, nativeLimit: native) + " CellKeeper retries automatically; choose macOS Charge Limit again to cancel.", systemImage: "arrow.triangle.2.circlepath")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
             }
             Text("You can always set the limit yourself in System Settings › Battery › Charging.")
                 .font(.caption)
