@@ -121,6 +121,9 @@ struct NativeLimitControllerTests {
         let waiting = await controller.evaluate(.periodic)
         #expect(waiting.decision?.reason == .releaseRequired(.backendSwitch))
         #expect(system.reading == .limit(90))
+        let environment = DiagnosticsEnvironment(appVersion: "0.1.0 (1)", systemVersion: "Version 27.0.1", modelIdentifier: "Mac16,1")
+        let report = DiagnosticsReport.text(status: waiting, environment: environment, generatedAt: clock.now)
+        #expect(report.contains("Reason: Switching backend: CellKeeper restores your own macOS Charge Limit of 80% first."))
 
         clock.advance(by: ChargingPolicy.minimumRestoreRetryInterval)
         let switched = await controller.evaluate(.periodic)

@@ -78,7 +78,12 @@ public enum DiagnosticsReport {
             field("State", decision.state.rawValue)
             field("Wants", decision.desiredMode.description)
             field("Action", ChargeController.describe(decision.action, nativeLimit: capabilities.isEnforcedByMacOS))
-            field("Reason", decision.reason.description)
+            // As in the activity log: with macOS's Charge Limit, what
+            // CellKeeper restores is the user's own limit.
+            let restoreTarget = capabilities.isEnforcedByMacOS
+                ? "your own macOS Charge Limit" + (status.nativeLimit?.ownerLimit.map { " of \($0)%" } ?? "")
+                : "normal charging"
+            field("Reason", decision.reason.description(restoring: restoreTarget))
             for note in decision.notes {
                 field("Note", note.description)
             }
