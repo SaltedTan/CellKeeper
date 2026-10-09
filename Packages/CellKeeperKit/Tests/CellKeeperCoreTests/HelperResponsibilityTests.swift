@@ -264,6 +264,102 @@ struct HelperResponsibilityTests {
         }
     }
 
+    @Test("Another client's clear of an activation not yet confirmed is an outside change: CellKeeper faults and does not set it again", arguments: [false, true])
+    func pendingActivationClearedByAnotherClient(losesReply: Bool) async throws {
+        let rig = HelperRig()
+        let hooks = RequestHooks()
+        let backend = rig.hookedBackend(hooks)
+        let controller = rig.controller(on: backend, percent: 85)
+        await controller.evaluate(.launch)
+        let other = await rig.otherClient()
+        hooks.onNextActivation {
+            // Before CellKeeper's first confirming read, another client
+            // clears the control; the reply arrives, or is lost.
+            #expect(await other.setControl(control: inhibit, active: false) == .ok)
+            if losesReply { throw TransportTestError() }
+        }
+        rig.clock.advance(by: 60)
+        let failed = await controller.evaluate(.periodic)
+        #expect(failed.isBackendFaulted)
+        #expect(failed.events.contains { $0.kind == .safety && $0.message.contains("another client of the helper cleared") })
+        rig.clock.advance(by: 61)
+        let next = await controller.evaluate(.periodic)
+        #expect(next.isBackendFaulted)
+        #expect(rig.control.writes.filter { $0 == .apply(.chargingInhibited, active: true) }.count == 1)
+        #expect(rig.control.activeControls.isEmpty)
+    }
+
+    @Test("The helper's own release of an activation not yet confirmed is not an outside change")
+    func pendingActivationReleasedByHelper() async throws {
+        let rig = HelperRig()
+        let hooks = RequestHooks()
+        let backend = rig.hookedBackend(hooks)
+        let controller = rig.controller(on: backend, percent: 85)
+        hooks.onNextActivation {
+            // External power is lost before CellKeeper reads: the helper
+            // clears the inhibit under its own interlock.
+            rig.power.update { $0.isOnExternalPower = false }
+            await rig.engine.tick()
+        }
+        let status = await rig.confirmedEvaluation(controller)
+        #expect(!status.isBackendFaulted)
+        #expect(!status.events.contains { $0.message.contains("outside CellKeeper") })
+        #expect(rig.control.activeControls.isEmpty)
+    }
+
+    @Test("An outside change found earlier survives a failed read and is reported once")
+    func outsideNoticeSurvivesFailedRead() async throws {
+        let rig = HelperRig()
+        _ = try await rig.backend.setMode(.inhibitCharging)
+        #expect(await rig.otherClient().setControl(control: inhibit, active: false) == .ok)
+        _ = try await rig.backend.setMode(.normal)
+        rig.transport.latest?.failNextRequests(1)
+        await #expect(throws: BackendError.self) { _ = try await rig.backend.currentMode() }
+        guard case .changedOutside? = await rig.backend.reportedModeOrigin() else {
+            Issue.record("the outside change was lost on a failed read")
+            return
+        }
+        #expect(try await rig.backend.currentMode() == .normal)
+        #expect(await rig.backend.reportedModeOrigin() == nil)
+    }
+
+    enum Resolution: String, CaseIterable, Sendable {
+        case helperRecovers, userStays
+    }
+
+    @Test("A switch that waits for an unsettled activation completes once the helper recovers, or is cancelled by staying", arguments: Resolution.allCases)
+    func unsettledSwitchResolves(resolution: Resolution) async throws {
+        let rig = HelperRig()
+        let hooks = RequestHooks()
+        let backend = rig.hookedBackend(hooks)
+        let controller = rig.controller(on: backend, percent: 85)
+        hooks.onNextActivation {
+            rig.control.failNextApplies(1)
+            rig.control.failNextRestores(1)
+            rig.transport.isReachable = false
+            hooks.onNextRead {
+                await rig.transport.latest?.session.invalidate()
+                throw TransportTestError()
+            }
+        }
+        _ = await rig.confirmedEvaluation(controller)
+        let pending = await controller.switchBackend(to: MockChargingBackend())
+        #expect(pending.pendingBackend != nil)
+        switch resolution {
+        case .helperRecovers:
+            rig.transport.isReachable = true
+            rig.clock.advance(by: 61)
+            let recovered = await controller.evaluate(.periodic)
+            #expect(recovered.pendingBackend == nil)
+            #expect(recovered.backend.identifier == "simulated")
+            #expect(rig.control.activeControls.isEmpty)
+        case .userStays:
+            let stayed = await controller.switchBackend(to: backend)
+            #expect(stayed.pendingBackend == nil)
+            #expect(stayed.backend.identifier == HelperRig.descriptor.identifier)
+        }
+    }
+
     @Test("An activation whose reply was lost is settled by a later read: CellKeeper's own once the helper names it")
     func pendingActivationSettlesAsOwn() async throws {
         let rig = HelperRig()

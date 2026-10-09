@@ -606,17 +606,31 @@ public actor HelperChargingBackend: ChargingBackend {
     /// the helper names it as the control's latest change (`setByClient`, on
     /// the session it was sent on, after the generation before it), it took
     /// effect and the control is CellKeeper's. Otherwise nothing of it is
-    /// still in effect: it did not take effect, or it did and has ended since,
-    /// or the helper restarted (and its start restored defaults). A control
-    /// active then is not CellKeeper's, and is reported as an outside change.
+    /// still in effect: it did not take effect (the control has not changed
+    /// since), or the control changed since, or the helper restarted (and its
+    /// start restored defaults). A control that changed since is never
+    /// CellKeeper's, but its latest change is classified like the end of a
+    /// hold: another client's clear or restore, or any other outside change,
+    /// is reported as an outside change (R27), and a failure as a failure. An
+    /// active control CellKeeper did not set is reported as well (``observe``).
     private func settlePendingActivations(in state: HelperStateReply) {
         for (control, pending) in pendingActivations {
             pendingActivations[control] = nil
             guard pending.instance == helperInstance else { continue }
             let change = state.change(for: control)
-            if change.cause == .setByClient, change.session == pending.session, change.generation > pending.generationBefore,
+            guard change.generation > pending.generationBefore else { continue }
+            if change.cause == .setByClient, change.session == pending.session,
                state.activeControls.controls.contains(control) {
                 holds[control] = Hold(generation: change.generation, instance: pending.instance)
+                continue
+            }
+            switch ending(by: change, of: control) {
+            case .outside(let detail):
+                outsideLoss = outsideLoss ?? detail
+            case .failure:
+                unreportedHardwareError = unreportedHardwareError ?? "CellKeeper's helper cleared \(Self.describe([control])) after a hardware error (code \(state.lastHardwareError))"
+            case .released, .own:
+                break
             }
         }
     }
@@ -639,6 +653,14 @@ public actor HelperChargingBackend: ChargingBackend {
         guard change.generation == hold.generation + 1, !isActive else {
             return .outside("\(name) changed \(change.generation &- hold.generation) times since CellKeeper set it, and is \(isActive ? "active again, set by someone else" : "off")")
         }
+        return ending(by: change, of: control)
+    }
+
+    /// What `change`, the helper's latest change of `control`, says about how
+    /// something CellKeeper set there ended: one of the helper's own rules,
+    /// CellKeeper's own release, a failure, or an outside change.
+    private func ending(by change: HelperControlChange, of control: HelperControl) -> Ending {
+        let name = Self.describe([control])
         let isOwnSession = ownSessions.contains(change.session)
         switch change.cause {
         case .leaseExpired?:

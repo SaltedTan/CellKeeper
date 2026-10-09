@@ -261,7 +261,9 @@ app. What is already in place, and tested against the simulated control:
   fails meanwhile, the backend keeps asking for normal charging, counts
   failures and keeps a backend switch pending. An activation whose outcome
   is unknown never makes a control CellKeeper's, so nothing is cleared on
-  its account.
+  its account; if another client or tool changed the control before
+  CellKeeper could confirm the activation, that is reported as an outside
+  change, and CellKeeper stops (R27).
 - **Helper failures:** a failed write or an owed restore faults the backend
   at once, also while the helper cannot read its controls back, and a new
   hardware error is counted as a failure.
