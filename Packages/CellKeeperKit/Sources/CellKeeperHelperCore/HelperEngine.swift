@@ -18,7 +18,8 @@ import Foundation
 ///   reading taken after every read it depends on and after every clearing
 ///   write, so a call that took time cannot leave an expired lease or a
 ///   stale power state in force. An activation then needs only pure checks
-///   on that same reading before its write.
+///   on that same reading before its write, and any call that writes after
+///   its checks settles the time limits again before it returns.
 /// - Every write that returns is read back. A write that throws, a failed
 ///   read-back or a mismatch restores defaults and raises `writeFailed`,
 ///   which refuses activations until a client restores defaults or an hour
@@ -161,6 +162,8 @@ public actor HelperEngine {
     private var lastHardwareError = 0
     /// Calls into the control so far; each takes time.
     private var hardwareCalls = 0
+    /// ``hardwareCalls`` when the time limits were last settled.
+    private var hardwareCallsWhenSettled = 0
     private var writeFailedAt: TimeInterval?
 
     /// - Parameters:
@@ -211,7 +214,7 @@ public actor HelperEngine {
     /// activation) and returns `hardwareError`. Later calls do nothing.
     @discardableResult
     public func start() -> HelperStatus {
-        defer { deliverEvents() }
+        defer { finishOperation() }
         switch phase {
         case .shuttingDown:
             return .shuttingDown
@@ -230,7 +233,7 @@ public actor HelperEngine {
 
     /// A new session for a client connection. See ``HelperSession``.
     public func openSession() -> HelperSession {
-        defer { deliverEvents() }
+        defer { finishOperation() }
         let id = HelperSessionID(rawValue: nextSessionNumber)
         nextSessionNumber += 1
         sessions[id] = SessionState(budget: RequestBudget(at: uptime()))
@@ -246,7 +249,7 @@ public actor HelperEngine {
     /// system events retry an owed restore. During shutdown it only
     /// retries the restore.
     public func tick() {
-        defer { deliverEvents() }
+        defer { finishOperation() }
         switch phase {
         case .running: refresh(.tick)
         case .shuttingDown: retryRestoreDuringShutdown()
@@ -260,7 +263,7 @@ public actor HelperEngine {
     /// every read, so an inhibit whose lease ran out is cleared before
     /// this returns and the host acknowledges sleep.
     public func systemWillSleep() {
-        defer { deliverEvents() }
+        defer { finishOperation() }
         switch phase {
         case .running:
             sleepAnnouncedAt = uptime()
@@ -276,7 +279,7 @@ public actor HelperEngine {
     /// check. Power states read at or before this call count as
     /// unavailable, so the power reading must provide a newer one.
     public func systemDidWake() {
-        defer { deliverEvents() }
+        defer { finishOperation() }
         switch phase {
         case .running:
             sleepAnnouncedAt = nil
@@ -300,7 +303,7 @@ public actor HelperEngine {
     /// start restores defaults before anything else (R2).
     @discardableResult
     public func terminate() -> HelperStatus {
-        defer { deliverEvents() }
+        defer { finishOperation() }
         switch phase {
         case .shuttingDown:
             if isRestoreOwed {
@@ -339,7 +342,7 @@ public actor HelperEngine {
     // MARK: - Requests (through HelperSession)
 
     func hello(_ id: HelperSessionID, clientProtocolVersion: Int) -> HelperHelloReply {
-        defer { deliverEvents() }
+        defer { finishOperation() }
         var status = admit(id, .hello, needsIntroduction: false).refusal ?? .ok
         if status == .ok, !HelperProtocolVersion.isSupported(client: clientProtocolVersion) {
             status = reject(id, .hello, .incompatibleProtocol)
@@ -356,7 +359,7 @@ public actor HelperEngine {
     }
 
     func readState(_ id: HelperSessionID) -> HelperStateReply {
-        defer { deliverEvents() }
+        defer { finishOperation() }
         if let refusal = admit(id, .readState).refusal {
             return HelperStateReply(
                 status: refusal,
@@ -385,7 +388,7 @@ public actor HelperEngine {
     }
 
     func acquireOrRenewLease(_ id: HelperSessionID, control rawControl: Int, seconds: Int) -> HelperLeaseReply {
-        defer { deliverEvents() }
+        defer { finishOperation() }
         func refused(_ status: HelperStatus) -> HelperLeaseReply {
             HelperLeaseReply(status: reject(id, .acquireOrRenewLease, status), grantedSeconds: 0)
         }
@@ -412,7 +415,7 @@ public actor HelperEngine {
     }
 
     func releaseLease(_ id: HelperSessionID, control rawControl: Int) -> HelperStatus {
-        defer { deliverEvents() }
+        defer { finishOperation() }
         // Only moves toward safety, so the budget does not refuse it
         // (unless this request revokes the session).
         let admission = admit(id, .releaseLease, metered: false)
@@ -433,7 +436,7 @@ public actor HelperEngine {
     }
 
     func setControl(_ id: HelperSessionID, control rawControl: Int, active: Bool) -> HelperStatus {
-        defer { deliverEvents() }
+        defer { finishOperation() }
         // Deactivation only moves toward safety, so the budget does not
         // refuse it (unless this request revokes the session).
         let admission = admit(id, .setControl, metered: active)
@@ -491,7 +494,7 @@ public actor HelperEngine {
     }
 
     func restoreDefaults(_ id: HelperSessionID) -> HelperStatus {
-        defer { deliverEvents() }
+        defer { finishOperation() }
         if let refusal = admit(id, .restoreDefaults, metered: false, needsIntroduction: false, isRestore: true).refusal {
             return refusal
         }
@@ -499,7 +502,7 @@ public actor HelperEngine {
     }
 
     func restoreDefaultsAndExit(_ id: HelperSessionID) -> HelperStatus {
-        defer { deliverEvents() }
+        defer { finishOperation() }
         if let refusal = admit(id, .restoreDefaultsAndExit, metered: false, needsIntroduction: false, isRestore: true).refusal {
             return refusal
         }
@@ -510,10 +513,25 @@ public actor HelperEngine {
     }
 
     func invalidate(_ id: HelperSessionID) {
-        defer { deliverEvents() }
+        defer { finishOperation() }
         guard sessions.removeValue(forKey: id) != nil else { return }
         emit(.sessionInvalidated(id))
         endSession(id)
+    }
+
+    // MARK: - Ending an operation
+
+    /// Ends every public entry point. If the operation made a hardware call
+    /// since the time limits were last settled, for example a clearing
+    /// write at the end of a request, that call took time, so they are
+    /// settled again before the call returns. Then the events are
+    /// delivered. During shutdown no lease remains and the engine owns no
+    /// control, so there is nothing to settle.
+    private func finishOperation() {
+        if phase == .running, hardwareCalls != hardwareCallsWhenSettled {
+            settleTimeLimits()
+        }
+        deliverEvents()
     }
 
     // MARK: - Events
@@ -660,10 +678,12 @@ public actor HelperEngine {
     /// one whenever that cleanup made a hardware call, because the call
     /// took time. Returns the reading of the last pass, which made none.
     ///
-    /// It ends: a pass makes a hardware call only to clear a control the
-    /// engine set, and each such call clears one (or, failing, restores
-    /// defaults and owns nothing more), so at most one pass per control
-    /// makes calls.
+    /// It ends: a pass makes a hardware call only to clear a control in
+    /// `expected`. Each such call either clears it, which removes it from
+    /// `expected`, or fails, and the restore that follows a failure empties
+    /// `expected` whatever its outcome. Once `expected` is empty a pass
+    /// makes no call, so at most one pass per control makes calls.
+    @discardableResult
     private func settleTimeLimits() -> TimeInterval {
         while true {
             let callsBefore = hardwareCalls
@@ -680,6 +700,7 @@ public actor HelperEngine {
             }
             enforceInterlocks()
             if hardwareCalls == callsBefore {
+                hardwareCallsWhenSettled = hardwareCalls
                 return now
             }
         }

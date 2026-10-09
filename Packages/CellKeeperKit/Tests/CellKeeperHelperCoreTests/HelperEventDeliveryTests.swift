@@ -142,7 +142,7 @@ struct HelperEventDeliveryTests {
         #expect(h.control.activeControls.isEmpty)
     }
 
-    @Test("A sink that blocks delays only what follows; the write was made within its lease")
+    @Test("A sink that blocks delays the call's own reply and what follows, but the write was made within its lease")
     func blockingSink() async {
         let h = Harness()
         let session = await h.startedSession()
@@ -240,6 +240,42 @@ struct HelperTimeLimitOrderTests {
         // Cleared before the call returns, so before a host acknowledges sleep.
         #expect(h.control.activeControls.isEmpty)
         #expect(h.recorder.contains(.leaseEnded(session.id, .chargingInhibited, .expired)))
+    }
+
+    enum FinalWrite: String, CaseIterable, Sendable {
+        case releaseLease, deactivate
+    }
+
+    enum Aging: String, CaseIterable, Sendable {
+        case leaseRunsOut, powerStateAges
+    }
+
+    @Test("A clearing write at the end of a request is followed by a fresh check before the reply", arguments: FinalWrite.allCases, Aging.allCases)
+    func settledAfterFinalWrite(request: FinalWrite, aging: Aging) async {
+        let h = Harness()
+        let session = await h.startedSession()
+        #expect(await h.activate(.chargingInhibited, on: session) == .ok)
+        #expect(await h.activate(.adapterDisabled, on: session) == .ok)
+        switch aging {
+        case .leaseRunsOut:
+            #expect(await session.acquireOrRenewLease(control: HelperControl.adapterDisabled.rawValue, seconds: 1).grantedSeconds == 1)
+        case .powerStateAges:
+            let readAt = h.clock.uptime - 59
+            h.power.update { $0.readAtUptime = readAt }
+        }
+
+        // Clearing the inhibit takes 2 s.
+        let clock = h.clock
+        h.control.performDuringNextApplies(1) { clock.advance(by: 2) }
+        let inhibit = HelperControl.chargingInhibited.rawValue
+        let status: HelperStatus
+        switch request {
+        case .releaseLease: status = await session.releaseLease(control: inhibit)
+        case .deactivate: status = await session.setControl(control: inhibit, active: false)
+        }
+        #expect(status == .ok)
+        // Straight after the reply, before any tick or read could repair it.
+        #expect(h.control.activeControls.isEmpty)
     }
 
     @Test("Cleanup that takes time is followed by a fresh check: a lease that ran out meanwhile is expired too")
