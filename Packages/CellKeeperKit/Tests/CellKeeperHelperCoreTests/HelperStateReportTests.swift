@@ -224,6 +224,38 @@ struct HelperStateReportTests {
             == HelperControlChange(generation: 2, cause: .restoredAfterWriteFailure, interlocks: [], session: 0))
     }
 
+    @Test("A change made by a restore whose read-back failed is recorded for the restore at the next read, not as an outside change")
+    func unconfirmedRestore() async {
+        let h = Harness()
+        let session = await h.startedSession()
+        #expect(await h.activate(.chargingInhibited, on: session) == .ok)
+        // The check cannot read back; the restore clears the control, but
+        // its reads before and after fail too.
+        h.control.failNextReadBacks(3)
+        await h.engine.tick()
+        let state = await session.readState()
+        #expect(state.interlocks.contains(.hardwareFault))
+        #expect(state.change(for: .chargingInhibited)
+            == HelperControlChange(generation: 2, cause: .restoredAfterReadBackFailure, interlocks: [], session: 0))
+    }
+
+    @Test("An activation that took effect and then threw is recorded for the session that asked, by the restore's read before it")
+    func unconfirmedActivation() async {
+        let h = Harness()
+        let session = await h.startedSession()
+        let control = HelperControl.chargingInhibited
+        #expect(await session.acquireOrRenewLease(control: control.rawValue, seconds: control.maximumLeaseSeconds).status == .ok)
+        // The write takes effect and throws; the restore after it fails, so
+        // the control stays active.
+        h.control.failNextAppliesAfterApplying(1)
+        h.control.failNextRestores(1)
+        #expect(await session.setControl(control: control.rawValue, active: true) == .hardwareError)
+        let state = await session.readState()
+        #expect(state.active == [control])
+        #expect(state.change(for: control)
+            == HelperControlChange(generation: 1, cause: .setByClient, interlocks: [], session: sessionNumber(session)))
+    }
+
     @Test("A restore after an activation the limits refused names the session that asked")
     func activationLimited() async {
         let h = Harness()

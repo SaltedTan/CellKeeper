@@ -183,6 +183,10 @@ public actor HelperEngine {
     /// What the engine is doing while it writes; nil when it is not
     /// writing, so that a change a read-back finds is an outside one.
     private var context: ChangeContext?
+    /// Writes whose effect no read-back has shown yet (they threw, or the
+    /// read-back after them failed), by control: the next read that sees a
+    /// change of that control records it for the write.
+    private var unconfirmedWrites: [HelperControl: ChangeContext] = [:]
 
     /// - Parameters:
     ///   - control: the only access to charging hardware.
@@ -928,13 +932,15 @@ public actor HelperEngine {
 
     /// Records every control whose read-back differs from the last
     /// successful one (``lastKnownReadBack``): a control in `controls`
-    /// changed for `cause`; any other changed outside the engine. Called
-    /// before ``lastKnownReadBack`` is updated, and not for a failed
-    /// read-back, so a change during an unknown state is recorded at the
-    /// next read that sees it.
+    /// changed for `cause`; one an unconfirmed write targeted, for that
+    /// write; any other changed outside the engine. Called before
+    /// ``lastKnownReadBack`` is updated, and not for a failed read-back, so a
+    /// change during an unknown state is recorded at the next read that
+    /// sees it.
     private func recordChanges(to readBack: Set<HelperControl>, of controls: Set<HelperControl>, for cause: ChangeContext?) {
+        defer { unconfirmedWrites = [:] }
         for control in HelperControl.allCases where readBack.contains(control) != lastKnownReadBack.contains(control) {
-            let made = controls.contains(control) ? cause ?? ChangeContext(cause: .changedOutside) : ChangeContext(cause: .changedOutside)
+            let made = (controls.contains(control) ? cause : nil) ?? unconfirmedWrites[control] ?? ChangeContext(cause: .changedOutside)
             let generation = (history[control]?.generation ?? 0) + 1
             history[control] = HelperControlChange(
                 generation: generation,
@@ -985,11 +991,13 @@ public actor HelperEngine {
             let code = HelperHardwareError.code(for: error)
             recordHardwareError(code)
             owned.formUnion(HelperControl.allCases)
+            unconfirmedWrites[control] = cause
             record(.threw(code: code), nil)
             return .writeFailed
         }
         guard let readBack = readHardware(attributing: [control], to: cause) else {
             owned.formUnion(HelperControl.allCases)
+            unconfirmedWrites[control] = cause
             record(.readBackFailed(code: lastHardwareError), nil)
             return .writeFailed
         }
@@ -1075,10 +1083,12 @@ public actor HelperEngine {
             let code = HelperHardwareError.code(for: error)
             recordHardwareError(code)
             owned.formUnion(mayHaveBeenIntroduced)
+            for control in HelperControl.allCases { unconfirmedWrites[control] = cause }
             record(.threw(code: code), nil)
             return restoreFailed(reason)
         }
         guard let readBack = readHardware(attributing: Set(HelperControl.allCases), to: cause) else {
+            for control in HelperControl.allCases { unconfirmedWrites[control] = cause }
             owned.formUnion(mayHaveBeenIntroduced)
             record(.readBackFailed(code: lastHardwareError), nil)
             return restoreFailed(reason)
