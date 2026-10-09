@@ -23,6 +23,14 @@ struct ChargeControllerTests {
         return (controller, telemetry)
     }
 
+    /// Evaluates a first reading, then lets a minute pass so that the next
+    /// evaluation reads a distinct sample. A charge at or above the limit is
+    /// acted on only once a second reading confirms it.
+    private func takeFirstReading(_ controller: ChargeController) async {
+        await controller.evaluate(.launch)
+        clock.advance(by: 60)
+    }
+
     // MARK: - Execution and honesty
 
     @Test("Decisions are executed through the mock backend and reported as simulated")
@@ -30,7 +38,12 @@ struct ChargeControllerTests {
         let backend = MockChargingBackend()
         let (controller, _) = makeController(percent: 85, backend: backend)
 
-        let status = await controller.evaluate(.launch)
+        let first = await controller.evaluate(.launch)
+        #expect(first.decision?.reason == .confirmingLimit(percent: 85, limit: 80))
+        #expect(await backend.requestedModes.isEmpty)
+
+        clock.advance(by: 60)
+        let status = await controller.evaluate(.periodic)
         #expect(status.decision?.action == .disableCharging)
         #expect(status.lastExecution?.result == .simulated)
         #expect(status.currentMode == .inhibitCharging)
@@ -46,7 +59,8 @@ struct ChargeControllerTests {
     @Test("A read-only backend refuses control but still computes the desired mode")
     func readOnlyBackend() async {
         let (controller, _) = makeController(percent: 85, backend: ReadOnlyChargingBackend(reason: "test"))
-        let status = await controller.evaluate(.launch)
+        await takeFirstReading(controller)
+        let status = await controller.evaluate(.periodic)
         #expect(status.decision?.desiredMode == .inhibitCharging)
         #expect(status.decision?.action == .refuse(.controlUnavailable("test")))
         #expect(status.lastExecution?.result == .refused(.controlUnavailable("test")))
@@ -63,11 +77,58 @@ struct ChargeControllerTests {
         #expect(initial.decision?.desiredMode == .normal)
         #expect(await backend.requestedModes.isEmpty)
 
-        let lowered = try await controller.apply(settings: ChargingSettings.default.withChargeLimit(70))
+        // The charge is now above the limit; the next reading confirms it.
+        let crossed = try await controller.apply(settings: ChargingSettings.default.withChargeLimit(70))
+        #expect(crossed.decision?.reason == .confirmingLimit(percent: 78, limit: 70))
+        #expect(await backend.requestedModes.isEmpty)
+
+        clock.advance(by: 60)
+        let lowered = await controller.evaluate(.periodic)
         #expect(lowered.decision?.state == .holding)
         #expect(lowered.decision?.action == .disableCharging)
         #expect(lowered.currentMode == .inhibitCharging)
         #expect(await backend.requestedModes == [.inhibitCharging])
+    }
+
+    @Test("Evaluations of the same reading do not confirm the limit; the next reading does")
+    func limitConfirmedByNextReading() async {
+        let backend = MockChargingBackend()
+        let (controller, _) = makeController(percent: 85, backend: backend)
+        await controller.evaluate(.launch)
+        await controller.evaluate(.powerSourceChanged)
+        let same = await controller.evaluate(.periodic)
+        #expect(same.decision?.state == .charging)
+        #expect(same.decision?.notes == [.confirmingLimit])
+        #expect(await backend.requestedModes.isEmpty)
+        #expect(same.events.filter { $0.message == "Note: \(PolicyNote.confirmingLimit)" }.count == 1)
+
+        clock.advance(by: 60)
+        let confirmed = await controller.evaluate(.periodic)
+        #expect(confirmed.decision?.state == .holding)
+        #expect(confirmed.currentMode == .inhibitCharging)
+        #expect(await backend.requestedModes == [.inhibitCharging])
+    }
+
+    @Test("A temperature pause lasts the minimum time across evaluations, then charging resumes")
+    func temperatureMinimumPause() async {
+        let backend = MockChargingBackend()
+        let (controller, telemetry) = makeController(percent: 50, backend: backend)
+        await telemetry.set(snapshot(percent: 50, temperature: 41))
+        let hot = await controller.evaluate(.launch)
+        #expect(hot.decision?.state == .temperaturePause)
+        #expect(hot.currentMode == .inhibitCharging)
+
+        await telemetry.set(snapshot(percent: 50, temperature: 34))
+        clock.advance(by: ChargingPolicy.minimumTemperaturePause - 1)
+        let cooled = await controller.evaluate(.periodic)
+        #expect(cooled.decision?.state == .temperaturePause)
+        #expect(cooled.currentMode == .inhibitCharging)
+
+        clock.advance(by: 1)
+        let resumed = await controller.evaluate(.periodic)
+        #expect(resumed.decision?.state == .charging)
+        #expect(resumed.currentMode == .normal)
+        #expect(await backend.requestedModes == [.inhibitCharging, .normal])
     }
 
     @Test("Invalid settings are rejected and the previous settings kept")
@@ -88,7 +149,8 @@ struct ChargeControllerTests {
         await backend.failNextRequests(1)
         let (controller, _) = makeController(percent: 85, backend: backend)
 
-        let status = await controller.evaluate(.launch)
+        await takeFirstReading(controller)
+        let status = await controller.evaluate(.periodic)
         #expect(await backend.requestedModes == [.inhibitCharging, .normal])
         guard case .failed = status.lastExecution?.result else {
             Issue.record("expected failure, got \(String(describing: status.lastExecution))")
@@ -124,7 +186,8 @@ struct ChargeControllerTests {
         // The backend will claim to be in normal mode whatever is requested.
         await backend.overrideReadBack(.some(.normal))
         let (controller, _) = makeController(percent: 85, backend: backend)
-        let status = await controller.evaluate(.launch)
+        await takeFirstReading(controller)
+        let status = await controller.evaluate(.periodic)
         #expect(status.consecutiveFailures == 1)
         #expect(status.events.contains { $0.kind == .failure && $0.message.contains("Read-back mismatch") })
         guard case .failed = status.lastExecution?.result else {
@@ -162,7 +225,8 @@ struct ChargeControllerTests {
     func externalWriterDetected() async throws {
         let backend = MockChargingBackend()
         let (controller, _) = makeController(percent: 85, backend: backend)
-        await controller.evaluate(.launch)
+        await takeFirstReading(controller)
+        await controller.evaluate(.periodic)
         #expect(try await backend.currentMode() == .inhibitCharging)
 
         await backend.simulateExternalChange(to: .forceDischarge)
@@ -184,7 +248,8 @@ struct ChargeControllerTests {
     func fullChargeLifecycle() async {
         let backend = MockChargingBackend()
         let (controller, telemetry) = makeController(percent: 85, backend: backend)
-        await controller.evaluate(.launch)
+        await takeFirstReading(controller)
+        await controller.evaluate(.periodic)
 
         let started = await controller.startFullCharge()
         #expect(started.activeOverride?.kind == .fullCharge)
@@ -208,6 +273,7 @@ struct ChargeControllerTests {
         #expect(started.decision?.state == .discharging)
         #expect(started.currentMode == .forceDischarge)
 
+        clock.advance(by: 600)
         await telemetry.set(snapshot(percent: 80, charging: false))
         let done = await controller.evaluate(.powerSourceChanged)
         #expect(done.activeOverride == nil)
@@ -341,7 +407,8 @@ struct ChargeControllerTests {
     func switchBackend() async throws {
         let first = MockChargingBackend()
         let (controller, _) = makeController(percent: 85, backend: first)
-        await controller.evaluate(.launch)
+        await takeFirstReading(controller)
+        await controller.evaluate(.periodic)
         #expect(try await first.currentMode() == .inhibitCharging)
 
         let status = await controller.switchBackend(to: ReadOnlyChargingBackend(reason: "test"))
@@ -354,7 +421,8 @@ struct ChargeControllerTests {
     func switchRefusedWithoutRestore() async throws {
         let first = MockChargingBackend()
         let (controller, _) = makeController(percent: 85, backend: first)
-        await controller.evaluate(.launch)
+        await takeFirstReading(controller)
+        await controller.evaluate(.periodic)
         await first.failNextRequests(1)
 
         let status = await controller.switchBackend(to: ReadOnlyChargingBackend(reason: "test"))
@@ -400,7 +468,8 @@ struct ChargeControllerTests {
     @Test("A non-hardware backend can never report a hardware change")
     func appliedDowngraded() async {
         let (controller, _) = makeController(percent: 85, backend: OverclaimingBackend())
-        let status = await controller.evaluate(.launch)
+        await takeFirstReading(controller)
+        let status = await controller.evaluate(.periodic)
         #expect(status.lastExecution?.result == .simulated)
         #expect(status.events.contains { $0.kind == .safety && $0.message.contains("not a hardware backend") })
     }
@@ -408,10 +477,13 @@ struct ChargeControllerTests {
     @Test("Repeated rate-limit refusals are logged once")
     func rateLimitLoggedOnce() async {
         let (controller, telemetry) = makeController(percent: 85)
+        await takeFirstReading(controller)
         await controller.evaluate(.launch)
         await telemetry.set(snapshot(percent: 50))
         await controller.evaluate(.periodic)
         await telemetry.set(snapshot(percent: 85))
+        // A first reading at 85% again, then readings that confirm it.
+        await controller.evaluate(.periodic)
         for _ in 0..<5 {
             clock.advance(by: 5)
             await controller.evaluate(.periodic)
@@ -434,12 +506,18 @@ struct ChargeControllerTests {
     func rateLimited() async {
         let backend = MockChargingBackend()
         let (controller, telemetry) = makeController(percent: 85, backend: backend)
+        await takeFirstReading(controller)
         await controller.evaluate(.launch)
         await telemetry.set(snapshot(percent: 50))
+        clock.advance(by: 10)
         let relaxed = await controller.evaluate(.powerSourceChanged)
         #expect(relaxed.currentMode == .normal)
 
+        // Two readings at 85% within a minute of the first hold.
         await telemetry.set(snapshot(percent: 85))
+        clock.advance(by: 10)
+        await controller.evaluate(.powerSourceChanged)
+        clock.advance(by: 10)
         let limited = await controller.evaluate(.powerSourceChanged)
         guard case .refuse(.rateLimited) = limited.decision?.action else {
             Issue.record("expected rate limiting, got \(String(describing: limited.decision?.action))")
@@ -457,11 +535,15 @@ struct ChargeControllerTests {
     @Test("Concurrent evaluations never overlap backend requests")
     func serialized() async {
         // Telemetry alternates on every read and the clock advances past the
-        // rate limit each time, so each evaluation makes exactly one request.
+        // rate limit each time. Once the first two readings have confirmed
+        // the limit, each evaluation makes exactly one request.
         let backend = ConcurrencyProbeBackend()
         let telemetry = AlternatingTelemetry(clock: clock)
         let clock = clock
         let controller = ChargeController(telemetry: telemetry, backend: backend, settings: .default, now: { clock.now }, uptime: { clock.uptime })
+        await controller.evaluate(.launch)
+        await controller.evaluate(.periodic)
+        #expect(await backend.totalRequests == 0)
         await withTaskGroup(of: Void.self) { group in
             for _ in 0..<20 {
                 group.addTask { await controller.evaluate(.manual) }
@@ -499,8 +581,9 @@ actor OverclaimingBackend: ChargingBackend {
     }
 }
 
-/// Alternates between 85% and 50% on each read and advances the clock past
-/// the restricting-request interval.
+/// Reads 85% on every read, alternating between external power (the limit
+/// latch holds) and battery power (restrictions cleared, latch kept), and
+/// advances the clock past the restricting-request interval.
 actor AlternatingTelemetry: TelemetryProvider {
     private let clock: TestClock
     private var reads = 0
@@ -512,7 +595,7 @@ actor AlternatingTelemetry: TelemetryProvider {
     func currentSnapshot() -> BatterySnapshot {
         reads += 1
         clock.advance(by: ChargingPolicy.minimumRestrictingInterval + 1)
-        return snapshot(percent: reads.isMultiple(of: 2) ? 50 : 85, at: clock.now)
+        return snapshot(percent: 85, source: reads.isMultiple(of: 2) ? .battery : .externalPower, at: clock.now)
     }
 
     nonisolated func powerSourceChanges() -> AsyncStream<Void> {

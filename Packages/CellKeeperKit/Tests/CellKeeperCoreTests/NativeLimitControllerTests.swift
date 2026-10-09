@@ -1015,7 +1015,10 @@ struct NativeLimitControllerTests {
             now: { clock.now },
             uptime: { clock.uptime }
         )
-        let simulated = await controller.evaluate(.launch)
+        // The second reading at 92% confirms the limit and makes the request.
+        await controller.evaluate(.launch)
+        clock.advance(by: 60)
+        let simulated = await controller.evaluate(.periodic)
         #expect(simulated.lastExecution?.result == .simulated)
 
         clock.advance(by: 5)

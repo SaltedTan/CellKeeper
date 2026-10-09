@@ -19,7 +19,8 @@ import Foundation
 /// 6. On battery power → CellKeeper's restrictions cleared (a later plug-in
 ///    then charges normally even if CellKeeper has stopped; the limit latch
 ///    is kept and re-applied once power returns).
-/// 7. Temperature protection tripped → charging paused.
+/// 7. Temperature protection tripped → charging paused, for at least
+///    ``minimumTemperaturePause``.
 /// 8. Temporary full charge active → charging allowed.
 /// 9. Discharge session active → run from the battery down to the confirmed
 ///    target (never below it, never below the current limit).
@@ -27,7 +28,14 @@ import Foundation
 /// 11. Limit latch set → hold (raising the limit releases it).
 /// 12. Sleep imminent at or above the resume threshold → hold, so a software
 ///     limit cannot overshoot while the Mac sleeps.
-/// 13. Otherwise → charge toward the limit.
+/// 13. Otherwise → charge toward the limit. This includes a first reading at
+///     or above the limit, which the next distinct reading must confirm
+///     before the latch in rule 11 is set.
+///
+/// Only that latch is debounced (research rule R14): every other rule acts on
+/// the first reading that calls for it, because each either relaxes toward
+/// macOS defaults or is a safety trigger (the floor, the sleep precaution,
+/// temperature protection).
 ///
 /// With a native-limit backend (macOS enforces the limit; see
 /// ``evaluateNativeLimit(_:steps:overrideEnded:)``) rules 1–3 apply
@@ -61,6 +69,10 @@ public enum ChargingPolicy {
     public static let minimumRestoreRetryInterval: TimeInterval = 60
     /// Charge limits a discharge session may target.
     public static let dischargeTargetRange = 20...95
+    /// Once temperature protection pauses charging, the pause lasts at least
+    /// this long on the monotonic clock, even if the battery cools sooner
+    /// (research rule R21).
+    public static let minimumTemperaturePause: TimeInterval = 5 * 60
 
     public static func evaluate(_ input: PolicyInput) -> PolicyDecision {
         let settings = input.settings
@@ -69,9 +81,13 @@ public enum ChargingPolicy {
         guard issues.isEmpty else {
             return decision(.failSafe, .normal, .invalidConfiguration(issues), memory: PolicyMemory(), input: input)
         }
+        // The latches survive an evaluation that does not look at the charge,
+        // but a crossing waiting for confirmation does not: the two readings
+        // that set the limit latch must be consecutive.
+        let carriedMemory = input.memory.withoutPendingLimitCrossing
         if let release = input.releaseReason {
             let ended: OverrideEnd? = input.activeOverride?.kind == .dischargeToLimit ? .interrupted : nil
-            return decision(.failSafe, .normal, .releaseRequired(release), memory: input.memory, input: input, overrideEnded: ended)
+            return decision(.failSafe, .normal, .releaseRequired(release), memory: carriedMemory, input: input, overrideEnded: ended)
         }
         guard settings.isManagementEnabled else {
             return decision(.unmanaged, .normal, .managementDisabled, memory: PolicyMemory(), input: input)
@@ -92,7 +108,7 @@ public enum ChargingPolicy {
             return evaluateNativeLimit(input, steps: steps, overrideEnded: overrideEnded)
         }
 
-        func failSafe(_ reason: DecisionReason, memory: PolicyMemory = input.memory) -> PolicyDecision {
+        func failSafe(_ reason: DecisionReason, memory: PolicyMemory = carriedMemory) -> PolicyDecision {
             var ended = overrideEnded
             if ended == nil, input.activeOverride?.kind == .dischargeToLimit {
                 ended = .interrupted
@@ -123,17 +139,17 @@ public enum ChargingPolicy {
             notes.append(.temperatureUnavailable)
         }
 
+        let limit = settings.chargeLimit
         var memory = input.memory
-        // A limit raised above the one the latch was set at ends the hold:
-        // the user asked for more charge. The latch sets again at once if
-        // the charge has already reached the new limit.
-        let wasLimitReached = memory.limitReached && settings.chargeLimit <= (memory.latchedLimit ?? settings.chargeLimit)
-        memory.limitReached = nextLimitLatch(current: wasLimitReached, percent: percent, settings: settings)
-        memory.latchedLimit = memory.limitReached ? settings.chargeLimit : nil
-        memory.temperatureTripped = nextTemperatureLatch(current: memory.temperatureTripped, celsius: temperature, protection: protection)
+        let limitLatch = nextLimitLatch(input.memory, percent: percent, sampleTime: sampleTime(of: snapshot), settings: settings)
+        memory.limitReached = limitLatch.reached
+        memory.pendingLimitCrossing = limitLatch.pending
+        memory.latchedLimit = memory.limitReached ? limit : nil
+        let temperatureLatch = nextTemperatureLatch(input.memory, celsius: temperature, protection: protection, uptime: input.uptime)
+        memory.temperatureTripped = temperatureLatch.tripped
+        memory.temperatureTrippedAtUptime = temperatureLatch.since
         memory.belowSafetyFloor = nextFloorLatch(current: memory.belowSafetyFloor, percent: percent)
 
-        let limit = settings.chargeLimit
         var activeKind: ChargeOverride.Kind?
         if overrideEnded == nil, let activeOverride = input.activeOverride {
             switch activeOverride.kind {
@@ -177,9 +193,15 @@ public enum ChargingPolicy {
             if activeKind == .fullCharge {
                 notes.append(.fullChargeSuppressed(by: .temperaturePause))
             }
-            let reason: DecisionReason = temperature >= protection.pauseAtCelsius
-                ? .temperatureHigh(celsius: temperature, pauseAt: protection.pauseAtCelsius)
-                : .temperatureCooling(celsius: temperature, resumeAt: protection.resumeAtCelsius)
+            let reason: DecisionReason
+            if temperature >= protection.pauseAtCelsius {
+                reason = .temperatureHigh(celsius: temperature, pauseAt: protection.pauseAtCelsius)
+            } else if temperature <= protection.resumeAtCelsius, let trippedAt = memory.temperatureTrippedAtUptime {
+                let remaining = trippedAt + minimumTemperaturePause - input.uptime
+                reason = .temperatureMinimumPause(celsius: temperature, resumesAt: input.now.addingTimeInterval(remaining))
+            } else {
+                reason = .temperatureCooling(celsius: temperature, resumeAt: protection.resumeAtCelsius)
+            }
             return make(.temperaturePause, .inhibitCharging, reason)
         }
 
@@ -206,6 +228,11 @@ public enum ChargingPolicy {
 
         if input.isSleepImminent, percent >= settings.resumeThreshold {
             return make(.holding, .inhibitCharging, .sleepPrecaution(percent: percent, resumeThreshold: settings.resumeThreshold))
+        }
+
+        if memory.pendingLimitCrossing != nil {
+            notes.append(.confirmingLimit)
+            return make(.charging, .normal, .confirmingLimit(percent: percent, limit: limit))
         }
 
         let reason: DecisionReason = percent <= settings.resumeThreshold
@@ -307,24 +334,76 @@ public enum ChargingPolicy {
 
     // MARK: - Latches
 
-    /// Limit hysteresis: set at or above the limit, cleared at or below the
-    /// resume threshold, unchanged in between. Never set when the limit is 100%.
-    static func nextLimitLatch(current: Bool, percent: Int, settings: ChargingSettings) -> Bool {
-        if settings.chargeLimit >= 100 { return false }
-        if percent >= settings.chargeLimit { return true }
-        if percent <= settings.resumeThreshold { return false }
-        return current
+    /// A reading's identity for the limit debounce: the driver's own update
+    /// time where reported, otherwise when CellKeeper read it. Evaluating the
+    /// same reading again (several evaluations within one driver refresh)
+    /// does not make it a second reading.
+    static func sampleTime(of snapshot: BatterySnapshot) -> Date {
+        snapshot.sourceTimestamp ?? snapshot.timestamp
     }
 
-    /// Temperature hysteresis: set at or above the pause threshold, cleared at
-    /// or below the resume threshold. Cleared when protection is disabled or
-    /// the temperature is unknown, so a lost sensor can never pause charging
-    /// indefinitely.
-    static func nextTemperatureLatch(current: Bool, celsius: Double?, protection: TemperatureProtection) -> Bool {
-        guard protection.isEnabled, let celsius else { return false }
-        if celsius >= protection.pauseAtCelsius { return true }
-        if celsius <= protection.resumeAtCelsius { return false }
-        return current
+    /// Limit hysteresis, set only on confirmation (research rule R14).
+    ///
+    /// While clear, a reading at or above the limit becomes the pending
+    /// crossing. The latch sets when the next distinct reading is also at or
+    /// above the limit, and so was the pending one, judged against the
+    /// current limit. A reading below the limit drops the pending crossing.
+    ///
+    /// Once set, the latch holds at or above the limit, including a limit
+    /// raised to a charge already reached: that is not a new crossing, so the
+    /// hold continues without a gap. Below the limit it is cleared at once if
+    /// the limit was raised above the one it was set at, or at or below the
+    /// resume threshold, and is otherwise unchanged (the hysteresis band).
+    /// Never set when the limit is 100%.
+    static func nextLimitLatch(
+        _ memory: PolicyMemory,
+        percent: Int,
+        sampleTime: Date,
+        settings: ChargingSettings
+    ) -> (reached: Bool, pending: PolicyMemory.LimitCrossing?) {
+        let limit = settings.chargeLimit
+        if limit >= 100 { return (false, nil) }
+        if memory.limitReached {
+            if percent >= limit { return (true, nil) }
+            // The user asked for more charge.
+            if limit > (memory.latchedLimit ?? limit) { return (false, nil) }
+            return (percent > settings.resumeThreshold, nil)
+        }
+        guard percent >= limit else { return (false, nil) }
+        if let first = memory.pendingLimitCrossing, first.percent >= limit {
+            return first.sampleTime != sampleTime ? (true, nil) : (false, first)
+        }
+        return (false, PolicyMemory.LimitCrossing(sampleTime: sampleTime, percent: percent))
+    }
+
+    /// Temperature hysteresis with a minimum pause (research rule R21). Set
+    /// at or above the pause threshold on the first such reading, because
+    /// pausing is a safety action, and stays set at least
+    /// ``minimumTemperaturePause`` of monotonic time: it is cleared at or
+    /// below the resume threshold only once that has passed. Cleared at once
+    /// when protection is disabled or the temperature is unknown, so a lost
+    /// sensor can never hold charging off. Once clear, it sets again on the
+    /// next hot reading, with no minimum time.
+    static func nextTemperatureLatch(
+        _ memory: PolicyMemory,
+        celsius: Double?,
+        protection: TemperatureProtection,
+        uptime: TimeInterval
+    ) -> (tripped: Bool, since: TimeInterval?) {
+        guard protection.isEnabled, let celsius else { return (false, nil) }
+        guard memory.temperatureTripped else {
+            return celsius >= protection.pauseAtCelsius ? (true, uptime) : (false, nil)
+        }
+        // A trip time later than now (a clock that went backwards) counts as
+        // now, so it can extend the pause by at most the minimum.
+        let trippedAt = memory.temperatureTrippedAtUptime.map { min($0, uptime) }
+        if celsius > protection.resumeAtCelsius { return (true, trippedAt) }
+        if let trippedAt {
+            let paused = uptime - trippedAt
+            // A clock that does not give a usable duration ends the pause.
+            if paused.isFinite, paused < minimumTemperaturePause { return (true, trippedAt) }
+        }
+        return (false, nil)
     }
 
     /// Safety-floor hysteresis: set at or below the floor, cleared at or above

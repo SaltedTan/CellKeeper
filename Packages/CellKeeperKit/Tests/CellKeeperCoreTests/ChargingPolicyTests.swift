@@ -40,9 +40,9 @@ struct ChargeLimitTests {
         #expect(decision.memory.limitReached)
     }
 
-    @Test("At or above the limit, charging is disabled", arguments: [80, 81, 95, 100])
+    @Test("At or above the limit on a second reading, charging is disabled", arguments: [80, 81, 95, 100])
     func atOrAboveLimit(percent: Int) {
-        let decision = ChargingPolicy.evaluate(input(snapshot(percent: percent)))
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: percent), memory: memoryAfterReading(percent)))
         #expect(decision.state == .holding)
         #expect(decision.desiredMode == .inhibitCharging)
         #expect(decision.action == .disableCharging)
@@ -64,14 +64,16 @@ struct ChargeLimitTests {
         var memory = PolicyMemory()
         var mode: ChargeControlMode = .normal
         var states: [PolicyState] = []
-        // Charge up past the limit, then drift down to the resume threshold.
-        for percent in [70, 79, 80, 79, 76, 75, 76] {
-            let decision = ChargingPolicy.evaluate(input(snapshot(percent: percent), currentMode: mode, memory: memory))
+        // Charge up past the limit (confirmed by a second reading), then
+        // drift down to the resume threshold. Readings are a minute apart.
+        for (index, percent) in [70, 79, 80, 80, 79, 76, 75, 76].enumerated() {
+            let time = referenceDate.addingTimeInterval(TimeInterval(index) * 60)
+            let decision = ChargingPolicy.evaluate(input(snapshot(percent: percent, at: time), currentMode: mode, memory: memory, now: time, uptime: 10_000 + TimeInterval(index) * 60))
             memory = decision.memory
             if let requested = decision.action.requestedMode { mode = requested }
             states.append(decision.state)
         }
-        #expect(states == [.charging, .charging, .holding, .holding, .holding, .charging, .charging])
+        #expect(states == [.charging, .charging, .charging, .holding, .holding, .holding, .charging, .charging])
         #expect(mode == .normal)
     }
 
@@ -82,18 +84,25 @@ struct ChargeLimitTests {
         #expect(before.action == .noAction)
         #expect(before.desiredMode == .normal)
 
-        let after = ChargingPolicy.evaluate(input(reading, settings: ChargingSettings(chargeLimit: 70, resumeThreshold: 65), memory: before.memory))
+        // A lowered limit below the charge is confirmed by the next reading.
+        let lowered = ChargingSettings(chargeLimit: 70, resumeThreshold: 65)
+        let crossed = ChargingPolicy.evaluate(input(reading, settings: lowered, memory: before.memory))
+        #expect(crossed.reason == .confirmingLimit(percent: 78, limit: 70))
+        #expect(crossed.desiredMode == .normal)
+
+        let later = referenceDate.addingTimeInterval(60)
+        let after = ChargingPolicy.evaluate(input(snapshot(percent: 78, at: later), settings: lowered, memory: crossed.memory, now: later, uptime: 10_060))
         #expect(after.state == .holding)
         #expect(after.action == .disableCharging)
 
-        let raised = ChargingPolicy.evaluate(input(reading, settings: ChargingSettings(chargeLimit: 90, resumeThreshold: 85), currentMode: .inhibitCharging, memory: after.memory))
+        let raised = ChargingPolicy.evaluate(input(snapshot(percent: 78, at: later), settings: ChargingSettings(chargeLimit: 90, resumeThreshold: 85), currentMode: .inhibitCharging, memory: after.memory, now: later, uptime: 10_060))
         #expect(raised.state == .charging)
         #expect(raised.action == .enableCharging)
     }
 
     @Test("Raising the limit above the charge resumes charging, without waiting for the resume threshold")
     func raisingLimitResumesCharging() {
-        let held = ChargingPolicy.evaluate(input(snapshot(percent: 80), settings: ChargingSettings(chargeLimit: 80, resumeThreshold: 75)))
+        let held = ChargingPolicy.evaluate(input(snapshot(percent: 80), settings: ChargingSettings(chargeLimit: 80, resumeThreshold: 75), memory: memoryAfterReading(80)))
         #expect(held.state == .holding)
         #expect(held.memory.latchedLimit == 80)
 
@@ -106,14 +115,21 @@ struct ChargeLimitTests {
         #expect(!raised.memory.limitReached)
         #expect(raised.memory.latchedLimit == nil)
 
-        let reached = ChargingPolicy.evaluate(input(snapshot(percent: 90), settings: raisedSettings, memory: raised.memory))
+        // Reaching the new limit is a new crossing, confirmed by a second reading.
+        let first = referenceDate.addingTimeInterval(600)
+        let crossed = ChargingPolicy.evaluate(input(snapshot(percent: 90, at: first), settings: raisedSettings, memory: raised.memory, now: first, uptime: 10_600))
+        #expect(crossed.state == .charging)
+        #expect(crossed.reason == .confirmingLimit(percent: 90, limit: 90))
+
+        let second = first.addingTimeInterval(60)
+        let reached = ChargingPolicy.evaluate(input(snapshot(percent: 90, at: second), settings: raisedSettings, memory: crossed.memory, now: second, uptime: 10_660))
         #expect(reached.state == .holding)
         #expect(reached.memory.latchedLimit == 90)
     }
 
     @Test("Lowering the limit, or raising it to a charge already reached, keeps holding")
     func limitChangesThatKeepHolding() {
-        let held = ChargingPolicy.evaluate(input(snapshot(percent: 86), settings: ChargingSettings(chargeLimit: 80, resumeThreshold: 75)))
+        let held = ChargingPolicy.evaluate(input(snapshot(percent: 86), settings: ChargingSettings(chargeLimit: 80, resumeThreshold: 75), memory: memoryAfterReading(86)))
         #expect(held.state == .holding)
 
         let lowered = ChargingPolicy.evaluate(input(snapshot(percent: 86), settings: ChargingSettings(chargeLimit: 70, resumeThreshold: 65), currentMode: .inhibitCharging, memory: held.memory))
@@ -199,7 +215,7 @@ struct DischargeSessionTests {
 
     @Test("Without a session, above the limit only holds")
     func holdWithoutSession() {
-        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 90)))
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 90), memory: memoryAfterReading(90)))
         #expect(decision.state == .holding)
         #expect(decision.action == .disableCharging)
     }
@@ -252,7 +268,7 @@ struct DischargeSessionTests {
     @Test("A backend that cannot discharge interrupts the session and says why")
     func unsupportedInterrupts() {
         let capabilities = ControlCapabilities(availability: .simulated, supportedModes: [.normal, .inhibitCharging])
-        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 90), override: session, capabilities: capabilities))
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 90), override: session, capabilities: capabilities, memory: memoryAfterReading(90)))
         #expect(decision.overrideEnded == .interrupted)
         #expect(decision.notes.contains(.dischargeUnsupported))
         #expect(decision.state == .holding)
@@ -274,7 +290,8 @@ struct DischargeSessionTests {
         #expect(running.state == .discharging)
         #expect(running.reason == .dischargingToLimit(percent: 85, limit: 80))
 
-        let done = ChargingPolicy.evaluate(input(snapshot(percent: 80), settings: lowered, override: session, currentMode: .forceDischarge))
+        let later = referenceDate.addingTimeInterval(600)
+        let done = ChargingPolicy.evaluate(input(snapshot(percent: 80, at: later), settings: lowered, override: session, currentMode: .forceDischarge, memory: running.memory, now: later, uptime: 10_600))
         #expect(done.overrideEnded == .completed)
         #expect(done.desiredMode == .inhibitCharging)
     }
@@ -308,7 +325,7 @@ struct FullChargeOverrideTests {
 
     @Test("The override completes at 100% and the limit applies again")
     func overrideCompletes() {
-        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 100), override: override))
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 100), override: override, memory: memoryAfterReading(99)))
         #expect(decision.overrideEnded == .completed)
         #expect(decision.state == .holding)
         #expect(decision.action == .disableCharging)
@@ -325,7 +342,7 @@ struct FullChargeOverrideTests {
         let expiredUptime = override.expiresAtUptime
         // The wall clock was moved back a day; the override still expires.
         let earlier = referenceDate.addingTimeInterval(-86_400)
-        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 90, at: earlier), override: override, now: earlier, uptime: expiredUptime))
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 90, at: earlier), override: override, memory: memoryAfterReading(90), now: earlier, uptime: expiredUptime))
         #expect(decision.overrideEnded == .expired)
         #expect(decision.state == .holding)
 
@@ -429,7 +446,7 @@ struct BackendAvailabilityTests {
 
     @Test("When control is unavailable, a pause is refused but still computed")
     func refusesWhenUnavailable() {
-        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85), capabilities: unavailable, currentMode: nil))
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85), capabilities: unavailable, currentMode: nil, memory: memoryAfterReading(85)))
         #expect(decision.state == .holding)
         #expect(decision.desiredMode == .inhibitCharging)
         #expect(decision.action == .refuse(.controlUnavailable("read-only")))
@@ -452,20 +469,20 @@ struct BackendAvailabilityTests {
     @Test("Unsupported modes are refused")
     func unsupportedMode() {
         let capabilities = ControlCapabilities(availability: .simulated, supportedModes: [.normal])
-        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85), capabilities: capabilities))
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85), capabilities: capabilities, memory: memoryAfterReading(85)))
         #expect(decision.action == .refuse(.modeUnsupported(.inhibitCharging)))
     }
 
     @Test("A faulted backend in normal mode is never asked to restrict")
     func faultedRefusesRestriction() {
-        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85), faulted: true))
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85), memory: memoryAfterReading(85), faulted: true))
         #expect(decision.action == .refuse(.backendFaulted))
     }
 
     @Test("A faulted backend that is not confirmed normal is actively restored", arguments: [ChargeControlMode?.some(.forceDischarge), .some(.inhibitCharging), nil])
     func faultedRestores(current: ChargeControlMode?) {
         // Even when the policy itself wants to hold, recovery takes priority.
-        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85), currentMode: current, faulted: true))
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85), currentMode: current, memory: memoryAfterReading(85), faulted: true))
         #expect(decision.desiredMode == .inhibitCharging)
         #expect(decision.action == .enableCharging)
     }
@@ -483,19 +500,19 @@ struct RateLimitTests {
     @Test("A restricting change soon after another is refused until the interval passes")
     func minimumInterval() {
         let recent: [TimeInterval] = [10_000 - 30]
-        let limited = ChargingPolicy.evaluate(input(snapshot(percent: 85), recentRestrictingRequests: recent))
+        let limited = ChargingPolicy.evaluate(input(snapshot(percent: 85), memory: memoryAfterReading(85), recentRestrictingRequests: recent))
         #expect(limited.desiredMode == .inhibitCharging)
         #expect(limited.action == .refuse(.rateLimited(retryAt: referenceDate.addingTimeInterval(30))))
 
         let later = referenceDate.addingTimeInterval(31)
-        let allowed = ChargingPolicy.evaluate(input(snapshot(percent: 85, at: later), recentRestrictingRequests: recent, now: later, uptime: 10_031))
+        let allowed = ChargingPolicy.evaluate(input(snapshot(percent: 85, at: later), memory: limited.memory, recentRestrictingRequests: recent, now: later, uptime: 10_031))
         #expect(allowed.action == .disableCharging)
     }
 
     @Test("Restricting changes are capped per hour")
     func hourlyCap() {
         let history = (0..<ChargingPolicy.maximumRestrictingRequestsPerHour).map { 10_000 - 3_000 + TimeInterval($0) * 120 }
-        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85), recentRestrictingRequests: history))
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85), memory: memoryAfterReading(85), recentRestrictingRequests: history))
         #expect(decision.action == .refuse(.rateLimited(retryAt: referenceDate.addingTimeInterval(history[0] + 3_600 - 10_000))))
     }
 
@@ -514,7 +531,7 @@ struct RateLimitTests {
     func wallClockIndependent() {
         let recent: [TimeInterval] = [10_000 - 30]
         let earlier = referenceDate.addingTimeInterval(-7_200)
-        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85, at: earlier), recentRestrictingRequests: recent, now: earlier))
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85, at: earlier), memory: memoryAfterReading(85), recentRestrictingRequests: recent, now: earlier))
         #expect(decision.action == .refuse(.rateLimited(retryAt: earlier.addingTimeInterval(30))))
     }
 }
@@ -604,7 +621,7 @@ struct FailSafeTests {
         }
 
         let recent = snapshot(percent: 90, sourceTimestamp: referenceDate.addingTimeInterval(-59))
-        #expect(ChargingPolicy.evaluate(input(recent)).state == .holding)
+        #expect(ChargingPolicy.evaluate(input(recent, memory: memoryAfterReading(90))).state == .holding)
     }
 
     @Test("Absurd telemetry timestamps fail safe without trapping", arguments: [Date.distantPast, .distantFuture])

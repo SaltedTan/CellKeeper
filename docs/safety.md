@@ -59,7 +59,8 @@ app (`AppModel`, `AppDelegate` and the views) are checked by hand.
 | Safety floor: at ≤ 10% charging is always allowed, overriding temperature protection and every other rule, until the charge recovers to 15% | R5 | `ChargingPolicy.nextFloorLatch` |
 | On battery power, CellKeeper's restrictions are cleared, so a later plug-in charges normally even if CellKeeper has stopped | R18 | `ChargingPolicy` (`onBattery`) |
 | Overrides always expire, on a monotonic clock that wall-clock changes cannot affect: a temporary full charge at 100%/fully charged, on unplug, or after 1–48 h (default 12 h); expiry and unplug are processed even when the charge reading is unusable | R22, R23 | `ChargeOverride`, `ChargingPolicy` |
-| Temperature protection with hysteresis; an unknown temperature can never hold charging off | R21 | `ChargingPolicy.nextTemperatureLatch` |
+| Temperature protection with hysteresis. A pause starts on the first hot reading and lasts at least 5 minutes (monotonic clock), even if the battery cools sooner; an unknown temperature, or turning protection off, ends it at once, so it can never hold charging off | R21 | `ChargingPolicy.nextTemperatureLatch` |
+| Debounce: charging is paused at the limit only once two consecutive distinct readings (identified by the driver's own update time, or else the read time) reach it. Re-evaluating one reading does not count twice, a reading below the limit or an unusable one in between starts over, and meanwhile charging continues with a note saying so. The safety floor, the sleep precaution, temperature protection, and every change toward macOS defaults act on the first reading | R14 | `ChargingPolicy.nextLimitLatch` |
 | Discharge is a confirmed, one-shot session, never a setting. Its target (20–95%) is captured when confirmed; it never goes below that target or the current limit. It ends at the target, on unplug, before sleep, on temperature pause, on lost telemetry, on a backend fault, or if unsupported, and never restarts by itself | R6, R16, R20 | `ChargeOverride.dischargeToLimit`, `ChargingPolicy`, `SettingsView` |
 | Before sleep, charging is held at or above the resume threshold so a software limit cannot overshoot while asleep; the precaution lasts until wake (bounded to 2 min of monotonic time if no wake notification arrives) | R16 | `ChargingPolicy` (`sleepPrecaution`), `ChargeController` |
 | Restricting changes rate-limited (≥ 60 s apart, ≤ 20 per hour, monotonic clock); relaxing changes toward normal never limited | R13 | `ChargingPolicy.rateLimitRetryTime` |
@@ -102,6 +103,8 @@ app (`AppModel`, `AppDelegate` and the views) are checked by hand.
 | Resume threshold | 75% | 3–20 points below the limit, and ≥ 15% (floor + 5) |
 | Safety floor | 10% | fixed |
 | Temperature pause / resume | 40 °C / 35 °C | pause 35–45 °C; resume ≥ 30 °C and ≥ 3 °C below pause |
+| Temperature pause, minimum | 5 min | fixed (monotonic clock) |
+| Limit debounce | 2 readings | fixed: two consecutive distinct readings at or above the limit |
 | Temporary full charge | 12 h | 1–48 h |
 | Discharge session | 6 h | 1–48 h; only for limits of 20–95% |
 | Safety floor exit | 15% | floor + 5 |
@@ -111,10 +114,11 @@ app (`AppModel`, `AppDelegate` and the views) are checked by hand.
 
 ## Required before any privileged control backend
 
-These are **not** implemented, because no backend that writes to hardware
-itself exists. Each is a precondition for enabling one, and a reviewer should
-block any PR that adds hardware writes without them. How the macOS Charge
-Limit backend relates to them is described after the list.
+Except where marked, these are **not** implemented, because no backend that
+writes to hardware itself exists. Each is a precondition for enabling one,
+and a reviewer should block any PR that adds hardware writes without them.
+How the macOS Charge Limit backend relates to them is described after the
+list.
 
 1. **Verified mechanism per model.** Run the verification protocol in research
    note 02 §7 (a read-only, allowlisted capability probe, then single
@@ -145,6 +149,11 @@ Limit backend relates to them is described after the list.
    an inhibit) and fall back to the safe state if it does not appear (R11).
 6. **Debounce and dwell.** Two consecutive fresh samples before acting on a
    threshold crossing; minimum dwell for temperature pause (R14, R21).
+   *Implemented in the policy* for backends that switch charging themselves:
+   the limit latch needs two consecutive distinct readings, and a
+   temperature pause lasts at least 5 minutes (see the safeguards table and
+   the deviations below). A privileged helper must still enforce its own
+   guards (precondition 3).
 7. **External-writer detection and coexistence.** Stop and restore if another
    tool changes the same state; detect macOS Charge Limit / Optimized Battery
    Charging and never fight them (R25–R27).
@@ -187,7 +196,9 @@ hardware writes and a helper, and do not apply. For the rest:
   every change. Charging behaviour is macOS's and is not used as
   confirmation.
 - **6, debounce and dwell:** macOS applies its own hysteresis; CellKeeper's
-  rate limit bounds how often the setting changes.
+  rate limit bounds how often the setting changes. The policy's debounce and
+  minimum pause are not used, because CellKeeper only chooses the limit's
+  value.
 - **7, external-writer detection:** implemented. An outside change is
   detected and adopted as your own limit; CellKeeper then stops managing
   (see the deviations below).
@@ -202,9 +213,21 @@ hardware writes and a helper, and do not apply. For the rest:
 - **Rate budget (R13).** Only restricting changes are counted; relaxing
   changes toward normal charging are treated as safety-direction changes and
   never limited.
-- **Debounce (R14) and temperature dwell (R21)** are deferred to the first
-  real backend (precondition 6). With simulated control, an extra transition
-  has no physical effect.
+- **Debounce (R14).** Only the limit crossing waits for a second reading:
+  it is the one restricting crossing that is not a safety trigger (R14
+  exempts those). Crossings that relax toward macOS defaults (falling to the
+  resume threshold, raising the limit, unplugging, losing the temperature
+  reading) also act on the first reading, for the same reason as the rate
+  budget: they move toward the safe state. While a crossing waits, charging
+  continues until the next reading, normally about a minute later (one
+  driver refresh), so the charge can rise a little further past the limit.
+- **Temperature dwell (R21).** R21 asks for a 5-minute minimum in each
+  state. CellKeeper applies it only to the paused state: once a pause has
+  ended, the next reading at or above the pause threshold pauses charging
+  again at once, because pausing is a safety action and a minimum before it
+  could only delay protection. Pauses stay bounded: each lasts at least
+  5 minutes, so there are at most 12 an hour, and each counts toward the
+  restricting-change rate limit.
 - **Failure handling (R11).** R11 asks for one retry and then a one-hour
   backoff. CellKeeper instead restores normal charging after every failed
   restricting request and faults the backend after 3 failures; the fault then
