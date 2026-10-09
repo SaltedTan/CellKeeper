@@ -167,13 +167,25 @@ struct HelperEventDeliveryTests {
 
 @Suite("Helper engine: final checks")
 struct HelperFinalCheckTests {
-    @Test("A power state that goes stale during the checks clears the other active control too", arguments: HelperControl.allCases)
-    func staleAtFinalCheck(alreadyActive: HelperControl) async {
+    enum RequestedLease: String, CaseIterable, Sendable {
+        case valid, missing, expired
+    }
+
+    @Test("A power state that goes stale during the checks clears the other active control, whatever the requested lease", arguments: HelperControl.allCases, RequestedLease.allCases)
+    func staleAtFinalCheck(alreadyActive: HelperControl, lease: RequestedLease) async {
         let h = Harness()
         let session = await h.startedSession()
         #expect(await h.activate(alreadyActive, on: session) == .ok)
         let requested = HelperControl.allCases.first { $0 != alreadyActive } ?? alreadyActive
-        #expect(await session.acquireOrRenewLease(control: requested.rawValue, seconds: 60).status == .ok)
+        switch lease {
+        case .valid:
+            #expect(await session.acquireOrRenewLease(control: requested.rawValue, seconds: 60).status == .ok)
+        case .missing:
+            break
+        case .expired:
+            // Runs out in the 2 s that pass below.
+            #expect(await session.acquireOrRenewLease(control: requested.rawValue, seconds: 1).status == .ok)
+        }
 
         // A sample 59 s old when the checks judge it; 2 s pass before the
         // final check.
@@ -182,10 +194,71 @@ struct HelperFinalCheckTests {
             $0.readAtUptime = readAt
             $0.jumpAfterJudged = 2
         }
-        #expect(await session.setControl(control: requested.rawValue, active: true) == .blockedByInterlock)
+        let status = await session.setControl(control: requested.rawValue, active: true)
+        #expect(status == (lease == .valid ? .blockedByInterlock : .noLease))
         #expect(h.control.activeControls.isEmpty)
         #expect(h.recorder.contains(.deactivated(alreadyActive, .interlock(.powerStateUnavailable))))
-        #expect(await session.readState().interlocks == .powerStateUnavailable)
+        let interlocks = await session.readState().interlocks
+        #expect(interlocks == .powerStateUnavailable)
+    }
+}
+
+@Suite("Helper engine: time limits judged after the reads")
+struct HelperTimeLimitOrderTests {
+    enum Trigger: String, CaseIterable, Sendable {
+        case tick, systemWillSleep, systemDidWake
+    }
+
+    @Test("A lease that runs out during the power read is expired before another control is activated")
+    func leaseExpiresDuringPowerRead() async {
+        let h = Harness()
+        let session = await h.startedSession()
+        #expect(await h.activate(.chargingInhibited, on: session) == .ok)
+        #expect(await session.acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: 1).grantedSeconds == 1)
+        #expect(await session.acquireOrRenewLease(control: HelperControl.adapterDisabled.rawValue, seconds: 120).status == .ok)
+
+        // Reading the power state takes 2 s.
+        h.power.update { $0.readDuration = 2 }
+        #expect(await session.setControl(control: HelperControl.adapterDisabled.rawValue, active: true) == .ok)
+        #expect(h.control.activeControls == [.adapterDisabled])
+        #expect(h.recorder.contains(.leaseEnded(session.id, .chargingInhibited, .expired)))
+    }
+
+    @Test("Ticks, sleep and wake expire a lease that runs out during the power read", arguments: Trigger.allCases)
+    func expiryAfterPowerRead(trigger: Trigger) async {
+        let h = Harness()
+        let session = await h.startedSession()
+        #expect(await h.activate(.chargingInhibited, on: session) == .ok)
+        #expect(await session.acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: 1).grantedSeconds == 1)
+
+        h.power.update { $0.readDuration = 2 }
+        switch trigger {
+        case .tick: await h.engine.tick()
+        case .systemWillSleep: await h.engine.systemWillSleep()
+        case .systemDidWake: await h.engine.systemDidWake()
+        }
+        // Cleared before the call returns, so before a host acknowledges sleep.
+        #expect(h.control.activeControls.isEmpty)
+        #expect(h.recorder.contains(.leaseEnded(session.id, .chargingInhibited, .expired)))
+    }
+
+    @Test("Cleanup that takes time is followed by a fresh check: a lease that ran out meanwhile is expired too")
+    func cleanupIsRechecked() async {
+        let h = Harness()
+        let session = await h.startedSession()
+        #expect(await h.activate(.chargingInhibited, on: session) == .ok)
+        #expect(await h.activate(.adapterDisabled, on: session) == .ok)
+        _ = await session.acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: 1)
+        _ = await session.acquireOrRenewLease(control: HelperControl.adapterDisabled.rawValue, seconds: 2)
+        h.clock.advance(by: 1.5)
+
+        // Clearing the expired inhibit takes a second, in which the
+        // adapter-disable's lease runs out as well.
+        let clock = h.clock
+        h.control.performDuringNextApplies(1) { clock.advance(by: 1) }
+        await h.engine.tick()
+        #expect(h.control.activeControls.isEmpty)
+        #expect(h.recorder.contains(.leaseEnded(session.id, .adapterDisabled, .expired)))
     }
 }
 

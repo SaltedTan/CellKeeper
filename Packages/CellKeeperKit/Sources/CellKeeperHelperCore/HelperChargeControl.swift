@@ -108,6 +108,7 @@ public final class SimulatedChargeControl: HelperChargeControl, @unchecked Senda
     private var active: Set<HelperControl>
     private var log: [Write] = []
     private var reads = 0
+    private var pendingApplyActions: [@Sendable () -> Void] = []
     private var pendingApplyFailures = 0
     private var pendingFailuresAfterApplying = 0
     private var pendingMisapplies = 0
@@ -135,6 +136,8 @@ public final class SimulatedChargeControl: HelperChargeControl, @unchecked Senda
     }
 
     public func apply(_ control: HelperControl, active isActive: Bool) throws {
+        let during = lock.withLock { pendingApplyActions.isEmpty ? nil : pendingApplyActions.removeFirst() }
+        during?()
         try lock.withLock {
             log.append(.apply(control, active: isActive))
             guard capabilities.contains(control.requiredCapability) else {
@@ -233,6 +236,12 @@ public final class SimulatedChargeControl: HelperChargeControl, @unchecked Senda
     /// The number of calls to `readBack`, including failed ones.
     public var readBackCount: Int {
         lock.withLock { reads }
+    }
+
+    /// Runs `action` during each of the next `count` calls to `apply`, for
+    /// example to advance a test clock as if the call took time.
+    public func performDuringNextApplies(_ count: Int, _ action: @escaping @Sendable () -> Void) {
+        lock.withLock { pendingApplyActions.append(contentsOf: Array(repeating: action, count: count)) }
     }
 
     /// Makes the next `count` calls to `apply` throw without changing state.

@@ -14,9 +14,11 @@ import Foundation
 ///   when it expires, when it is released, when its session is invalidated
 ///   or revoked (R1), when a client restores defaults, and at shutdown; the
 ///   control is cleared with it. Only one session holds leases at a time.
-///   An activation's final checks (lease, power state's age, interlocks,
-///   activation limits) use one fresh clock reading, taken after the
-///   checks' reads, and only these pure checks separate it from the write.
+///   Every check judges lease expiry and the power state's age on a clock
+///   reading taken after every read it depends on and after every clearing
+///   write, so a call that took time cannot leave an expired lease or a
+///   stale power state in force. An activation then needs only pure checks
+///   on that same reading before its write.
 /// - Every write that returns is read back. A write that throws, a failed
 ///   read-back or a mismatch restores defaults and raises `writeFailed`,
 ///   which refuses activations until a client restores defaults or an hour
@@ -157,6 +159,8 @@ public actor HelperEngine {
     private var powerStateReadAt: TimeInterval?
     private var activations: ActivationHistory
     private var lastHardwareError = 0
+    /// Calls into the control so far; each takes time.
+    private var hardwareCalls = 0
     private var writeFailedAt: TimeInterval?
 
     /// - Parameters:
@@ -177,8 +181,12 @@ public actor HelperEngine {
     ///     check and a write. It may re-enter the engine (on the engine's
     ///     executor, for example with `assumeIsolated`): that starts a new,
     ///     complete operation, whose events follow the ones already queued.
-    ///     It may block, but only at the cost of delaying the next
-    ///     operation; the daemon logs and persists asynchronously.
+    ///     Delivery is synchronous, at the end of each call and before it
+    ///     returns, so a sink that blocks delays that call's own reply and
+    ///     the operations after it; a host that waits for
+    ///     ``systemWillSleep()`` before acknowledging sleep also waits for
+    ///     the delivery. The daemon therefore logs and persists
+    ///     asynchronously.
     public init(
         control: any HelperChargeControl,
         power: any HelperPowerReading,
@@ -231,10 +239,12 @@ public actor HelperEngine {
     }
 
     /// Runs the periodic checks: verifies the read-back (retrying an owed
-    /// restore), expires leases, and applies the interlocks. The host calls
-    /// it every few seconds. Every admitted request except `hello` and the
-    /// restores runs the same checks, but only ticks and system events
-    /// retry an owed restore. During shutdown it only retries the restore.
+    /// restore), applies the interlocks, then expires leases and judges the
+    /// power state's age on a clock reading taken after those reads. The
+    /// host calls it every few seconds. Every admitted request except
+    /// `hello` and the restores runs the same checks, but only ticks and
+    /// system events retry an owed restore. During shutdown it only
+    /// retries the restore.
     public func tick() {
         defer { deliverEvents() }
         switch phase {
@@ -246,7 +256,9 @@ public actor HelperEngine {
 
     /// The system is about to sleep (R16): `sleepImminent` clears the
     /// adapter-disable and refuses it until ``systemDidWake()``. The
-    /// charging inhibit stays only while its lease is valid.
+    /// charging inhibit stays only while its lease is valid, judged after
+    /// every read, so an inhibit whose lease ran out is cleared before
+    /// this returns and the host acknowledges sleep.
     public func systemWillSleep() {
         defer { deliverEvents() }
         switch phase {
@@ -356,8 +368,7 @@ public actor HelperEngine {
                 lastHardwareError: 0
             )
         }
-        refresh(.request)
-        let now = uptime()
+        let now = refresh(.request)
         func remaining(_ control: HelperControl) -> Int {
             guard let deadline = leases[control] else { return 0 }
             return max(0, Int((deadline - now).rounded(.up)))
@@ -444,20 +455,16 @@ public actor HelperEngine {
         guard probe.capabilities.contains(control.requiredCapability) else {
             return reject(id, .setControl, .unsupportedControl)
         }
-        refresh(.request)
-        // The checks read the hardware and the power state, which takes
-        // time. The final checks use one fresh clock reading, and only pure
-        // checks separate them from the write; events wait until the
-        // operation ends, so no callback runs in between either.
-        let now = uptime()
-        guard isLeaseValid(control, for: id, at: now) else {
+        // Every lease and the power state's age have been judged on this
+        // reading, taken after every read and every clearing write, and the
+        // cleanup is done whatever is refused below. Only pure checks
+        // separate it from the write; events wait until the operation ends,
+        // so no callback runs in between either.
+        let now = refresh(.request)
+        // Every lease that had run out by `now` has ended, so a lease that
+        // is still there is valid.
+        guard leaseHolder == id, leases[control] != nil else {
             return reject(id, .setControl, .noLease)
-        }
-        if let readAt = powerStateReadAt, now - readAt > Self.maximumPowerStateAge {
-            // The power state went stale during the checks: like any
-            // interlock, it clears what it blocks at once.
-            raise(.powerStateUnavailable)
-            enforceInterlocks()
         }
         guard interlocks.isDisjoint(with: control.blockingInterlocks) else {
             return reject(id, .setControl, .blockedByInterlock)
@@ -637,16 +644,45 @@ public actor HelperEngine {
 
     // MARK: - Checks
 
-    private func refresh(_ trigger: Trigger) {
+    /// The checks: the read-back, the power state and the interlocks, then
+    /// the time limits. Returns the clock reading at which every lease and
+    /// the power state's age were last judged, taken after every read and
+    /// every clearing write.
+    @discardableResult
+    private func refresh(_ trigger: Trigger) -> TimeInterval {
         verifyHardware(trigger)
-        let now = uptime()
-        for control in HelperControl.allCases {
-            if let deadline = leases[control], deadline <= now {
-                endLease(control, reason: .expired)
-                clear(control, reason: .leaseExpired)
+        updateConditionInterlocks()
+        return settleTimeLimits()
+    }
+
+    /// Applies the time limits that only restrict, lease expiry and the
+    /// power state's age, on a fresh clock reading, and again on a newer
+    /// one whenever that cleanup made a hardware call, because the call
+    /// took time. Returns the reading of the last pass, which made none.
+    ///
+    /// It ends: a pass makes a hardware call only to clear a control the
+    /// engine set, and each such call clears one (or, failing, restores
+    /// defaults and owns nothing more), so at most one pass per control
+    /// makes calls.
+    private func settleTimeLimits() -> TimeInterval {
+        while true {
+            let callsBefore = hardwareCalls
+            let now = uptime()
+            for control in HelperControl.allCases {
+                if let deadline = leases[control], deadline <= now {
+                    endLease(control, reason: .expired)
+                    clear(control, reason: .leaseExpired)
+                }
+            }
+            if let readAt = powerStateReadAt, now - readAt > Self.maximumPowerStateAge {
+                powerStateReadAt = nil
+                raise(.powerStateUnavailable)
+            }
+            enforceInterlocks()
+            if hardwareCalls == callsBefore {
+                return now
             }
         }
-        updateConditionInterlocks()
     }
 
     /// Compares the read-back with what the engine set, and retries an owed
@@ -774,18 +810,6 @@ public actor HelperEngine {
         }
     }
 
-    /// True if `id` holds an unexpired lease on `control` at `now`. A lease
-    /// found expired ends here, and its control is cleared.
-    private func isLeaseValid(_ control: HelperControl, for id: HelperSessionID, at now: TimeInterval) -> Bool {
-        guard leaseHolder == id, let deadline = leases[control] else { return false }
-        guard deadline > now else {
-            endLease(control, reason: .expired)
-            deactivate(control, reason: .leaseExpired)
-            return false
-        }
-        return true
-    }
-
     private func endAllLeases(reason: HelperLeaseEndReason) {
         for control in HelperControl.allCases {
             endLease(control, reason: reason)
@@ -805,6 +829,7 @@ public actor HelperEngine {
     @discardableResult
     private func readHardware() -> Set<HelperControl>? {
         do {
+            hardwareCalls += 1
             let readBack = try hardware.readBack()
             lastReadBack = readBack
             lastKnownReadBack = readBack
@@ -828,6 +853,7 @@ public actor HelperEngine {
             emit(.write(HelperWriteRecord(target: .control(control, active: active), outcome: outcome, readBack: readBack)))
         }
         do {
+            hardwareCalls += 1
             try hardware.apply(control, active: active)
         } catch {
             let code = HelperHardwareError.code(for: error)
@@ -912,6 +938,7 @@ public actor HelperEngine {
             emit(.write(HelperWriteRecord(target: .restoreDefaults, outcome: outcome, readBack: readBack)))
         }
         do {
+            hardwareCalls += 1
             try hardware.restoreDefaults()
         } catch {
             let code = HelperHardwareError.code(for: error)

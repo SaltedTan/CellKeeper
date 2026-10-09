@@ -587,7 +587,7 @@ reply block. Raw values never change and are never reused. Protocol version
 | `readState()` | refused | no | yes | Read-back controls, seconds left on each lease, whether the caller holds them, interlocks, last hardware error |
 | `acquireOrRenewLease(control, seconds)` | refused | — | yes | Grants or renews, clamped to 900 s (inhibit) or 120 s (adapter); one session holds leases at a time |
 | `releaseLease(control)` | refused | holder | not refused¹ | Ends the lease and clears the control |
-| `setControl(control, true)` | refused | yes | yes | Capability, then the checks; then, on one fresh clock reading, the lease, the power state's age, interlocks and activation limits; then write and read-back |
+| `setControl(control, true)` | refused | yes | yes | Capability, then the checks, which end with every lease and the power state's age judged on a fresh clock reading; then, on that reading, the lease, interlocks and activation limits; then write and read-back |
 | `setControl(control, false)` | refused | no | not refused¹ | Clears the control if the engine set it |
 | `restoreDefaults()` | allowed | no | not refused¹ | Ends every lease and restores defaults. Reads the hardware afresh and writes nothing if it shows defaults and no restore is owed; an owed restore is written even if defaults may already be in effect. Also served before start and during shutdown |
 | `restoreDefaultsAndExit()` | allowed | no | not refused¹ | Restores defaults, then shuts down so the host can exit (update, uninstall). During shutdown, the same as `restoreDefaults()` |
@@ -630,14 +630,19 @@ Other rules:
 - **Leases (R3).** Per control, bound to the session. A control is cleared
   when its lease expires, is released, or its session is invalidated or
   revoked (R1). Interlocks clear controls but leave leases in place. The
-  checks before an activation read the hardware and the power state,
-  which takes time, so the final checks use one fresh clock reading taken
-  after those reads: the lease, the power state's age, the interlocks and
-  the activation limits. Only these pure checks separate that reading
-  from the write. A lease that ran out meanwhile ends there (`noLease`).
-  A power state that went stale raises `powerStateUnavailable`, which,
-  like any interlock, clears what it blocks at once, and refuses the
-  activation (`blockedByInterlock`).
+  checks read the hardware and the power state, and clearing a control
+  writes to it, all of which takes time. So lease expiry and the power
+  state's age, the time limits that only restrict, are judged on a clock
+  reading taken after every read they depend on, and judged again on a
+  newer reading whenever that cleanup made a hardware call, until a pass
+  makes none. Every lease that has run out ends and its control is
+  cleared; a power state that has gone stale raises
+  `powerStateUnavailable`, which, like any interlock, clears what it
+  blocks at once. This happens in every check: requests, ticks, sleep
+  and wake, so an expired lease is cleared before `systemWillSleep()`
+  returns. An activation then uses the last reading: only pure checks
+  (its own lease, the interlocks, the activation limits) separate it from
+  the write, and a refusal such as `noLease` comes after the cleanup.
 - **Activation limits (R13).** An activation of each control at most once a
   minute, and at most 20 activations of all controls per rolling hour, on
   the monotonic clock, measured from the moment of each write. Every
@@ -676,9 +681,10 @@ Other rules:
 - **Checks.** Every admitted, valid request, except `hello`, the restores,
   and deactivations and lease releases beyond the request budget, and
   every `tick()` (every few seconds), sleep and wake, runs the same
-  checks: compare the read-back with what the engine set, expire leases,
-  recompute the interlocks and clear what they block. A read-back that
-  fails is an unknown state, so defaults are restored (R1).
+  checks: compare the read-back with what the engine set, read the power
+  state and recompute the interlocks, clear what they block, then judge
+  the time limits as above. A read-back that fails is an unknown state,
+  so defaults are restored (R1).
 - **An owed restore** is retried once per `tick()` and per sleep or wake,
   by a client's restore or deactivation, and when the lease holder's session
   ends; never by other requests, so a failing control is not hammered.
@@ -731,10 +737,13 @@ Other rules:
   and state change, so the sink never runs between a check and a write.
   The sink may re-enter the engine: that starts a new, complete operation
   on consistent state, whose events follow the ones already queued, and
-  the sink is never entered recursively. It may block, but only at the
-  cost of delaying the next operation; the daemon logs and persists
-  asynchronously. Losing the last activation record in a crash is
-  acceptable, because the next start restores defaults first.
+  the sink is never entered recursively. Delivery is synchronous, at the
+  end of each call and before it returns: a sink that blocks delays that
+  call's own reply and every operation after it, and a host that waits
+  for `systemWillSleep()` before acknowledging sleep also waits for the
+  delivery. So the daemon logs and persists asynchronously. Losing the
+  last activation record in a crash is acceptable, because the next start
+  restores defaults first.
 - **Time (R22).** One monotonic clock that counts sleep, injected, shared
   with the power reading. `HelperEngine.continuousUptime` is the system's
   `CLOCK_MONOTONIC`: the same in every process, and counting from boot on
@@ -773,7 +782,9 @@ Remaining limitations:
   at each wake.
 - Persisting the activation history, closing revoked connections, keeping
   each connection's requests in order and exiting are the host's jobs.
-- A blocking event sink delays the next operation, for every client.
+- A blocking event sink delays the reply of the call that caused the
+  events, the host's acknowledgement of sleep, and every later operation,
+  for every client.
 
 Not there yet: the daemon (SMAppService, launchd, SIGTERM), the NSXPC
 transport and code-signing requirements, the IOKit power reading and
@@ -935,5 +946,5 @@ decisions.
 | D33 | An activation refused by the activation limits restores defaults but raises no degraded mode (lead's decision, 2026-10-09; a deviation from R13) | A legitimate client can hit the per-control interval after a benign race, and its own fallback already asks for defaults |
 | D34 | A session that makes more than 20 requests in a row beyond its budget, refused or served, is revoked and its controls cleared | Requests the budget does not refuse must not become a way around it (research note 04, §3.6) |
 | D35 | The helper's clock is the system's `CLOCK_MONOTONIC`, and a new engine takes the activation history of the previous one in the same boot | A relaunch the client asks for must not reset the activation limits; the daemon persists the history and discards it at a new boot |
-| D36 | The helper engine queues its events and delivers them, in order, when each operation has ended; the final checks before an activation (lease, power state's age, interlocks, activation limits) use one fresh clock reading and only pure checks separate them from the write, which `activationRecorded` then reports with its time (lead's decision, 2026-10-09) | A sink that ran mid-operation could block or re-enter the engine between a check and a write; removing that class of bug beats re-checking after every callback |
+| D36 | The helper engine queues its events and delivers them, in order, when each operation has ended (lead's decision, 2026-10-09). Lease expiry and the power state's age are judged on a clock reading taken after every read they depend on, again after any clearing write, in every check; an activation follows on that reading with only pure checks, and `activationRecorded` reports the write with its time | A sink that ran mid-operation could block or re-enter the engine between a check and a write; removing that class of bug beats re-checking after every callback. A time limit judged on a reading taken before a slow read or write could let an expired lease or a stale power state stay in force |
 | D37 | A control that a failed or wrong restore may have made active counts as the engine's until it reads back inactive; a control active before and after a restore keeps its owner, and the state before is read afresh, falling back to the controls last known to be another tool's | A restore that went wrong must not leave a restriction that nothing retries, while another tool's control must not become the engine's to fight over. A tool that sets an inactive control during each restore still looks like a wrong restore (a known limitation) |
