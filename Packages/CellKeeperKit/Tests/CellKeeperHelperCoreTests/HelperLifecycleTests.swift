@@ -71,6 +71,23 @@ struct HelperSleepTests {
         #expect(await session.readState().interlocks.isEmpty)
     }
 
+    @Test("A power state stamped at the wake time itself does not count as read after the wake")
+    func equalTimestampAtWake() async {
+        let h = Harness()
+        let session = await h.startedSession()
+        #expect(await h.activate(.chargingInhibited, on: session) == .ok)
+        h.clock.freeze()
+        let cachedAt = h.clock.uptime
+        h.power.update { $0.readAtUptime = cachedAt }
+
+        await h.engine.systemWillSleep()
+        #expect(h.control.activeControls == [.chargingInhibited])
+        // Sleep and wake while the clock still reads the cached sample's time.
+        await h.engine.systemDidWake()
+        #expect(h.control.activeControls.isEmpty)
+        #expect(await session.readState().interlocks == .powerStateUnavailable)
+    }
+
     @Test("At wake the read-back is compared with what the engine set (R17, R27)")
     func wakeComparesReadBack() async {
         let h = Harness()
@@ -135,6 +152,13 @@ struct HelperExternalModificationTests {
         h.control.failNextRestores(1)
         #expect(await session.restoreDefaults() == .hardwareError)
         #expect(await session.readState().interlocks == [.externalModification, .hardwareFault])
+        // Nothing of the engine's is set, so ticks do not retry: that would
+        // fight the other tool. Only a client's restore does.
+        let writes = h.control.writeCount
+        await h.engine.tick()
+        await h.engine.tick()
+        #expect(h.control.writeCount == writes)
+        #expect(h.control.activeControls == [.chargingInhibited])
         #expect(await session.restoreDefaults() == .ok)
         #expect(await session.readState().interlocks.isEmpty)
     }
@@ -142,7 +166,9 @@ struct HelperExternalModificationTests {
 
 @Suite("Helper engine: hardware failures")
 struct HelperHardwareFailureTests {
-    @Test("A failed activation restores defaults and reports the error")
+    private let simulatedFailure = HelperHardwareError.simulatedFailure.code
+
+    @Test("A failed activation restores defaults and refuses activations until a client restores (R11)")
     func failedApply() async {
         let h = Harness()
         let session = await h.startedSession()
@@ -151,12 +177,40 @@ struct HelperHardwareFailureTests {
 
         #expect(await h.activate(.adapterDisabled, on: session) == .hardwareError)
         #expect(h.control.activeControls.isEmpty)
-        #expect(h.recorder.contains(.hardwareError(code: HelperHardwareError.simulatedFailure.code)))
+        #expect(h.recorder.contains(.hardwareError(code: simulatedFailure)))
         #expect(h.recorder.contains(.restored(.writeFailed)))
+        #expect(h.recorder.writes.suffix(2) == [
+            HelperWriteRecord(target: .control(.adapterDisabled, active: true), outcome: .threw(code: simulatedFailure), readBack: nil),
+            HelperWriteRecord(target: .restoreDefaults, outcome: .confirmed, readBack: []),
+        ])
         let state = await session.readState()
-        #expect(state.lastHardwareError == HelperHardwareError.simulatedFailure.code)
-        // The restore read back clean, so the engine is not faulted.
-        #expect(state.interlocks.isEmpty)
+        #expect(state.lastHardwareError == simulatedFailure)
+        // No restore is owed, but the control is no longer trusted.
+        #expect(state.interlocks == .writeFailed)
+        h.clock.advance(by: HelperEngine.minimumActivationInterval)
+        #expect(await h.activate(.chargingInhibited, on: session) == .blockedByInterlock)
+        #expect(await h.activate(.adapterDisabled, on: session) == .blockedByInterlock)
+
+        // A client's restore is the deliberate acknowledgement.
+        #expect(await session.restoreDefaults() == .ok)
+        #expect(h.recorder.contains(.interlocksCleared(.writeFailed)))
+        #expect(await h.activate(.chargingInhibited, on: session) == .ok)
+    }
+
+    @Test("A failed write refuses activations for an hour after it, then lifts on its own")
+    func writeFailureBackoff() async {
+        let h = Harness()
+        let session = await h.startedSession()
+        h.control.failNextApplies(1)
+        #expect(await h.activate(.chargingInhibited, on: session) == .hardwareError)
+
+        h.clock.advance(by: HelperEngine.writeFailureBackoff - 1)
+        await h.engine.tick()
+        #expect(await session.readState().interlocks == .writeFailed)
+        h.clock.advance(by: 1)
+        await h.engine.tick()
+        #expect(await session.readState().interlocks.isEmpty)
+        #expect(await h.activate(.chargingInhibited, on: session) == .ok)
     }
 
     @Test("An activation that does not read back restores defaults")
@@ -167,12 +221,16 @@ struct HelperHardwareFailureTests {
 
         #expect(await h.activate(.chargingInhibited, on: session) == .hardwareError)
         #expect(h.recorder.contains(.restored(.readBackMismatch)))
+        #expect(h.recorder.writes.contains(
+            HelperWriteRecord(target: .control(.chargingInhibited, active: true), outcome: .readBackMismatch, readBack: [])
+        ))
         let state = await session.readState()
         #expect(state.active.isEmpty)
+        #expect(state.interlocks == .writeFailed)
         #expect(state.lastHardwareError == HelperHardwareError.readBackMismatch.code)
     }
 
-    @Test("A failed clear and a failed restore fault the engine; ticks retry until clean")
+    @Test("A failed clear and a failed restore: ticks retry the restore until clean; the write failure stays")
     func faultAndRetry() async {
         let h = Harness()
         let session = await h.startedSession()
@@ -185,7 +243,7 @@ struct HelperHardwareFailureTests {
         var state = await session.readState()
         // Read-back state is reported, not the intended one.
         #expect(state.active == [.chargingInhibited])
-        #expect(state.interlocks == .hardwareFault)
+        #expect(state.interlocks == [.hardwareFault, .writeFailed])
         h.clock.advance(by: HelperEngine.minimumActivationInterval)
         #expect(await h.activate(.chargingInhibited, on: session) == .blockedByInterlock)
 
@@ -193,24 +251,47 @@ struct HelperHardwareFailureTests {
         await h.engine.tick()
         #expect(h.control.writeCount == writes + 1)
         #expect(h.recorder.contains(.restoreFailed(.faultRetry)))
-        #expect(await session.readState().interlocks == .hardwareFault)
+        #expect(await session.readState().interlocks == [.hardwareFault, .writeFailed])
 
         await h.engine.tick()
         #expect(h.control.writeCount == writes + 2)
         state = await session.readState()
         #expect(state.active.isEmpty)
-        #expect(state.interlocks.isEmpty)
+        #expect(state.interlocks == .writeFailed)
         #expect(h.recorder.contains(.restored(.faultRetry)))
+        #expect(await h.activate(.chargingInhibited, on: session) == .blockedByInterlock)
+        #expect(await session.restoreDefaults() == .ok)
         #expect(await h.activate(.chargingInhibited, on: session) == .ok)
     }
 
-    @Test("A restore that does not read back clean faults the engine")
+    @Test("While a restore is owed, a deactivation retries it and reports success only once the control reads back inactive")
+    func deactivationWhileRestoreOwed() async {
+        let h = Harness()
+        let session = await h.startedSession()
+        let inhibit = HelperControl.chargingInhibited.rawValue
+        #expect(await h.activate(.chargingInhibited, on: session) == .ok)
+        h.control.failNextApplies(1)
+        h.control.failNextRestores(2)
+        #expect(await session.setControl(control: inhibit, active: false) == .hardwareError)
+
+        let writes = h.control.writeCount
+        #expect(await session.setControl(control: inhibit, active: false) == .hardwareError)
+        #expect(h.control.writeCount == writes + 1)
+        #expect(h.control.activeControls == [.chargingInhibited])
+        #expect(await session.setControl(control: inhibit, active: false) == .ok)
+        #expect(h.control.activeControls.isEmpty)
+    }
+
+    @Test("A restore that does not read back clean means a restore is owed")
     func restoreNotConfirmed() async {
         let h = Harness(control: SimulatedChargeControl(initiallyActive: [.chargingInhibited]))
         h.control.ignoreNextRestores(1)
 
         #expect(await h.engine.start() == .hardwareError)
         #expect(h.recorder.contains(.restoreFailed(.start)))
+        #expect(h.recorder.writes == [
+            HelperWriteRecord(target: .restoreDefaults, outcome: .readBackMismatch, readBack: [.chargingInhibited]),
+        ])
         let session = await h.introducedSession()
         var state = await session.readState()
         #expect(state.active == [.chargingInhibited])
@@ -239,6 +320,9 @@ struct HelperHardwareFailureTests {
         #expect(state.status == .hardwareError)
         #expect(state.active.isEmpty)
         #expect(state.interlocks == .hardwareFault)
+        #expect(h.recorder.writes.last == HelperWriteRecord(
+            target: .restoreDefaults, outcome: .readBackFailed(code: simulatedFailure), readBack: nil
+        ))
 
         await h.engine.tick()
         #expect(await session.readState() == HelperStateReply(
@@ -248,7 +332,7 @@ struct HelperHardwareFailureTests {
             adapterDisabledLeaseSeconds: 0,
             isLeaseHolder: true,
             interlocks: [],
-            lastHardwareError: HelperHardwareError.simulatedFailure.code
+            lastHardwareError: simulatedFailure
         ))
     }
 
@@ -264,7 +348,7 @@ struct HelperHardwareFailureTests {
         #expect(h.control.activeControls.isEmpty)
         #expect(h.control.writes.suffix(2) == [.apply(.chargingInhibited, active: false), .restoreDefaults])
         #expect(h.recorder.contains(.restored(.writeFailed)))
-        #expect(await session.readState().interlocks.isEmpty)
+        #expect(await session.readState().interlocks == .writeFailed)
     }
 }
 
@@ -272,6 +356,7 @@ struct HelperHardwareFailureTests {
 struct HelperShutdownTests {
     private func expectShutDown(_ h: Harness, _ session: HelperSession) async {
         #expect(await h.engine.isShuttingDown)
+        #expect(await h.engine.isSafeToExit)
         let writes = h.control.writeCount
         #expect(await session.hello(clientProtocolVersion: HelperProtocolVersion.current).status == .shuttingDown)
         #expect(await session.readState().status == .shuttingDown)
@@ -279,9 +364,10 @@ struct HelperShutdownTests {
         #expect(await session.setControl(control: 1, active: true) == .shuttingDown)
         #expect(await session.setControl(control: 1, active: false) == .shuttingDown)
         #expect(await session.releaseLease(control: 1) == .shuttingDown)
-        #expect(await session.restoreDefaults() == .shuttingDown)
-        #expect(await session.restoreDefaultsAndExit() == .shuttingDown)
-        #expect(await h.engine.terminate() == .shuttingDown)
+        // Restores are still served; with defaults confirmed they write nothing.
+        #expect(await session.restoreDefaults() == .ok)
+        #expect(await session.restoreDefaultsAndExit() == .ok)
+        #expect(await h.engine.terminate() == .ok)
         #expect(await h.engine.start() == .shuttingDown)
         await h.engine.tick()
         await h.engine.systemWillSleep()
@@ -290,7 +376,7 @@ struct HelperShutdownTests {
         #expect(h.control.writeCount == writes)
     }
 
-    @Test("restoreDefaultsAndExit restores, then serves nothing more")
+    @Test("restoreDefaultsAndExit restores, then serves only restores")
     func restoreAndExit() async {
         let h = Harness()
         let holder = await h.startedSession()
@@ -302,7 +388,7 @@ struct HelperShutdownTests {
         #expect(await updater.restoreDefaultsAndExit() == .ok)
         #expect(h.control.activeControls.isEmpty)
         #expect(h.recorder.contains(.leaseEnded(holder.id, .chargingInhibited, .shutdown)))
-        #expect(h.recorder.contains(.shuttingDown(.exitRequested, restored: true)))
+        #expect(h.recorder.events.suffix(2) == [.shuttingDown(.exitRequested, restored: true), .safeToExit])
         await expectShutDown(h, holder)
     }
 
@@ -323,18 +409,50 @@ struct HelperShutdownTests {
         let h = Harness(control: SimulatedChargeControl(initiallyActive: [.chargingInhibited]))
         #expect(await h.engine.terminate() == .ok)
         #expect(h.control.activeControls.isEmpty)
-        #expect(await h.engine.isShuttingDown)
+        #expect(await h.engine.isSafeToExit)
     }
 
-    @Test("A restore that fails at exit is reported, and the engine still shuts down")
-    func failedRestoreAtExit() async {
+    @Test("After a failed shutdown restore, ticks retry it until it is safe to exit", arguments: [false, true])
+    func recoveryAfterFailedShutdownRestore(requestedByClient: Bool) async {
+        let h = Harness()
+        let session = await h.startedSession()
+        #expect(await h.activate(.adapterDisabled, on: session) == .ok)
+        h.control.failNextRestores(2)
+
+        if requestedByClient {
+            #expect(await session.restoreDefaultsAndExit() == .hardwareError)
+        } else {
+            #expect(await h.engine.terminate() == .hardwareError)
+        }
+        #expect(await h.engine.isShuttingDown)
+        #expect(await h.engine.isSafeToExit == false)
+        #expect(h.recorder.contains(.shuttingDown(requestedByClient ? .exitRequested : .terminate, restored: false)))
+        #expect(h.control.activeControls == [.adapterDisabled])
+        // Only restores are served.
+        #expect(await session.acquireOrRenewLease(control: 2, seconds: 60).status == .shuttingDown)
+        #expect(await session.setControl(control: 2, active: true) == .shuttingDown)
+
+        await h.engine.tick()
+        #expect(h.control.activeControls == [.adapterDisabled])
+        #expect(await h.engine.isSafeToExit == false)
+        await h.engine.tick()
+        #expect(h.control.activeControls.isEmpty)
+        #expect(await h.engine.isSafeToExit)
+        #expect(h.recorder.events.last == .safeToExit)
+        #expect(await h.engine.terminate() == .ok)
+    }
+
+    @Test("During shutdown, terminate and a client's restore both retry the owed restore")
+    func retriesDuringShutdown() async {
         let h = Harness()
         let session = await h.startedSession()
         #expect(await h.activate(.chargingInhibited, on: session) == .ok)
-        h.control.failNextRestores(1)
+        h.control.failNextRestores(2)
 
         #expect(await h.engine.terminate() == .hardwareError)
-        #expect(h.recorder.contains(.shuttingDown(.terminate, restored: false)))
-        #expect(await h.engine.isShuttingDown)
+        #expect(await h.engine.terminate() == .hardwareError)
+        #expect(await session.restoreDefaults() == .ok)
+        #expect(h.control.activeControls.isEmpty)
+        #expect(await h.engine.isSafeToExit)
     }
 }

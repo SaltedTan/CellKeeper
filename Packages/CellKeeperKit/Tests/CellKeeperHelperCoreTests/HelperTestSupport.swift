@@ -1,17 +1,32 @@
 import CellKeeperHelperCore
 import Foundation
 
-/// A monotonic clock the test advances by hand.
+/// A monotonic clock the test advances by hand. Like a real clock, every
+/// reading is a little later than the one before (a microsecond), unless the
+/// clock is frozen.
 final class HelperTestClock: @unchecked Sendable {
+    static let tick: TimeInterval = 1e-6
+
     private let lock = NSLock()
     private var elapsed: TimeInterval = 0
+    private var isFrozen = false
 
     var uptime: TimeInterval {
-        lock.withLock { 50_000 + elapsed }
+        lock.withLock {
+            if !isFrozen {
+                elapsed += Self.tick
+            }
+            return 50_000 + elapsed
+        }
     }
 
     func advance(by interval: TimeInterval) {
         lock.withLock { elapsed += interval }
+    }
+
+    /// Stops the per-reading step, so readings repeat until `advance`.
+    func freeze() {
+        lock.withLock { isFrozen = true }
     }
 }
 
@@ -27,6 +42,8 @@ final class StubPowerReading: HelperPowerReading, @unchecked Sendable {
         /// nil: stamped with the clock's time when read.
         var readAtUptime: TimeInterval?
         var isUnavailable = false
+        /// How long each read takes on the clock.
+        var readDuration: TimeInterval = 0
     }
 
     private let lock = NSLock()
@@ -43,6 +60,9 @@ final class StubPowerReading: HelperPowerReading, @unchecked Sendable {
 
     func latestPowerState() -> HelperPowerState? {
         let values = lock.withLock { self.values }
+        if values.readDuration > 0 {
+            clock.advance(by: values.readDuration)
+        }
         guard !values.isUnavailable else { return nil }
         return HelperPowerState(
             stateOfCharge: values.stateOfCharge,
@@ -63,6 +83,14 @@ final class EventRecorder: @unchecked Sendable {
         lock.withLock { recorded }
     }
 
+    /// The recorded hardware writes, in order.
+    var writes: [HelperWriteRecord] {
+        events.compactMap {
+            if case .write(let record) = $0 { return record }
+            return nil
+        }
+    }
+
     func record(_ event: HelperEvent) {
         lock.withLock { recorded.append(event) }
     }
@@ -78,19 +106,27 @@ final class EventRecorder: @unchecked Sendable {
 
 /// An engine on a simulated control, a stub power reading and a test clock.
 struct Harness {
-    let clock = HelperTestClock()
+    let clock: HelperTestClock
     let control: SimulatedChargeControl
     let power: StubPowerReading
     let recorder = EventRecorder()
     let engine: HelperEngine
 
-    init(control: SimulatedChargeControl = SimulatedChargeControl()) {
-        self.init(chargeControl: control)
+    init(
+        control: SimulatedChargeControl = SimulatedChargeControl(),
+        clock: HelperTestClock = HelperTestClock(),
+        activationHistory: [HelperActivationRecord] = []
+    ) {
+        self.init(chargeControl: control, clock: clock, activationHistory: activationHistory)
     }
 
-    init(chargeControl: any HelperChargeControl) {
+    init(
+        chargeControl: any HelperChargeControl,
+        clock: HelperTestClock = HelperTestClock(),
+        activationHistory: [HelperActivationRecord] = []
+    ) {
+        self.clock = clock
         self.control = (chargeControl as? SimulatedChargeControl) ?? SimulatedChargeControl()
-        let clock = clock
         let recorder = recorder
         power = StubPowerReading(clock: clock)
         engine = HelperEngine(
@@ -98,6 +134,7 @@ struct Harness {
             power: power,
             build: 42,
             uptime: { clock.uptime },
+            activationHistory: activationHistory,
             events: { recorder.record($0) }
         )
     }
@@ -120,6 +157,14 @@ struct Harness {
         let lease = await session.acquireOrRenewLease(control: control.rawValue, seconds: control.maximumLeaseSeconds)
         guard lease.status == .ok else { return lease.status }
         return await session.setControl(control: control.rawValue, active: true)
+    }
+
+    /// Spends a session's request budget: reads until the first refusal,
+    /// which leaves an over-budget streak of exactly one.
+    func exhaustBudget(of session: HelperSession) async {
+        for _ in 0...HelperEngine.requestBurst {
+            if await session.readState().status == .rateLimited { return }
+        }
     }
 }
 

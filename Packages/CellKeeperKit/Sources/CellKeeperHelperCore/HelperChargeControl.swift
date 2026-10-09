@@ -107,7 +107,11 @@ public final class SimulatedChargeControl: HelperChargeControl, @unchecked Senda
     private let capabilities: HelperCapabilities
     private var active: Set<HelperControl>
     private var log: [Write] = []
+    private var reads = 0
     private var pendingApplyFailures = 0
+    private var pendingFailuresAfterApplying = 0
+    private var pendingMisapplies = 0
+    private var pendingReadBackFailuresAfterApplying = 0
     private var pendingIgnoredApplies = 0
     private var pendingReadBackFailures = 0
     private var pendingRestoreFailures = 0
@@ -139,16 +143,30 @@ public final class SimulatedChargeControl: HelperChargeControl, @unchecked Senda
                 pendingIgnoredApplies -= 1
                 return
             }
+            var target = control
+            if pendingMisapplies > 0 {
+                pendingMisapplies -= 1
+                target = HelperControl.allCases.first { $0 != control } ?? control
+            }
             if isActive {
-                active.insert(control)
+                active.insert(target)
             } else {
-                active.remove(control)
+                active.remove(target)
+            }
+            if pendingReadBackFailuresAfterApplying > 0 {
+                pendingReadBackFailuresAfterApplying -= 1
+                pendingReadBackFailures += 1
+            }
+            if pendingFailuresAfterApplying > 0 {
+                pendingFailuresAfterApplying -= 1
+                throw HelperHardwareError.simulatedFailure
             }
         }
     }
 
     public func readBack() throws -> Set<HelperControl> {
         try lock.withLock {
+            reads += 1
             if pendingReadBackFailures > 0 {
                 pendingReadBackFailures -= 1
                 throw HelperHardwareError.simulatedFailure
@@ -188,9 +206,32 @@ public final class SimulatedChargeControl: HelperChargeControl, @unchecked Senda
         lock.withLock { log.count }
     }
 
+    /// The number of calls to `readBack`, including failed ones.
+    public var readBackCount: Int {
+        lock.withLock { reads }
+    }
+
     /// Makes the next `count` calls to `apply` throw without changing state.
     public func failNextApplies(_ count: Int) {
         lock.withLock { pendingApplyFailures += count }
+    }
+
+    /// Makes the next `count` calls to `apply` change the state and then
+    /// throw, like a write that took effect but reported an error.
+    public func failNextAppliesAfterApplying(_ count: Int) {
+        lock.withLock { pendingFailuresAfterApplying += count }
+    }
+
+    /// Makes the next `count` calls to `apply` change the other control
+    /// instead of the one asked for, and return normally.
+    public func misapplyNextApplies(_ count: Int) {
+        lock.withLock { pendingMisapplies += count }
+    }
+
+    /// After each of the next `count` successful calls to `apply`, makes
+    /// the next `readBack` throw.
+    public func failReadBacksAfterNextApplies(_ count: Int) {
+        lock.withLock { pendingReadBackFailuresAfterApplying += count }
     }
 
     /// Makes the next `count` calls to `apply` succeed without changing

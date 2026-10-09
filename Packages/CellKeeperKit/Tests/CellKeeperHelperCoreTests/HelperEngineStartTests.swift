@@ -1,4 +1,5 @@
 import CellKeeperHelperCore
+import Foundation
 import Testing
 
 @Suite("Helper engine: start")
@@ -11,6 +12,7 @@ struct HelperEngineStartTests {
         #expect(h.control.activeControls.isEmpty)
         #expect(h.control.writes == [.restoreDefaults])
         #expect(h.recorder.events == [
+            .write(HelperWriteRecord(target: .restoreDefaults, outcome: .confirmed, readBack: [])),
             .restored(.start),
             .started(capabilities: [.chargingInhibit, .adapterDisable], isSimulated: true),
         ])
@@ -59,6 +61,9 @@ struct HelperEngineStartTests {
         #expect(await h.engine.start() == .hardwareError)
         #expect(h.recorder.contains(.restoreFailed(.start)))
         #expect(h.recorder.contains(.hardwareError(code: HelperHardwareError.simulatedFailure.code)))
+        #expect(h.recorder.writes == [
+            HelperWriteRecord(target: .restoreDefaults, outcome: .threw(code: HelperHardwareError.simulatedFailure.code), readBack: nil),
+        ])
 
         // Faulted, but still serving, so a client can see why.
         let session = await h.introducedSession()
@@ -80,12 +85,14 @@ struct HelperEngineStartTests {
         #expect(await session.setControl(control: HelperControl.adapterDisabled.rawValue, active: true) == .ok)
     }
 
-    @Test("The shared uptime clock starts near zero and never goes backwards")
+    @Test("The shared uptime clock is the system's: it counts from boot, including sleep, in every process")
     func continuousUptime() {
         let first = HelperEngine.continuousUptime()
         let second = HelperEngine.continuousUptime()
-        #expect(first >= 0)
         #expect(second >= first)
+        // Uptime without sleep can only be smaller. A clock that started
+        // with this process would be far below it.
+        #expect(first >= ProcessInfo.processInfo.systemUptime - 1)
     }
 
     @Test("Starting twice changes nothing")

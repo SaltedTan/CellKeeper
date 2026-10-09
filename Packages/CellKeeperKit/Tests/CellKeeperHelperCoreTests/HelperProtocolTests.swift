@@ -28,6 +28,7 @@ struct HelperProtocolTests {
             (.externalModification, 1 << 7),
             (.hardwareFault, 1 << 8),
             (.sleepImminent, 1 << 9),
+            (.writeFailed, 1 << 10),
         ]
         for (interlock, raw) in interlocks {
             #expect(interlock.rawValue == raw, "\(interlock)")
@@ -64,7 +65,7 @@ struct HelperProtocolTests {
 
     @Test("Each control is blocked by the interlocks that concern it")
     func blockingInterlocks() {
-        let shared: HelperInterlocks = [.belowBatteryFloor, .powerStateUnavailable, .externalModification, .hardwareFault]
+        let shared: HelperInterlocks = [.belowBatteryFloor, .powerStateUnavailable, .externalModification, .hardwareFault, .writeFailed]
         #expect(HelperControl.chargingInhibited.blockingInterlocks == shared.union(.notOnExternalPower))
         #expect(HelperControl.adapterDisabled.blockingInterlocks == shared.union([
             .belowAdapterFloor, .adapterAbsent, .adapterPresenceUnknown, .thermalPressure, .sleepImminent,
@@ -140,6 +141,24 @@ struct HelperChargeControlTests {
         try control.restoreDefaults()
         #expect(control.activeControls.isEmpty)
         #expect(control.writeCount == 6)
+        #expect(control.readBackCount == 2)
+    }
+
+    @Test("Partial failures: a write that takes effect and then throws, and one that changes the other control")
+    func simulatedPartialFailures() throws {
+        let control = SimulatedChargeControl()
+        control.failNextAppliesAfterApplying(1)
+        #expect(throws: HelperHardwareError.simulatedFailure) {
+            try control.apply(.chargingInhibited, active: true)
+        }
+        #expect(control.activeControls == [.chargingInhibited])
+
+        control.misapplyNextApplies(1)
+        try control.apply(.chargingInhibited, active: false)
+        #expect(control.activeControls == [.chargingInhibited])
+        control.misapplyNextApplies(1)
+        try control.apply(.chargingInhibited, active: true)
+        #expect(control.activeControls == [.chargingInhibited, .adapterDisabled])
     }
 
     @Test("Unknown hardware has no capabilities and never writes")

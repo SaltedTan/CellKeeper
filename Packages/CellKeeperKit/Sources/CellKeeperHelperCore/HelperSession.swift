@@ -18,8 +18,13 @@ public struct HelperSessionID: Hashable, Sendable, CustomStringConvertible {
 /// set. Arguments arrive as raw wire values and are validated by the engine.
 ///
 /// `hello` must succeed before any other request is served, except
-/// ``restoreDefaults()`` and ``restoreDefaultsAndExit()``, which any session
-/// may call at any time because they only move toward safety.
+/// ``restoreDefaults()`` and ``restoreDefaultsAndExit()``: they only move
+/// toward safety, so any live session may call them, also before the engine
+/// has started and during shutdown, and the request budget never refuses
+/// them. A session that was invalidated or revoked gets `notIntroduced` for
+/// everything. A session that keeps exceeding its request budget is revoked
+/// (``HelperEvent/sessionRevoked(_:)``); the transport should then close
+/// its connection.
 public struct HelperSession: Sendable {
     public let id: HelperSessionID
     private let engine: HelperEngine
@@ -31,8 +36,9 @@ public struct HelperSession: Sendable {
 
     /// Introduces the client. A version outside
     /// ``HelperProtocolVersion/minimumSupportedClient`` through
-    /// ``HelperProtocolVersion/current`` gets `incompatibleProtocol`. No side
-    /// effects.
+    /// ``HelperProtocolVersion/current`` gets `incompatibleProtocol`. Any
+    /// hello that does not return `ok` withdraws the introduction. No other
+    /// side effects.
     public func hello(clientProtocolVersion: Int) async -> HelperHelloReply {
         await engine.hello(id, clientProtocolVersion: clientProtocolVersion)
     }
@@ -52,29 +58,36 @@ public struct HelperSession: Sendable {
         await engine.acquireOrRenewLease(id, control: control, seconds: seconds)
     }
 
-    /// Ends this session's lease on `control` and clears the control.
+    /// Ends this session's lease on `control` and clears the control. Never
+    /// refused by the request budget.
     public func releaseLease(control: Int) async -> HelperStatus {
         await engine.releaseLease(id, control: control)
     }
 
     /// Activates or deactivates `control`. Activation needs this session's
-    /// lease, the capability, no blocking interlock, and the rate limits.
-    /// Deactivation needs no lease and is never rate-limited. A request for
-    /// the state already in effect writes nothing.
+    /// lease (still valid when the write is made), the capability, no
+    /// blocking interlock, and the activation limits; refused by those
+    /// limits, it restores defaults. Deactivation needs no lease, is never
+    /// rate-limited, and clears only what the engine set. A request for the
+    /// state already in effect writes nothing.
     public func setControl(control: Int, active: Bool) async -> HelperStatus {
         await engine.setControl(id, control: control, active: active)
     }
 
     /// Ends every lease and returns every control to macOS's default,
-    /// confirmed by read-back. A clean restore also clears the
-    /// `externalModification` and `hardwareFault` interlocks.
+    /// confirmed by read-back; writes nothing if the read-back already shows
+    /// defaults. A clean result also clears the `externalModification`,
+    /// `hardwareFault` and `writeFailed` interlocks.
     public func restoreDefaults() async -> HelperStatus {
         await engine.restoreDefaults(id)
     }
 
     /// Restores defaults, then shuts the engine down so the host can exit
-    /// (for an update or an uninstall). Every later request gets
-    /// `shuttingDown`.
+    /// (for an update or an uninstall). From then on, every request except
+    /// a restore gets `shuttingDown`. Returns `hardwareError` if defaults
+    /// were not confirmed; the engine keeps retrying, and the host waits for
+    /// ``HelperEngine/isSafeToExit``. During shutdown it acts like
+    /// ``restoreDefaults()``.
     public func restoreDefaultsAndExit() async -> HelperStatus {
         await engine.restoreDefaultsAndExit(id)
     }

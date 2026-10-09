@@ -87,11 +87,18 @@ struct HelperSessionTests {
             #expect(await b.acquireOrRenewLease(control: control.rawValue, seconds: 60).status == .leaseHeldByOtherClient)
         }
         #expect(await b.setControl(control: HelperControl.adapterDisabled.rawValue, active: true) == .noLease)
+        // Nor may B use a lease A holds, whether its control is active or not.
+        #expect(await b.setControl(control: HelperControl.chargingInhibited.rawValue, active: true) == .noLease)
+        #expect(await a.acquireOrRenewLease(control: HelperControl.adapterDisabled.rawValue, seconds: 60).status == .ok)
+        #expect(await b.setControl(control: HelperControl.adapterDisabled.rawValue, active: true) == .noLease)
+        #expect(h.control.activeControls == [.chargingInhibited])
         #expect(await b.readState().isLeaseHolder == false)
         #expect(await a.readState().isLeaseHolder)
         #expect(h.recorder.contains(.requestRejected(b.id, .acquireOrRenewLease, .leaseHeldByOtherClient)))
 
         #expect(await a.releaseLease(control: HelperControl.chargingInhibited.rawValue) == .ok)
+        #expect(await b.acquireOrRenewLease(control: HelperControl.adapterDisabled.rawValue, seconds: 60).status == .leaseHeldByOtherClient)
+        #expect(await a.releaseLease(control: HelperControl.adapterDisabled.rawValue) == .ok)
         #expect(await b.acquireOrRenewLease(control: HelperControl.adapterDisabled.rawValue, seconds: 60).status == .ok)
         #expect(await a.acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: 60).status == .leaseHeldByOtherClient)
     }
@@ -172,6 +179,8 @@ struct HelperSessionTests {
     @Test("Events form an audit trail of what the engine did")
     func auditTrail() async {
         let h = Harness()
+        h.clock.freeze()
+        let now = h.clock.uptime
         await h.engine.start()
         let session = await h.engine.openSession()
         _ = await session.hello(clientProtocolVersion: HelperProtocolVersion.current)
@@ -182,15 +191,53 @@ struct HelperSessionTests {
         await session.invalidate()
 
         #expect(h.recorder.events == [
+            .write(HelperWriteRecord(target: .restoreDefaults, outcome: .confirmed, readBack: [])),
             .restored(.start),
             .started(capabilities: [.chargingInhibit, .adapterDisable], isSimulated: true),
             .sessionOpened(session.id),
             .leaseGranted(session.id, .chargingInhibited, seconds: 300),
+            .activationRecorded(HelperActivationRecord(control: .chargingInhibited, uptime: now)),
+            .write(HelperWriteRecord(target: .control(.chargingInhibited, active: true), outcome: .confirmed, readBack: [.chargingInhibited])),
             .activated(.chargingInhibited, by: session.id),
             .leaseRenewed(session.id, .chargingInhibited, seconds: 300),
             .leaseEnded(session.id, .chargingInhibited, .released),
+            .write(HelperWriteRecord(target: .control(.chargingInhibited, active: false), outcome: .confirmed, readBack: [])),
             .deactivated(.chargingInhibited, .leaseReleased),
             .sessionInvalidated(session.id),
         ])
+    }
+
+    @Test("An invalidated session can no longer restore or shut the engine down")
+    func invalidatedSessionHasNoAuthority() async {
+        let h = Harness()
+        let a = await h.startedSession()
+        await a.invalidate()
+        let b = await h.introducedSession()
+        #expect(await h.activate(.chargingInhibited, on: b) == .ok)
+        let writes = h.control.writeCount
+
+        // Messages from A that arrive after its connection ended.
+        #expect(await a.restoreDefaults() == .notIntroduced)
+        #expect(await a.restoreDefaultsAndExit() == .notIntroduced)
+        #expect(h.recorder.contains(.requestRejected(a.id, .restoreDefaults, .notIntroduced)))
+        #expect(h.control.writeCount == writes)
+        #expect(h.control.activeControls == [.chargingInhibited])
+        #expect(await h.engine.isShuttingDown == false)
+        let state = await b.readState()
+        #expect(state.isLeaseHolder)
+        #expect(state.chargingInhibitedLeaseSeconds > 0)
+    }
+
+    @Test("Any failed hello withdraws the introduction, also one refused by the budget")
+    func failedHelloWithdrawsIntroduction() async {
+        let h = Harness()
+        let session = await h.startedSession()
+        await h.exhaustBudget(of: session)
+
+        #expect(await session.hello(clientProtocolVersion: HelperProtocolVersion.current).status == .rateLimited)
+        h.clock.advance(by: 5)
+        #expect(await session.readState().status == .notIntroduced)
+        #expect(await session.hello(clientProtocolVersion: HelperProtocolVersion.current).status == .ok)
+        #expect(await session.readState().status == .ok)
     }
 }

@@ -29,10 +29,18 @@ struct RequestBudget {
 /// ``HelperEngine/maximumActivationsPerHour`` in total per rolling hour.
 struct ActivationHistory {
     private static let window: TimeInterval = 60 * 60
-    private var entries: [(control: HelperControl, uptime: TimeInterval)] = []
+    private(set) var records: [HelperActivationRecord]
+
+    /// Keeps the records of the last hour. Records from the future cannot
+    /// belong to this boot's clock and are dropped.
+    init(records: [HelperActivationRecord], at now: TimeInterval) {
+        self.records = records
+            .filter { $0.uptime <= now && now - $0.uptime < Self.window }
+            .sorted { $0.uptime < $1.uptime }
+    }
 
     func allows(_ control: HelperControl, at now: TimeInterval) -> Bool {
-        let recent = entries.filter { now - $0.uptime < Self.window }
+        let recent = records.filter { now - $0.uptime < Self.window }
         if recent.count >= HelperEngine.maximumActivationsPerHour {
             return false
         }
@@ -42,8 +50,15 @@ struct ActivationHistory {
         return true
     }
 
-    mutating func record(_ control: HelperControl, at now: TimeInterval) {
-        entries.removeAll { now - $0.uptime >= Self.window }
-        entries.append((control, now))
+    mutating func record(_ control: HelperControl, at now: TimeInterval) -> HelperActivationRecord {
+        records.removeAll { now - $0.uptime >= Self.window }
+        let record = HelperActivationRecord(control: control, uptime: now)
+        records.append(record)
+        return record
+    }
+
+    /// The records still within the window.
+    func current(at now: TimeInterval) -> [HelperActivationRecord] {
+        records.filter { now - $0.uptime < Self.window }
     }
 }

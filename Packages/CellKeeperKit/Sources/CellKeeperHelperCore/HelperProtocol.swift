@@ -23,7 +23,7 @@ public enum HelperProtocolVersion {
 
 /// The controls the helper can set. The client says what, never how: the
 /// mechanism behind each control is compiled into the helper.
-public enum HelperControl: Int, Sendable, CaseIterable, CustomStringConvertible {
+public enum HelperControl: Int, Sendable, CaseIterable, Codable, CustomStringConvertible {
     /// External power runs the Mac; battery charging is inhibited.
     case chargingInhibited = 1
     /// The Mac runs from the battery although an adapter is connected.
@@ -48,7 +48,7 @@ public enum HelperControl: Int, Sendable, CaseIterable, CustomStringConvertible 
 
     /// The interlocks that clear this control and refuse its activation.
     public var blockingInterlocks: HelperInterlocks {
-        let always: HelperInterlocks = [.belowBatteryFloor, .powerStateUnavailable, .externalModification, .hardwareFault]
+        let always: HelperInterlocks = [.belowBatteryFloor, .powerStateUnavailable, .externalModification, .hardwareFault, .writeFailed]
         switch self {
         case .chargingInhibited:
             return always.union(.notOnExternalPower)
@@ -144,11 +144,16 @@ public struct HelperInterlocks: OptionSet, Sendable, Hashable, CustomStringConve
     /// may be controlling charging (rule R27). Lasts until a client's
     /// restore of defaults reads back clean.
     public static let externalModification = HelperInterlocks(rawValue: 1 << 7)
-    /// Clearing a control or restoring defaults failed or did not read back
-    /// clean. Lasts until a restore reads back clean.
+    /// A restore of defaults is owed: one failed or did not read back clean.
+    /// Lasts until a restore reads back clean; the engine retries it.
     public static let hardwareFault = HelperInterlocks(rawValue: 1 << 8)
     /// The system announced sleep and has not woken yet (rule R16).
     public static let sleepImminent = HelperInterlocks(rawValue: 1 << 9)
+    /// A write to a control failed or read back wrong, so the control is not
+    /// trusted (rule R11). Lasts until a client's restore of defaults reads
+    /// back clean, or ``HelperEngine/writeFailureBackoff`` after the last
+    /// failure.
+    public static let writeFailed = HelperInterlocks(rawValue: 1 << 10)
 
     private static let names: [(HelperInterlocks, String)] = [
         (.belowBatteryFloor, "belowBatteryFloor"),
@@ -161,6 +166,7 @@ public struct HelperInterlocks: OptionSet, Sendable, Hashable, CustomStringConve
         (.externalModification, "externalModification"),
         (.hardwareFault, "hardwareFault"),
         (.sleepImminent, "sleepImminent"),
+        (.writeFailed, "writeFailed"),
     ]
 
     public var description: String {
@@ -173,7 +179,8 @@ public enum HelperStatus: Int, Sendable, CaseIterable, CustomStringConvertible {
     case ok = 0
     /// The client's protocol version is outside the supported range.
     case incompatibleProtocol = 1
-    /// The session has not completed `hello` (or has been invalidated).
+    /// The session has not completed `hello`, or no longer exists (it was
+    /// invalidated or revoked).
     case notIntroduced = 2
     /// This Mac's helper cannot perform the control.
     case unsupportedControl = 3

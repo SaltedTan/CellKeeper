@@ -44,11 +44,11 @@ struct HelperInterlockTests {
         let readAt = h.clock.uptime
         h.power.update { $0.readAtUptime = readAt }
 
-        h.clock.advance(by: HelperEngine.maximumPowerStateAge)
+        h.clock.advance(by: HelperEngine.maximumPowerStateAge - 1)
         await h.engine.tick()
         #expect(h.control.activeControls == [.chargingInhibited, .adapterDisabled])
 
-        h.clock.advance(by: 1)
+        h.clock.advance(by: 2)
         await h.engine.tick()
         #expect(h.control.activeControls.isEmpty)
         #expect(await session.readState().interlocks == .powerStateUnavailable)
