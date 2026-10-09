@@ -1,6 +1,6 @@
 # CellKeeper architecture
 
-Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit). Last reviewed 2026-10-06.
+Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit), plus the logic of the future privileged helper with a simulated control only. Last reviewed 2026-10-09.
 
 This document describes how CellKeeper is put together and why. Research that
 informed these decisions is in [`docs/research/`](research/README.md); safety
@@ -26,7 +26,7 @@ rules are in [`docs/safety.md`](safety.md).
    actions as refused, and what macOS reports is shown separately from what
    CellKeeper wants.
 5. **Minimal machinery.** No third-party dependencies, no dependency
-   injection framework, two modules plus the app.
+   injection framework, three modules plus the app.
 
 ## Modules
 
@@ -59,17 +59,29 @@ rules are in [`docs/safety.md`](safety.md).
 │  Controller: ChargeController (actor: telemetry → policy → backend, safety fallbacks, log)     │
 │  Support:    CellKeeperLog (os.Logger categories)                                              │
 └────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────── CellKeeperHelperCore (pure Swift, Foundation only; not used yet) ──────────────┐
+│  Wire:     HelperProtocolVersion, HelperControl, HelperControlSet, HelperCapabilities,         │
+│            HelperInterlocks, HelperStatus, reply values (primitives only, for NSXPC)           │
+│  Engine:   HelperEngine (actor: sessions, per-control leases, rate limits, interlocks,         │
+│            restore at start, exit and disconnect, read-back), HelperSession, HelperEvent       │
+│  Seams:    HelperChargeControl (SimulatedChargeControl, UnknownHardwareChargeControl),         │
+│            HelperPowerReading (the helper's own power state)                                   │
+└────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - `Packages/CellKeeperKit` is a local Swift package (tools version 6.0, Swift
-  6 language mode, macOS 14+) with two library products and two test targets.
-  `swift test` runs every non-UI test without opening Xcode.
+  6 language mode, macOS 14+) with three library products and three test
+  targets. `swift test` runs every non-UI test without opening Xcode.
 - `CellKeeper.xcodeproj` contains only the app target. It uses a
   file-system-synchronized group for `CellKeeper/`, so adding a Swift file
   needs no project edits. The project file format is pinned to
   `objectVersion = 77` (Xcode 16+); CI fails if a newer Xcode rewrites it.
 - The boundary is enforced by dependency direction: `CellKeeperCore` cannot
   import `CellKeeperKit`, so policy code cannot reach IOKit.
+- `CellKeeperHelperCore` depends on nothing, and nothing depends on it yet.
+  It holds the logic of the future privileged helper and the vocabulary the
+  app and the helper will share (see "Helper engine" below).
 
 Requirement → location:
 
@@ -84,7 +96,7 @@ Requirement → location:
 | Scheduler | — | Future: will feed overrides into `PolicyInput` |
 | Notifications | — | Future: driven from `ControlEvent`s |
 | Shortcuts/automation | — | Future: App Intents calling `AppModel` intents |
-| Privileged operations | — | Future: `CellKeeperHelper` behind a backend |
+| Privileged operations | `HelperEngine` (HelperCore) | Helper logic implemented with a simulated control only; no hardware control, and the app does not use it yet. The daemon, its XPC transport and the app's backend are future work |
 
 ## Data flow
 
@@ -531,8 +543,119 @@ candidates, in the order we intend to evaluate them:
    process exits, which would be a valuable fail-safe, but whether that holds
    on shipping Apple silicon is unverified.
 
-No helper code exists. It will not be enabled without the hardware
-verification protocol in research note 02 §7 and the rules in `safety.md`.
+The helper's logic exists as `CellKeeperHelperCore` (below), with a
+simulated control only. There is no daemon, no XPC, and no hardware control,
+and the app does not use it yet. Real control will not be enabled without the
+hardware verification protocol in research note 02 §7 and the rules in
+`safety.md`.
+
+### Helper engine (`CellKeeperHelperCore`)
+
+`HelperEngine` is everything the helper decides, without the parts that
+touch the system. It is pure Swift on Foundation: no IOKit, XPC, processes,
+files or network. The layers, from the client down:
+
+1. **Transport** (future). The app's in-process backend first, then an NSXPC
+   listener in the daemon. It opens one `HelperSession` per connection,
+   forwards each request with its raw wire values, and invalidates the
+   session when the connection ends. It must deliver one connection's
+   requests in order; the engine itself is an actor.
+2. **Session and engine.** Validation, leases, rate limits, interlocks and
+   read-back, below.
+3. **`HelperChargeControl`**, the only access to hardware: `probe()`,
+   `apply(_:active:)`, `readBack()`, `restoreDefaults()`. A real control is
+   the one place for undocumented operations and computes its capabilities
+   only from a compiled-in, reviewed allowlist. `SimulatedChargeControl`
+   (tests, contributor builds) changes nothing and says so.
+   `UnknownHardwareChargeControl` has no capabilities and writes nothing; the
+   daemon will ship with it until a mechanism is verified (R12a).
+4. **`HelperPowerReading`**: the charge, external power, physical adapter
+   presence (distinct from external power, because a disabled adapter makes
+   the Mac report battery power) and thermal pressure, read by the helper
+   itself and stamped on the engine's clock. The helper never takes the
+   client's word for them.
+
+Wire vocabulary. Every argument and reply field is an `Int`, `UInt64` or
+`Bool`, so each request maps one to one onto an NSXPC method with a single
+reply block. Raw values never change and are never reused. Protocol version
+1; the helper serves clients from `minimumSupportedClient` (1) to `current`.
+
+| Request | Before `hello` | Lease | Request budget | Effect |
+|---|---|---|---|---|
+| `hello(clientProtocolVersion)` | — | no | yes | Status, helper protocol version, build, capabilities, whether simulated |
+| `readState()` | refused | no | yes | Read-back controls, seconds left on each lease, whether the caller holds them, interlocks, last hardware error |
+| `acquireOrRenewLease(control, seconds)` | refused | — | yes | Grants or renews, clamped to 900 s (inhibit) or 120 s (adapter); one session holds leases at a time |
+| `releaseLease(control)` | refused | holder | never refused | Ends the lease and clears the control |
+| `setControl(control, true)` | refused | yes | yes | Capability, interlocks, rate limit, then write and read-back |
+| `setControl(control, false)` | refused | no | never refused | Clears the control if the engine set it |
+| `restoreDefaults()` | allowed | no | never refused | Ends every lease and restores defaults; writes nothing if already at defaults |
+| `restoreDefaultsAndExit()` | allowed | no | never refused | Restores defaults, then shuts down so the host can exit (update, uninstall) |
+
+Statuses: `ok`, `incompatibleProtocol`, `notIntroduced`,
+`unsupportedControl`, `invalidArgument` (unknown control, lease of 0 s or
+less), `noLease`, `leaseHeldByOtherClient`, `rateLimited`,
+`blockedByInterlock`, `hardwareError`, `shuttingDown`, `notReady` (before
+the start-up restore).
+
+Interlocks are reported in `readState` and can never be set by a client:
+
+| Interlock | Raised while | Clears and refuses |
+|---|---|---|
+| `powerStateUnavailable` | No reading; no charge (0–100%) or power source; read more than 60 s ago, in the future, or before the last wake (R9, R17) | both controls |
+| `belowBatteryFloor` | Charge ≤ 10%, until ≥ 15% (R5) | both |
+| `notOnExternalPower` | Not running on external power (R18) | charging inhibit |
+| `adapterAbsent`, `adapterPresenceUnknown` | No adapter connected, or not known | adapter-disable |
+| `belowAdapterFloor` | Charge ≤ 25%, until ≥ 30% (note 02, §7) | adapter-disable |
+| `thermalPressure` | macOS reports high thermal pressure (R21) | adapter-disable |
+| `sleepImminent` | From will-sleep until wake, at most 120 s without a wake (R16) | adapter-disable |
+| `externalModification` | The read-back differed from what the engine set, until a client's restore reads back clean (R27) | both |
+| `hardwareFault` | A clear or restore failed or did not read back clean, until a restore reads back clean | both |
+
+Other rules:
+
+- **Start (R2).** `start()` restores defaults and reads back before anything
+  else is served; until then only restores are honoured. If that restore
+  fails, the engine serves sessions but is faulted.
+- **Leases (R3).** Per control, bound to the session. A control is cleared
+  when its lease expires, is released, or its session is invalidated (R1).
+  Interlocks clear controls but leave leases in place.
+- **Rate limits (R13).** An activation of each control at most once a
+  minute, and at most 20 activations of all controls per rolling hour, on
+  the monotonic clock. Every attempted activation write counts. A request
+  for the state already in effect writes nothing and is not counted.
+  Deactivations and restores are never limited. Each session also has a
+  request budget of 10 at once and 2 per second.
+- **Read-back (R11, R30).** Every write is read back. A failed write or a
+  mismatch restores defaults and returns `hardwareError`. `readState` always
+  reports read-back state, never intended state; if the read-back fails, its
+  status is `hardwareError`.
+- **Checks.** Every request other than `hello` and the restores, `tick()`
+  (every few seconds), and every sleep or wake runs the same checks: compare
+  the read-back with what the engine set, expire leases, recompute the
+  interlocks and clear what they block. A read-back that fails is an unknown
+  state, so defaults are restored (R1). Only `tick()` and system events
+  retry a failed restore.
+- **Outside changes (R26, R27).** Defaults are restored once. Until a
+  client's restore reads back clean, the engine writes nothing on its own,
+  so it never fights another tool; `readState` keeps reporting what it reads.
+- **Sleep and wake (R16, R17).** `systemWillSleep()` clears the
+  adapter-disable; the inhibit stays only while its lease is valid, and the
+  lease keeps counting during sleep. `systemDidWake()` reads back, compares,
+  and runs every check.
+- **Shutdown (R4).** `terminate()` (the daemon's SIGTERM path) and
+  `restoreDefaultsAndExit` end every lease, restore defaults, and shut the
+  engine down: every later request gets `shuttingDown`. The engine never
+  exits the process itself.
+- **Audit.** Every lease grant, renewal and end, activation, deactivation,
+  restore (with its reason), hardware error, interlock change and refused
+  request is an event for the host to log. A session over its request budget
+  is reported once until it is back within it.
+- **Time (R22).** One monotonic clock that counts sleep, injected, shared
+  with the power reading (`HelperEngine.continuousUptime`).
+
+Not there yet: the daemon (SMAppService, launchd, SIGTERM), the NSXPC
+transport and code-signing requirements, the IOKit power reading and
+acknowledged sleep notifications, the app's backend, and any real control.
 
 ## Known limitations
 
@@ -585,13 +708,17 @@ closed before a backend that changes hardware *itself* is enabled:
   so it would end a discharge session immediately. That is safe (no cycling,
   because sessions never restart by themselves), but discharge would not
   work. Telemetry must first distinguish *physical* adapter presence from the
-  effective power source.
+  effective power source. The helper engine already takes presence as a
+  separate input and refuses the adapter-disable while it is unknown; the
+  app's telemetry and the helper's power reading still have to provide it.
 - **Sleep and quit are not interlocks.** The app reacts to will-sleep and
   quit notifications, but cannot delay sleep until a request completes or
   finish a hung backend call. A privileged backend needs helper-owned sleep
   handling (`IORegisterForSystemPower` with acknowledgement), per-control
   leases that lapse to `.normal`, and bounded operations (XPC timeouts with
-  connection invalidation).
+  connection invalidation). `HelperEngine` implements the leases and the
+  sleep, wake and exit rules; the daemon still has to deliver those events
+  and bound its calls.
 
 ## Telemetry
 
@@ -677,3 +804,6 @@ decisions.
 | D24 | Invalid settings are rejected before use, never applied | The UI only offers valid values; a rejected change keeps the previous valid settings, so there is no "invalid settings" state to restore from at run time. The policy still fails safe if handed invalid settings directly |
 | D25 | An attempted restore stays owed until confirmed, across relaunches; any record found at launch makes it owed | Otherwise recognising an earlier change, a relaunch, or a marker that could not be saved could quietly abandon giving the user's limit back. The cost is one restore and re-apply after a crash |
 | D26 | Only the limit crossing is debounced (two consecutive distinct readings, identified by the driver's update time where reported); cooling alone ends a temperature pause no sooner than 5 minutes after it began, but a new pause needs no wait (rules R14, R21) | The limit crossing is the one restricting change that is not a safety trigger, so a single wrong reading should not cause it. Safety triggers and changes toward macOS defaults act at once; a minimum before re-pausing would only delay protection |
+| D26 | The helper's logic is its own target with no dependencies, built and tested against a simulated control before any mechanism is verified | Every safety rule the helper enforces can be tested in CI without hardware or root; the daemon and its transport then stay thin |
+| D27 | After an outside change, the helper restores defaults once and then writes nothing on its own until a client restores | Restoring after every reading would fight another tool and toggle the hardware (R26, R27); a client restore is a deliberate act |
+| D28 | The helper's hourly activation cap counts both controls together; the one-minute interval is per control | R13 caps transitions in total; a discharge that ends in a hold needs both controls in quick succession |

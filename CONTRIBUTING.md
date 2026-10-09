@@ -34,6 +34,9 @@ Read [docs/safety.md](docs/safety.md). In particular:
 - Charging policy code (`CellKeeperCore`) must not import IOKit or call any
   hardware or private interface. System access belongs in `CellKeeperKit` or
   behind a `ChargingBackend`.
+- The helper's logic (`CellKeeperHelperCore`) imports Foundation only: no
+  IOKit, XPC, processes, files or network. Hardware access will live only
+  behind `HelperChargeControl`.
 - Every failure path must return to macOS default charging.
 - New policy behaviour needs deterministic tests.
 
@@ -63,6 +66,7 @@ provisioning profiles, or other credentials.
 | `CellKeeper/` | SwiftUI app (menu bar, settings, app model) |
 | `Packages/CellKeeperKit/Sources/CellKeeperCore/` | Pure domain logic: policy, controller, settings, backend protocol and backends (simulated, read-only, native Charge Limit) |
 | `Packages/CellKeeperKit/Sources/CellKeeperKit/` | macOS adapters (read-only telemetry, notifications, the `shortcuts` and `pmset` runners, the Charge Limit record file) |
+| `Packages/CellKeeperKit/Sources/CellKeeperHelperCore/` | Logic of the future privileged helper: wire vocabulary, the helper engine (leases, rate limits, interlocks), simulated and monitor-only controls. Foundation only, no hardware access; not used by the app yet |
 | `Packages/CellKeeperKit/Tests/` | Swift Testing tests |
 | `Config/` | xcconfig files and entitlements |
 | `docs/` | Architecture, safety, roadmap, research |
