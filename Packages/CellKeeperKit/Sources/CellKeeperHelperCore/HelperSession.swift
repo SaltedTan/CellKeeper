@@ -45,8 +45,9 @@ public struct HelperSession: Sendable {
         await engine.hello(id, clientProtocolVersion: clientProtocolVersion)
     }
 
-    /// The controls read back from the hardware, the leases, the
-    /// interlocks and the last hardware error. Runs the engine's checks
+    /// The controls read back from the hardware, the leases and why each
+    /// control's latest lease ended, the interlocks, and the last hardware
+    /// error with the number of errors so far. Runs the engine's checks
     /// first, as every request except `hello` and the restores does.
     public func readState() async -> HelperStateReply {
         await engine.readState(id)

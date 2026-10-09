@@ -160,10 +160,14 @@ public actor HelperEngine {
     private var powerStateReadAt: TimeInterval?
     private var activations: ActivationHistory
     private var lastHardwareError = 0
+    /// Hardware errors since start, so a client sees each one.
+    private var hardwareErrorCount = 0
     /// Calls into the control so far; each takes time.
     private var hardwareCalls = 0
     /// ``hardwareCalls`` when the time limits were last settled.
     private var hardwareCallsWhenSettled = 0
+    /// Why each control's latest lease ended, for clients that held it.
+    private var leaseEnds: [HelperControl: HelperLeaseEndReason] = [:]
     private var writeFailedAt: TimeInterval?
 
     /// - Parameters:
@@ -368,13 +372,19 @@ public actor HelperEngine {
                 adapterDisabledLeaseSeconds: 0,
                 isLeaseHolder: false,
                 interlocks: [],
-                lastHardwareError: 0
+                lastHardwareError: 0,
+                hardwareErrorCount: 0,
+                chargingInhibitedLeaseEnd: 0,
+                adapterDisabledLeaseEnd: 0
             )
         }
         let now = refresh(.request)
         func remaining(_ control: HelperControl) -> Int {
             guard let deadline = leases[control] else { return 0 }
             return max(0, Int((deadline - now).rounded(.up)))
+        }
+        func ended(_ control: HelperControl) -> Int {
+            leases[control] == nil ? leaseEnds[control]?.rawValue ?? 0 : 0
         }
         return HelperStateReply(
             status: lastReadBack == nil ? .hardwareError : .ok,
@@ -383,7 +393,10 @@ public actor HelperEngine {
             adapterDisabledLeaseSeconds: remaining(.adapterDisabled),
             isLeaseHolder: leaseHolder == id,
             interlocks: interlocks,
-            lastHardwareError: lastHardwareError
+            lastHardwareError: lastHardwareError,
+            hardwareErrorCount: hardwareErrorCount,
+            chargingInhibitedLeaseEnd: ended(.chargingInhibited),
+            adapterDisabledLeaseEnd: ended(.adapterDisabled)
         )
     }
 
@@ -516,7 +529,7 @@ public actor HelperEngine {
         defer { finishOperation() }
         guard sessions.removeValue(forKey: id) != nil else { return }
         emit(.sessionInvalidated(id))
-        endSession(id)
+        endSession(id, reason: .sessionInvalidated)
     }
 
     // MARK: - Ending an operation
@@ -626,14 +639,14 @@ public actor HelperEngine {
     private func revoke(_ id: HelperSessionID) {
         guard sessions.removeValue(forKey: id) != nil else { return }
         emit(.sessionRevoked(id))
-        endSession(id)
+        endSession(id, reason: .revoked)
     }
 
     /// Ends what an ended session held: its leases, and the controls set
     /// under them (R1, R3). If a restore is owed, retries it instead.
-    private func endSession(_ id: HelperSessionID) {
+    private func endSession(_ id: HelperSessionID, reason: HelperLeaseEndReason) {
         guard leaseHolder == id else { return }
-        endAllLeases(reason: .sessionInvalidated)
+        endAllLeases(reason: reason)
         if isRestoreOwed {
             if !owned.isEmpty {
                 restoreAll(reason: .sessionInvalidated)
@@ -826,6 +839,7 @@ public actor HelperEngine {
 
     private func endLease(_ control: HelperControl, reason: HelperLeaseEndReason) {
         guard let holder = leaseHolder, leases.removeValue(forKey: control) != nil else { return }
+        leaseEnds[control] = reason
         emit(.leaseEnded(holder, control, reason))
         if leases.isEmpty {
             leaseHolder = nil
@@ -1006,6 +1020,7 @@ public actor HelperEngine {
 
     private func recordHardwareError(_ code: Int) {
         lastHardwareError = code
+        hardwareErrorCount += 1
         emit(.hardwareError(code: code))
     }
 

@@ -29,14 +29,33 @@ public enum HelperChangeReason: Sendable, Equatable {
     case terminate
 }
 
-/// Why a lease ended.
-public enum HelperLeaseEndReason: Sendable, Equatable {
-    case released
-    case expired
-    case restoredDefaults
-    /// The session's connection ended, or the engine revoked it.
-    case sessionInvalidated
-    case shutdown
+/// Why a lease ended. Also on the wire, in ``HelperStateReply``: the raw
+/// values never change and are never reused, and 0 means none.
+public enum HelperLeaseEndReason: Int, Sendable, Equatable, CaseIterable, CustomStringConvertible {
+    /// Its holder released it.
+    case released = 1
+    /// It ran out before its holder renewed it.
+    case expired = 2
+    /// A client restored defaults, which ends every lease.
+    case restoredDefaults = 3
+    /// The holder's connection ended.
+    case sessionInvalidated = 4
+    /// The engine revoked the holder's session for exceeding its request
+    /// budget.
+    case revoked = 5
+    /// The engine shut down.
+    case shutdown = 6
+
+    public var description: String {
+        switch self {
+        case .released: "released"
+        case .expired: "expired"
+        case .restoredDefaults: "restoredDefaults"
+        case .sessionInvalidated: "sessionInvalidated"
+        case .revoked: "revoked"
+        case .shutdown: "shutdown"
+        }
+    }
 }
 
 /// The requests a session can make, for audit.

@@ -744,7 +744,7 @@ reply block. Raw values never change and are never reused. Protocol version
 | Request | Before `hello` | Lease | Request budget | Effect |
 |---|---|---|---|---|
 | `hello(clientProtocolVersion)` | — | no | yes | Status, helper protocol version, build, capabilities, whether simulated. Any failed `hello` withdraws the introduction |
-| `readState()` | refused | no | yes | Read-back controls, seconds left on each lease, whether the caller holds them, interlocks, last hardware error |
+| `readState()` | refused | no | yes | Read-back controls, seconds left on each lease, whether the caller holds them, why each control's latest lease ended, interlocks, the last hardware error and the number of hardware errors since start |
 | `acquireOrRenewLease(control, seconds)` | refused | — | yes | Grants or renews, clamped to 900 s (inhibit) or 120 s (adapter); one session holds leases at a time |
 | `releaseLease(control)` | refused | holder | not refused¹ | Ends the lease and clears the control |
 | `setControl(control, true)` | refused | yes | yes | Capability, then the checks, which end with every lease and the power state's age judged on a fresh clock reading; then, on that reading, the lease, interlocks and activation limits; then write and read-back |
@@ -760,6 +760,17 @@ Only a live session is served. An invalidated or revoked session gets
 `notIntroduced` for anything else, depending on the engine's phase.
 Requests the budget does not refuse still spend a token when one is left,
 and still count toward revocation.
+
+`readState` says, per control, why its latest lease ended: `released`,
+`expired`, `restoredDefaults` (a client's restore, which ends every lease),
+`sessionInvalidated` (the holder's connection ended), `revoked` or
+`shutdown`; on the wire a raw `HelperLeaseEndReason`, and 0 while a lease on
+the control is active or if none has ended since start. Any live session
+may still clear a control toward safety, with `setControl(control, false)`
+or a restore; a deactivation ends no lease, so the holder then sees its
+control cleared while its lease runs on. `hardwareErrorCount` counts every
+hardware error since start, so a client can tell a new error from an old one
+with the same code.
 
 Statuses: `ok`, `incompatibleProtocol`, `notIntroduced`,
 `unsupportedControl`, `invalidArgument` (unknown control, lease of 0 s or
@@ -1113,3 +1124,4 @@ decisions.
 | D35 | The helper's clock is the system's `CLOCK_MONOTONIC`, and a new engine takes the activation history of the previous one in the same boot | A relaunch the client asks for must not reset the activation limits; the daemon persists the history and discards it at a new boot |
 | D36 | The helper engine queues its events and delivers them, in order, when each operation has ended (lead's decision, 2026-10-09). Lease expiry and the power state's age are judged on a clock reading taken after every read they depend on, and again after any write, including the last write of a request, before the call returns; an activation follows on that reading with only pure checks, and `activationRecorded` reports the write with its time | A sink that ran mid-operation could block or re-enter the engine between a check and a write; removing that class of bug beats re-checking after every callback. A time limit judged on a reading taken before a slow read or write could let an expired lease or a stale power state stay in force |
 | D37 | A control that a failed or wrong restore may have made active counts as the engine's until it reads back inactive; a control active before and after a restore keeps its owner, and the state before is read afresh, falling back to the controls last known to be another tool's | A restore that went wrong must not leave a restriction that nothing retries, while another tool's control must not become the engine's to fight over. A tool that sets an inactive control during each restore still looks like a wrong restore (a known limitation) |
+| D38 | `readState` reports why each control's latest lease ended and how many hardware errors there have been; any live session may still clear a control toward safety (lead's decision, 2026-10-09) | A client must tell the helper's own releases from another client's changes without guessing from its clock, and see every hardware error; limiting deactivation to the lease holder would make a move toward safety depend on who asks |

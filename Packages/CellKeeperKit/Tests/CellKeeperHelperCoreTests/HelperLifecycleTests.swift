@@ -333,7 +333,12 @@ struct HelperHardwareFailureTests {
             adapterDisabledLeaseSeconds: 0,
             isLeaseHolder: true,
             interlocks: [],
-            lastHardwareError: simulatedFailure
+            lastHardwareError: simulatedFailure,
+            // The tick's read, then the check's read, the restore's read
+            // before it, and its read-back.
+            hardwareErrorCount: 4,
+            chargingInhibitedLeaseEnd: 0,
+            adapterDisabledLeaseEnd: 0
         ))
     }
 

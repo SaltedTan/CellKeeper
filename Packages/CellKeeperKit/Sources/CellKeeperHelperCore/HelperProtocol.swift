@@ -272,6 +272,15 @@ public struct HelperStateReply: Sendable, Equatable {
     /// The last hardware error code, 0 if there has been none. See
     /// ``HelperHardwareError``.
     public var lastHardwareError: Int
+    /// How many hardware errors the engine has recorded since it started, so
+    /// that a repeat of the same code is visible.
+    public var hardwareErrorCount: Int
+    /// Why the latest lease on the charging inhibit ended: a raw
+    /// ``HelperLeaseEndReason``, or 0 while a lease on it is active or if
+    /// none has ended since the engine started.
+    public var chargingInhibitedLeaseEnd: Int
+    /// The same for the adapter-disable.
+    public var adapterDisabledLeaseEnd: Int
 
     public init(
         status: HelperStatus,
@@ -280,7 +289,10 @@ public struct HelperStateReply: Sendable, Equatable {
         adapterDisabledLeaseSeconds: Int,
         isLeaseHolder: Bool,
         interlocks: HelperInterlocks,
-        lastHardwareError: Int
+        lastHardwareError: Int,
+        hardwareErrorCount: Int,
+        chargingInhibitedLeaseEnd: Int,
+        adapterDisabledLeaseEnd: Int
     ) {
         self.status = status
         self.activeControls = activeControls
@@ -289,6 +301,9 @@ public struct HelperStateReply: Sendable, Equatable {
         self.isLeaseHolder = isLeaseHolder
         self.interlocks = interlocks
         self.lastHardwareError = lastHardwareError
+        self.hardwareErrorCount = hardwareErrorCount
+        self.chargingInhibitedLeaseEnd = chargingInhibitedLeaseEnd
+        self.adapterDisabledLeaseEnd = adapterDisabledLeaseEnd
     }
 
     /// Seconds left on the lease for `control`, rounded up; 0 for none.
@@ -296,6 +311,15 @@ public struct HelperStateReply: Sendable, Equatable {
         switch control {
         case .chargingInhibited: chargingInhibitedLeaseSeconds
         case .adapterDisabled: adapterDisabledLeaseSeconds
+        }
+    }
+
+    /// Why the latest lease on `control` ended; nil while one is active, if
+    /// none has ended, or for a value this version does not know.
+    public func leaseEnd(for control: HelperControl) -> HelperLeaseEndReason? {
+        switch control {
+        case .chargingInhibited: HelperLeaseEndReason(rawValue: chargingInhibitedLeaseEnd)
+        case .adapterDisabled: HelperLeaseEndReason(rawValue: adapterDisabledLeaseEnd)
         }
     }
 }
