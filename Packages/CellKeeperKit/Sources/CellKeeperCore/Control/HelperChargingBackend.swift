@@ -441,20 +441,17 @@ public actor HelperChargingBackend: ChargingBackend {
             return .released(.connectionLost)
         }
         let name = Self.describe([control])
-        switch state.leaseEnd(for: control) {
-        case .expired?:
+        switch state.change(for: control).cause {
+        case .leaseExpired?:
             return .released(.leaseExpired)
-        case .sessionInvalidated?, .revoked?, .shutdown?:
+        case .sessionEnded?, .sessionRevoked?, .shutdown?:
             // CellKeeper's earlier session ended; the helper cleared what
             // it held.
             return .released(.connectionLost)
-        case .restoredDefaults?:
+        case .clearedByRestore?:
             // CellKeeper forgets what it held before its own restores.
             return .unexplained("another client of the helper restored macOS's defaults, which ended CellKeeper's \(name)")
-        case .released?:
-            // Only the lease holder releases: CellKeeper did.
-            return nil
-        case nil:
+        default:
             break
         }
         // The lease runs on. Only the power and sleep conditions are

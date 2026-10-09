@@ -232,13 +232,113 @@ public struct HelperHelloReply: Sendable, Equatable {
     public var capabilities: HelperCapabilities
     /// True if the helper's control is simulated and changes no hardware.
     public var isSimulated: Bool
+    /// The calling session's number, as ``HelperControlChange/session``
+    /// reports it, so a client recognises changes its own sessions made,
+    /// also after reconnecting.
+    public var sessionID: UInt64
+    /// A random number fixed for the life of this helper process. A client
+    /// that sees it change knows the helper restarted: generations and
+    /// session numbers start again, and the start restored defaults.
+    public var helperInstance: UInt64
 
-    public init(status: HelperStatus, helperProtocolVersion: Int, build: Int, capabilities: HelperCapabilities, isSimulated: Bool) {
+    public init(
+        status: HelperStatus,
+        helperProtocolVersion: Int,
+        build: Int,
+        capabilities: HelperCapabilities,
+        isSimulated: Bool,
+        sessionID: UInt64,
+        helperInstance: UInt64
+    ) {
         self.status = status
         self.helperProtocolVersion = helperProtocolVersion
         self.build = build
         self.capabilities = capabilities
         self.isSimulated = isSimulated
+        self.sessionID = sessionID
+        self.helperInstance = helperInstance
+    }
+}
+
+/// Why a control last turned on or off, as the helper saw it. Raw values are
+/// the wire format; 0 means no change since the helper started. A lease
+/// ending is not a change: what clears the control is.
+public enum HelperChangeCause: Int, Sendable, Equatable, CaseIterable, CustomStringConvertible {
+    /// A session activated it.
+    case setByClient = 1
+    /// A session deactivated it, or released its lease.
+    case clearedByClient = 2
+    /// A session's restore of defaults cleared it.
+    case clearedByRestore = 3
+    /// Its lease ran out.
+    case leaseExpired = 4
+    /// Interlocks cleared it; ``HelperControlChange/interlocks`` says which.
+    case interlock = 5
+    /// The lease holder's connection ended.
+    case sessionEnded = 6
+    /// The engine revoked the lease holder's session.
+    case sessionRevoked = 7
+    /// The restore of defaults at shutdown.
+    case shutdown = 8
+    /// The restore of defaults at start.
+    case start = 9
+    /// It changed without the engine writing it: another tool (rule R27).
+    case changedOutside = 10
+    /// The restore that follows an outside change.
+    case restoredAfterOutsideChange = 11
+    /// The restore that follows a failed or mismatched write (`writeFailed`).
+    case restoredAfterWriteFailure = 12
+    /// The restore that follows a read-back that failed.
+    case restoredAfterReadBackFailure = 13
+    /// A retry of a restore that was owed.
+    case restoreRetried = 14
+    /// The restore that follows an activation the activation limits refused.
+    case activationLimited = 15
+
+    public var description: String {
+        switch self {
+        case .setByClient: "setByClient"
+        case .clearedByClient: "clearedByClient"
+        case .clearedByRestore: "clearedByRestore"
+        case .leaseExpired: "leaseExpired"
+        case .interlock: "interlock"
+        case .sessionEnded: "sessionEnded"
+        case .sessionRevoked: "sessionRevoked"
+        case .shutdown: "shutdown"
+        case .start: "start"
+        case .changedOutside: "changedOutside"
+        case .restoredAfterOutsideChange: "restoredAfterOutsideChange"
+        case .restoredAfterWriteFailure: "restoredAfterWriteFailure"
+        case .restoredAfterReadBackFailure: "restoredAfterReadBackFailure"
+        case .restoreRetried: "restoreRetried"
+        case .activationLimited: "activationLimited"
+        }
+    }
+}
+
+/// The latest change of one control, from ``HelperStateReply``. Not on the
+/// wire as such: the reply carries its four fields per control.
+public struct HelperControlChange: Sendable, Equatable {
+    /// How many times the control has turned on or off since the helper
+    /// started. A client that recorded the generation of its own
+    /// activation knows from it whether anything happened since.
+    public var generation: UInt64
+    /// Why it last changed; nil if it has not changed, or for a value this
+    /// version does not know.
+    public var cause: HelperChangeCause?
+    /// For ``HelperChangeCause/interlock``, the interlocks that cleared it,
+    /// as they were then.
+    public var interlocks: HelperInterlocks
+    /// The session that made the change (its ``HelperHelloReply/sessionID``),
+    /// for the causes a session makes or ends; 0 for the engine's own changes
+    /// and outside ones.
+    public var session: UInt64
+
+    public init(generation: UInt64, cause: HelperChangeCause?, interlocks: HelperInterlocks, session: UInt64) {
+        self.generation = generation
+        self.cause = cause
+        self.interlocks = interlocks
+        self.session = session
     }
 }
 
@@ -275,12 +375,21 @@ public struct HelperStateReply: Sendable, Equatable {
     /// How many hardware errors the engine has recorded since it started, so
     /// that a repeat of the same code is visible.
     public var hardwareErrorCount: Int
-    /// Why the latest lease on the charging inhibit ended: a raw
-    /// ``HelperLeaseEndReason``, or 0 while a lease on it is active or if
-    /// none has ended since the engine started.
-    public var chargingInhibitedLeaseEnd: Int
-    /// The same for the adapter-disable.
-    public var adapterDisabledLeaseEnd: Int
+    /// The charging inhibit's change generation; see
+    /// ``HelperControlChange/generation``.
+    public var chargingInhibitedGeneration: UInt64
+    /// Why the charging inhibit last changed: a raw ``HelperChangeCause``,
+    /// 0 for none.
+    public var chargingInhibitedChangeCause: Int
+    /// The interlocks behind that change, if an interlock caused it.
+    public var chargingInhibitedChangeInterlocks: HelperInterlocks
+    /// The session behind that change, or 0.
+    public var chargingInhibitedChangeSession: UInt64
+    /// The same four for the adapter-disable.
+    public var adapterDisabledGeneration: UInt64
+    public var adapterDisabledChangeCause: Int
+    public var adapterDisabledChangeInterlocks: HelperInterlocks
+    public var adapterDisabledChangeSession: UInt64
 
     public init(
         status: HelperStatus,
@@ -291,8 +400,8 @@ public struct HelperStateReply: Sendable, Equatable {
         interlocks: HelperInterlocks,
         lastHardwareError: Int,
         hardwareErrorCount: Int,
-        chargingInhibitedLeaseEnd: Int,
-        adapterDisabledLeaseEnd: Int
+        chargingInhibitedChange: HelperControlChange,
+        adapterDisabledChange: HelperControlChange
     ) {
         self.status = status
         self.activeControls = activeControls
@@ -302,8 +411,14 @@ public struct HelperStateReply: Sendable, Equatable {
         self.interlocks = interlocks
         self.lastHardwareError = lastHardwareError
         self.hardwareErrorCount = hardwareErrorCount
-        self.chargingInhibitedLeaseEnd = chargingInhibitedLeaseEnd
-        self.adapterDisabledLeaseEnd = adapterDisabledLeaseEnd
+        self.chargingInhibitedGeneration = chargingInhibitedChange.generation
+        self.chargingInhibitedChangeCause = chargingInhibitedChange.cause?.rawValue ?? 0
+        self.chargingInhibitedChangeInterlocks = chargingInhibitedChange.interlocks
+        self.chargingInhibitedChangeSession = chargingInhibitedChange.session
+        self.adapterDisabledGeneration = adapterDisabledChange.generation
+        self.adapterDisabledChangeCause = adapterDisabledChange.cause?.rawValue ?? 0
+        self.adapterDisabledChangeInterlocks = adapterDisabledChange.interlocks
+        self.adapterDisabledChangeSession = adapterDisabledChange.session
     }
 
     /// Seconds left on the lease for `control`, rounded up; 0 for none.
@@ -314,12 +429,23 @@ public struct HelperStateReply: Sendable, Equatable {
         }
     }
 
-    /// Why the latest lease on `control` ended; nil while one is active, if
-    /// none has ended, or for a value this version does not know.
-    public func leaseEnd(for control: HelperControl) -> HelperLeaseEndReason? {
+    /// The latest change of `control`.
+    public func change(for control: HelperControl) -> HelperControlChange {
         switch control {
-        case .chargingInhibited: HelperLeaseEndReason(rawValue: chargingInhibitedLeaseEnd)
-        case .adapterDisabled: HelperLeaseEndReason(rawValue: adapterDisabledLeaseEnd)
+        case .chargingInhibited:
+            HelperControlChange(
+                generation: chargingInhibitedGeneration,
+                cause: HelperChangeCause(rawValue: chargingInhibitedChangeCause),
+                interlocks: chargingInhibitedChangeInterlocks,
+                session: chargingInhibitedChangeSession
+            )
+        case .adapterDisabled:
+            HelperControlChange(
+                generation: adapterDisabledGeneration,
+                cause: HelperChangeCause(rawValue: adapterDisabledChangeCause),
+                interlocks: adapterDisabledChangeInterlocks,
+                session: adapterDisabledChangeSession
+            )
         }
     }
 }

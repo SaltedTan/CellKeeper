@@ -769,8 +769,8 @@ reply block. Raw values never change and are never reused. Protocol version
 
 | Request | Before `hello` | Lease | Request budget | Effect |
 |---|---|---|---|---|
-| `hello(clientProtocolVersion)` | — | no | yes | Status, helper protocol version, build, capabilities, whether simulated. Any failed `hello` withdraws the introduction |
-| `readState()` | refused | no | yes | Read-back controls, seconds left on each lease, whether the caller holds them, why each control's latest lease ended, interlocks, the last hardware error and the number of hardware errors since start |
+| `hello(clientProtocolVersion)` | — | no | yes | Status, helper protocol version, build, capabilities, whether simulated, the caller's session number and the helper's instance. Any failed `hello` withdraws the introduction |
+| `readState()` | refused | no | yes | Read-back controls, seconds left on each lease, whether the caller holds them, each control's latest change (below), interlocks, the last hardware error and the number of hardware errors since start |
 | `acquireOrRenewLease(control, seconds)` | refused | — | yes | Grants or renews, clamped to 900 s (inhibit) or 120 s (adapter); one session holds leases at a time |
 | `releaseLease(control)` | refused | holder | not refused¹ | Ends the lease and clears the control |
 | `setControl(control, true)` | refused | yes | yes | Capability, then the checks, which end with every lease and the power state's age judged on a fresh clock reading; then, on that reading, the lease, interlocks and activation limits; then write and read-back |
@@ -787,16 +787,41 @@ Only a live session is served. An invalidated or revoked session gets
 Requests the budget does not refuse still spend a token when one is left,
 and still count toward revocation.
 
-`readState` says, per control, why its latest lease ended: `released`,
-`expired`, `restoredDefaults` (a client's restore, which ends every lease),
-`sessionInvalidated` (the holder's connection ended), `revoked` or
-`shutdown`; on the wire a raw `HelperLeaseEndReason`, and 0 while a lease on
-the control is active or if none has ended since start. Any live session
-may still clear a control toward safety, with `setControl(control, false)`
-or a restore; a deactivation ends no lease, so the holder then sees its
-control cleared while its lease runs on. `hardwareErrorCount` counts every
-hardware error since start, so a client can tell a new error from an old one
-with the same code.
+The engine knows why each control changes, so `readState` reports it
+instead of leaving clients to infer it. Per control (`HelperControlChange`,
+four primitive fields on the wire):
+
+- `generation`: how many times the control has turned on or off since
+  start, as read-backs saw it;
+- `cause` (a raw `HelperChangeCause`, 0 for none): `setByClient`,
+  `clearedByClient` (a deactivation or a lease release), `clearedByRestore`,
+  `leaseExpired`, `interlock`, `sessionEnded`, `sessionRevoked`, `shutdown`,
+  `start`, `changedOutside`, `restoredAfterOutsideChange`,
+  `restoredAfterWriteFailure`, `restoredAfterReadBackFailure`,
+  `restoreRetried` or `activationLimited`;
+- `interlocks`: for `interlock`, the interlocks that cleared it, as they were
+  then;
+- `session`: the session that made the change or whose end made it, by the
+  number `hello` gave it; 0 for the engine's own changes and outside ones.
+
+A change is recorded by the read-back that first shows it, for what the
+engine was doing: a write records the change of the control it wrote, a
+restore the changes of every control, and any other change a read-back finds
+is `changedOutside`. The checks record each clear for the lease that ran out
+or the interlocks that made it, also when the time limits are settled again
+after a slow write, in the same check or at the end of the call. A lease
+ending is not a change, so a later
+expiry never hides an earlier deactivation. `hello` also returns the caller's session
+number and the helper's instance (random, fixed for the process), so a
+client recognises its own sessions' changes after reconnecting, and a
+restarted helper, whose generations and session numbers start again. The
+host can read the same history with `latestChange(of:)`, also during
+shutdown.
+
+Any live session may still clear a control toward safety, with
+`setControl(control, false)` or a restore; the history names it.
+`hardwareErrorCount` counts every hardware error since start, so a client
+can tell a new error from an old one with the same code.
 
 Statuses: `ok`, `incompatibleProtocol`, `notIntroduced`,
 `unsupportedControl`, `invalidArgument` (unknown control, lease of 0 s or
@@ -1150,7 +1175,7 @@ decisions.
 | D35 | The helper's clock is the system's `CLOCK_MONOTONIC`, and a new engine takes the activation history of the previous one in the same boot | A relaunch the client asks for must not reset the activation limits; the daemon persists the history and discards it at a new boot |
 | D36 | The helper engine queues its events and delivers them, in order, when each operation has ended (lead's decision, 2026-10-09). Lease expiry and the power state's age are judged on a clock reading taken after every read they depend on, and again after any write, including the last write of a request, before the call returns; an activation follows on that reading with only pure checks, and `activationRecorded` reports the write with its time | A sink that ran mid-operation could block or re-enter the engine between a check and a write; removing that class of bug beats re-checking after every callback. A time limit judged on a reading taken before a slow read or write could let an expired lease or a stale power state stay in force |
 | D37 | A control that a failed or wrong restore may have made active counts as the engine's until it reads back inactive; a control active before and after a restore keeps its owner, and the state before is read afresh, falling back to the controls last known to be another tool's | A restore that went wrong must not leave a restriction that nothing retries, while another tool's control must not become the engine's to fight over. A tool that sets an inactive control during each restore still looks like a wrong restore (a known limitation) |
-| D38 | `readState` reports why each control's latest lease ended and how many hardware errors there have been; any live session may still clear a control toward safety (lead's decision, 2026-10-09) | A client must tell the helper's own releases from another client's changes without guessing from its clock, and see every hardware error; limiting deactivation to the lease holder would make a move toward safety depend on who asks |
+| D38 | `readState` reports, per control, a change generation and the cause, interlocks and session of its latest change, and how many hardware errors there have been; `hello` gives the caller's session number and the helper's instance. Any live session may still clear a control toward safety (lead's decisions, 2026-10-09) | Snapshots of active bits, current interlocks and lease state cannot establish why a control changed; the engine knows, so a client's classification becomes a lookup. Limiting deactivation to the lease holder would make a move toward safety depend on who asks |
 | D39 | The app renews a helper lease only at the end of an evaluation that still wants the mode it holds, including one that changes nothing; a failed renewal is a failure and `.normal` is requested at once | Safety precondition 3 and rule R3: a hung or stalled policy loop must let the restriction lapse, and a renewal that cannot be made must not leave one in place |
 | D40 | A hold the helper ended under its own rules (a lapsed lease, a power or sleep interlock, the end of CellKeeper's session) is logged and not treated as an outside change; another client's restore or deactivation, a clear the helper does not explain, and the helper's `externalModification` fault the backend at once | The helper's releases are its safety rules working, and faulting on them would stop control for nothing; anything else may be another tool, which R27 says to stop for |
 | D41 | The helper backend never asks the helper to restore defaults by itself; `.normal` releases only what CellKeeper set and succeeds when nothing is active, even after an outside change, which faults the controller through `reportedModeOrigin()`. Only the user clearing the fault restores defaults, and only if the helper waits for that (lead's decision, 2026-10-09) | A restore may undo another tool's change (R26, R27), so it must be a deliberate act; and quitting or switching backend must not be blocked while macOS's defaults are in effect |

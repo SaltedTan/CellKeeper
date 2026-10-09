@@ -29,22 +29,23 @@ public enum HelperChangeReason: Sendable, Equatable {
     case terminate
 }
 
-/// Why a lease ended. Also on the wire, in ``HelperStateReply``: the raw
-/// values never change and are never reused, and 0 means none.
-public enum HelperLeaseEndReason: Int, Sendable, Equatable, CaseIterable, CustomStringConvertible {
+/// Why a lease ended, for the audit log. A client learns why a control
+/// changed from ``HelperControlChange`` instead: a lease ending is not a
+/// control change.
+public enum HelperLeaseEndReason: Sendable, Equatable, CustomStringConvertible {
     /// Its holder released it.
-    case released = 1
+    case released
     /// It ran out before its holder renewed it.
-    case expired = 2
+    case expired
     /// A client restored defaults, which ends every lease.
-    case restoredDefaults = 3
+    case restoredDefaults
     /// The holder's connection ended.
-    case sessionInvalidated = 4
+    case sessionInvalidated
     /// The engine revoked the holder's session for exceeding its request
     /// budget.
-    case revoked = 5
+    case revoked
     /// The engine shut down.
-    case shutdown = 6
+    case shutdown
 
     public var description: String {
         switch self {

@@ -44,15 +44,18 @@ struct HelperProtocolTests {
             #expect(status.rawValue == raw, "\(status)")
         }
 
-        // 0 on the wire means no lease has ended.
-        let leaseEnds: [(HelperLeaseEndReason, Int)] = [
-            (.released, 1), (.expired, 2), (.restoredDefaults, 3), (.sessionInvalidated, 4), (.revoked, 5), (.shutdown, 6),
+        // 0 on the wire means no change since start.
+        let causes: [(HelperChangeCause, Int)] = [
+            (.setByClient, 1), (.clearedByClient, 2), (.clearedByRestore, 3), (.leaseExpired, 4), (.interlock, 5),
+            (.sessionEnded, 6), (.sessionRevoked, 7), (.shutdown, 8), (.start, 9), (.changedOutside, 10),
+            (.restoredAfterOutsideChange, 11), (.restoredAfterWriteFailure, 12), (.restoredAfterReadBackFailure, 13),
+            (.restoreRetried, 14), (.activationLimited, 15),
         ]
-        #expect(leaseEnds.count == HelperLeaseEndReason.allCases.count)
-        for (reason, raw) in leaseEnds {
-            #expect(reason.rawValue == raw, "\(reason)")
+        #expect(causes.count == HelperChangeCause.allCases.count)
+        for (cause, raw) in causes {
+            #expect(cause.rawValue == raw, "\(cause)")
         }
-        #expect(HelperLeaseEndReason(rawValue: 0) == nil)
+        #expect(HelperChangeCause(rawValue: 0) == nil)
     }
 
     @Test("Unknown raw values are not controls", arguments: [0, 3, -1, Int.max])
