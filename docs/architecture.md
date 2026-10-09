@@ -420,7 +420,12 @@ The controller adds, independent of the backend:
   policy is then told to release (`ReleaseReason.backendSwitch`) whatever
   the settings say, so `.normal` keeps being requested (automatic retries
   60 s apart), and the switch completes as soon as it is confirmed.
-  Choosing the current kind of backend again cancels the pending switch;
+  Choosing the current kind of backend again cancels the pending switch.
+  The app shows a pending switch for every backend, in the menu and in
+  Settings › Control: which backend is still in charge, which one was
+  chosen, and what the switch waits for (the user's own limit for macOS's
+  Charge Limit, confirmed normal charging otherwise), with a button that
+  stays with the backend in charge;
 - if a read fails while CellKeeper holds a non-normal state, `.normal` is
   requested (`ReleaseReason.stateUnverified`). The last confirmed mode stays
   the expectation, so a reading that differs from it after reads recover is

@@ -216,6 +216,7 @@ private struct ControlSettingsTab: View {
                         Button("Clear fault and retry") { model.resetBackendFault() }
                             .help(faultResetHelp(for: status))
                     }
+                    PendingSwitchNotice(status: status, select: { model.selectBackend($0) })
                 }
             }
 
@@ -362,11 +363,6 @@ private struct NativeLimitSetupSection: View {
                 } message: {
                     Text("Only do this after setting your own limit in System Settings. CellKeeper will then treat the current limit as yours.")
                 }
-            }
-            if let pending = model.status?.pendingBackend {
-                Label(Format.pendingSwitch(to: pending.displayName, nativeLimit: native) + " CellKeeper retries automatically; choose macOS Charge Limit again to cancel.", systemImage: "arrow.triangle.2.circlepath")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
             }
             Text("You can always set the limit yourself in System Settings › Battery › Charging.")
                 .font(.caption)
