@@ -16,6 +16,19 @@ hardware state. Dates are deliberately omitted.
   the native limit, and anything below 80% or "discharge to target" stays
   experimental until a mechanism is verified on real hardware.
 
+## Current priority
+
+Decided by the owner on 2026-10-09: **CellKeeper's own charge control**
+(milestone 4) comes first. CellKeeper will stop and resume charging itself,
+so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
+85, 90, 95 and 100% steps.
+
+- Everything that needs no hardware write is built first (phase 4a).
+- The hardware gates are unchanged. No private mechanism is tried until a
+  dedicated test Mac is available, and no privileged helper ships without an
+  Apple Developer ID.
+- The open items of milestone 3 wait until phase 4a is done.
+
 ## Milestone 1 — Architecture and vertical slice ✅
 
 - Swift package (`CellKeeperCore`, `CellKeeperKit`) and menu-bar app.
@@ -61,7 +74,7 @@ charge limit" action instead of `pmset -g battlimit` (note 08, O18).
   on a daily-use Mac is acceptable.
 - Use it for schedules ("100% before travel on Friday") without root.
 
-## Milestone 3 — Diagnostics and observability
+## Milestone 3 — Diagnostics and observability (after phase 4a)
 
 - Diagnostics view and exportable report (no identifiers): telemetry,
   decisions, OS build, model identifier. Done: Settings › Activity › Copy
@@ -72,37 +85,91 @@ charge limit" action instead of `pmset -g battlimit` (note 08, O18).
 - Unplug/replug and sleep/wake observation runs on real hardware to measure
   notification cadence (research 01, open question 1).
 
-## Milestone 4 — Charge limits below 80% (gated)
+## Milestone 4 — CellKeeper's own charge control: limits at any level (current priority)
 
-Tracked in [issue #1](https://github.com/SaltedTan/CellKeeper/issues/1). No public
-mechanism exists; every candidate is private and needs root. This milestone
-is **blocked** until all of the following are available:
+Tracked in [issue #1](https://github.com/SaltedTan/CellKeeper/issues/1).
+CellKeeper enforces the limit itself. Settings accept every whole
+percentage from 20 to 100. Below 100%, CellKeeper stops charging at the
+limit and lets it charge again at the resume threshold; at 100%, it removes
+its own restriction. Temperature protection and discharge sessions work as
+the policy already defines them. The policy and controller already do this
+with the simulated backend. What is
+missing is a mechanism that changes charging on real hardware, and the
+privileged helper that would run it.
 
-- **A dedicated test Mac** with no other battery tools. Hardware experiments
-  with private mechanisms must not run on a daily-use Mac, and the maintainer
-  currently has only one.
-- **A verified mechanism.** Follow research note 02 §7 (read-only,
-  allowlisted capability probe, then single reversible writes, then the
-  persistence matrix). Evaluate Apple's private `ChargeInhibit` power
-  assertion first (released automatically when the owning process exits),
-  and the SMC adapter-cut key only if a genuine need remains.
-- **An Apple Developer ID**, because a privileged helper must be signed and
-  notarized to be installed reliably.
+No public mechanism exists; every candidate is private and needs root
+([research note 02](research/02-charging-control-apple-silicon.md)). The
+owner's long-term direction (2026-10-06): CellKeeper controls charging
+itself, and the user turns macOS's own Charge Limit off. The app should then
+guide the user through turning it off, and detect it if it is turned back
+on, so two limits never compete.
 
-Then:
+### Phase 4a — Foundations without hardware writes (in progress)
 
-- `CellKeeperHelper` launch daemon registered with `SMAppService`, XPC with
-  code-signing requirements on both sides, typed operations only.
-- Per-control leases, restore-on-start, restore-on-SIGTERM, uninstall flow;
-  first version can only *restore defaults* and report state.
-- In-process mock helper transport so contributors without a Developer ID can
-  test the protocol.
-- Non-sandboxed, notarized app (see research 05); experimental backend behind
-  explicit opt-in, per verified model; every precondition in `safety.md`.
-- Owner's direction (2026-10-06): in the long run CellKeeper controls
-  charging itself, and the user turns macOS's own Charge Limit off. The app
-  should then guide the user through turning it off, and detect it if it is
-  turned back on, so two limits never compete.
+Needs no test Mac and no Developer ID. Nothing in this phase writes to
+hardware.
+
+- Helper logic (`CellKeeperHelperCore`), implemented and unit-tested
+  against a simulated charge control: a closed vocabulary of typed
+  operations; per-control leases; rate limits; the helper's own guards
+  (telemetry freshness, battery floor, AC loss, adapter presence, thermal
+  pressure, sleep); restore on start and on exit; detection of changes made
+  by someone else.
+- An app-side `ChargingBackend` that drives the helper: leases renewed only
+  by successful policy evaluations, and a read-back after every change. With
+  an in-process transport, the app can offer a **Simulated helper** that
+  shows limits at any level without changing anything.
+- An XPC transport with code-signing requirements on both sides, tested over
+  an anonymous listener in `swift test`.
+- The `CellKeeperHelper` daemon executable and its launchd property list,
+  with SIGTERM and sleep handling and its own power reading. It contains no
+  hardware control: it reports that it controls nothing, writes nothing, and
+  never reports hardware defaults as restored. Its logic is tested without
+  registering a privileged service; installing and distributing it belong
+  to phase 4b.
+- The `safety.md` preconditions that do not depend on the mechanism:
+  debounce and dwell (6); coexistence with macOS's Charge Limit and
+  Optimized Battery Charging (7); an uninstall flow that restores defaults
+  (9); a documented recovery procedure (research rule R31).
+- UI: limits at any level with the helper backend, honest status
+  (Simulated or Unavailable), and guidance for turning macOS's Charge Limit
+  off.
+
+### Phase 4b — Signed helper (needs an Apple Developer ID)
+
+Tracked in [issue #57](https://github.com/SaltedTan/CellKeeper/issues/57).
+
+- Register the daemon with `SMAppService` and guide the user through
+  approving it. Non-sandboxed, Hardened Runtime, notarized app and helper
+  ([research notes 04](research/04-privileged-helper.md) and
+  [05](research/05-distribution-and-signing.md)).
+- Release code-signing requirements checked with `codesign --verify -R`;
+  separate identities for development builds.
+- Installation, update and uninstall verified on a clean Mac.
+
+### Phase 4c — A verified mechanism (needs a dedicated test Mac)
+
+Tracked in [issue #58](https://github.com/SaltedTan/CellKeeper/issues/58).
+
+Hardware experiments with private mechanisms must not run on a daily-use
+Mac, and the maintainer currently has only one (owner decision, confirmed
+2026-10-09).
+
+- Follow research note 02 §7: a read-only, allowlisted capability probe,
+  then single reversible writes, then the persistence matrix. Evaluate
+  Apple's private `ChargeInhibit` power assertion first: Apple's published
+  source releases it when the owning process exits, and the test Mac must
+  show whether it works, and is released, on shipping Apple silicon. Try the
+  SMC adapter-cut key only if a genuine need remains.
+- Record the results per Mac model and firmware in `docs/research/`. Add a
+  verified mechanism to the helper's allowlist, with behavioural
+  verification in independent telemetry (`safety.md` precondition 5) and a
+  tested independent recovery (precondition 11).
+- Then offer the backend as experimental and opt-in, per verified model,
+  with every precondition in `safety.md`.
+
+Blocked until both exist: a dedicated test Mac with no other battery tools,
+and an Apple Developer ID.
 
 ## Later
 

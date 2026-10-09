@@ -483,8 +483,12 @@ candidates, in the order we intend to evaluate them:
 1. **Delegated native limit.** Implemented in milestone 2 as
    `NativeChargeLimitBackend` (see above and
    [research note 08](research/08-native-charge-limit.md)).
-2. **Privileged helper (`CellKeeperHelper`).** Only if a verified mechanism
-   exists that the native limit cannot provide (for example limits below 80%).
+2. **Privileged helper (`CellKeeperHelper`).** CellKeeper's own charge
+   control, for limits at any level, is the current priority (owner decision,
+   2026-10-09; roadmap milestone 4). Its foundations are developed against a
+   simulated control first (phase 4a). Installing the helper needs a
+   Developer ID (phase 4b), and hardware control needs a mechanism verified
+   on a dedicated test Mac and every precondition in `safety.md` (phase 4c).
    Design (see [04](research/04-privileged-helper.md)): `SMAppService` launch
    daemon; XPC with code-signing requirements on both sides; a fixed set of
    typed operations (no raw keys, no command execution); a lease that restores

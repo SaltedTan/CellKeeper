@@ -31,7 +31,7 @@ Limit** (80–100%) through a shortcut you create, and macOS enforces it.
 | Temporary charge to 100% | **Real** with macOS's Charge Limit; otherwise simulated |
 | Temperature protection | **Policy real**; cannot trigger without a temperature reading; not available with macOS's Charge Limit |
 | Discharge to limit while plugged in | **Policy real, control simulated**; a confirmed one-shot session, never automatic; not available with macOS's Charge Limit |
-| Limits below 80%, or CellKeeper switching charging itself | **Not implemented** — see [roadmap](docs/roadmap.md) and [issue #1](https://github.com/SaltedTan/CellKeeper/issues/1) |
+| Limits at any level (including below 80%), with CellKeeper switching charging itself | **In progress, the current priority; no hardware control yet** — see [roadmap](docs/roadmap.md) milestone 4 and [issue #1](https://github.com/SaltedTan/CellKeeper/issues/1) |
 | Scheduling, calibration, notifications, Shortcuts actions for CellKeeper's own controls, launch at login | Planned |
 
 The menu bar always shows which kind of control is in effect: **Available**,
@@ -48,8 +48,12 @@ documented-as-far-as-possible mechanisms, with the fail-safe rules in
 [docs/safety.md](docs/safety.md). The details are in
 [docs/research/](docs/research/README.md).
 
-Limits below 80% need private, privileged mechanisms and are a separate,
-gated step on the [roadmap](docs/roadmap.md).
+Limits at any level, including below 80%, need CellKeeper to switch
+charging itself, and every known way to do that is private and needs root.
+This is CellKeeper's current priority: the parts that need no hardware
+writes are being built now, and real control stays gated on a dedicated
+test Mac and an Apple Developer ID (milestone 4 on the
+[roadmap](docs/roadmap.md)).
 
 ## Using macOS's Charge Limit (experimental)
 
