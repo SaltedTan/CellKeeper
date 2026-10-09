@@ -66,6 +66,7 @@ public enum HelperRequestKind: Sendable, Equatable {
     case acquireOrRenewLease
     case releaseLease
     case setControl
+    case clearControlIfUnchanged
     case restoreDefaults
     case restoreDefaultsAndExit
 }

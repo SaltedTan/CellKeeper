@@ -38,6 +38,7 @@ struct HelperProtocolTests {
             (.ok, 0), (.incompatibleProtocol, 1), (.notIntroduced, 2), (.unsupportedControl, 3),
             (.invalidArgument, 4), (.noLease, 5), (.leaseHeldByOtherClient, 6), (.rateLimited, 7),
             (.blockedByInterlock, 8), (.hardwareError, 9), (.shuttingDown, 10), (.notReady, 11),
+            (.controlChanged, 12),
         ]
         #expect(statuses.count == HelperStatus.allCases.count)
         for (status, raw) in statuses {

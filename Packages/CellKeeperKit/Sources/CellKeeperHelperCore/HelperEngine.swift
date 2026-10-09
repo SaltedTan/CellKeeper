@@ -20,6 +20,11 @@ import Foundation
 ///   stale power state in force. An activation then needs only pure checks
 ///   on that same reading before its write, and any call that writes after
 ///   its checks settles the time limits again before it returns.
+/// - The engine records why each control changed (``HelperControlChange``).
+///   A client releasing a control it set can name that change
+///   (`clearControlIfUnchanged`): the engine compares it with its history
+///   right before clearing, and writes nothing if the control has changed
+///   since.
 /// - Every write that returns is read back. A write that throws, a failed
 ///   read-back or a mismatch restores defaults and raises `writeFailed`,
 ///   which refuses activations until a client restores defaults or an hour
@@ -532,6 +537,34 @@ public actor HelperEngine {
         }
         emit(.activated(control, by: id))
         return .ok
+    }
+
+    func clearControlIfUnchanged(_ id: HelperSessionID, control rawControl: Int, generation: UInt64, helperInstance: UInt64) -> HelperStatus {
+        defer { finishOperation() }
+        // Only moves toward safety, so the budget does not refuse it
+        // (unless this request revokes the session).
+        let admission = admit(id, .clearControlIfUnchanged, metered: false)
+        if let refusal = admission.refusal {
+            return refusal
+        }
+        guard let control = HelperControl(rawValue: rawControl) else {
+            return reject(id, .clearControlIfUnchanged, .invalidArgument)
+        }
+        // Over the budget it skips the checks, as a deactivation does. The
+        // history is then as of the last read: every change made through
+        // the engine is in it, because each write is read back and recorded
+        // at once, but a change by another tool since then is not, as for
+        // any request.
+        if admission.hasToken {
+            refresh(.request)
+        }
+        // Compared on the history the checks just updated, with nothing
+        // between the comparison and the clear.
+        guard helperInstance == instance, latestChange(of: control).generation == generation else {
+            return reject(id, .clearControlIfUnchanged, .controlChanged)
+        }
+        let isInactive = performing(.clearedByClient, by: id) { deactivate(control, reason: .clientRequest) }
+        return isInactive ? .ok : reject(id, .clearControlIfUnchanged, .hardwareError)
     }
 
     func restoreDefaults(_ id: HelperSessionID) -> HelperStatus {

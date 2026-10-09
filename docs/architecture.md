@@ -813,6 +813,7 @@ reply block. Raw values never change and are never reused. Protocol version
 | `releaseLease(control)` | refused | holder | not refused¹ | Ends the lease and clears the control |
 | `setControl(control, true)` | refused | yes | yes | Capability, then the checks, which end with every lease and the power state's age judged on a fresh clock reading; then, on that reading, the lease, interlocks and activation limits; then write and read-back |
 | `setControl(control, false)` | refused | no | not refused¹ | Clears the control if the engine set it |
+| `clearControlIfUnchanged(control, generation, helperInstance)` | refused | no | not refused¹ | Clears the control if the engine set it and its latest change is still `generation` on the helper process `helperInstance`; otherwise writes nothing and returns `controlChanged` |
 | `restoreDefaults()` | allowed | no | not refused¹ | Ends every lease and restores defaults. Reads the hardware afresh and writes nothing if it shows defaults and no restore is owed; an owed restore is written even if defaults may already be in effect. Also served before start and during shutdown |
 | `restoreDefaultsAndExit()` | allowed | no | not refused¹ | Restores defaults, then shuts down so the host can exit (update, uninstall). During shutdown, the same as `restoreDefaults()` |
 
@@ -848,15 +849,22 @@ restore the changes of every control, and any other change a read-back finds
 is `changedOutside`. The checks record each clear for the lease that ran out
 or the interlocks that made it, also when the time limits are settled again
 after a slow write, in the same check or at the end of the call. A lease
-ending is not a change, so a later
-expiry never hides an earlier deactivation. `hello` also returns the caller's session
-number and the helper's instance (random, fixed for the process), so a
-client recognises its own sessions' changes after reconnecting, and a
-restarted helper, whose generations and session numbers start again. The
-host can read the same history with `latestChange(of:)`, also during
-shutdown.
+ending is not a change, so a later expiry never hides an earlier
+deactivation. `hello` also returns the caller's session number and the
+helper's instance (random, fixed for the process), so a client recognises
+its own sessions' changes after reconnecting, and a restarted helper, whose
+generations and session numbers start again. The host can read the same
+history with `latestChange(of:)`, also during shutdown.
 
-Any live session may still clear a control toward safety, with
+A client that releases a control it set names the change it set with
+`clearControlIfUnchanged`: the engine compares the generation and the
+helper instance with the latest change after its checks and right before
+it clears, with nothing in between, so a control that changed hands since
+the client last read it (its lease ran out, and another client set it) is
+never cleared by mistake. Over the request budget it skips the checks, as a
+deactivation does; every change made through the engine is already in the
+history then, because each write is read back at once. Any live session may
+still clear a control toward safety unconditionally, with
 `setControl(control, false)` or a restore; the history names it.
 `hardwareErrorCount` counts every hardware error since start, so a client
 can tell a new error from an old one with the same code.
@@ -865,7 +873,8 @@ Statuses: `ok`, `incompatibleProtocol`, `notIntroduced`,
 `unsupportedControl`, `invalidArgument` (unknown control, lease of 0 s or
 less), `noLease`, `leaseHeldByOtherClient`, `rateLimited`,
 `blockedByInterlock`, `hardwareError`, `shuttingDown`, `notReady` (before
-the start-up restore).
+the start-up restore), `controlChanged` (`clearControlIfUnchanged` found
+another change; nothing written).
 
 Interlocks are reported in `readState` and can never be set by a client:
 
@@ -1223,3 +1232,4 @@ decisions.
 | D45 | The Simulated helper reads adapter presence from `IOPSCopyExternalPowerAdapterDetails`: present with details, absent without on battery, unknown without on external power | It is documented to describe the attached adapter; behaviour with a disabled adapter is unverified (safety precondition 12), and an adapter wrongly read as absent only makes the helper clear the adapter-disable |
 | D46 | A hold CellKeeper cannot confirm released stays CellKeeper's across disconnects, failed releases and helper shutdowns: until a fresh read explains how it ended, the backend accepts only `.normal` and reports its mode as an error, so a backend switch stays pending | A helper that cannot be asked may still enforce CellKeeper's restriction; completing a switch then would leave it in place with nothing renewing or releasing it |
 | D47 | A helper that waits for an acknowledgement because of its own failure (`writeFailed`, an owed restore, or an interlock this version does not know) faults the backend at once with that reason; a hardware error the helper had not reported before is a failure of the next read, whatever else it shows | The user must learn of a broken control when it happens, not after a lease expiry or an hour of backoff, and only the fault reset offers the restore the helper waits for; a recovered error must still be counted |
+| D48 | The helper's wire API has a conditional deactivation, `clearControlIfUnchanged(control, generation, helperInstance)`, which the engine checks after its checks and right before clearing, and which writes nothing on a mismatch (`controlChanged`, raw value 12); `setControl(control, false)` and the restores stay unconditional (lead's decision, 2026-10-10) | A client that checks ownership and then clears in a second request can clear a control that changed hands in between; only the engine can compare and clear atomically. Deliberate clears and safety restores must not depend on what a client last saw |

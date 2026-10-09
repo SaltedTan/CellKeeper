@@ -202,6 +202,10 @@ public enum HelperStatus: Int, Sendable, CaseIterable, CustomStringConvertible {
     case shuttingDown = 10
     /// The helper has not yet restored defaults at start.
     case notReady = 11
+    /// For `clearControlIfUnchanged`: the control's latest change is not
+    /// the one the client named (another generation, or another helper
+    /// process). Nothing was written.
+    case controlChanged = 12
 
     public var description: String {
         switch self {
@@ -217,6 +221,7 @@ public enum HelperStatus: Int, Sendable, CaseIterable, CustomStringConvertible {
         case .hardwareError: "hardwareError"
         case .shuttingDown: "shuttingDown"
         case .notReady: "notReady"
+        case .controlChanged: "controlChanged"
         }
     }
 }
