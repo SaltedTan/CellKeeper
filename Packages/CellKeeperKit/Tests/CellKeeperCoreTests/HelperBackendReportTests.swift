@@ -52,7 +52,7 @@ struct HelperHoldEndTests {
             Issue.record("expected an outside change")
             return
         }
-        #expect(detail.contains("lease on it ran on"))
+        #expect(detail.contains("another client of the helper cleared"))
     }
 
     @Test("A session the helper revoked ended CellKeeper's hold as a lost connection")

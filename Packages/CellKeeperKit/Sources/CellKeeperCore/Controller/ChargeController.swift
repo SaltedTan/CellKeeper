@@ -99,9 +99,11 @@ public actor ChargeController {
     private var pendingBackend: (any ChargingBackend)?
     /// Set for an evaluation in which a non-normal state could not be read.
     private var isOwnedStateUnverified = false
-    /// The outside change the backend keeps reporting
-    /// (``ReportedModeOrigin/changedOutside(_:)``) has faulted it already.
-    private var isOutsideChangeHandled = false
+    /// The fault the backend keeps reporting
+    /// (``ReportedModeOrigin/changedOutside(_:)`` or
+    /// ``ReportedModeOrigin/needsAcknowledgement(_:)``) has faulted it
+    /// already.
+    private var isReportedFaultHandled = false
     private var decision: PolicyDecision?
     private var lastExecution: ExecutionRecord?
     private var consecutiveFailures = 0
@@ -364,7 +366,7 @@ public actor ChargeController {
         unconfirmedRequests = []
         isRestoreOutstanding = false
         hasSeededOwnership = false
-        isOutsideChangeHandled = false
+        isReportedFaultHandled = false
         nativeLimit = nil
         lastExecution = nil
         record(.settings, "Control backend changed from \(previousName) to \(newBackend.descriptor.displayName).")
@@ -405,7 +407,7 @@ public actor ChargeController {
             guard consecutiveFailures > 0 else { return }
             consecutiveFailures = 0
             lastFailureUptime = nil
-            isOutsideChangeHandled = false
+            isReportedFaultHandled = false
             record(.safety, "Backend fault cleared by user.")
             do {
                 try await backend.resetAfterFault()
@@ -559,19 +561,27 @@ public actor ChargeController {
         guard adoptionCount == adoptionsBefore else { return }
         guard capabilities.availability.acceptsRequests else { return }
         let origin = await backend.reportedModeOrigin()
-        if case .changedOutside(let detail)? = origin {
-            // The backend found it itself, possibly while CellKeeper held
-            // nothing; it keeps reporting it until it is gone.
-            if !isOutsideChangeHandled {
-                isOutsideChangeHandled = true
+        // Faults the backend found itself, possibly while CellKeeper held
+        // nothing; it keeps reporting them until they are gone.
+        let reportedFault: String? = switch origin {
+        case .changedOutside(let detail)?:
+            "Charging control changed outside CellKeeper: \(detail). Backend faulted; CellKeeper releases its own restrictions and does not override the change."
+        case .needsAcknowledgement(let detail)?:
+            "\(detail). Backend faulted: clear the fault to acknowledge it; until then only normal charging is requested."
+        default:
+            nil
+        }
+        if let reportedFault {
+            if !isReportedFaultHandled {
+                isReportedFaultHandled = true
                 ownedMode = nil
                 unconfirmedRequests = []
                 consecutiveFailures = max(consecutiveFailures, Self.maximumConsecutiveFailures)
-                record(.safety, "Charging control changed outside CellKeeper: \(detail). Backend faulted; CellKeeper releases its own restrictions and does not override the change.", level: .fault)
+                record(.safety, reportedFault, level: .fault)
             }
             return
         }
-        isOutsideChangeHandled = false
+        isReportedFaultHandled = false
         guard let observed else {
             registerFailure("The backend did not report its mode.")
             isOwnedStateUnverified = holdsNonNormalState

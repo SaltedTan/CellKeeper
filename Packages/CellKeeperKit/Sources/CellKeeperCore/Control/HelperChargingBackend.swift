@@ -11,21 +11,31 @@ import Foundation
 ///   including after reconnecting. Every request is confirmed by a fresh read.
 /// - Switching between the two controls sets the new one before clearing the
 ///   old one, so charging is never allowed in between.
-/// - `.normal` releases only what CellKeeper set. If the helper reports an
-///   outside change, or a control CellKeeper did not set is active, the
-///   backend never restores defaults by itself (research rules R26, R27): it
-///   reports the change, and only ``resetAfterFault()`` (the user clearing
-///   the fault) restores defaults.
-/// - A hold the helper ended itself (a lapsed lease, one of its power or
-///   sleep interlocks, a lost connection) is reported by
-///   ``reportedModeOrigin()``, so the controller does not take it for an
-///   outside change. Why a hold ended comes from the helper: the reason its
-///   lease ended, its interlocks, and its count of hardware errors. Another
-///   client's restore or deactivation is an outside change.
+/// - Ownership comes from the helper's change history: CellKeeper records the
+///   generation of each control it activates, and the control stays its own
+///   only while that generation is current. Why a hold ended is looked up,
+///   not inferred: the cause the helper recorded for the next change
+///   decides whether it was one of the helper's own releases, CellKeeper's
+///   own, a failure, or an outside change. Any other generation is an
+///   outside change.
+/// - `.normal` releases only what is still CellKeeper's, checked that way
+///   right before it deactivates. If the helper reports an outside change,
+///   or a control CellKeeper did not set is active, the backend never
+///   restores defaults by itself (research rules R26, R27): it reports the
+///   change, and only ``resetAfterFault()`` (the user clearing the fault)
+///   restores defaults.
+/// - While CellKeeper may still hold a control it cannot confirm released
+///   (the helper cannot be reached, or is shutting down), the backend still
+///   accepts `.normal` and reports its mode as unknown, so the controller
+///   keeps asking for `.normal` and a backend switch waits.
+/// - A helper that waits for an acknowledgement (`writeFailed`, a restore it
+///   owes) is reported as ``ReportedModeOrigin/needsAcknowledgement(_:)``,
+///   and a new hardware error as a failure.
 /// - Requests are paced to stay within the helper's per-session request
 ///   budget, far from the point where it revokes a session.
-/// - While CellKeeper holds a control, a ``LeaseActivity`` keeps the app
-///   from being napped, so evaluations renew the lease on time.
+/// - While CellKeeper holds a control through a live session, a
+///   ``LeaseActivity`` keeps the app from being napped, so evaluations renew
+///   the lease on time.
 ///
 /// The controller serialises all calls into it.
 public actor HelperChargingBackend: ChargingBackend {
@@ -36,6 +46,17 @@ public actor HelperChargingBackend: ChargingBackend {
     private let pause: @Sendable (TimeInterval) async -> Void
     private let activity: any LeaseActivity
 
+    /// A control CellKeeper activated, by the helper's account.
+    private struct Hold {
+        /// The control's generation right after CellKeeper set it.
+        var generation: UInt64
+        /// The helper process it was set on.
+        var instance: UInt64
+        /// CellKeeper asked for it to be cleared; no read has confirmed
+        /// that yet.
+        var isReleaseRequested = false
+    }
+
     private var connection: (any HelperConnection)?
     /// The helper's reply to `hello` on ``connection``.
     private var introduction: HelperHelloReply?
@@ -43,42 +64,48 @@ public actor HelperChargingBackend: ChargingBackend {
     /// connections, so a simulated request is never reported as applied.
     private var isSimulated = false
     private var pacer: RequestPacer
-    /// The controls CellKeeper set, confirmed by read-back, that it has not
-    /// released and has not seen cleared.
-    private var held: Set<HelperControl> = [] {
-        didSet {
-            if held.isEmpty != oldValue.isEmpty {
-                activity.setHolding(!held.isEmpty)
-            }
-        }
-    }
+    /// The helper process the last introduction was made to.
+    private var helperInstance: UInt64?
+    /// The session numbers of CellKeeper's own sessions with that process.
+    private var ownSessions: Set<UInt64> = []
+    /// The controls CellKeeper set whose end it has not yet seen. Kept across
+    /// disconnects: until a fresh read explains it, CellKeeper may still
+    /// hold the control.
+    private var holds: [HelperControl: Hold] = [:]
     /// When CellKeeper's leases end at the latest, on ``uptime``: the time
     /// before each grant was requested, plus the seconds granted. Never later
     /// than the helper's own deadline. Used only to avoid renewing a lease
     /// that may have lapsed.
     private var leaseDeadlines: [HelperControl: TimeInterval] = [:]
-    /// The connection ended while CellKeeper held a control, so the helper
-    /// has cleared it.
-    private var isConnectionLostWhileHolding = false
-    /// The helper's count of hardware errors at the last read.
+    /// The helper's count of hardware errors at the last read, on
+    /// ``helperInstance``.
     private var lastHardwareErrorCount: Int?
     /// An outside change the helper still shows: its `externalModification`
     /// interlock, or a control CellKeeper did not set.
     private var currentOutsideChange: String?
-    /// A hold that ended without CellKeeper or a rule of the helper, kept
-    /// until the next request.
-    private var unexplainedLoss: String?
+    /// An outside change found in the history of a control CellKeeper held,
+    /// kept until the next request.
+    private var outsideLoss: String?
     /// How the helper last ended CellKeeper's hold, kept until the next
     /// request.
     private var lastRelease: HoldRelease?
+    /// CellKeeper's own release, confirmed only after a later read, kept
+    /// until the next request.
+    private var isOwnReleaseConfirmed = false
+    /// A hardware error the helper reported, or a hold it cleared because
+    /// of one, that ``currentMode()`` has not reported yet.
+    private var unreportedHardwareError: String?
     private var origin: ReportedModeOrigin?
+    /// Whether ``activity`` is held.
+    private var isActivityHeld = false
 
     /// - Parameters:
     ///   - uptime: monotonic seconds that keep counting during sleep, on the
     ///     same scale as the helper's clock.
     ///   - pause: waits the given number of seconds; used to stay within the
     ///     helper's request budget.
-    ///   - activity: told when CellKeeper starts and stops holding a control.
+    ///   - activity: told when CellKeeper starts and stops holding a control
+    ///     through a live session.
     public init(
         descriptor: BackendDescriptor,
         transport: any HelperTransport,
@@ -99,7 +126,7 @@ public actor HelperChargingBackend: ChargingBackend {
         if let connection {
             Task { await connection.invalidate() }
         }
-        if !held.isEmpty {
+        if isActivityHeld {
             activity.setHolding(false)
         }
     }
@@ -107,6 +134,7 @@ public actor HelperChargingBackend: ChargingBackend {
     // MARK: - ChargingBackend
 
     public func capabilities() async -> ControlCapabilities {
+        defer { updateActivity() }
         let introduction: HelperHelloReply
         let state: HelperStateReply
         do {
@@ -116,6 +144,11 @@ public actor HelperChargingBackend: ChargingBackend {
             }
             state = try await fetchState()
         } catch {
+            // CellKeeper may still hold a control there: keep accepting
+            // `.normal`, so the controller keeps asking for it.
+            if !holds.isEmpty {
+                return ControlCapabilities(availability: isSimulated ? .simulated : .experimental, supportedModes: [.normal])
+            }
             return .unavailable(Self.reason(error))
         }
         // Modes an interlock blocks right now are not offered, so the policy
@@ -130,36 +163,46 @@ public actor HelperChargingBackend: ChargingBackend {
     }
 
     /// The mode read back from the helper. Unknown (nil) if the helper cannot
-    /// be reached or used at all, like a backend that accepts no requests;
-    /// an error if a request to it fails.
+    /// be reached and CellKeeper holds nothing there, like a backend that
+    /// accepts no requests; an error if a request fails, if CellKeeper may
+    /// still hold a control it cannot confirm released, or if the helper
+    /// reports a new hardware error.
     public func currentMode() async throws -> ChargeControlMode? {
+        defer { updateActivity() }
         origin = nil
         let state: HelperStateReply
         do {
             state = try await readState()
-        } catch BackendError.unavailable {
+        } catch BackendError.unavailable(let reason) {
+            guard holds.isEmpty else {
+                throw BackendError.operationFailed("\(reason) CellKeeper may still have \(Self.describe(Set(holds.keys))) set there, so it keeps asking for normal charging until the helper confirms the release.")
+            }
             return nil
         }
-        switch observe(state) {
-        case nil:
-            break
-        case .released(let release)?:
-            lastRelease = release
-        case .unexplained(let detail)?:
-            unexplainedLoss = detail
-        case .hardwareError(let detail)?:
-            throw BackendError.operationFailed(detail)
-        }
+        observe(state)
         let active = state.activeControls.controls
-        if let outside = currentOutsideChange ?? unexplainedLoss {
+        // A fault reported here makes a hardware error moot.
+        if let outside = currentOutsideChange ?? outsideLoss {
+            unreportedHardwareError = nil
             origin = .changedOutside(outside)
             return Self.mode(for: active)
+        }
+        if let waiting = Self.acknowledgementNeeded(state) {
+            unreportedHardwareError = nil
+            origin = .needsAcknowledgement(waiting)
+            return Self.mode(for: active)
+        }
+        if let error = unreportedHardwareError {
+            unreportedHardwareError = nil
+            throw BackendError.operationFailed(error)
         }
         guard let mode = Self.mode(for: active) else {
             throw BackendError.operationFailed("CellKeeper's helper reports both charging inhibited and the adapter disabled")
         }
         if let lastRelease {
             origin = .releasedByBackend(lastRelease)
+        } else if isOwnReleaseConfirmed {
+            origin = .cellKeeper
         }
         return mode
     }
@@ -169,6 +212,7 @@ public actor HelperChargingBackend: ChargingBackend {
     }
 
     public func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome {
+        defer { updateActivity() }
         switch mode {
         case .normal:
             return try await releaseAll()
@@ -186,8 +230,9 @@ public actor HelperChargingBackend: ChargingBackend {
     /// alone: it may have lapsed, and a new lease would not bring back a
     /// control the helper has cleared. The next read reports the lapse.
     public func renewHold(_ mode: ChargeControlMode) async throws {
+        defer { updateActivity() }
         guard let control = Self.control(for: mode) else { return }
-        guard held.contains(control) else {
+        guard let hold = holds[control], !hold.isReleaseRequested else {
             throw BackendError.operationFailed("CellKeeper holds no \(Self.describe([control])) on its helper to renew")
         }
         if let deadline = leaseDeadlines[control], uptime() >= deadline {
@@ -206,6 +251,7 @@ public actor HelperChargingBackend: ChargingBackend {
     /// before the restore arrived, the backend connects again, says hello,
     /// and tries once more.
     public func resetAfterFault() async throws {
+        defer { updateActivity() }
         clearNotices()
         let state: HelperStateReply
         do {
@@ -214,11 +260,11 @@ public actor HelperChargingBackend: ChargingBackend {
             return
         }
         if state.status == .ok {
-            _ = observe(state)
+            observe(state)
         }
         let needsAcknowledgement = state.status == .hardwareError
             || !state.interlocks.subtracting(Self.conditionInterlocks).isEmpty
-            || !state.activeControls.controls.subtracting(held).isEmpty
+            || !state.activeControls.controls.subtracting(holds.keys).isEmpty
         guard needsAcknowledgement else { return }
         var status: HelperStatus?
         do {
@@ -231,70 +277,80 @@ public actor HelperChargingBackend: ChargingBackend {
             await dropConnection()
             status = try await send(needsToken: false) { try await $0.restoreDefaults() }
         }
-        held = []
-        leaseDeadlines = [:]
-        isConnectionLostWhileHolding = false
-        currentOutsideChange = nil
         guard status == .ok else {
             if status.map(Self.isSessionLost) ?? false { await dropConnection() }
             throw BackendError.operationFailed("CellKeeper's helper could not restore macOS's defaults (\(status.map(String.init(describing:)) ?? "no reply"))")
         }
+        // Confirmed by the helper's read-back: nothing is set any more.
+        holds = [:]
+        leaseDeadlines = [:]
+        currentOutsideChange = nil
     }
 
     // MARK: - Requests
 
-    /// Holds `target`, then lets go of the other control. Confirms by a
-    /// fresh read that exactly `target` is active.
+    /// Holds `target`, then lets go of the other control if it is
+    /// CellKeeper's. Confirms by a fresh read that exactly `target` is
+    /// active, set by CellKeeper.
     private func hold(_ target: HelperControl, as mode: ChargeControlMode) async throws -> ControlOutcome {
         clearNotices()
         let introduction = try await introduced()
         guard introduction.capabilities.contains(target.requiredCapability) else {
             throw BackendError.unsupportedMode(mode)
         }
-        let expected = Self.mode(for: held) ?? .normal
+        let expected = Self.mode(for: Set(holds.keys)) ?? .normal
         let before = try await readState()
-        if case .unexplained(let detail)? = observe(before) {
-            unexplainedLoss = detail
-        }
-        if currentOutsideChange != nil || unexplainedLoss != nil {
+        observe(before)
+        if currentOutsideChange != nil || outsideLoss != nil {
             // Never write over another tool's change (R26, R27).
             throw BackendError.changedOutside(expected: expected, found: Self.mode(for: before.activeControls.controls))
         }
-        let wasInEffect = before.activeControls.controls == [target]
+        let wasInEffect = before.activeControls.controls == [target] && holds[target] != nil
         do {
             try await takeLease(target)
             let status = try await send(needsToken: true) { try await $0.setControl(control: target.rawValue, active: true) }
             guard status == .ok else {
                 throw await refusal(status, activating: target)
             }
-            held.insert(target)
+            let set = try await readState()
+            let change = set.change(for: target)
+            guard set.activeControls.controls.contains(target) else {
+                throw BackendError.verificationFailed(expected: mode, actual: Self.mode(for: set.activeControls.controls))
+            }
+            if holds[target]?.generation != change.generation {
+                guard change.cause == .setByClient, ownSessions.contains(change.session), let instance = helperInstance else {
+                    throw BackendError.verificationFailed(expected: mode, actual: Self.mode(for: set.activeControls.controls))
+                }
+                holds[target] = Hold(generation: change.generation, instance: instance)
+            }
             // Only now that the new control is set: no moment in between
             // allows charging the policy did not ask for.
             for other in HelperControl.allCases where other != target {
-                try await letGo(other, leaseHeld: before.isLeaseHolder && before.leaseSeconds(for: other) > 0)
+                try await letGo(other, leaseHeld: set.isLeaseHolder && set.leaseSeconds(for: other) > 0)
             }
             let after = try await readState()
+            observe(after)
             let active = after.activeControls.controls
-            guard active == [target], !after.interlocks.contains(.externalModification) else {
+            guard active == [target], holds[target] != nil, currentOutsideChange == nil, outsideLoss == nil else {
                 throw BackendError.verificationFailed(expected: mode, actual: Self.mode(for: active))
             }
-            held = [target]
-            isConnectionLostWhileHolding = false
         } catch {
             await reconcileAfterFailure()
             throw error
         }
+        clearNotices()
         return outcome(changed: !wasInEffect)
     }
 
-    /// Clears what CellKeeper set and ends its leases, then confirms that
-    /// nothing is active. A control CellKeeper did not set is never touched:
-    /// it is reported as an outside change.
+    /// Clears what is still CellKeeper's, checked against the helper's
+    /// history right before, and ends its leases; then confirms that nothing
+    /// is active. A control CellKeeper did not set, or no longer owns, is
+    /// never touched: it is reported as an outside change.
     private func releaseAll() async throws -> ControlOutcome {
         clearNotices()
         let before = try await readState()
-        _ = observe(before)
-        let ownedBefore = held
+        observe(before)
+        let ownedBefore = Set(holds.keys)
         do {
             // The adapter first, so external power returns as soon as possible.
             for control in [HelperControl.adapterDisabled, .chargingInhibited] {
@@ -305,39 +361,42 @@ public actor HelperChargingBackend: ChargingBackend {
             throw error
         }
         let after = try await readState()
+        observe(after)
         let remaining = after.activeControls.controls
-        held.formIntersection(remaining)
         guard remaining.isEmpty else {
-            if remaining.isDisjoint(with: ownedBefore) {
+            if remaining.isDisjoint(with: holds.keys) {
                 throw BackendError.changedOutside(expected: .normal, found: Self.mode(for: remaining))
             }
             throw BackendError.verificationFailed(expected: .normal, actual: Self.mode(for: remaining))
         }
         leaseDeadlines = [:]
-        isConnectionLostWhileHolding = false
+        clearNotices()
         return outcome(changed: !ownedBefore.isEmpty)
     }
 
-    /// Clears `control` if CellKeeper set it, and ends CellKeeper's lease on
-    /// it. Neither needs a lease or is ever rate-limited by the helper.
+    /// Clears `control` if it is still CellKeeper's, and ends CellKeeper's
+    /// lease on it. The hold is kept, marked as released, until a read
+    /// confirms the change; the helper's history then shows it as
+    /// CellKeeper's own, also after a reconnect. Neither request needs a
+    /// lease or is ever rate-limited by the helper.
     private func letGo(_ control: HelperControl, leaseHeld: Bool) async throws {
-        if held.contains(control) {
+        if holds[control] != nil {
+            holds[control]?.isReleaseRequested = true
             let status = try await send(needsToken: false) { try await $0.setControl(control: control.rawValue, active: false) }
             guard status == .ok else {
                 if Self.isSessionLost(status) { await dropConnection() }
                 throw BackendError.operationFailed("CellKeeper's helper could not clear \(Self.describe([control])) (\(status))")
             }
-            held.remove(control)
         }
-        if leaseHeld || leaseDeadlines[control] != nil {
+        if leaseHeld {
             let status = try await send(needsToken: false) { try await $0.releaseLease(control: control.rawValue) }
             // `noLease`: it has already ended.
             guard status == .ok || status == .noLease else {
                 if Self.isSessionLost(status) { await dropConnection() }
                 throw BackendError.operationFailed("CellKeeper's helper could not end the lease on \(Self.describe([control])) (\(status))")
             }
-            leaseDeadlines[control] = nil
         }
+        leaseDeadlines[control] = nil
     }
 
     /// Takes or renews CellKeeper's lease on `control` for the longest the
@@ -364,20 +423,17 @@ public actor HelperChargingBackend: ChargingBackend {
             return .operationFailed("CellKeeper's helper refused to set \(Self.describe([control])) (\(status))")
         }
         if state.interlocks.contains(.externalModification) {
-            return .changedOutside(expected: Self.mode(for: held) ?? .normal, found: Self.mode(for: state.activeControls.controls))
+            return .changedOutside(expected: Self.mode(for: Set(holds.keys)) ?? .normal, found: Self.mode(for: state.activeControls.controls))
         }
         let blocking = state.interlocks.intersection(control.blockingInterlocks)
         return .operationFailed("CellKeeper's helper refused to set \(Self.describe([control])): \(Self.describe(blocking))")
     }
 
-    /// After a failed request CellKeeper holds only what is still active of
-    /// what it set; the controller then requests `.normal`.
+    /// After a failed request, a fresh read decides what is still
+    /// CellKeeper's; the controller then requests `.normal`.
     private func reconcileAfterFailure() async {
         guard let state = try? await readState() else { return }
-        held.formIntersection(state.activeControls.controls)
-        if held.isEmpty {
-            isConnectionLostWhileHolding = false
-        }
+        observe(state)
     }
 
     private func outcome(changed: Bool) -> ControlOutcome {
@@ -388,85 +444,125 @@ public actor HelperChargingBackend: ChargingBackend {
     private func clearNotices() {
         origin = nil
         lastRelease = nil
-        unexplainedLoss = nil
+        outsideLoss = nil
+        isOwnReleaseConfirmed = false
+    }
+
+    /// Holds the activity exactly while CellKeeper holds a control it has
+    /// not asked to release, through a live session that renews it.
+    private func updateActivity() {
+        let isRenewing = connection != nil && holds.values.contains { !$0.isReleaseRequested && $0.instance == helperInstance }
+        guard isRenewing != isActivityHeld else { return }
+        isActivityHeld = isRenewing
+        activity.setHolding(isRenewing)
     }
 
     // MARK: - Reading state
 
-    /// What a fresh read shows about controls CellKeeper held that are no
-    /// longer active.
-    private enum Loss {
+    /// Why a control CellKeeper held changed, looked up in the helper's
+    /// history.
+    private enum Ending {
+        /// One of the helper's own rules ended it.
         case released(HoldRelease)
-        /// The helper cleared it after a hardware error: a failure.
-        case hardwareError(String)
-        /// Neither CellKeeper nor a rule of the helper explains it.
-        case unexplained(String)
+        /// CellKeeper released it.
+        case own
+        /// The helper cleared it because of a hardware problem: a failure.
+        case failure
+        /// Someone else changed it.
+        case outside(String)
     }
 
-    /// Updates what CellKeeper holds from a fresh read and says how a hold
-    /// that ended came about, from what the helper reports: why the lease
-    /// ended, its interlocks, and its count of hardware errors. Also notes an
-    /// outside change the helper still shows.
-    private func observe(_ state: HelperStateReply) -> Loss? {
+    /// Updates what CellKeeper holds from a fresh read, and notes how holds
+    /// ended, any outside change the helper still shows, and any hardware
+    /// error it had not reported before (until ``currentMode()`` reports it).
+    private func observe(_ state: HelperStateReply) {
         let active = state.activeControls.controls
-        let isNewHardwareError = lastHardwareErrorCount.map { state.hardwareErrorCount > $0 } ?? false
+        if let count = lastHardwareErrorCount, state.hardwareErrorCount > count {
+            unreportedHardwareError = "CellKeeper's helper reports a new hardware error (code \(state.lastHardwareError))"
+        }
         lastHardwareErrorCount = state.hardwareErrorCount
-        let foreign = active.subtracting(held)
+        var endings: [Ending] = []
+        for (control, hold) in holds {
+            guard let ending = ending(of: control, hold, in: state) else { continue }
+            holds[control] = nil
+            endings.append(ending)
+        }
+        for ending in endings {
+            switch ending {
+            case .released(let release): lastRelease = lastRelease ?? release
+            case .own: isOwnReleaseConfirmed = true
+            case .failure: unreportedHardwareError = unreportedHardwareError ?? "CellKeeper's helper cleared CellKeeper's control after a hardware error (code \(state.lastHardwareError))"
+            case .outside(let detail): outsideLoss = outsideLoss ?? detail
+            }
+        }
+        let foreign = active.subtracting(holds.keys)
         if state.interlocks.contains(.externalModification) {
-            currentOutsideChange = "CellKeeper's helper found its controls changed by something other than CellKeeper (another tool may be controlling charging); it restored macOS's defaults once and changes nothing more until the fault is cleared"
+            currentOutsideChange = "CellKeeper's helper found its controls changed by something other than CellKeeper (another tool may be controlling charging); it restored macOS's defaults and changes nothing more until the fault is cleared"
         } else if !foreign.isEmpty {
-            currentOutsideChange = "CellKeeper's helper reports \(Self.describe(foreign)), which CellKeeper did not set"
+            currentOutsideChange = "CellKeeper's helper reports \(Self.describe(foreign)), which CellKeeper did not set or no longer holds"
         } else {
             currentOutsideChange = nil
         }
-        let lost = held.subtracting(active)
-        held.formIntersection(active)
-        defer {
-            for control in lost { leaseDeadlines[control] = nil }
-            if held.isEmpty { isConnectionLostWhileHolding = false }
-        }
-        guard !lost.isEmpty, currentOutsideChange == nil else { return nil }
-        let losses = lost.compactMap { loss(of: $0, in: state, isNewHardwareError: isNewHardwareError) }
-        // The most serious explanation wins: an outside change, then a
-        // failure, then one of the helper's releases.
-        return losses.first { if case .unexplained = $0 { true } else { false } }
-            ?? losses.first { if case .hardwareError = $0 { true } else { false } }
-            ?? losses.first
     }
 
-    /// Why `control`, which CellKeeper held, is no longer active; nil if
-    /// CellKeeper released it itself.
-    private func loss(of control: HelperControl, in state: HelperStateReply, isNewHardwareError: Bool) -> Loss? {
-        if isConnectionLostWhileHolding {
-            return .released(.connectionLost)
-        }
+    /// How a hold ended, by the helper's history; nil if it has not.
+    private func ending(of control: HelperControl, _ hold: Hold, in state: HelperStateReply) -> Ending? {
         let name = Self.describe([control])
-        switch state.change(for: control).cause {
+        let isActive = state.activeControls.controls.contains(control)
+        guard hold.instance == helperInstance else {
+            // An earlier helper process is gone; its successor restored
+            // defaults at start (R2).
+            return isActive
+                ? .outside("\(name) is active after the helper restarted, so CellKeeper cannot tell whose it is")
+                : .released(.backendStopped)
+        }
+        let change = state.change(for: control)
+        if change.generation == hold.generation {
+            return nil
+        }
+        guard change.generation == hold.generation + 1, !isActive else {
+            return .outside("\(name) changed \(change.generation &- hold.generation) times since CellKeeper set it, and is \(isActive ? "active again, set by someone else" : "off")")
+        }
+        let isOwnSession = ownSessions.contains(change.session)
+        switch change.cause {
         case .leaseExpired?:
             return .released(.leaseExpired)
-        case .sessionEnded?, .sessionRevoked?, .shutdown?:
-            // CellKeeper's earlier session ended; the helper cleared what
-            // it held.
-            return .released(.connectionLost)
-        case .clearedByRestore?:
-            // CellKeeper forgets what it held before its own restores.
-            return .unexplained("another client of the helper restored macOS's defaults, which ended CellKeeper's \(name)")
-        default:
-            break
+        case .interlock?:
+            if change.interlocks.contains(.externalModification) {
+                return .outside("CellKeeper's helper cleared \(name) after its controls were changed outside CellKeeper")
+            }
+            let routine = change.interlocks.intersection(Self.conditionInterlocks)
+            guard change.interlocks == routine, !routine.isEmpty else { return .failure }
+            return .released(.interlock(Self.describe(routine)))
+        case .sessionEnded?, .sessionRevoked?:
+            return isOwnSession
+                ? .released(.connectionLost)
+                : .outside("another client's session ended, which cleared \(name)")
+        case .shutdown?, .start?:
+            return .released(.backendStopped)
+        case .clearedByClient?, .clearedByRestore?, .activationLimited?:
+            return isOwnSession
+                ? .own
+                : .outside(change.cause == .clearedByRestore
+                    ? "another client of the helper restored macOS's defaults, which cleared \(name)"
+                    : "another client of the helper cleared \(name)")
+        case .restoredAfterWriteFailure?, .restoredAfterReadBackFailure?, .restoreRetried?:
+            return .failure
+        case .changedOutside?, .restoredAfterOutsideChange?:
+            return .outside("\(name) was changed outside CellKeeper")
+        case .setByClient?, nil:
+            return .outside("\(name) changed in a way CellKeeper cannot account for")
         }
-        // The lease runs on. Only the power and sleep conditions are
-        // routine; an interlock that waits for an acknowledgement is not.
-        let blocking = state.interlocks.intersection(control.blockingInterlocks).intersection(Self.conditionInterlocks)
-        if !blocking.isEmpty {
-            return .released(.interlock(Self.describe(blocking)))
-        }
-        if isNewHardwareError {
-            return .hardwareError("CellKeeper's helper cleared \(name) after a hardware error (code \(state.lastHardwareError))")
-        }
-        if state.leaseSeconds(for: control) > 0 {
-            return .unexplained("\(name) was cleared while CellKeeper's lease on it ran on, by no rule of the helper: another client of the helper cleared it")
-        }
-        return .unexplained("\(name) ended, and the helper reports no reason")
+    }
+
+    /// What the helper waits for a client to acknowledge, if anything: an
+    /// interlock other than the power and sleep conditions and an outside
+    /// change (`writeFailed`, a restore it owes, one this version does not
+    /// know).
+    static func acknowledgementNeeded(_ state: HelperStateReply) -> String? {
+        let waiting = state.interlocks.subtracting(conditionInterlocks).subtracting(.externalModification)
+        guard !waiting.isEmpty else { return nil }
+        return "CellKeeper's helper stopped making changes: \(describe(waiting))"
     }
 
     /// A fresh `readState` whose status is `ok`.
@@ -523,6 +619,15 @@ public actor HelperChargingBackend: ChargingBackend {
             await new.invalidate()
             throw BackendError.unavailable(Self.helloRefusal(reply))
         }
+        if reply.helperInstance != helperInstance {
+            // A new helper process: its sessions and generations start
+            // again. Holds made with the old one are settled at the next
+            // read.
+            helperInstance = reply.helperInstance
+            ownSessions = []
+            lastHardwareErrorCount = nil
+        }
+        ownSessions.insert(reply.sessionID)
         connection = new
         introduction = reply
         isSimulated = reply.isSimulated
@@ -549,14 +654,13 @@ public actor HelperChargingBackend: ChargingBackend {
         }
     }
 
-    /// Ends the current connection. The helper clears what its session held.
+    /// Ends the current connection. The helper clears what its session
+    /// held; CellKeeper keeps its holds until a fresh read explains them.
     private func dropConnection() async {
         let old = connection
         connection = nil
         introduction = nil
-        if !held.isEmpty {
-            isConnectionLostWhileHolding = true
-        }
+        updateActivity()
         await old?.invalidate()
     }
 
@@ -624,7 +728,7 @@ public actor HelperChargingBackend: ChargingBackend {
             (.powerStateUnavailable, "the helper's own power reading is missing or out of date"),
             (.sleepImminent, "the Mac is about to sleep"),
             (.externalModification, "its controls were changed outside CellKeeper"),
-            (.hardwareFault, "a hardware fault"),
+            (.hardwareFault, "a restore of macOS's defaults failed and is owed"),
             (.writeFailed, "a write to one of its controls failed"),
         ]
         var parts = names.filter { interlocks.contains($0.0) }.map(\.1)

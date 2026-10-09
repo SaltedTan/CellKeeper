@@ -214,40 +214,56 @@ hardware writes and a helper, and do not apply. For the rest:
 ### Where the helper backend stands
 
 The helper backend (`HelperChargingBackend`) drives the helper's logic
-(`HelperEngine`), which runs only in process and only on a simulated
-control. Nothing is written to hardware, so none of these preconditions is
-met for a real backend yet. What is already in place, and tested against the
-simulated control:
+(`HelperEngine`), which runs only in the app's own process and only on a
+simulated control. Nothing is written to hardware, so none of these
+preconditions is met for a real backend yet. Because the Simulated helper
+lives and dies with the app, its leases, disconnect handling and restores
+are exercised by tests, not by a separate process that outlives a crashed
+app. What is already in place, and tested against the simulated control:
 
-- **3, lease / dead-man switch:** per-control leases with their own
-  deadlines (15 min for the charging inhibit, 2 min for the adapter-disable)
-  that end on expiry, on disconnect, at helper start and at shutdown, and the
-  helper's own floor, AC-loss, adapter, thermal, sleep and freshness guards
-  (`HelperEngine`). Renewal is tied to policy evaluations: the controller
-  renews a hold only at the end of an evaluation that still wants it,
-  including one whose action is "no change", so a hung or stalled loop lets
-  the lease lapse. A failed renewal counts as a failure and normal charging
-  is requested at once (`ChargeController.renewHoldIfStillWanted`). While
-  CellKeeper holds a control, the app holds an activity that keeps macOS from
-  napping it, so renewals arrive on time (`LeaseActivity`). The helper's own
-  power reading uses public, read-only interfaces in process; the daemon's is
-  still to come.
+- **3, lease / dead-man switch (logic only):** per-control leases with their
+  own deadlines (15 min for the charging inhibit, 2 min for the
+  adapter-disable). The engine clears a control when its lease expires or the
+  lease holder's session ends, restores defaults at start and at shutdown,
+  and keeps retrying a restore that failed; it applies its own floor,
+  AC-loss, adapter, thermal, sleep and freshness guards. Renewal is tied to
+  policy evaluations: the controller renews a hold only at the end of an
+  evaluation that still wants it, including one whose action is "no change",
+  so a hung or stalled loop lets the lease lapse. A failed renewal counts as
+  a failure and normal charging is requested at once
+  (`ChargeController.renewHoldIfStillWanted`). While CellKeeper holds a
+  control through a live session, the app asks macOS not to nap it
+  (`LeaseActivity`); that makes late renewals less likely but does not
+  guarantee them, and a lease that lapses only ends the restriction. The
+  helper's own power reading uses public, read-only interfaces in process;
+  the daemon's is still to come.
 - **6, debounce and dwell:** the policy's debounce and minimum pause apply to
   the helper backend, as to any backend that switches charging itself.
-- **7, external-writer detection (in part):** an outside change the helper
-  finds faults the backend at once, and so does another client of the
-  helper restoring defaults or clearing CellKeeper's control, which the
-  helper's report of why each lease ended makes visible. CellKeeper releases
-  only what it set and never restores defaults over another tool's change by
-  itself. Only the user clearing the fault restores defaults, once. A hold
-  the helper ended itself (lapse, power or sleep interlock, lost connection)
-  is logged and is not mistaken for an outside change. Coexistence with
-  macOS's Charge Limit and Optimized Battery Charging is not done.
+- **7, external-writer detection (in part):** the helper records why each
+  control last changed, and the backend decides from that record whether a
+  hold ended under the helper's own rules (an expired lease, a power or sleep
+  interlock, the end of CellKeeper's session, a helper restart), by
+  CellKeeper's own release, or otherwise. Anything else, including another
+  client of the helper clearing or restoring a control, faults the backend.
+  CellKeeper deactivates only controls it still owns by that record and never
+  restores defaults by itself; only the user clearing the fault restores
+  defaults, once. Limits: the helper sees an outside change only when it
+  reads the control, so a change undone between two reads goes unnoticed;
+  another client can still take over a control between CellKeeper's check
+  and its deactivation; and coexistence with macOS's Charge Limit and
+  Optimized Battery Charging is not done.
+- **Unconfirmed releases:** if the helper cannot be reached, is shutting
+  down, or a release fails while CellKeeper may still hold a control, the
+  backend keeps asking for normal charging, counts failures and keeps a
+  backend switch pending until a fresh read shows how the hold ended.
+- **Helper failures:** a failed write or an owed restore faults the backend
+  at once, and a new hardware error is counted as a failure.
 - **8, monotonic time:** one clock that counts sleep for the helper's leases,
   rate limits and power-state age.
 
 Everything else, including the daemon, the authenticated XPC transport, a
-verified mechanism, and acknowledged sleep handling, is still missing.
+verified mechanism, behavioural verification, and acknowledged sleep
+handling, is still missing.
 
 ### Deliberate deviations from research note 06
 

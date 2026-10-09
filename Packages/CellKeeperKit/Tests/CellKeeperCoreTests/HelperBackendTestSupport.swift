@@ -92,6 +92,14 @@ final class TestHelperConnection: HelperConnection, @unchecked Sendable {
         lock.withLock { pendingFailures += count }
     }
 
+    /// Lets `count` requests through, then fails the next one as a
+    /// transport failure.
+    func failRequest(after count: Int) {
+        lock.withLock { requestsBeforeFailure = count }
+    }
+
+    private var requestsBeforeFailure: Int?
+
     /// After the next successful activation, the next state read reports
     /// nothing active, as if the read-back did not match.
     func reportMismatchAfterNextActivation() {
@@ -113,6 +121,13 @@ final class TestHelperConnection: HelperConnection, @unchecked Sendable {
 
     private func takeFailure() -> Bool {
         lock.withLock {
+            if let remaining = requestsBeforeFailure {
+                if remaining == 0 {
+                    requestsBeforeFailure = nil
+                    return true
+                }
+                requestsBeforeFailure = remaining - 1
+            }
             guard pendingFailures > 0 else { return false }
             pendingFailures -= 1
             return true
@@ -197,16 +212,32 @@ final class TestHelperConnection: HelperConnection, @unchecked Sendable {
     }
 }
 
-/// Opens ``TestHelperConnection``s to an engine in the test.
+/// Opens ``TestHelperConnection``s to an engine in the test, and can
+/// relaunch the helper as a new engine on the same control, as launchd
+/// would.
 final class TestHelperTransport: HelperTransport, @unchecked Sendable {
-    let engine: HelperEngine
     private let lock = NSLock()
+    private let makeEngine: (@Sendable () -> HelperEngine)?
+    private var currentEngine: HelperEngine
     private var opened: [TestHelperConnection] = []
     private var isReachableValue = true
     private var helloStatusValue: HelperStatus?
 
-    init(engine: HelperEngine) {
-        self.engine = engine
+    init(engine: HelperEngine, relaunching makeEngine: (@Sendable () -> HelperEngine)? = nil) {
+        self.currentEngine = engine
+        self.makeEngine = makeEngine
+    }
+
+    /// The engine connections are made to now.
+    var engine: HelperEngine {
+        lock.withLock { currentEngine }
+    }
+
+    /// Replaces the engine with a new one, as a relaunched helper process.
+    func relaunch() {
+        guard let makeEngine else { return }
+        let fresh = makeEngine()
+        lock.withLock { currentEngine = fresh }
     }
 
     /// False makes `connect()` fail, as if the helper were not installed.
@@ -288,9 +319,13 @@ struct HelperRig {
     let power: StubHelperPower
     let events = HelperEventLog()
     let activity = RecordingLeaseActivity()
-    let engine: HelperEngine
     let transport: TestHelperTransport
     let backend: HelperChargingBackend
+
+    /// The helper engine now running; a relaunch replaces it.
+    var engine: HelperEngine {
+        transport.engine
+    }
 
     static let descriptor = BackendDescriptor(identifier: "test-helper", displayName: "Test helper", summary: "")
 
@@ -305,14 +340,12 @@ struct HelperRig {
         self.control = control
         power = StubHelperPower(clock: clock)
         let events = events
-        engine = HelperEngine(
-            control: chargeControl ?? (isSimulated ? control : UnsimulatedChargeControl(inner: control)),
-            power: power,
-            build: 7,
-            uptime: { clock.uptime },
-            events: { events.record($0) }
-        )
-        transport = TestHelperTransport(engine: engine)
+        let power = power
+        let hardware = chargeControl ?? (isSimulated ? control : UnsimulatedChargeControl(inner: control))
+        let makeEngine: @Sendable () -> HelperEngine = {
+            HelperEngine(control: hardware, power: power, build: 7, uptime: { clock.uptime }, events: { events.record($0) })
+        }
+        transport = TestHelperTransport(engine: makeEngine(), relaunching: makeEngine)
         backend = HelperChargingBackend(
             descriptor: Self.descriptor,
             transport: transport,

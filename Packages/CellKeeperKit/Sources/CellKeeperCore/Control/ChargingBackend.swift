@@ -304,12 +304,16 @@ public enum HoldRelease: Sendable, Equatable, CustomStringConvertible {
     /// The connection to the backend ended, and with it every hold made
     /// through it (rule R1).
     case connectionLost
+    /// The backend stopped or restarted, which restores defaults (rules R2,
+    /// R4).
+    case backendStopped
 
     public var description: String {
         switch self {
         case .leaseExpired: "its lease expired before CellKeeper renewed it"
         case .interlock(let interlocks): "a safety interlock required it (\(interlocks))"
         case .connectionLost: "the connection to it ended"
+        case .backendStopped: "it stopped or restarted, which restores macOS's defaults"
         }
     }
 }
@@ -328,6 +332,11 @@ public enum ReportedModeOrigin: Sendable, Equatable {
     /// may be controlling charging (rule R27). Reported for as long as the
     /// backend still sees it.
     case changedOutside(String)
+    /// The backend stopped making changes until someone acknowledges a
+    /// problem it found itself (a failed write, a restore it owes): the
+    /// controller faults, so the user can clear the fault (rule R11).
+    /// Reported for as long as the backend waits.
+    case needsAcknowledgement(String)
 }
 
 /// A charging-control backend.

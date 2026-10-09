@@ -214,9 +214,7 @@ private struct ControlSettingsTab: View {
                             .foregroundStyle(.red)
                             .fixedSize(horizontal: false, vertical: true)
                         Button("Clear fault and retry") { model.resetBackendFault() }
-                            .help(usesHelper(status)
-                                  ? "Clears the fault. If the helper is waiting for it, this also restores macOS's default charging, which can undo another tool's change."
-                                  : "Clears the fault and lets CellKeeper manage charging again.")
+                            .help(faultResetHelp(for: status))
                     }
                 }
             }
@@ -236,20 +234,45 @@ private struct ControlSettingsTab: View {
         model.backendChoice == .nativeLimit || model.status?.capabilities.isEnforcedByMacOS == true
     }
 
-    /// True when the backend in use is CellKeeper's helper, whose fault
-    /// reset can restore macOS's defaults.
-    private func usesHelper(_ status: ControllerStatus) -> Bool {
-        ControlBackendChoice(backendIdentifier: status.backend.identifier) == .simulatedHelper
+    /// How clearing the fault affects charging, for the backend in use.
+    private enum FaultReset {
+        case nativeLimit
+        /// The Simulated helper: its reset changes only simulated controls.
+        case simulatedHelper
+        /// A helper that controls hardware (not available yet): its reset
+        /// restores macOS's default charging.
+        case helper
+        case other
+    }
+
+    private func faultReset(for status: ControllerStatus) -> FaultReset {
+        if isNative { return .nativeLimit }
+        guard ControlBackendChoice(backendIdentifier: status.backend.identifier) == .simulatedHelper else { return .other }
+        return status.capabilities.availability.affectsHardware ? .helper : .simulatedHelper
     }
 
     private func faultExplanation(for status: ControllerStatus) -> String {
-        if isNative {
-            return "The control backend failed repeatedly. Until you clear the fault, CellKeeper only gives back your own Charge Limit."
+        switch faultReset(for: status) {
+        case .nativeLimit:
+            "The control backend failed repeatedly. Until you clear the fault, CellKeeper only gives back your own Charge Limit."
+        case .simulatedHelper:
+            "The simulated helper failed, found its controls changed outside CellKeeper, or is waiting for you to acknowledge a problem. Until you clear the fault, only normal charging is requested. Clearing it also resets the simulated helper's controls if it is waiting for that; your Mac's charging is not changed."
+        case .helper:
+            "The helper failed, found charging changed outside CellKeeper, or is waiting for you to acknowledge a problem. Until you clear the fault, only normal charging is requested. Clearing it also has the helper restore macOS's default charging if it is waiting for that, which can undo another tool's change."
+        case .other:
+            "The control backend failed repeatedly. Until you clear the fault, only normal charging will be requested."
         }
-        if usesHelper(status) {
-            return "The control backend failed repeatedly, or found charging changed outside CellKeeper. Until you clear the fault, only normal charging will be requested. Clearing it also has the helper restore macOS's default charging if it is waiting for that, which can undo another tool's change."
+    }
+
+    private func faultResetHelp(for status: ControllerStatus) -> String {
+        switch faultReset(for: status) {
+        case .simulatedHelper:
+            "Clears the fault and resets the simulated helper's controls if it is waiting for that. Your Mac's charging is not changed."
+        case .helper:
+            "Clears the fault. If the helper is waiting for it, this also restores macOS's default charging, which can undo another tool's change."
+        case .nativeLimit, .other:
+            "Clears the fault and lets CellKeeper manage charging again."
         }
-        return "The control backend failed repeatedly. Until you clear the fault, only normal charging will be requested."
     }
 
     private func choose(_ choice: ControlBackendChoice) {

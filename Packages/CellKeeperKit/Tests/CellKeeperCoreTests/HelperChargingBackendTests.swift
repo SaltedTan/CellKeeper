@@ -170,7 +170,7 @@ struct HelperChargingBackendTests {
         #expect(rig.control.activeControls.isEmpty)
     }
 
-    @Test("A hold that ended under the helper's hardware-fault interlock is a failure, not a routine release")
+    @Test("A hold that ended under the helper's hardware-fault interlock needs an acknowledgement, not a routine release")
     func clearedUnderHardwareFault() async throws {
         let rig = HelperRig()
         try await hold(.inhibitCharging, rig)
@@ -181,12 +181,12 @@ struct HelperChargingBackendTests {
         await rig.engine.tick()
         #expect(rig.control.activeControls.isEmpty)
         #expect(await rig.observedState().interlocks.contains(.hardwareFault))
-        do {
-            _ = try await rig.backend.currentMode()
-            Issue.record("expected a failure")
-        } catch {
-            #expect(String(describing: error).contains("hardware error"))
+        #expect(try await rig.backend.currentMode() == .normal)
+        guard case .needsAcknowledgement(let detail)? = await rig.backend.reportedModeOrigin() else {
+            Issue.record("expected an acknowledgement, got \(String(describing: await rig.backend.reportedModeOrigin()))")
+            return
         }
+        #expect(detail.contains("owed"))
     }
 
     // MARK: - Setting modes
@@ -229,7 +229,8 @@ struct HelperChargingBackendTests {
             .apply(.chargingInhibited, active: true),
             .apply(.adapterDisabled, active: false),
         ])
-        #expect((await rig.observedState()).adapterDisabledLeaseSeconds == 0)
+        let state = await rig.observedState()
+        #expect(state.adapterDisabledLeaseSeconds == 0)
     }
 
     @Test("Normal releases CellKeeper's controls and leases, and restores nothing else")
