@@ -258,7 +258,8 @@ struct HelperActivationRecordTests {
             if case .activationRecorded(let record) = event { return record }
             return nil
         }
-        #expect(fromEvents == (await first.engine.activationHistory))
+        let fromGetter = await first.engine.activationHistory
+        #expect(fromEvents == fromGetter)
         _ = await session.restoreDefaultsAndExit()
 
         // A relaunch with the persisted events: 59.9 s after the last write.
