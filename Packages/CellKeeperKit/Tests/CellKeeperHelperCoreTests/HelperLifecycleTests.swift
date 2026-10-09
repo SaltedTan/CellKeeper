@@ -315,7 +315,8 @@ struct HelperHardwareFailureTests {
         #expect(h.control.activeControls.isEmpty)
         #expect(h.recorder.contains(.restored(.readBackFailed)))
 
-        h.control.failNextReadBacks(2)
+        // The check's read, the restore's read before it, and its read-back.
+        h.control.failNextReadBacks(3)
         let state = await session.readState()
         #expect(state.status == .hardwareError)
         #expect(state.active.isEmpty)

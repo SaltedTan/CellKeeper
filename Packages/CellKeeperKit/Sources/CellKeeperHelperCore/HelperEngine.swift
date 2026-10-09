@@ -14,8 +14,9 @@ import Foundation
 ///   when it expires, when it is released, when its session is invalidated
 ///   or revoked (R1), when a client restores defaults, and at shutdown; the
 ///   control is cleared with it. Only one session holds leases at a time.
-///   The lease is checked again on a fresh clock reading right before an
-///   activation is written.
+///   An activation's final checks (lease, power state's age, interlocks,
+///   activation limits) use one fresh clock reading, taken after the
+///   checks' reads, and only these pure checks separate it from the write.
 /// - Every write that returns is read back. A write that throws, a failed
 ///   read-back or a mismatch restores defaults and raises `writeFailed`,
 ///   which refuses activations until a client restores defaults or an hour
@@ -33,8 +34,11 @@ import Foundation
 ///   may be in control (R27): `externalModification` is raised and defaults
 ///   are restored until none of the engine's own controls can still be
 ///   active. From then until a client's restore reads back clean, the
-///   engine writes nothing on its own, so it never fights the other tool.
-///   Shutdown still restores.
+///   engine writes nothing on its own, so it does not fight the other tool
+///   over controls that are clearly that tool's. (A tool that sets an
+///   inactive control during each restore looks like a restore that went
+///   wrong, and is retried.) Start, shutdown and client restores still
+///   write.
 /// - Activations are rate-limited (R13). A refused activation restores
 ///   defaults. Deactivations and restores are never limited. Each session
 ///   also has a request budget; a session that keeps exceeding it is
@@ -47,7 +51,9 @@ import Foundation
 /// - Read-back state is reported, never intended state (R30).
 ///
 /// Every call is synchronous inside the actor, so requests, ticks and
-/// system events never interleave hardware access.
+/// system events never interleave hardware access. Events are delivered
+/// only when the operation that caused them has ended, so no callback
+/// runs between a check and a write.
 public actor HelperEngine {
     /// Each control is activated at most once per this interval (R13).
     public static let minimumActivationInterval: TimeInterval = 60
@@ -115,7 +121,10 @@ public actor HelperEngine {
     private let power: any HelperPowerReading
     private let build: Int
     private let uptime: @Sendable () -> TimeInterval
-    private let emit: @Sendable (HelperEvent) -> Void
+    private let sink: @Sendable (HelperEvent) -> Void
+    /// Events of the operation in progress, delivered when it ends.
+    private var pendingEvents: [HelperEvent] = []
+    private var isDeliveringEvents = false
 
     private var phase = Phase.notStarted
     private var hasAnnouncedSafeToExit = false
@@ -135,6 +144,8 @@ public actor HelperEngine {
     private var owned = Set(HelperControl.allCases)
     /// The latest read-back; nil if it failed.
     private var lastReadBack: Set<HelperControl>?
+    /// The latest read-back that succeeded.
+    private var lastKnownReadBack: Set<HelperControl> = []
     private var interlocks: HelperInterlocks = []
     private var isBatteryFloorLatched = false
     private var isAdapterFloorLatched = false
@@ -160,11 +171,14 @@ public actor HelperEngine {
     ///     made in this boot (see ``activationHistory``), so that a
     ///     relaunch cannot reset the activation limits. Records older than
     ///     an hour or later than now are dropped.
-    ///   - events: receives every event, synchronously, for the audit log.
-    ///     It must not block: it runs inside the engine, between its checks
-    ///     and its writes. Persisting the activation history, for example,
-    ///     is done asynchronously; losing the last record in a crash is
-    ///     acceptable, because the next start restores defaults first.
+    ///   - events: receives every event, in order, for the audit log. The
+    ///     events of an operation are delivered when it has ended, after its
+    ///     last write and state change, so the sink never runs between a
+    ///     check and a write. It may re-enter the engine (on the engine's
+    ///     executor, for example with `assumeIsolated`): that starts a new,
+    ///     complete operation, whose events follow the ones already queued.
+    ///     It may block, but only at the cost of delaying the next
+    ///     operation; the daemon logs and persists asynchronously.
     public init(
         control: any HelperChargeControl,
         power: any HelperPowerReading,
@@ -177,7 +191,7 @@ public actor HelperEngine {
         self.power = power
         self.build = build
         self.uptime = uptime
-        self.emit = events
+        self.sink = events
         self.activations = ActivationHistory(records: activationHistory, at: uptime())
     }
 
@@ -189,6 +203,7 @@ public actor HelperEngine {
     /// activation) and returns `hardwareError`. Later calls do nothing.
     @discardableResult
     public func start() -> HelperStatus {
+        defer { deliverEvents() }
         switch phase {
         case .shuttingDown:
             return .shuttingDown
@@ -207,6 +222,7 @@ public actor HelperEngine {
 
     /// A new session for a client connection. See ``HelperSession``.
     public func openSession() -> HelperSession {
+        defer { deliverEvents() }
         let id = HelperSessionID(rawValue: nextSessionNumber)
         nextSessionNumber += 1
         sessions[id] = SessionState(budget: RequestBudget(at: uptime()))
@@ -220,6 +236,7 @@ public actor HelperEngine {
     /// restores runs the same checks, but only ticks and system events
     /// retry an owed restore. During shutdown it only retries the restore.
     public func tick() {
+        defer { deliverEvents() }
         switch phase {
         case .running: refresh(.tick)
         case .shuttingDown: retryRestoreDuringShutdown()
@@ -231,6 +248,7 @@ public actor HelperEngine {
     /// adapter-disable and refuses it until ``systemDidWake()``. The
     /// charging inhibit stays only while its lease is valid.
     public func systemWillSleep() {
+        defer { deliverEvents() }
         switch phase {
         case .running:
             sleepAnnouncedAt = uptime()
@@ -246,6 +264,7 @@ public actor HelperEngine {
     /// check. Power states read at or before this call count as
     /// unavailable, so the power reading must provide a newer one.
     public func systemDidWake() {
+        defer { deliverEvents() }
         switch phase {
         case .running:
             sleepAnnouncedAt = nil
@@ -269,6 +288,7 @@ public actor HelperEngine {
     /// start restores defaults before anything else (R2).
     @discardableResult
     public func terminate() -> HelperStatus {
+        defer { deliverEvents() }
         switch phase {
         case .shuttingDown:
             if isRestoreOwed {
@@ -292,11 +312,12 @@ public actor HelperEngine {
         phase == .shuttingDown && !isRestoreOwed
     }
 
-    /// The activations of the last hour, for the activation limits. The
-    /// daemon persists them (an ``HelperEvent/activationRecorded(_:)`` event
-    /// follows every change) and passes them to the next engine in the same
-    /// boot; it discards them when the boot changes, because the clock
-    /// starts again. The engine keeps at most the latest
+    /// The activations of the last hour, for the activation limits, each
+    /// at the time of its write. On every
+    /// ``HelperEvent/activationRecorded(_:)`` event the daemon persists a
+    /// snapshot of them, asynchronously, and passes them to the next engine
+    /// in the same boot; it discards them when the boot changes, because
+    /// the clock starts again. The engine keeps at most the latest
     /// ``maximumActivationsPerHour`` records it is given, which is enough
     /// for both limits; the daemon's reader must bound what it reads too.
     public var activationHistory: [HelperActivationRecord] {
@@ -306,6 +327,7 @@ public actor HelperEngine {
     // MARK: - Requests (through HelperSession)
 
     func hello(_ id: HelperSessionID, clientProtocolVersion: Int) -> HelperHelloReply {
+        defer { deliverEvents() }
         var status = admit(id, .hello, needsIntroduction: false).refusal ?? .ok
         if status == .ok, !HelperProtocolVersion.isSupported(client: clientProtocolVersion) {
             status = reject(id, .hello, .incompatibleProtocol)
@@ -322,6 +344,7 @@ public actor HelperEngine {
     }
 
     func readState(_ id: HelperSessionID) -> HelperStateReply {
+        defer { deliverEvents() }
         if let refusal = admit(id, .readState).refusal {
             return HelperStateReply(
                 status: refusal,
@@ -351,6 +374,7 @@ public actor HelperEngine {
     }
 
     func acquireOrRenewLease(_ id: HelperSessionID, control rawControl: Int, seconds: Int) -> HelperLeaseReply {
+        defer { deliverEvents() }
         func refused(_ status: HelperStatus) -> HelperLeaseReply {
             HelperLeaseReply(status: reject(id, .acquireOrRenewLease, status), grantedSeconds: 0)
         }
@@ -377,6 +401,7 @@ public actor HelperEngine {
     }
 
     func releaseLease(_ id: HelperSessionID, control rawControl: Int) -> HelperStatus {
+        defer { deliverEvents() }
         // Only moves toward safety, so the budget does not refuse it
         // (unless this request revokes the session).
         let admission = admit(id, .releaseLease, metered: false)
@@ -397,6 +422,7 @@ public actor HelperEngine {
     }
 
     func setControl(_ id: HelperSessionID, control rawControl: Int, active: Bool) -> HelperStatus {
+        defer { deliverEvents() }
         // Deactivation only moves toward safety, so the budget does not
         // refuse it (unless this request revokes the session).
         let admission = admit(id, .setControl, metered: active)
@@ -419,39 +445,36 @@ public actor HelperEngine {
             return reject(id, .setControl, .unsupportedControl)
         }
         refresh(.request)
-        // The checks read the hardware and the power state, and every event
-        // is a synchronous callback, all of which takes time: the lease is
-        // checked on a fresh clock.
-        guard isLeaseValid(control, for: id, at: uptime()) else {
+        // The checks read the hardware and the power state, which takes
+        // time. The final checks use one fresh clock reading, and only pure
+        // checks separate them from the write; events wait until the
+        // operation ends, so no callback runs in between either.
+        let now = uptime()
+        guard isLeaseValid(control, for: id, at: now) else {
             return reject(id, .setControl, .noLease)
+        }
+        if let readAt = powerStateReadAt, now - readAt > Self.maximumPowerStateAge {
+            // The power state went stale during the checks: like any
+            // interlock, it clears what it blocks at once.
+            raise(.powerStateUnavailable)
+            enforceInterlocks()
         }
         guard interlocks.isDisjoint(with: control.blockingInterlocks) else {
             return reject(id, .setControl, .blockedByInterlock)
         }
         guard !expected.contains(control) else { return .ok }
-        let reservedAt = uptime()
-        guard activations.allows(control, at: reservedAt) else {
+        guard activations.allows(control, at: now) else {
             // R13: the safe state, but no degraded mode (a deliberate
             // deviation; see architecture.md).
             ensureDefaults(reason: .activationLimited)
             return reject(id, .setControl, .rateLimited)
         }
-        // The activation is reserved before the event that reports it, and
-        // counts from here even if the write is then abandoned.
-        emit(.activationRecorded(activations.record(control, at: reservedAt)))
-        // Final checks on a fresh clock, after the last callback: nothing is
-        // emitted between them and the write.
-        let writeAt = uptime()
-        guard isLeaseValid(control, for: id, at: writeAt) else {
-            return reject(id, .setControl, .noLease)
-        }
-        guard let readAt = powerStateReadAt, writeAt - readAt <= Self.maximumPowerStateAge else {
-            raise(.powerStateUnavailable)
-            return reject(id, .setControl, .blockedByInterlock)
-        }
-        // The activation limits measure from the real write time.
-        activations.moveLatestRecord(to: writeAt)
-        if let failure = write(control, active: true) {
+        // An attempted write counts, whatever its outcome, from the moment
+        // it is made.
+        let record = activations.record(control, at: now)
+        let failure = write(control, active: true)
+        emit(.activationRecorded(record))
+        if let failure {
             noteWriteFailure()
             restoreAll(reason: failure)
             return reject(id, .setControl, .hardwareError)
@@ -461,6 +484,7 @@ public actor HelperEngine {
     }
 
     func restoreDefaults(_ id: HelperSessionID) -> HelperStatus {
+        defer { deliverEvents() }
         if let refusal = admit(id, .restoreDefaults, metered: false, needsIntroduction: false, isRestore: true).refusal {
             return refusal
         }
@@ -468,6 +492,7 @@ public actor HelperEngine {
     }
 
     func restoreDefaultsAndExit(_ id: HelperSessionID) -> HelperStatus {
+        defer { deliverEvents() }
         if let refusal = admit(id, .restoreDefaultsAndExit, metered: false, needsIntroduction: false, isRestore: true).refusal {
             return refusal
         }
@@ -478,9 +503,34 @@ public actor HelperEngine {
     }
 
     func invalidate(_ id: HelperSessionID) {
+        defer { deliverEvents() }
         guard sessions.removeValue(forKey: id) != nil else { return }
         emit(.sessionInvalidated(id))
         endSession(id)
+    }
+
+    // MARK: - Events
+
+    /// Queues an event; ``deliverEvents()`` sends it when the operation
+    /// ends.
+    private func emit(_ event: HelperEvent) {
+        pendingEvents.append(event)
+    }
+
+    /// Delivers the queued events in order. Every public entry point calls
+    /// it as it ends. An operation started from the sink queues its events
+    /// behind the ones still being delivered, and this loop delivers them
+    /// too, so the sink is never entered recursively.
+    private func deliverEvents() {
+        guard !isDeliveringEvents else { return }
+        isDeliveringEvents = true
+        defer { isDeliveringEvents = false }
+        var index = 0
+        while index < pendingEvents.count {
+            sink(pendingEvents[index])
+            index += 1
+        }
+        pendingEvents.removeAll()
     }
 
     // MARK: - Admission
@@ -687,6 +737,11 @@ public actor HelperEngine {
             self.writeFailedAt = nil
             lower(.writeFailed)
         }
+        enforceInterlocks()
+    }
+
+    /// Clears every control the engine set that a raised interlock blocks.
+    private func enforceInterlocks() {
         for control in HelperControl.allCases where expected.contains(control) {
             let blocking = interlocks.intersection(control.blockingInterlocks)
             if !blocking.isEmpty {
@@ -752,6 +807,7 @@ public actor HelperEngine {
         do {
             let readBack = try hardware.readBack()
             lastReadBack = readBack
+            lastKnownReadBack = readBack
             owned.formIntersection(readBack)
             return readBack
         } catch {
@@ -838,18 +894,19 @@ public actor HelperEngine {
 
     /// Restores every control to its default and confirms by read-back. A
     /// failure means a restore is owed (`hardwareFault`); a clean read-back
-    /// settles it. Whatever the restore may have made active counts as the
+    /// settles it. The state before is read afresh right before the
+    /// restore. Whatever the restore may have made active counts as the
     /// engine's: a control that reads back active and was not active before
     /// it, and, if the restore threw or could not be read back, every
     /// control not known to have been active before. A control active
     /// before and after keeps its owner, so another tool's control does not
-    /// become the engine's.
+    /// become the engine's. If the state before cannot be read, the controls
+    /// last known to be another tool's still count as active before, so a
+    /// failed read never makes them the engine's.
     @discardableResult
     private func restoreAll(reason: HelperChangeReason) -> Bool {
         expected = []
-        // Unknown before the restore counts as nothing active, so that
-        // everything active after it counts as the engine's.
-        let before = lastReadBack ?? []
+        let before = readHardware() ?? lastKnownReadBack.subtracting(owned)
         let mayHaveBeenIntroduced = Set(HelperControl.allCases).subtracting(before)
         func record(_ outcome: HelperWriteRecord.Outcome, _ readBack: Set<HelperControl>?) {
             emit(.write(HelperWriteRecord(target: .restoreDefaults, outcome: outcome, readBack: readBack)))

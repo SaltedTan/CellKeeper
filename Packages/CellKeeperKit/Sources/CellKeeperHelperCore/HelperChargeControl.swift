@@ -119,6 +119,7 @@ public final class SimulatedChargeControl: HelperChargeControl, @unchecked Senda
     private var pendingMisrestores = 0
     private var pendingPartialRestores: [HelperControl] = []
     private var pendingFailuresAfterRestoring = 0
+    private var pendingCompetingWrites: [HelperControl] = []
     private var pendingReadBackFailuresAfterRestoring = 0
 
     public init(
@@ -198,6 +199,9 @@ public final class SimulatedChargeControl: HelperChargeControl, @unchecked Senda
                 active = active.intersection([kept])
             } else {
                 active = []
+            }
+            if !pendingCompetingWrites.isEmpty {
+                active.insert(pendingCompetingWrites.removeFirst())
             }
             if pendingReadBackFailuresAfterRestoring > 0 {
                 pendingReadBackFailuresAfterRestoring -= 1
@@ -288,6 +292,13 @@ public final class SimulatedChargeControl: HelperChargeControl, @unchecked Senda
     /// control except `kept`, and return normally.
     public func partiallyRestoreNextRestores(_ count: Int, keeping kept: HelperControl) {
         lock.withLock { pendingPartialRestores.append(contentsOf: Array(repeating: kept, count: count)) }
+    }
+
+    /// Makes another writer set `control` during each of the next `count`
+    /// calls to `restoreDefaults`, after the restore has changed the state.
+    /// They return normally.
+    public func simulateCompetingWriterDuringNextRestores(_ count: Int, setting control: HelperControl) {
+        lock.withLock { pendingCompetingWrites.append(contentsOf: Array(repeating: control, count: count)) }
     }
 
     /// Makes the next `count` calls to `restoreDefaults` change the state

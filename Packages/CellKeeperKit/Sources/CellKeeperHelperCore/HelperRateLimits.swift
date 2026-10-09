@@ -78,13 +78,6 @@ struct ActivationHistory {
         return record
     }
 
-    /// Moves the latest record to a later time, the moment its write is
-    /// made, so the limits measure from the real write.
-    mutating func moveLatestRecord(to uptime: TimeInterval) {
-        guard let last = records.indices.last, records[last].uptime < uptime else { return }
-        records[last].uptime = uptime
-    }
-
     /// The records still within the window.
     func current(at now: TimeInterval) -> [HelperActivationRecord] {
         records.filter { now - $0.uptime < Self.window }

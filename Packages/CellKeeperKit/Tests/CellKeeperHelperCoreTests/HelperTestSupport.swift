@@ -10,14 +10,29 @@ final class HelperTestClock: @unchecked Sendable {
     private let lock = NSLock()
     private var elapsed: TimeInterval = 0
     private var isFrozen = false
+    private var pendingJump: (reads: Int, interval: TimeInterval)?
 
     var uptime: TimeInterval {
         lock.withLock {
+            if let jump = pendingJump {
+                if jump.reads == 0 {
+                    elapsed += jump.interval
+                    pendingJump = nil
+                } else {
+                    pendingJump = (jump.reads - 1, jump.interval)
+                }
+            }
             if !isFrozen {
                 elapsed += Self.tick
             }
             return 50_000 + elapsed
         }
+    }
+
+    /// Lets the next `reads` readings through unchanged; the one after them
+    /// is `interval` later, as if that much time had passed in between.
+    func jump(by interval: TimeInterval, afterReads reads: Int) {
+        lock.withLock { pendingJump = (reads, interval) }
     }
 
     func advance(by interval: TimeInterval) {
@@ -44,6 +59,10 @@ final class StubPowerReading: HelperPowerReading, @unchecked Sendable {
         var isUnavailable = false
         /// How long each read takes on the clock.
         var readDuration: TimeInterval = 0
+        /// Once, at the next read: the engine's next clock reading after
+        /// the one that judges this sample is this much later. Use with a
+        /// fixed read time.
+        var jumpAfterJudged: TimeInterval?
     }
 
     private let lock = NSLock()
@@ -59,9 +78,16 @@ final class StubPowerReading: HelperPowerReading, @unchecked Sendable {
     }
 
     func latestPowerState() -> HelperPowerState? {
-        let values = lock.withLock { self.values }
+        let values = lock.withLock {
+            let current = self.values
+            self.values.jumpAfterJudged = nil
+            return current
+        }
         if values.readDuration > 0 {
             clock.advance(by: values.readDuration)
+        }
+        if let jump = values.jumpAfterJudged {
+            clock.jump(by: jump, afterReads: 1)
         }
         guard !values.isUnavailable else { return nil }
         return HelperPowerState(

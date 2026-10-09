@@ -109,12 +109,10 @@ public enum HelperEvent: Sendable, Equatable {
     case leaseEnded(HelperSessionID, HelperControl, HelperLeaseEndReason)
     /// Every hardware write attempt, client-driven or internal.
     case write(HelperWriteRecord)
-    /// An activation was reserved: it counts toward the activation limits
-    /// from now on, even if its write is then abandoned. The record carries
-    /// the reservation time; the engine itself measures from the later write
-    /// time, which is the same while the event sink does not block. The host
-    /// persists it (see
-    /// ``HelperEngine/activationHistory``).
+    /// An activation write was attempted, whatever its outcome; it counts
+    /// toward the activation limits. The record carries the time of the
+    /// write. Treat it as a notification: the host persists a snapshot of
+    /// ``HelperEngine/activationHistory``, asynchronously.
     case activationRecorded(HelperActivationRecord)
     /// The control was set and confirmed by read-back.
     case activated(HelperControl, by: HelperSessionID)
