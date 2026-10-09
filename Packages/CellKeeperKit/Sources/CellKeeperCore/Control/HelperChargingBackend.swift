@@ -16,11 +16,16 @@ import Foundation
 ///   backend never restores defaults by itself (research rules R26, R27): it
 ///   reports the change, and only ``resetAfterFault()`` (the user clearing
 ///   the fault) restores defaults.
-/// - A hold the helper ended itself (a lapsed lease, one of its interlocks,
-///   a lost connection) is reported by ``reportedModeOrigin()``, so the
-///   controller does not take it for an outside change.
+/// - A hold the helper ended itself (a lapsed lease, one of its power or
+///   sleep interlocks, a lost connection) is reported by
+///   ``reportedModeOrigin()``, so the controller does not take it for an
+///   outside change. Why a hold ended comes from the helper: the reason its
+///   lease ended, its interlocks, and its count of hardware errors. Another
+///   client's restore or deactivation is an outside change.
 /// - Requests are paced to stay within the helper's per-session request
-///   budget.
+///   budget, far from the point where it revokes a session.
+/// - While CellKeeper holds a control, a ``LeaseActivity`` keeps the app
+///   from being napped, so evaluations renew the lease on time.
 ///
 /// The controller serialises all calls into it.
 public actor HelperChargingBackend: ChargingBackend {
@@ -29,6 +34,7 @@ public actor HelperChargingBackend: ChargingBackend {
 
     private let uptime: @Sendable () -> TimeInterval
     private let pause: @Sendable (TimeInterval) async -> Void
+    private let activity: any LeaseActivity
 
     private var connection: (any HelperConnection)?
     /// The helper's reply to `hello` on ``connection``.
@@ -39,15 +45,23 @@ public actor HelperChargingBackend: ChargingBackend {
     private var pacer: RequestPacer
     /// The controls CellKeeper set, confirmed by read-back, that it has not
     /// released and has not seen cleared.
-    private var held: Set<HelperControl> = []
+    private var held: Set<HelperControl> = [] {
+        didSet {
+            if held.isEmpty != oldValue.isEmpty {
+                activity.setHolding(!held.isEmpty)
+            }
+        }
+    }
     /// When CellKeeper's leases end at the latest, on ``uptime``: the time
     /// before each grant was requested, plus the seconds granted. Never later
-    /// than the helper's own deadline.
+    /// than the helper's own deadline. Used only to avoid renewing a lease
+    /// that may have lapsed.
     private var leaseDeadlines: [HelperControl: TimeInterval] = [:]
     /// The connection ended while CellKeeper held a control, so the helper
     /// has cleared it.
     private var isConnectionLostWhileHolding = false
-    private var lastHardwareError: Int?
+    /// The helper's count of hardware errors at the last read.
+    private var lastHardwareErrorCount: Int?
     /// An outside change the helper still shows: its `externalModification`
     /// interlock, or a control CellKeeper did not set.
     private var currentOutsideChange: String?
@@ -64,16 +78,19 @@ public actor HelperChargingBackend: ChargingBackend {
     ///     same scale as the helper's clock.
     ///   - pause: waits the given number of seconds; used to stay within the
     ///     helper's request budget.
+    ///   - activity: told when CellKeeper starts and stops holding a control.
     public init(
         descriptor: BackendDescriptor,
         transport: any HelperTransport,
         uptime: @escaping @Sendable () -> TimeInterval = HelperEngine.continuousUptime,
-        pause: @escaping @Sendable (TimeInterval) async -> Void = { try? await Task.sleep(for: .seconds($0)) }
+        pause: @escaping @Sendable (TimeInterval) async -> Void = { try? await Task.sleep(for: .seconds($0)) },
+        activity: any LeaseActivity = ProcessLeaseActivity()
     ) {
         self.descriptor = descriptor
         self.transport = transport
         self.uptime = uptime
         self.pause = pause
+        self.activity = activity
         self.pacer = RequestPacer(at: uptime())
     }
 
@@ -81,6 +98,9 @@ public actor HelperChargingBackend: ChargingBackend {
         // The helper clears whatever the session still holds.
         if let connection {
             Task { await connection.invalidate() }
+        }
+        if !held.isEmpty {
+            activity.setHolding(false)
         }
     }
 
@@ -178,11 +198,13 @@ public actor HelperChargingBackend: ChargingBackend {
 
     /// Restores macOS's defaults through the helper if it is waiting for a
     /// client to acknowledge a problem: an interlock other than the power
-    /// and sleep conditions (an outside change or a hardware error), a
-    /// control CellKeeper did not set, or a failed read-back. This ends
-    /// every lease and may undo another tool's change, which is why only the
-    /// user's clearing of the fault does it. A helper that cannot be reached
-    /// has nothing to acknowledge.
+    /// and sleep conditions (an outside change, a failed write, an owed
+    /// restore), a control CellKeeper did not set, or a failed read-back.
+    /// This ends every lease and may undo another tool's change, which is
+    /// why only the user's clearing of the fault does it. A helper that
+    /// cannot be reached has nothing to acknowledge. If the session ended
+    /// before the restore arrived, the backend connects again, says hello,
+    /// and tries once more.
     public func resetAfterFault() async throws {
         clearNotices()
         let state: HelperStateReply
@@ -191,19 +213,31 @@ public actor HelperChargingBackend: ChargingBackend {
         } catch BackendError.unavailable {
             return
         }
-        _ = observe(state)
+        if state.status == .ok {
+            _ = observe(state)
+        }
         let needsAcknowledgement = state.status == .hardwareError
             || !state.interlocks.subtracting(Self.conditionInterlocks).isEmpty
             || !state.activeControls.controls.subtracting(held).isEmpty
         guard needsAcknowledgement else { return }
-        let status = try await send(needsToken: false) { try await $0.restoreDefaults() }
+        var status: HelperStatus?
+        do {
+            status = try await send(needsToken: false) { try await $0.restoreDefaults() }
+        } catch BackendError.operationFailed {
+            // The connection was lost; `send` has dropped it.
+            status = nil
+        }
+        if status.map(Self.isSessionLost) ?? true {
+            await dropConnection()
+            status = try await send(needsToken: false) { try await $0.restoreDefaults() }
+        }
         held = []
         leaseDeadlines = [:]
         isConnectionLostWhileHolding = false
         currentOutsideChange = nil
         guard status == .ok else {
-            if Self.isSessionLost(status) { await dropConnection() }
-            throw BackendError.operationFailed("CellKeeper's helper could not restore macOS's defaults (\(status))")
+            if status.map(Self.isSessionLost) ?? false { await dropConnection() }
+            throw BackendError.operationFailed("CellKeeper's helper could not restore macOS's defaults (\(status.map(String.init(describing:)) ?? "no reply"))")
         }
     }
 
@@ -370,12 +404,13 @@ public actor HelperChargingBackend: ChargingBackend {
     }
 
     /// Updates what CellKeeper holds from a fresh read and says how a hold
-    /// that ended came about. Also notes an outside change the helper still
-    /// shows.
+    /// that ended came about, from what the helper reports: why the lease
+    /// ended, its interlocks, and its count of hardware errors. Also notes an
+    /// outside change the helper still shows.
     private func observe(_ state: HelperStateReply) -> Loss? {
         let active = state.activeControls.controls
-        let hardwareErrorChanged = state.lastHardwareError != (lastHardwareError ?? 0)
-        lastHardwareError = state.lastHardwareError
+        let isNewHardwareError = lastHardwareErrorCount.map { state.hardwareErrorCount > $0 } ?? false
+        lastHardwareErrorCount = state.hardwareErrorCount
         let foreign = active.subtracting(held)
         if state.interlocks.contains(.externalModification) {
             currentOutsideChange = "CellKeeper's helper found its controls changed by something other than CellKeeper (another tool may be controlling charging); it restored macOS's defaults once and changes nothing more until the fault is cleared"
@@ -391,25 +426,50 @@ public actor HelperChargingBackend: ChargingBackend {
             if held.isEmpty { isConnectionLostWhileHolding = false }
         }
         guard !lost.isEmpty, currentOutsideChange == nil else { return nil }
+        let losses = lost.compactMap { loss(of: $0, in: state, isNewHardwareError: isNewHardwareError) }
+        // The most serious explanation wins: an outside change, then a
+        // failure, then one of the helper's releases.
+        return losses.first { if case .unexplained = $0 { true } else { false } }
+            ?? losses.first { if case .hardwareError = $0 { true } else { false } }
+            ?? losses.first
+    }
+
+    /// Why `control`, which CellKeeper held, is no longer active; nil if
+    /// CellKeeper released it itself.
+    private func loss(of control: HelperControl, in state: HelperStateReply, isNewHardwareError: Bool) -> Loss? {
         if isConnectionLostWhileHolding {
             return .released(.connectionLost)
         }
-        // Only the power and sleep conditions are routine; an interlock that
-        // waits for an acknowledgement (a hardware fault) is not.
-        let blocking = lost.reduce(into: HelperInterlocks()) {
-            $0.formUnion(state.interlocks.intersection($1.blockingInterlocks).intersection(Self.conditionInterlocks))
+        let name = Self.describe([control])
+        switch state.leaseEnd(for: control) {
+        case .expired?:
+            return .released(.leaseExpired)
+        case .sessionInvalidated?, .revoked?, .shutdown?:
+            // CellKeeper's earlier session ended; the helper cleared what
+            // it held.
+            return .released(.connectionLost)
+        case .restoredDefaults?:
+            // CellKeeper forgets what it held before its own restores.
+            return .unexplained("another client of the helper restored macOS's defaults, which ended CellKeeper's \(name)")
+        case .released?:
+            // Only the lease holder releases: CellKeeper did.
+            return nil
+        case nil:
+            break
         }
+        // The lease runs on. Only the power and sleep conditions are
+        // routine; an interlock that waits for an acknowledgement is not.
+        let blocking = state.interlocks.intersection(control.blockingInterlocks).intersection(Self.conditionInterlocks)
         if !blocking.isEmpty {
             return .released(.interlock(Self.describe(blocking)))
         }
-        let now = uptime()
-        if lost.allSatisfy({ state.leaseSeconds(for: $0) == 0 && now >= (leaseDeadlines[$0] ?? .infinity) }) {
-            return .released(.leaseExpired)
+        if isNewHardwareError {
+            return .hardwareError("CellKeeper's helper cleared \(name) after a hardware error (code \(state.lastHardwareError))")
         }
-        if hardwareErrorChanged {
-            return .hardwareError("CellKeeper's helper cleared \(Self.describe(lost)) after a hardware error (code \(state.lastHardwareError))")
+        if state.leaseSeconds(for: control) > 0 {
+            return .unexplained("\(name) was cleared while CellKeeper's lease on it ran on, by no rule of the helper: another client of the helper cleared it")
         }
-        return .unexplained("\(Self.describe(lost)) ended without CellKeeper releasing it and without a rule of the helper that explains it; another client of the helper may have changed it")
+        return .unexplained("\(name) ended, and the helper reports no reason")
     }
 
     /// A fresh `readState` whose status is `ok`.
@@ -503,14 +563,12 @@ public actor HelperChargingBackend: ChargingBackend {
         await old?.invalidate()
     }
 
-    /// Waits, if needed, until the helper's request budget has a token, so
-    /// it never refuses CellKeeper or ends the session for exceeding it.
+    /// Waits, if needed, so the helper's request budget never refuses
+    /// CellKeeper or revokes its session (see ``RequestPacer``).
     private func paced(needsToken: Bool) async {
-        if needsToken {
-            let wait = pacer.wait(at: uptime())
-            if wait > 0 {
-                await pause(wait)
-            }
+        let wait = pacer.wait(needsToken: needsToken, at: uptime())
+        if wait > 0 {
+            await pause(wait)
         }
         pacer.take(at: uptime())
     }
@@ -570,6 +628,7 @@ public actor HelperChargingBackend: ChargingBackend {
             (.sleepImminent, "the Mac is about to sleep"),
             (.externalModification, "its controls were changed outside CellKeeper"),
             (.hardwareFault, "a hardware fault"),
+            (.writeFailed, "a write to one of its controls failed"),
         ]
         var parts = names.filter { interlocks.contains($0.0) }.map(\.1)
         let unnamed = names.reduce(interlocks) { $0.subtracting($1.0) }
@@ -608,26 +667,42 @@ public actor HelperChargingBackend: ChargingBackend {
 struct RequestPacer {
     static let capacity = Double(HelperEngine.requestBurst - 1)
     static let rate = HelperEngine.requestsPerSecond
+    /// Requests that only move toward safety are sent without waiting, but
+    /// never more than this many in a row beyond the budget: far below
+    /// ``HelperEngine/maximumOverBudgetRequests``, after which the helper
+    /// revokes the session.
+    static let maximumUnpacedStreak = 4
 
     private var tokens: Double
     private var refilledAt: TimeInterval
+    /// Requests sent in a row without a token.
+    private(set) var overBudgetStreak = 0
 
     init(at now: TimeInterval) {
         tokens = Self.capacity
         refilledAt = now
     }
 
-    /// Seconds until a token is available; 0 if one is.
-    mutating func wait(at now: TimeInterval) -> TimeInterval {
+    /// Seconds to wait before sending a request; 0 to send it now. A request
+    /// the helper's budget may refuse waits for a token; one that only moves
+    /// toward safety waits only after ``maximumUnpacedStreak`` requests in a
+    /// row went without one.
+    mutating func wait(needsToken: Bool, at now: TimeInterval) -> TimeInterval {
         refill(at: now)
-        return tokens >= 1 ? 0 : (1 - tokens) / Self.rate
+        guard tokens < 1, needsToken || overBudgetStreak >= Self.maximumUnpacedStreak else { return 0 }
+        return (1 - tokens) / Self.rate
     }
 
     /// Uses a token if one is available, as the helper does for every
     /// request.
     mutating func take(at now: TimeInterval) {
         refill(at: now)
-        tokens = max(0, tokens - 1)
+        if tokens >= 1 {
+            tokens -= 1
+            overBudgetStreak = 0
+        } else {
+            overBudgetStreak += 1
+        }
     }
 
     private mutating func refill(at now: TimeInterval) {

@@ -227,16 +227,22 @@ simulated control:
   renews a hold only at the end of an evaluation that still wants it,
   including one whose action is "no change", so a hung or stalled loop lets
   the lease lapse. A failed renewal counts as a failure and normal charging
-  is requested at once (`ChargeController.renewHoldIfStillWanted`). The
-  helper's own power reading uses public, read-only interfaces in process; the
-  daemon's is still to come.
+  is requested at once (`ChargeController.renewHoldIfStillWanted`). While
+  CellKeeper holds a control, the app holds an activity that keeps macOS from
+  napping it, so renewals arrive on time (`LeaseActivity`). The helper's own
+  power reading uses public, read-only interfaces in process; the daemon's is
+  still to come.
+- **6, debounce and dwell:** the policy's debounce and minimum pause apply to
+  the helper backend, as to any backend that switches charging itself.
 - **7, external-writer detection (in part):** an outside change the helper
-  finds faults the backend at once; CellKeeper releases only what it set and
-  never restores defaults over another tool's change by itself. Only the user
-  clearing the fault restores defaults, once. A hold the helper ended itself
-  (lapse, interlock, lost connection) is logged and is not mistaken for an
-  outside change. Coexistence with macOS's Charge Limit and Optimized
-  Battery Charging is not done.
+  finds faults the backend at once, and so does another client of the
+  helper restoring defaults or clearing CellKeeper's control, which the
+  helper's report of why each lease ended makes visible. CellKeeper releases
+  only what it set and never restores defaults over another tool's change by
+  itself. Only the user clearing the fault restores defaults, once. A hold
+  the helper ended itself (lapse, power or sleep interlock, lost connection)
+  is logged and is not mistaken for an outside change. Coexistence with
+  macOS's Charge Limit and Optimized Battery Charging is not done.
 - **8, monotonic time:** one clock that counts sleep for the helper's leases,
   rate limits and power-state age.
 

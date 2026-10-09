@@ -80,6 +80,7 @@ final class TestHelperConnection: HelperConnection, @unchecked Sendable {
     private var helloStatus: HelperStatus?
     private var isMismatchArmed = false
     private var reportsMismatchAfterActivation = false
+    private var endsSessionBeforeRestore = false
 
     init(session: HelperSession, helloStatus: HelperStatus?) {
         self.session = session
@@ -95,6 +96,19 @@ final class TestHelperConnection: HelperConnection, @unchecked Sendable {
     /// nothing active, as if the read-back did not match.
     func reportMismatchAfterNextActivation() {
         lock.withLock { reportsMismatchAfterActivation = true }
+    }
+
+    /// Ends the session just before the next restore reaches the helper,
+    /// as if the connection had dropped in between.
+    func endSessionBeforeNextRestore() {
+        lock.withLock { endsSessionBeforeRestore = true }
+    }
+
+    private func takeSessionEndBeforeRestore() -> Bool {
+        lock.withLock {
+            defer { endsSessionBeforeRestore = false }
+            return endsSessionBeforeRestore
+        }
     }
 
     private func takeFailure() -> Bool {
@@ -167,6 +181,9 @@ final class TestHelperConnection: HelperConnection, @unchecked Sendable {
 
     func restoreDefaults() async throws -> HelperStatus {
         try await failIfInjected()
+        if takeSessionEndBeforeRestore() {
+            await session.invalidate()
+        }
         return await session.restoreDefaults()
     }
 
@@ -243,6 +260,26 @@ struct UnsimulatedChargeControl: HelperChargeControl {
     }
 }
 
+/// Records when the backend starts and stops holding a control.
+final class RecordingLeaseActivity: LeaseActivity, @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls: [Bool] = []
+
+    /// Every call, in order.
+    var changes: [Bool] {
+        lock.withLock { calls }
+    }
+
+    /// Whether the activity is held now.
+    var isHolding: Bool {
+        changes.last ?? false
+    }
+
+    func setHolding(_ isHolding: Bool) {
+        lock.withLock { calls.append(isHolding) }
+    }
+}
+
 /// A helper engine on a simulated control, a stub power reading and a test
 /// clock, and a backend that talks to it through a ``TestHelperTransport``.
 struct HelperRig {
@@ -250,6 +287,7 @@ struct HelperRig {
     let control: SimulatedChargeControl
     let power: StubHelperPower
     let events = HelperEventLog()
+    let activity = RecordingLeaseActivity()
     let engine: HelperEngine
     let transport: TestHelperTransport
     let backend: HelperChargingBackend
@@ -259,7 +297,9 @@ struct HelperRig {
     /// - Parameters:
     ///   - isSimulated: false uses a control that says it changes hardware.
     ///   - chargeControl: replaces the control (for a monitor-only helper).
-    init(clock: TestClock = TestClock(), isSimulated: Bool = true, chargeControl: (any HelperChargeControl)? = nil) {
+    ///   - backendClockOffset: added to the backend's clock, which otherwise
+    ///     is the engine's.
+    init(clock: TestClock = TestClock(), isSimulated: Bool = true, chargeControl: (any HelperChargeControl)? = nil, backendClockOffset: TimeInterval = 0) {
         self.clock = clock
         let control = SimulatedChargeControl()
         self.control = control
@@ -276,8 +316,9 @@ struct HelperRig {
         backend = HelperChargingBackend(
             descriptor: Self.descriptor,
             transport: transport,
-            uptime: { clock.uptime },
-            pause: { clock.advance(by: $0) }
+            uptime: { clock.uptime + backendClockOffset },
+            pause: { clock.advance(by: $0) },
+            activity: activity
         )
     }
 

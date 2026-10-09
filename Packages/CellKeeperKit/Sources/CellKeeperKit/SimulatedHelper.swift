@@ -76,7 +76,8 @@ extension HelperChargingBackend {
     /// `tickInterval` while the backend exists. Releasing the backend ends
     /// its session and stops the ticking. The app forwards sleep and wake to
     /// the engine through the returned backend's
-    /// ``InProcessHelperTransport``.
+    /// ``InProcessHelperTransport``. While CellKeeper holds a control,
+    /// `activity` keeps the app from being napped.
     ///
     /// - Parameters:
     ///   - power: the helper's power reading; the system's by default. It
@@ -87,24 +88,26 @@ extension HelperChargingBackend {
         power: (any HelperPowerReading)? = nil,
         tickInterval: Duration = .seconds(5),
         uptime: @escaping @Sendable () -> TimeInterval = HelperEngine.continuousUptime,
-        pause: @escaping @Sendable (TimeInterval) async -> Void = { try? await Task.sleep(for: .seconds($0)) }
+        pause: @escaping @Sendable (TimeInterval) async -> Void = { try? await Task.sleep(for: .seconds($0)) },
+        activity: any LeaseActivity = ProcessLeaseActivity()
     ) -> HelperChargingBackend {
-        let engine = HelperEngine(
-            control: SimulatedChargeControl(),
-            power: power ?? SystemHelperPowerReading(uptime: uptime),
-            build: Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "") ?? 0,
-            uptime: uptime,
-            events: { logHelperEvent($0) }
-        )
-        return HelperChargingBackend(
+        HelperChargingBackend(
             descriptor: BackendDescriptor(
                 identifier: simulatedHelperIdentifier,
                 displayName: "Simulated helper",
                 summary: "CellKeeper's own charge control, at any limit from 20 to 100%, simulated: the helper's logic runs inside CellKeeper with a simulated control, so nothing on your Mac changes. Real control needs a signed helper and a verified mechanism (roadmap milestone 4)."
             ),
-            transport: InProcessHelperTransport(engine: engine, tickInterval: tickInterval),
+            transport: InProcessHelperTransport(
+                control: SimulatedChargeControl(),
+                power: power ?? SystemHelperPowerReading(uptime: uptime),
+                build: Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "") ?? 0,
+                uptime: uptime,
+                tickInterval: tickInterval,
+                events: { logHelperEvent($0) }
+            ),
             uptime: uptime,
-            pause: pause
+            pause: pause,
+            activity: activity
         )
     }
 
@@ -112,7 +115,7 @@ extension HelperChargingBackend {
     private static func logHelperEvent(_ event: HelperEvent) {
         let message = "Simulated helper: \(String(describing: event))"
         switch event {
-        case .sessionOpened, .sessionInvalidated, .leaseGranted, .leaseRenewed:
+        case .sessionOpened, .sessionInvalidated, .leaseGranted, .leaseRenewed, .write, .activationRecorded:
             CellKeeperLog.backend.info("\(message, privacy: .public)")
         default:
             CellKeeperLog.backend.notice("\(message, privacy: .public)")
