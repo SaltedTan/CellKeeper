@@ -59,7 +59,7 @@ app (`AppModel`, `AppDelegate` and the views) are checked by hand.
 | Safety floor: at ≤ 10% charging is always allowed, overriding temperature protection and every other rule, until the charge recovers to 15% | R5 | `ChargingPolicy.nextFloorLatch` |
 | On battery power, CellKeeper's restrictions are cleared, so a later plug-in charges normally even if CellKeeper has stopped | R18 | `ChargingPolicy` (`onBattery`) |
 | Overrides always expire, on a monotonic clock that wall-clock changes cannot affect: a temporary full charge at 100%/fully charged, on unplug, or after 1–48 h (default 12 h); expiry and unplug are processed even when the charge reading is unusable | R22, R23 | `ChargeOverride`, `ChargingPolicy` |
-| Temperature protection with hysteresis. A pause starts on the first hot reading and lasts at least 5 minutes (monotonic clock), even if the battery cools sooner; an unknown temperature, or turning protection off, ends it at once, so it can never hold charging off | R21 | `ChargingPolicy.nextTemperatureLatch` |
+| Temperature protection with hysteresis. A pause starts on the first hot reading. Cooling alone ends it no sooner than 5 minutes after it began (monotonic clock); an unknown temperature or turning protection off ends it at once, so it can never hold charging off, and higher-priority rules (safety floor, battery power, fail-safe) still override it | R21 | `ChargingPolicy.nextTemperatureLatch` |
 | Debounce: charging is paused at the limit only once two consecutive distinct readings (identified by the driver's own update time, or else the read time) reach it. Re-evaluating one reading does not count twice, a reading below the limit or an unusable one in between starts over, and meanwhile charging continues with a note saying so. The safety floor, the sleep precaution, temperature protection, and every change toward macOS defaults act on the first reading | R14 | `ChargingPolicy.nextLimitLatch` |
 | Discharge is a confirmed, one-shot session, never a setting. Its target (20–95%) is captured when confirmed; it never goes below that target or the current limit. It ends at the target, on unplug, before sleep, on temperature pause, on lost telemetry, on a backend fault, or if unsupported, and never restarts by itself | R6, R16, R20 | `ChargeOverride.dischargeToLimit`, `ChargingPolicy`, `SettingsView` |
 | Before sleep, charging is held at or above the resume threshold so a software limit cannot overshoot while asleep; the precaution lasts until wake (bounded to 2 min of monotonic time if no wake notification arrives) | R16 | `ChargingPolicy` (`sleepPrecaution`), `ChargeController` |
@@ -103,7 +103,7 @@ app (`AppModel`, `AppDelegate` and the views) are checked by hand.
 | Resume threshold | 75% | 3–20 points below the limit, and ≥ 15% (floor + 5) |
 | Safety floor | 10% | fixed |
 | Temperature pause / resume | 40 °C / 35 °C | pause 35–45 °C; resume ≥ 30 °C and ≥ 3 °C below pause |
-| Temperature pause, minimum | 5 min | fixed (monotonic clock) |
+| Temperature pause, minimum before cooling ends it | 5 min | fixed (monotonic clock) |
 | Limit debounce | 2 readings | fixed: two consecutive distinct readings at or above the limit |
 | Temporary full charge | 12 h | 1–48 h |
 | Discharge session | 6 h | 1–48 h; only for limits of 20–95% |
@@ -150,9 +150,9 @@ list.
 6. **Debounce and dwell.** Two consecutive fresh samples before acting on a
    threshold crossing; minimum dwell for temperature pause (R14, R21).
    *Implemented in the policy* for backends that switch charging themselves:
-   the limit latch needs two consecutive distinct readings, and a
-   temperature pause lasts at least 5 minutes (see the safeguards table and
-   the deviations below). A privileged helper must still enforce its own
+   the limit latch needs two consecutive distinct readings, and cooling
+   alone ends a temperature pause no sooner than 5 minutes after it began
+   (see the safeguards table and the deviations below). A privileged helper must still enforce its own
    guards (precondition 3).
 7. **External-writer detection and coexistence.** Stop and restore if another
    tool changes the same state; detect macOS Charge Limit / Optimized Battery
@@ -222,12 +222,21 @@ hardware writes and a helper, and do not apply. For the rest:
   continues until the next reading, normally about a minute later (one
   driver refresh), so the charge can rise a little further past the limit.
 - **Temperature dwell (R21).** R21 asks for a 5-minute minimum in each
-  state. CellKeeper applies it only to the paused state: once a pause has
-  ended, the next reading at or above the pause threshold pauses charging
-  again at once, because pausing is a safety action and a minimum before it
-  could only delay protection. Pauses stay bounded: each lasts at least
-  5 minutes, so there are at most 12 an hour, and each counts toward the
-  restricting-change rate limit.
+  state. CellKeeper has a minimum only for the paused state, and only
+  against cooling: cooling to the resume temperature ends a pause no sooner
+  than 5 minutes after it began. An unknown temperature or turning
+  protection off ends a pause at once, and higher-priority rules (safety
+  floor, battery power, fail-safe, management off) override it at once. The
+  cleared state has no minimum: the next reading at or above the pause
+  temperature pauses charging again at once, because pausing is a safety
+  action and a wait before it could only delay protection. The minimum
+  therefore does not bound how often pauses start; a temperature reading
+  that keeps disappearing and returning hot can start one about every
+  minute. What bounds the requests is the rate limit: pausing from normal
+  charging is a restricting change, so such requests are at least 60 s
+  apart and at most 20 an hour, shared with every other restricting change.
+  A pause that ends a discharge session (`forceDischarge` →
+  `inhibitCharging`) is a relaxing change and is not counted.
 - **Failure handling (R11).** R11 asks for one retry and then a one-hour
   backoff. CellKeeper instead restores normal charging after every failed
   restricting request and faults the backend after 3 failures; the fault then

@@ -19,8 +19,8 @@ import Foundation
 /// 6. On battery power → CellKeeper's restrictions cleared (a later plug-in
 ///    then charges normally even if CellKeeper has stopped; the limit latch
 ///    is kept and re-applied once power returns).
-/// 7. Temperature protection tripped → charging paused, for at least
-///    ``minimumTemperaturePause``.
+/// 7. Temperature protection tripped → charging paused. Cooling alone ends
+///    the pause no sooner than ``minimumTemperaturePause`` after it began.
 /// 8. Temporary full charge active → charging allowed.
 /// 9. Discharge session active → run from the battery down to the confirmed
 ///    target (never below it, never below the current limit).
@@ -69,9 +69,10 @@ public enum ChargingPolicy {
     public static let minimumRestoreRetryInterval: TimeInterval = 60
     /// Charge limits a discharge session may target.
     public static let dischargeTargetRange = 20...95
-    /// Once temperature protection pauses charging, the pause lasts at least
-    /// this long on the monotonic clock, even if the battery cools sooner
-    /// (research rule R21).
+    /// Cooling alone ends a temperature pause no sooner than this after it
+    /// began, on the monotonic clock (research rule R21). An unknown
+    /// temperature, turning protection off, and higher-priority rules end or
+    /// override it at once.
     public static let minimumTemperaturePause: TimeInterval = 5 * 60
 
     public static func evaluate(_ input: PolicyInput) -> PolicyDecision {
@@ -335,9 +336,9 @@ public enum ChargingPolicy {
     // MARK: - Latches
 
     /// A reading's identity for the limit debounce: the driver's own update
-    /// time where reported, otherwise when CellKeeper read it. Evaluating the
-    /// same reading again (several evaluations within one driver refresh)
-    /// does not make it a second reading.
+    /// time where reported, so that several evaluations within one driver
+    /// refresh are one reading. Otherwise it is when CellKeeper read it, and
+    /// only evaluations of the same read are one reading.
     static func sampleTime(of snapshot: BatterySnapshot) -> Date {
         snapshot.sourceTimestamp ?? snapshot.timestamp
     }
@@ -378,12 +379,12 @@ public enum ChargingPolicy {
 
     /// Temperature hysteresis with a minimum pause (research rule R21). Set
     /// at or above the pause threshold on the first such reading, because
-    /// pausing is a safety action, and stays set at least
-    /// ``minimumTemperaturePause`` of monotonic time: it is cleared at or
-    /// below the resume threshold only once that has passed. Cleared at once
-    /// when protection is disabled or the temperature is unknown, so a lost
-    /// sensor can never hold charging off. Once clear, it sets again on the
-    /// next hot reading, with no minimum time.
+    /// pausing is a safety action. Cooling to the resume threshold clears it
+    /// only once it has been set for ``minimumTemperaturePause`` of monotonic
+    /// time. It is cleared at once when protection is disabled or the
+    /// temperature is unknown, so a lost sensor can never hold charging off.
+    /// Once clear, it sets again on the next hot reading, with no minimum
+    /// time.
     static func nextTemperatureLatch(
         _ memory: PolicyMemory,
         celsius: Double?,

@@ -165,11 +165,15 @@ struct ChargeControllerTests {
     func circuitBreaker() async {
         let backend = MockChargingBackend()
         let (controller, _) = makeController(percent: 85, backend: backend)
+        // Each evaluation after the first reading makes one restricting
+        // request, which fails, then restores normal charging.
+        await takeFirstReading(controller)
         for _ in 0..<ChargeController.maximumConsecutiveFailures {
             await backend.failNextRequests(1)
             await controller.evaluate(.periodic)
             clock.advance(by: ChargingPolicy.minimumRestrictingInterval)
         }
+        #expect(await backend.requestedModes == Array(repeating: [ChargeControlMode.inhibitCharging, .normal], count: ChargeController.maximumConsecutiveFailures).flatMap { $0 })
         let faulted = await controller.evaluate(.periodic)
         #expect(faulted.isBackendFaulted)
         #expect(faulted.currentMode == .normal)
@@ -378,7 +382,9 @@ struct ChargeControllerTests {
     func managementOff() async throws {
         let backend = MockChargingBackend()
         let (controller, _) = makeController(percent: 85, backend: backend)
-        await controller.evaluate(.launch)
+        await takeFirstReading(controller)
+        let holding = await controller.evaluate(.periodic)
+        #expect(holding.currentMode == .inhibitCharging)
         await controller.startFullCharge()
 
         var settings = ChargingSettings.default
@@ -387,6 +393,7 @@ struct ChargeControllerTests {
         #expect(status.activeOverride == nil)
         #expect(status.decision?.state == .unmanaged)
         #expect(status.currentMode == .normal)
+        #expect(await backend.requestedModes == [.inhibitCharging, .normal])
     }
 
     // MARK: - Lifecycle
@@ -435,10 +442,14 @@ struct ChargeControllerTests {
     func shutdownIsTerminal() async {
         let backend = MockChargingBackend()
         let (controller, _) = makeController(percent: 85, backend: backend)
-        await controller.evaluate(.launch)
+        await takeFirstReading(controller)
+        let holding = await controller.evaluate(.periodic)
+        #expect(holding.currentMode == .inhibitCharging)
+
         let stopped = await controller.shutdown(reason: "quit")
         #expect(stopped.currentMode == .normal)
         let requestsAtShutdown = await backend.requestedModes
+        #expect(requestsAtShutdown == [.inhibitCharging, .normal])
 
         clock.advance(by: 120)
         await controller.evaluate(.periodic)
@@ -496,10 +507,13 @@ struct ChargeControllerTests {
     func restoreDefaults() async {
         let backend = MockChargingBackend()
         let (controller, _) = makeController(percent: 85, backend: backend)
-        await controller.evaluate(.launch)
+        await takeFirstReading(controller)
+        let holding = await controller.evaluate(.periodic)
+        #expect(holding.currentMode == .inhibitCharging)
+
         let status = await controller.restoreSystemDefaults(reason: "quit")
         #expect(status.currentMode == .normal)
-        #expect(await backend.requestedModes.last == .normal)
+        #expect(await backend.requestedModes == [.inhibitCharging, .normal])
     }
 
     @Test("Rapid restricting changes are rate-limited; restoring normal charging is not")

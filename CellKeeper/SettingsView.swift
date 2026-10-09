@@ -151,7 +151,7 @@ private struct TemperatureProtectionControls: View {
                     step: 1) {
                 LabeledContent("Resume at", value: Format.celsius(settings.temperatureProtection.resumeAtCelsius))
             }
-            Text("Once paused, charging stays paused for at least \(Int(ChargingPolicy.minimumTemperaturePause / 60)) minutes, even if the battery cools sooner.")
+            Text("Once paused, charging stays paused for at least \(Int(ChargingPolicy.minimumTemperaturePause / 60)) minutes unless the temperature reading is lost.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if model.status?.snapshot?.temperatureCelsius == nil {

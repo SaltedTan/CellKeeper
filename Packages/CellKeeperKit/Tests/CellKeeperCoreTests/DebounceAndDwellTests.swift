@@ -3,7 +3,9 @@ import Foundation
 import Testing
 
 /// Evaluates a reading taken `seconds` after `referenceDate`, at that time:
-/// wall time, read time and uptime advance together.
+/// wall time, read time and uptime advance together. `wallClockShift` moves
+/// the wall clock (and the read time) without moving uptime, as if the
+/// system clock had been changed.
 private func evaluate(
     at seconds: TimeInterval,
     _ percent: Int,
@@ -14,9 +16,10 @@ private func evaluate(
     override: ChargeOverride? = nil,
     currentMode: ChargeControlMode? = .normal,
     memory: PolicyMemory,
-    sleepImminent: Bool = false
+    sleepImminent: Bool = false,
+    wallClockShift: TimeInterval = 0
 ) -> PolicyDecision {
-    let time = referenceDate.addingTimeInterval(seconds)
+    let time = referenceDate.addingTimeInterval(seconds + wallClockShift)
     let reading = snapshot(percent: percent, source: source, temperature: temperature, at: time, sourceTimestamp: sourceTimestamp)
     return ChargingPolicy.evaluate(input(
         reading,
@@ -82,6 +85,41 @@ struct LimitDebounceTests {
         let refreshed = evaluate(at: 60, 85, sourceTimestamp: refresh.addingTimeInterval(60), memory: reread.memory)
         #expect(refreshed.state == .holding)
         #expect(refreshed.action == .disableCharging)
+    }
+
+    @Test("A driver update time that goes backwards is still a different reading, so it confirms")
+    func driverTimeBackwards() {
+        let first = evaluate(at: 0, 85, sourceTimestamp: referenceDate.addingTimeInterval(-20), memory: PolicyMemory())
+        #expect(first.state == .charging)
+        let earlierTime = evaluate(at: 60, 85, sourceTimestamp: referenceDate.addingTimeInterval(-40), memory: first.memory)
+        #expect(earlierTime.state == .holding)
+        #expect(earlierTime.action == .disableCharging)
+        #expect(earlierTime.memory.limitReached)
+    }
+
+    @Test("A stale reading after wake drops the pending crossing; the next fresh reading starts over and the one after confirms")
+    func staleAfterWake() {
+        let beforeSleep = evaluate(at: 0, 85, sourceTimestamp: referenceDate.addingTimeInterval(-10), memory: PolicyMemory())
+        #expect(beforeSleep.memory.pendingLimitCrossing != nil)
+
+        // An hour later the driver has not refreshed since before sleep.
+        let stale = evaluate(at: 3_600, 85, sourceTimestamp: referenceDate.addingTimeInterval(-10), memory: beforeSleep.memory)
+        #expect(stale.state == .failSafe)
+        guard case .telemetryStale = stale.reason else {
+            Issue.record("expected telemetryStale, got \(stale.reason)")
+            return
+        }
+        #expect(stale.memory.pendingLimitCrossing == nil)
+
+        let refreshed = referenceDate.addingTimeInterval(3_630)
+        let fresh = evaluate(at: 3_640, 85, sourceTimestamp: refreshed, memory: stale.memory)
+        #expect(fresh.state == .charging)
+        #expect(fresh.reason == .confirmingLimit(percent: 85, limit: 80))
+        #expect(fresh.memory.pendingLimitCrossing == PolicyMemory.LimitCrossing(sampleTime: refreshed, percent: 85))
+
+        let next = evaluate(at: 3_700, 85, sourceTimestamp: refreshed.addingTimeInterval(60), memory: fresh.memory)
+        #expect(next.state == .holding)
+        #expect(next.action == .disableCharging)
     }
 
     @Test("A reading below the limit in between drops the pending crossing")
@@ -313,6 +351,36 @@ struct TemperatureMinimumPauseTests {
         #expect(now.memory.temperatureTrippedAtUptime == 10_000)
         let later = evaluate(at: 300, 50, temperature: 34, currentMode: .inhibitCharging, memory: now.memory)
         #expect(later.state == .charging)
+    }
+
+    @Test("Changing the wall clock during the minimum neither shortens nor extends it", arguments: [86_400.0, -86_400.0])
+    func wallClockJumpIgnored(shift: TimeInterval) {
+        let early = evaluate(at: 299, 50, temperature: 34, currentMode: .inhibitCharging, memory: tripped, wallClockShift: shift)
+        #expect(early.state == .temperaturePause)
+        #expect(early.reason == .temperatureMinimumPause(celsius: 34, resumesAt: referenceDate.addingTimeInterval(300 + shift)))
+
+        let done = evaluate(at: 300, 50, temperature: 34, currentMode: .inhibitCharging, memory: early.memory, wallClockShift: shift)
+        #expect(done.state == .charging)
+        #expect(done.action == .enableCharging)
+    }
+
+    @Test("A pause whose elapsed time is not finite ends")
+    func nonFiniteElapsedEndsPause() {
+        // A trip time or uptime that cannot give a duration.
+        let cases: [(trippedAt: TimeInterval, uptime: TimeInterval)] = [
+            (-.infinity, 10_010),
+            (.nan, 10_010),
+            (10_000, .infinity),
+            (10_000, .nan),
+        ]
+        for (trippedAt, uptime) in cases {
+            let memory = PolicyMemory(temperatureTripped: true, temperatureTrippedAtUptime: trippedAt)
+            let decision = ChargingPolicy.evaluate(input(snapshot(percent: 50, temperature: 34), currentMode: .inhibitCharging, memory: memory, uptime: uptime))
+            #expect(decision.state == .charging)
+            #expect(decision.action == .enableCharging)
+            #expect(!decision.memory.temperatureTripped)
+            #expect(decision.memory.temperatureTrippedAtUptime == nil)
+        }
     }
 
     @Test("A trip without a recorded time has no minimum")
