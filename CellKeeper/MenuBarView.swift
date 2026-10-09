@@ -109,7 +109,7 @@ private struct ControlSummary: View {
             if let decision = status.decision, !isSettled {
                 LabeledContent("Policy", value: decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS))
                 LabeledContent("Wants", value: decision.desiredMode.intentTitle(nativeLimit: status.capabilities.isEnforcedByMacOS))
-                Text(decision.reason.description)
+                Text(status.displayedReason ?? decision.reason.description)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

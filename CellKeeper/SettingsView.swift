@@ -220,18 +220,21 @@ private struct ControlSettingsTab: View {
                 }
             }
 
-            if isNative {
+            if isNativeChosenOrActive {
                 NativeLimitSetupSection(model: model)
             }
 
             if let status = model.status {
-                ControlDetailsSection(status: status, isNative: isNative)
+                ControlDetailsSection(status: status, isNative: status.capabilities.isEnforcedByMacOS)
             }
         }
         .formStyle(.grouped)
     }
 
-    private var isNative: Bool {
+    /// The native backend is chosen or in charge: its setup is shown, also
+    /// while a switch to it is pending. Text about the backend in charge
+    /// follows `status.capabilities` instead.
+    private var isNativeChosenOrActive: Bool {
         model.backendChoice == .nativeLimit || model.status?.capabilities.isEnforcedByMacOS == true
     }
 
@@ -246,8 +249,10 @@ private struct ControlSettingsTab: View {
         case other
     }
 
+    /// Follows the backend in charge, which the reset acts on, not the one
+    /// chosen in the picker (a switch may be pending).
     private func faultReset(for status: ControllerStatus) -> FaultReset {
-        if isNative { return .nativeLimit }
+        if status.capabilities.isEnforcedByMacOS { return .nativeLimit }
         guard ControlBackendChoice(backendIdentifier: status.backend.identifier) == .simulatedHelper else { return .other }
         return status.capabilities.availability.affectsHardware ? .helper : .simulatedHelper
     }

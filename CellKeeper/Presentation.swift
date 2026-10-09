@@ -187,6 +187,22 @@ enum Format {
     }
 }
 
+extension ControllerStatus {
+    /// The policy's reason as shown for the backend in charge: macOS's
+    /// Charge Limit restores the user's own limit, and the Simulated
+    /// helper's controls are simulated.
+    var displayedReason: String? {
+        guard let reason = decision?.reason else { return nil }
+        if capabilities.isEnforcedByMacOS {
+            return reason.description(restoring: "your own macOS Charge Limit")
+        }
+        if ControlBackendChoice(backendIdentifier: backend.identifier) == .simulatedHelper {
+            return reason.description(restoring: "normal charging on the simulated helper's controls (simulated; your Mac's charging is not changed)")
+        }
+        return reason.description
+    }
+}
+
 /// A backend switch that waits for the backend in charge, with the way to
 /// cancel it: choosing that backend again.
 struct PendingSwitchNotice: View {

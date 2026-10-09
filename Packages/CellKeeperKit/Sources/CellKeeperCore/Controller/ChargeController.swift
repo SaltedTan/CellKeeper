@@ -508,7 +508,7 @@ public actor ChargeController {
             record(.override, "\(Self.describe(override.kind)) \(ended).")
         }
         if Self.isMeaningfulChange(from: decision, to: newDecision) {
-            record(.decision, "[\(trigger.rawValue)] \(newDecision.state.rawValue): want \(newDecision.desiredMode), action \(Self.describe(newDecision.action, nativeLimit: capabilities.isEnforcedByMacOS)). \(newDecision.reason)")
+            record(.decision, "[\(trigger.rawValue)] \(newDecision.state.rawValue): want \(newDecision.desiredMode), action \(Self.describe(newDecision.action, nativeLimit: capabilities.isEnforcedByMacOS)). \(newDecision.reason.description(restoring: restoreTarget))")
         }
         for note in newDecision.notes where !(decision?.notes.contains(note) ?? false) {
             record(.decision, "Note: \(note)")
@@ -709,6 +709,12 @@ public actor ChargeController {
                 _ = await restoreNormal(reason: "safety fallback after failed \(mode) request")
             }
         }
+    }
+
+    /// What `.normal` is called in the activity log's reasons: the user's
+    /// own limit for macOS's Charge Limit, normal charging otherwise.
+    private var restoreTarget: String {
+        capabilities.isEnforcedByMacOS ? describeTarget(.normal) : "normal charging"
     }
 
     /// How a requested mode is described in the activity log.
