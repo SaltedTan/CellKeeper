@@ -16,6 +16,7 @@ public protocol HelperConnection: Sendable {
     func acquireOrRenewLease(control: Int, seconds: Int) async throws -> HelperLeaseReply
     func releaseLease(control: Int) async throws -> HelperStatus
     func setControl(control: Int, active: Bool) async throws -> HelperStatus
+    func clearControlIfUnchanged(control: Int, generation: UInt64, helperInstance: UInt64) async throws -> HelperStatus
     func restoreDefaults() async throws -> HelperStatus
     func restoreDefaultsAndExit() async throws -> HelperStatus
     /// Ends the connection. The helper invalidates the session, which clears
@@ -175,6 +176,10 @@ struct InProcessHelperConnection: HelperConnection {
 
     func setControl(control: Int, active: Bool) async throws -> HelperStatus {
         try await ifOpen { await $0.setControl(control: control, active: active) }
+    }
+
+    func clearControlIfUnchanged(control: Int, generation: UInt64, helperInstance: UInt64) async throws -> HelperStatus {
+        try await ifOpen { await $0.clearControlIfUnchanged(control: control, generation: generation, helperInstance: helperInstance) }
     }
 
     func restoreDefaults() async throws -> HelperStatus {

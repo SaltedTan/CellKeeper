@@ -194,6 +194,11 @@ final class TestHelperConnection: HelperConnection, @unchecked Sendable {
         return status
     }
 
+    func clearControlIfUnchanged(control: Int, generation: UInt64, helperInstance: UInt64) async throws -> HelperStatus {
+        try await failIfInjected()
+        return await session.clearControlIfUnchanged(control: control, generation: generation, helperInstance: helperInstance)
+    }
+
     func restoreDefaults() async throws -> HelperStatus {
         try await failIfInjected()
         if takeSessionEndBeforeRestore() {

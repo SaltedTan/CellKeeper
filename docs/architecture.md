@@ -323,7 +323,9 @@ public protocol ChargingBackend: Sendable {
   make), or `needsAcknowledgement(detail)` (the backend stopped making
   changes until someone acknowledges a problem it found itself, such as a
   failed write). The last two are reported for as long as the backend sees
-  them.
+  them, also by a `currentMode()` that throws; an outside change the backend
+  found earlier (while releasing a hold, say) is reported once, by the next
+  read, even if the request that found it succeeded.
 - Backends whose holds lapse unless renewed implement `renewHold(_:)`; the
   others keep the default, which does nothing. A backend never overrides
   another tool's change by itself; `resetAfterFault()` is called only when
@@ -435,8 +437,12 @@ The controller adds, independent of the backend:
   (`changedOutside`) faults it at once, like the controller's own detection,
   also while CellKeeper holds nothing; so does a backend that waits for an
   acknowledgement (`needsAcknowledgement`), with its own message, so the
-  user is offered the fault reset. Each is logged once for as long as the
-  backend keeps reporting it;
+  user is offered the fault reset. The controller looks for these after
+  every read, not only an evaluation's: also when it confirms a request
+  (including a successful `.normal`, which still counts as confirmed), in a
+  fallback, and when the read itself fails, which then counts as no further
+  failure. Each is logged once for as long as the backend keeps reporting
+  it;
 - renewal of the hold at the end of every evaluation in which CellKeeper
   holds a confirmed non-normal mode that the policy still wants, including
   evaluations whose action is "no change", and only if the backend accepts
@@ -609,42 +615,60 @@ whose connection throws on interruption or timeout.
   failures.
 - **Reading.** `currentMode()` comes from a fresh `readState`, never from
   what CellKeeper asked for. A read-back the helper could not make is an
-  error. A helper that cannot be reached while CellKeeper holds nothing there
+  error, but the interlocks and error count in that reply are still read, so
+  a fault the helper reports is reported with it (below). A helper that
+  cannot be reached while CellKeeper is responsible for nothing there
   reports an unknown mode, like a backend that accepts no requests, so it is
   not counted as failing.
-- **Ownership.** When CellKeeper activates a control, it records the
-  control's change generation from the helper's history (the change must be
-  `setByClient` by one of CellKeeper's sessions). The control stays
-  CellKeeper's only while that generation is current. Holds are kept across
-  disconnects until a fresh read explains how they ended.
+- **Pending activations.** Before it sends an activation, the backend
+  records it as pending: the control, the helper instance, the session it
+  is sent on and the control's generation before. From then on the
+  activation may take effect whatever happens to the reply, so CellKeeper
+  stays responsible for the control. The next successful read settles it:
+  if the helper names it as the control's latest change (`setByClient`, on
+  that session, after that generation) and the control is active, it
+  becomes a hold; otherwise nothing of it is still in effect (it did not
+  take effect, it has ended since, or the helper restarted), and an active
+  control is someone else's. A pending activation grants no ownership:
+  nothing is ever cleared on its account.
+- **Ownership.** A hold records the generation of CellKeeper's activation.
+  The control stays CellKeeper's only while that generation is current.
+  Holds are kept across disconnects until a fresh read explains how they
+  ended.
 - **Setting.** The backend takes the control's longest lease, activates the
-  control, records its generation, and only then clears the other control
-  (if it is still CellKeeper's) and ends its lease, so switching between
-  inhibit and discharge never allows charging the policy did not ask for. A
-  fresh read must then show exactly that control (`verificationFailed`
-  otherwise). The outcome is `simulated` for a simulated helper, otherwise
-  `applied`, or `unchanged` if it was already in effect. An outside change
-  found just before writing is `changedOutside`, and nothing is written.
-- **`.normal`.** Right before it deactivates, the backend reads the state and
-  checks ownership by generation; it then clears only what is still
-  CellKeeper's, ends only leases it holds, and confirms that nothing is
-  active. A control CellKeeper did not set, or no longer owns (for example
-  one another client set after CellKeeper's lease ran out), is never
-  touched: the request fails with `changedOutside`, which faults the
-  controller (R26, R27). The backend never asks the helper to restore
-  defaults by itself. If the helper flags an outside change but nothing is
-  active, `.normal` is in effect and confirmed, so quitting and switching
-  backend are not blocked; the change is reported through
-  `reportedModeOrigin()` and faults the controller. A narrow race remains:
-  another client could take over a control between the backend's read and
-  its deactivation, which the helper's API cannot make conditional today.
-- **Unresolved holds.** While CellKeeper may still hold a control it cannot
-  confirm released (the helper cannot be reached, refuses to introduce
-  CellKeeper because it is shutting down, or a release failed), the backend
-  still accepts requests with only `.normal` supported, and `currentMode()`
-  throws. The controller then keeps asking for `.normal`, counts the
-  failures, and a backend switch stays pending, until a fresh read explains
-  the hold: for example the restarted helper's start restored defaults.
+  control, confirms by a fresh read that the helper names the activation as
+  the latest change, and only then clears the other control (if it is still
+  CellKeeper's) and ends its lease, so switching between inhibit and
+  discharge never allows charging the policy did not ask for. A final read
+  must then show exactly that control (`verificationFailed` otherwise). The
+  outcome is `simulated` for a simulated helper, otherwise `applied`, or
+  `unchanged` if it was already in effect. An outside change found just
+  before writing is `changedOutside`, and nothing is written.
+- **`.normal`.** The backend reads the state, then clears each control it
+  holds with `clearControlIfUnchanged`, naming the generation and helper
+  instance of its own activation, ends only leases it holds, and confirms
+  that nothing is active. The helper compares the change right before it
+  clears, so a control that changed hands since the read (CellKeeper's lease
+  ran out and another client set it) is never cleared: the helper writes
+  nothing (`controlChanged`), and the next read shows the control as someone
+  else's, so the request fails with `changedOutside`, which faults the
+  controller (R26, R27). A control CellKeeper did not set is never touched
+  either. The backend never asks the helper to restore defaults by itself.
+  If the helper flags an outside change but nothing is active, `.normal` is
+  in effect and confirmed, so quitting and switching backend are not
+  blocked. An outside change found on the way is kept until a read reports
+  it through `reportedModeOrigin()`, even when the release succeeds, so the
+  controller faults (the confirmation of the `.normal` request is such a
+  read).
+- **Unresolved responsibility.** While CellKeeper may still hold a control it
+  cannot confirm released, or one a pending activation may have set (the
+  helper cannot be reached, cannot read its controls back, refuses to
+  introduce CellKeeper because it is shutting down, or a release failed),
+  the backend still accepts requests with only `.normal` supported, and
+  `currentMode()` throws. The controller then keeps asking for `.normal`,
+  counts the failures, and a backend switch stays pending, until a fresh
+  read explains it: for example the restarted helper's start restored
+  defaults.
 - **Renewal.** `renewHold(_:)` renews CellKeeper's lease for the longest the
   helper grants. The backend keeps a deadline for each lease that is never
   later than the helper's (the time before the request plus the seconds
@@ -665,7 +689,8 @@ whose connection throws on interruption or timeout.
   | The next generation, control off, cleared by another session (a deactivation or a restore), `changedOutside` or the restore after it | `changedOutside` |
   | Any other generation, or the control active again | `changedOutside`, and CellKeeper no longer owns the control |
 
-  Releases are reported until CellKeeper's next request. The helper's
+  Releases are reported until CellKeeper's next request; an outside change
+  found in the history is kept until a read reports it. The helper's
   `externalModification` interlock and any active control CellKeeper does
   not own are reported as `changedOutside` for as long as the backend sees
   them. An outside change takes precedence over everything else.
@@ -674,7 +699,10 @@ whose connection throws on interruption or timeout.
   `writeFailed`, `hardwareFault`, or one this version does not know) is
   reported as `needsAcknowledgement`, which faults the controller at once so
   the user is offered the fault reset; the helper's hour of backoff for
-  `writeFailed` stays as the fallback. A hardware error the helper had not
+  `writeFailed` stays as the fallback. This holds also when the helper
+  cannot read its controls back: the mode is then unknown and the read
+  fails, but the fault is reported with it, and the controller does not
+  count the failed read on top. A hardware error the helper had not
   reported before (its count grew) is reported by the next `currentMode()`
   as a failure, whatever else that read shows, unless a fault is reported
   instead.
@@ -731,11 +759,16 @@ Known limitations:
 - The helper's activation limit also counts activations that the policy
   treats as relaxing (from discharge back to inhibit). In rare sequences the
   helper refuses an activation the policy allowed; that is a failed request.
-- A helper that stops while CellKeeper holds a control and cannot confirm
-  defaults keeps the backend unresolved until the helper is reachable again;
-  meanwhile each evaluation counts failures, and the backend faults.
-- The ownership check before a deactivation and the deactivation are two
-  requests; another client could take over the control in between.
+- A helper that stops while CellKeeper is responsible for a control and
+  cannot confirm defaults keeps the backend unresolved until the helper is
+  reachable again; meanwhile each evaluation counts failures, and the
+  backend faults.
+- An activation whose outcome CellKeeper never saw, and which another client
+  ended before CellKeeper's next read, is settled without a report: it was
+  never confirmed, so the controller already treats the request as failed.
+- A lease release still clears the control if CellKeeper holds the lease;
+  only the holder's session can have set a control under it, so this never
+  clears another client's.
 
 ## Future control backends
 
@@ -1225,11 +1258,12 @@ decisions.
 | D38 | `readState` reports, per control, a change generation and the cause, interlocks and session of its latest change, and how many hardware errors there have been; `hello` gives the caller's session number and the helper's instance. Any live session may still clear a control toward safety (lead's decisions, 2026-10-09) | Snapshots of active bits, current interlocks and lease state cannot establish why a control changed; the engine knows, so a client's classification becomes a lookup. Limiting deactivation to the lease holder would make a move toward safety depend on who asks |
 | D39 | The app renews a helper lease only at the end of an evaluation that still wants the mode it holds, including one that changes nothing; a failed renewal is a failure and `.normal` is requested at once | Safety precondition 3 and rule R3: a hung or stalled policy loop must let the restriction lapse, and a renewal that cannot be made must not leave one in place |
 | D40 | The helper backend owns a control only while the change generation it recorded at activation is current, and classifies how a hold ended by the cause the helper recorded for the next change. An expired lease, a power or sleep interlock (as raised then), the end of one of CellKeeper's sessions, or a helper shutdown or start is logged as the helper's release; CellKeeper's own deactivation, also from an earlier session, is its own; anything else, including any later generation, another client's restore or deactivation and `externalModification`, faults the backend at once | Only the helper knows why a control changed; inferring it from active bits, current interlocks or lease state misreads handoffs, later expiries and lifted interlocks. The helper's releases are its safety rules working, and faulting on them would stop control for nothing; anything else may be another tool, which R27 says to stop for |
-| D41 | The helper backend never asks the helper to restore defaults by itself; `.normal` reads the state first, deactivates only controls CellKeeper still owns by generation, ends only leases it holds, and succeeds when nothing is active, even after an outside change, which faults the controller through `reportedModeOrigin()`. Only the user clearing the fault restores defaults, and only if the helper waits for that (lead's decision, 2026-10-09) | A restore or deactivation may undo another tool's change (R26, R27), so it must be a deliberate act; and quitting or switching backend must not be blocked while macOS's defaults are in effect. The read and the deactivation are two requests, so a narrow race with another client remains |
+| D41 | The helper backend never asks the helper to restore defaults by itself; `.normal` clears only controls CellKeeper still owns, each with `clearControlIfUnchanged` naming its own activation (D48), ends only leases it holds, and succeeds when nothing is active, even after an outside change, which faults the controller through `reportedModeOrigin()`. Only the user clearing the fault restores defaults, and only if the helper waits for that (lead's decision, 2026-10-09) | A restore or deactivation may undo another tool's change (R26, R27), so it must be a deliberate act; and quitting or switching backend must not be blocked while macOS's defaults are in effect |
 | D42 | Modes an interlock of the helper blocks are not offered by the backend's capabilities | The policy then refuses them as unsupported instead of counting each refusal as a failure, which would fault the backend for conditions such as a warm Mac or a low battery |
 | D43 | The helper backend paces its requests against a copy of the session's request budget, and sends at most 4 requests in a row beyond it | A well-behaved client must never be refused or revoked (20 in a row), including during bursts of user actions; moves toward safety must not wait for a token |
 | D44 | While CellKeeper holds a control through a live helper session and has not asked to release it, the app holds a `ProcessInfo` activity that prevents App Nap but allows idle system sleep; it ends with the session, also while the hold is unresolved | A napped app renews late and lets the lease lapse, which toggles charging for nothing; idle sleep is fine, because the lease counts sleep and the helper handles it (research note 04, §3.4). Without a session there is nothing to renew, and keeping the app awake would only cost energy |
 | D45 | The Simulated helper reads adapter presence from `IOPSCopyExternalPowerAdapterDetails`: present with details, absent without on battery, unknown without on external power | It is documented to describe the attached adapter; behaviour with a disabled adapter is unverified (safety precondition 12), and an adapter wrongly read as absent only makes the helper clear the adapter-disable |
-| D46 | A hold CellKeeper cannot confirm released stays CellKeeper's across disconnects, failed releases and helper shutdowns: until a fresh read explains how it ended, the backend accepts only `.normal` and reports its mode as an error, so a backend switch stays pending | A helper that cannot be asked may still enforce CellKeeper's restriction; completing a switch then would leave it in place with nothing renewing or releasing it |
-| D47 | A helper that waits for an acknowledgement because of its own failure (`writeFailed`, an owed restore, or an interlock this version does not know) faults the backend at once with that reason; a hardware error the helper had not reported before is a failure of the next read, whatever else it shows | The user must learn of a broken control when it happens, not after a lease expiry or an hour of backoff, and only the fault reset offers the restore the helper waits for; a recovered error must still be counted |
+| D46 | CellKeeper stays responsible for a control from the moment it sends an activation (recorded as pending, with the helper instance, the session and the generation before) and for a hold it cannot confirm released, across failed replies, disconnects, failed releases and helper shutdowns: until a fresh read settles it from the helper's history, the backend accepts only `.normal` and reports its mode as an error, so a backend switch stays pending. A pending activation becomes a hold only when the helper names it as the latest change; it never grants ownership by itself | An activation may take effect even if its reply or the read after it is lost, and a helper that cannot be asked may still enforce CellKeeper's restriction; completing a switch then would leave it in place with nothing renewing or releasing it. Owning on a guess could clear another client's control |
+| D47 | A helper that waits for an acknowledgement because of its own failure (`writeFailed`, an owed restore, or an interlock this version does not know) faults the backend at once with that reason, also when the helper cannot read its controls back (the mode is then unknown); a hardware error the helper had not reported before is a failure of the next read, whatever else it shows | The user must learn of a broken control when it happens, not after a lease expiry, an hour of backoff or three failed reads, and only the fault reset offers the restore the helper waits for; a recovered error must still be counted |
 | D48 | The helper's wire API has a conditional deactivation, `clearControlIfUnchanged(control, generation, helperInstance)`, which the engine checks after its checks and right before clearing, and which writes nothing on a mismatch (`controlChanged`, raw value 12); `setControl(control, false)` and the restores stay unconditional (lead's decision, 2026-10-10) | A client that checks ownership and then clears in a second request can clear a control that changed hands in between; only the engine can compare and clear atomically. Deliberate clears and safety restores must not depend on what a client last saw |
+| D49 | An outside change a backend finds is kept until a read reports it, even if the request that found it succeeds, and the controller handles faults a backend reports after every read: request confirmations, fallbacks, recovery reads and reads that fail, not only an evaluation's | Otherwise a successful `.normal` could erase the only notice of another tool's change, and the next evaluation would set the restriction again without a fault (R27) |

@@ -12,25 +12,33 @@ import Foundation
 /// - Switching between the two controls sets the new one before clearing the
 ///   old one, so charging is never allowed in between.
 /// - Ownership comes from the helper's change history: CellKeeper records the
-///   generation of each control it activates, and the control stays its own
-///   only while that generation is current. Why a hold ended is looked up,
-///   not inferred: the cause the helper recorded for the next change
+///   generation of each control it activates, once the helper names the
+///   activation as the control's latest change, and the control stays its
+///   own only while that generation is current. Why a hold ended is looked
+///   up, not inferred: the cause the helper recorded for the next change
 ///   decides whether it was one of the helper's own releases, CellKeeper's
 ///   own, a failure, or an outside change. Any other generation is an
 ///   outside change.
-/// - `.normal` releases only what is still CellKeeper's, checked that way
-///   right before it deactivates. If the helper reports an outside change,
-///   or a control CellKeeper did not set is active, the backend never
-///   restores defaults by itself (research rules R26, R27): it reports the
-///   change, and only ``resetAfterFault()`` (the user clearing the fault)
-///   restores defaults.
-/// - While CellKeeper may still hold a control it cannot confirm released
-///   (the helper cannot be reached, or is shutting down), the backend still
-///   accepts `.normal` and reports its mode as unknown, so the controller
-///   keeps asking for `.normal` and a backend switch waits.
+/// - An activation is recorded as pending before it is sent. Until a read
+///   settles it, CellKeeper stays responsible for the control, but owns
+///   nothing on its account.
+/// - `.normal` releases only what is still CellKeeper's: each clear names
+///   the change CellKeeper made, and the helper clears nothing that changed
+///   since (`clearControlIfUnchanged`). If the helper reports an outside
+///   change, or a control CellKeeper did not set is active, the backend
+///   never restores defaults by itself (research rules R26, R27): it reports
+///   the change, and only ``resetAfterFault()`` (the user clearing the
+///   fault) restores defaults. An outside change found by a request stays
+///   reported until a read reports it, even if the request succeeds.
+/// - While CellKeeper may still hold a control it cannot confirm released,
+///   or one an activation it sent may have set (the helper cannot be
+///   reached, cannot read its controls, or is shutting down), the backend
+///   still accepts `.normal` and reports its mode as unknown, so the
+///   controller keeps asking for `.normal` and a backend switch waits.
 /// - A helper that waits for an acknowledgement (`writeFailed`, a restore it
 ///   owes) is reported as ``ReportedModeOrigin/needsAcknowledgement(_:)``,
-///   and a new hardware error as a failure.
+///   also when it cannot read its controls back, and a new hardware error as
+///   a failure.
 /// - Requests are paced to stay within the helper's per-session request
 ///   budget, far from the point where it revokes a session.
 /// - While CellKeeper holds a control through a live session, a
@@ -57,6 +65,20 @@ public actor HelperChargingBackend: ChargingBackend {
         var isReleaseRequested = false
     }
 
+    /// An activation CellKeeper sent whose outcome no read has shown yet. It
+    /// may have taken effect, so CellKeeper stays responsible for the
+    /// control, but it grants no ownership: nothing is cleared on its
+    /// account.
+    private struct PendingActivation {
+        /// The helper process it was sent to.
+        var instance: UInt64
+        /// The session it was sent on, which the helper names as the cause
+        /// of the change if it took effect.
+        var session: UInt64
+        /// The control's generation just before.
+        var generationBefore: UInt64
+    }
+
     private var connection: (any HelperConnection)?
     /// The helper's reply to `hello` on ``connection``.
     private var introduction: HelperHelloReply?
@@ -72,6 +94,9 @@ public actor HelperChargingBackend: ChargingBackend {
     /// disconnects: until a fresh read explains it, CellKeeper may still
     /// hold the control.
     private var holds: [HelperControl: Hold] = [:]
+    /// Activations sent but not yet settled by a read. Kept across failures
+    /// and disconnects, like ``holds``.
+    private var pendingActivations: [HelperControl: PendingActivation] = [:]
     /// When CellKeeper's leases end at the latest, on ``uptime``: the time
     /// before each grant was requested, plus the seconds granted. Never later
     /// than the helper's own deadline. Used only to avoid renewing a lease
@@ -83,8 +108,10 @@ public actor HelperChargingBackend: ChargingBackend {
     /// An outside change the helper still shows: its `externalModification`
     /// interlock, or a control CellKeeper did not set.
     private var currentOutsideChange: String?
-    /// An outside change found in the history of a control CellKeeper held,
-    /// kept until the next request.
+    /// An outside change found in the history of a control CellKeeper held.
+    /// Kept, whatever CellKeeper asks for meanwhile, until ``currentMode()``
+    /// reports it or the user clears the fault (``resetAfterFault()``), so a
+    /// release that succeeds cannot hide it.
     private var outsideLoss: String?
     /// How the helper last ended CellKeeper's hold, kept until the next
     /// request.
@@ -144,9 +171,10 @@ public actor HelperChargingBackend: ChargingBackend {
             }
             state = try await fetchState()
         } catch {
-            // CellKeeper may still hold a control there: keep accepting
-            // `.normal`, so the controller keeps asking for it.
-            if !holds.isEmpty {
+            // CellKeeper may still hold a control there, or an activation it
+            // sent may have taken effect: keep accepting `.normal`, so the
+            // controller keeps asking for it.
+            if !unresolvedControls.isEmpty {
                 return ControlCapabilities(availability: isSimulated ? .simulated : .experimental, supportedModes: [.normal])
             }
             return .unavailable(Self.reason(error))
@@ -164,25 +192,54 @@ public actor HelperChargingBackend: ChargingBackend {
 
     /// The mode read back from the helper. Unknown (nil) if the helper cannot
     /// be reached and CellKeeper holds nothing there, like a backend that
-    /// accepts no requests; an error if a request fails, if CellKeeper may
-    /// still hold a control it cannot confirm released, or if the helper
-    /// reports a new hardware error.
+    /// accepts no requests; an error if a request fails, if the helper could
+    /// not read its controls back, if CellKeeper may still hold a control it
+    /// cannot confirm released (or one an activation it sent may have set),
+    /// or if the helper reports a new hardware error.
+    ///
+    /// A fault is reported through ``reportedModeOrigin()`` on every path,
+    /// also when this throws: an outside change (the helper still shows
+    /// one, or one was found earlier and not reported yet), then what the
+    /// helper waits for an acknowledgement of. Its interlocks are read even
+    /// when its controls cannot be.
     public func currentMode() async throws -> ChargeControlMode? {
         defer { updateActivity() }
         origin = nil
         let state: HelperStateReply
         do {
-            state = try await readState()
+            state = try await fetchState()
         } catch BackendError.unavailable(let reason) {
-            guard holds.isEmpty else {
-                throw BackendError.operationFailed("\(reason) CellKeeper may still have \(Self.describe(Set(holds.keys))) set there, so it keeps asking for normal charging until the helper confirms the release.")
+            origin = takeOutsideLoss().map(ReportedModeOrigin.changedOutside)
+            let unresolved = unresolvedControls
+            guard unresolved.isEmpty else {
+                throw BackendError.operationFailed("\(reason) CellKeeper may still have \(Self.describe(unresolved)) set there, so it keeps asking for normal charging until the helper confirms the release.")
             }
             return nil
+        } catch {
+            origin = takeOutsideLoss().map(ReportedModeOrigin.changedOutside)
+            throw error
+        }
+        noteHardwareErrors(state)
+        guard state.status == .ok else {
+            // Which controls are active is unknown, but the helper's
+            // interlocks are not: a fault it reports is reported now. The
+            // error thrown reports the hardware error.
+            unreportedHardwareError = nil
+            let loss = takeOutsideLoss()
+            if state.interlocks.contains(.externalModification) {
+                origin = .changedOutside(Self.externalModificationDetail)
+            } else if let loss {
+                origin = .changedOutside(loss)
+            } else if let waiting = Self.acknowledgementNeeded(state) {
+                origin = .needsAcknowledgement(waiting)
+            }
+            throw BackendError.operationFailed("CellKeeper's helper could not read back its controls (hardware error \(state.lastHardwareError))")
         }
         observe(state)
         let active = state.activeControls.controls
         // A fault reported here makes a hardware error moot.
-        if let outside = currentOutsideChange ?? outsideLoss {
+        let loss = takeOutsideLoss()
+        if let outside = currentOutsideChange ?? loss {
             unreportedHardwareError = nil
             origin = .changedOutside(outside)
             return Self.mode(for: active)
@@ -209,6 +266,18 @@ public actor HelperChargingBackend: ChargingBackend {
 
     public func reportedModeOrigin() async -> ReportedModeOrigin? {
         origin
+    }
+
+    /// The controls CellKeeper may have set on the helper and has not seen
+    /// end: those it holds, and those an activation it sent may have set.
+    private var unresolvedControls: Set<HelperControl> {
+        Set(holds.keys).union(pendingActivations.keys)
+    }
+
+    /// The outside change found earlier and not yet reported, now reported.
+    private func takeOutsideLoss() -> String? {
+        defer { outsideLoss = nil }
+        return outsideLoss
     }
 
     public func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome {
@@ -253,6 +322,8 @@ public actor HelperChargingBackend: ChargingBackend {
     public func resetAfterFault() async throws {
         defer { updateActivity() }
         clearNotices()
+        // The user has acknowledged it.
+        outsideLoss = nil
         let state: HelperStateReply
         do {
             state = try await fetchState()
@@ -283,6 +354,7 @@ public actor HelperChargingBackend: ChargingBackend {
         }
         // Confirmed by the helper's read-back: nothing is set any more.
         holds = [:]
+        pendingActivations = [:]
         leaseDeadlines = [:]
         currentOutsideChange = nil
     }
@@ -308,20 +380,28 @@ public actor HelperChargingBackend: ChargingBackend {
         let wasInEffect = before.activeControls.controls == [target] && holds[target] != nil
         do {
             try await takeLease(target)
+            guard let instance = helperInstance, let session = self.introduction?.sessionID else {
+                throw BackendError.operationFailed("no connection to CellKeeper's helper")
+            }
+            // Recorded before it is sent: from here on the activation may
+            // take effect whatever happens to the reply, so CellKeeper stays
+            // responsible for the control until a read shows the outcome.
+            pendingActivations[target] = PendingActivation(
+                instance: instance,
+                session: session,
+                generationBefore: before.change(for: target).generation
+            )
             let status = try await send(needsToken: true) { try await $0.setControl(control: target.rawValue, active: true) }
             guard status == .ok else {
                 throw await refusal(status, activating: target)
             }
             let set = try await readState()
-            let change = set.change(for: target)
-            guard set.activeControls.controls.contains(target) else {
+            observe(set)
+            // The read settled the activation: the control is CellKeeper's
+            // only if the helper names this activation as its latest change.
+            guard let hold = holds[target], hold.generation == set.change(for: target).generation,
+                  set.activeControls.controls.contains(target) else {
                 throw BackendError.verificationFailed(expected: mode, actual: Self.mode(for: set.activeControls.controls))
-            }
-            if holds[target]?.generation != change.generation {
-                guard change.cause == .setByClient, ownSessions.contains(change.session), let instance = helperInstance else {
-                    throw BackendError.verificationFailed(expected: mode, actual: Self.mode(for: set.activeControls.controls))
-                }
-                holds[target] = Hold(generation: change.generation, instance: instance)
             }
             // Only now that the new control is set: no moment in between
             // allows charging the policy did not ask for.
@@ -342,10 +422,12 @@ public actor HelperChargingBackend: ChargingBackend {
         return outcome(changed: !wasInEffect)
     }
 
-    /// Clears what is still CellKeeper's, checked against the helper's
-    /// history right before, and ends its leases; then confirms that nothing
-    /// is active. A control CellKeeper did not set, or no longer owns, is
-    /// never touched: it is reported as an outside change.
+    /// Clears what is still CellKeeper's and ends its leases; then confirms
+    /// that nothing is active. Each clear names the change CellKeeper made,
+    /// so the helper clears nothing that changed since. A control CellKeeper
+    /// did not set, or no longer owns, is never touched: it is reported as an
+    /// outside change. An outside change found on the way stays reported
+    /// after the release succeeds.
     private func releaseAll() async throws -> ControlOutcome {
         clearNotices()
         let before = try await readState()
@@ -374,16 +456,21 @@ public actor HelperChargingBackend: ChargingBackend {
         return outcome(changed: !ownedBefore.isEmpty)
     }
 
-    /// Clears `control` if it is still CellKeeper's, and ends CellKeeper's
-    /// lease on it. The hold is kept, marked as released, until a read
-    /// confirms the change; the helper's history then shows it as
-    /// CellKeeper's own, also after a reconnect. Neither request needs a
-    /// lease or is ever rate-limited by the helper.
+    /// Clears `control` if it is still the change CellKeeper made, and ends
+    /// CellKeeper's lease on it. The helper compares the change right before
+    /// it clears (`clearControlIfUnchanged`); if the control changed since,
+    /// it clears nothing, and the next read tells how CellKeeper's hold
+    /// ended. The hold is kept, marked as released, until a read confirms the
+    /// change; the helper's history then shows it as CellKeeper's own, also
+    /// after a reconnect. Neither request needs a lease or is ever
+    /// rate-limited by the helper.
     private func letGo(_ control: HelperControl, leaseHeld: Bool) async throws {
-        if holds[control] != nil {
+        if let hold = holds[control] {
             holds[control]?.isReleaseRequested = true
-            let status = try await send(needsToken: false) { try await $0.setControl(control: control.rawValue, active: false) }
-            guard status == .ok else {
+            let status = try await send(needsToken: false) {
+                try await $0.clearControlIfUnchanged(control: control.rawValue, generation: hold.generation, helperInstance: hold.instance)
+            }
+            guard status == .ok || status == .controlChanged else {
                 if Self.isSessionLost(status) { await dropConnection() }
                 throw BackendError.operationFailed("CellKeeper's helper could not clear \(Self.describe([control])) (\(status))")
             }
@@ -441,10 +528,11 @@ public actor HelperChargingBackend: ChargingBackend {
         return changed ? .applied : .unchanged
     }
 
+    /// Forgets the notices kept until the next request. An outside change
+    /// not yet reported is kept (see ``outsideLoss``).
     private func clearNotices() {
         origin = nil
         lastRelease = nil
-        outsideLoss = nil
         isOwnReleaseConfirmed = false
     }
 
@@ -472,15 +560,24 @@ public actor HelperChargingBackend: ChargingBackend {
         case outside(String)
     }
 
-    /// Updates what CellKeeper holds from a fresh read, and notes how holds
-    /// ended, any outside change the helper still shows, and any hardware
-    /// error it had not reported before (until ``currentMode()`` reports it).
-    private func observe(_ state: HelperStateReply) {
-        let active = state.activeControls.controls
+    /// Notes a hardware error the helper had not reported before, until
+    /// ``currentMode()`` reports it. Any reply that carries the helper's
+    /// state counts, also one whose read-back failed.
+    private func noteHardwareErrors(_ state: HelperStateReply) {
         if let count = lastHardwareErrorCount, state.hardwareErrorCount > count {
             unreportedHardwareError = "CellKeeper's helper reports a new hardware error (code \(state.lastHardwareError))"
         }
         lastHardwareErrorCount = state.hardwareErrorCount
+    }
+
+    /// Updates what CellKeeper holds from a fresh read whose status is `ok`:
+    /// settles the activations it sent, notes how holds ended, any outside
+    /// change the helper still shows, and any hardware error it had not
+    /// reported before (until ``currentMode()`` reports it).
+    private func observe(_ state: HelperStateReply) {
+        let active = state.activeControls.controls
+        noteHardwareErrors(state)
+        settlePendingActivations(in: state)
         var endings: [Ending] = []
         for (control, hold) in holds {
             guard let ending = ending(of: control, hold, in: state) else { continue }
@@ -497,11 +594,30 @@ public actor HelperChargingBackend: ChargingBackend {
         }
         let foreign = active.subtracting(holds.keys)
         if state.interlocks.contains(.externalModification) {
-            currentOutsideChange = "CellKeeper's helper found its controls changed by something other than CellKeeper (another tool may be controlling charging); it restored macOS's defaults and changes nothing more until the fault is cleared"
+            currentOutsideChange = Self.externalModificationDetail
         } else if !foreign.isEmpty {
             currentOutsideChange = "CellKeeper's helper reports \(Self.describe(foreign)), which CellKeeper did not set or no longer holds"
         } else {
             currentOutsideChange = nil
+        }
+    }
+
+    /// Settles each activation CellKeeper sent, by the helper's history. If
+    /// the helper names it as the control's latest change (`setByClient`, on
+    /// the session it was sent on, after the generation before it), it took
+    /// effect and the control is CellKeeper's. Otherwise nothing of it is
+    /// still in effect: it did not take effect, or it did and has ended since,
+    /// or the helper restarted (and its start restored defaults). A control
+    /// active then is not CellKeeper's, and is reported as an outside change.
+    private func settlePendingActivations(in state: HelperStateReply) {
+        for (control, pending) in pendingActivations {
+            pendingActivations[control] = nil
+            guard pending.instance == helperInstance else { continue }
+            let change = state.change(for: control)
+            if change.cause == .setByClient, change.session == pending.session, change.generation > pending.generationBefore,
+               state.activeControls.controls.contains(control) {
+                holds[control] = Hold(generation: change.generation, instance: pending.instance)
+            }
         }
     }
 
@@ -683,6 +799,8 @@ public actor HelperChargingBackend: ChargingBackend {
         .belowBatteryFloor, .notOnExternalPower, .belowAdapterFloor, .adapterAbsent,
         .adapterPresenceUnknown, .thermalPressure, .powerStateUnavailable, .sleepImminent,
     ]
+
+    static let externalModificationDetail = "CellKeeper's helper found its controls changed by something other than CellKeeper (another tool may be controlling charging); it restored macOS's defaults and changes nothing more until the fault is cleared"
 
     static func mode(for control: HelperControl) -> ChargeControlMode {
         switch control {

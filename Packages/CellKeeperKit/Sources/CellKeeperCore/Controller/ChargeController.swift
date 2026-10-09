@@ -537,7 +537,11 @@ public actor ChargeController {
             // what CellKeeper last confirmed.
             currentMode = nil
             nativeLimit = await backend.nativeLimitStatus()
-            registerFailure("Could not read the backend's mode: \(error)")
+            // A fault reported with the failed read has faulted the backend
+            // already (`readBackendMode()`).
+            if !isReportedFaultHandled {
+                registerFailure("Could not read the backend's mode: \(error)")
+            }
             isOwnedStateUnverified = holdsNonNormalState
             return
         }
@@ -560,28 +564,10 @@ public actor ChargeController {
         // A change adopted while reading has been handled by `adopt(_:)`.
         guard adoptionCount == adoptionsBefore else { return }
         guard capabilities.availability.acceptsRequests else { return }
+        // A fault the backend found itself, possibly while CellKeeper held
+        // nothing, has been handled by `readBackendMode()`.
+        guard !isReportedFaultHandled else { return }
         let origin = await backend.reportedModeOrigin()
-        // Faults the backend found itself, possibly while CellKeeper held
-        // nothing; it keeps reporting them until they are gone.
-        let reportedFault: String? = switch origin {
-        case .changedOutside(let detail)?:
-            "Charging control changed outside CellKeeper: \(detail). Backend faulted; CellKeeper releases its own restrictions and does not override the change."
-        case .needsAcknowledgement(let detail)?:
-            "\(detail). Backend faulted: clear the fault to acknowledge it; until then only normal charging is requested."
-        default:
-            nil
-        }
-        if let reportedFault {
-            if !isReportedFaultHandled {
-                isReportedFaultHandled = true
-                ownedMode = nil
-                unconfirmedRequests = []
-                consecutiveFailures = max(consecutiveFailures, Self.maximumConsecutiveFailures)
-                record(.safety, reportedFault, level: .fault)
-            }
-            return
-        }
-        isReportedFaultHandled = false
         guard let observed else {
             registerFailure("The backend did not report its mode.")
             isOwnedStateUnverified = holdsNonNormalState
@@ -755,8 +741,17 @@ public actor ChargeController {
     /// Reads the backend's mode. A native backend may adopt an outside change
     /// during any read; it is handled here at once, so no read can leave an
     /// adoption unreported. Callers compare ``adoptionCount`` to notice it.
+    /// So is a fault the backend reports with the read, also when the read
+    /// fails: every read, including a request's confirmation, a fallback's
+    /// and a recovery's, faults the backend at once for it.
     private func readBackendMode() async throws -> ChargeControlMode? {
-        let mode = try await backend.currentMode()
+        let mode: ChargeControlMode?
+        do {
+            mode = try await backend.currentMode()
+        } catch {
+            await handleReportedFault()
+            throw error
+        }
         if let change = await backend.takeAdoptedLimitChange() {
             nativeLimit = await backend.nativeLimitStatus()
             // A marker from an earlier session needs nothing more if
@@ -765,7 +760,34 @@ public actor ChargeController {
                 adopt(change)
             }
         }
+        await handleReportedFault()
         return mode
+    }
+
+    /// Faults the backend for a fault it reported with its last read
+    /// (``ReportedModeOrigin/changedOutside(_:)`` or
+    /// ``ReportedModeOrigin/needsAcknowledgement(_:)``), once for as long as
+    /// it keeps reporting it. Afterwards ``isReportedFaultHandled`` says
+    /// whether the last read reported one.
+    private func handleReportedFault() async {
+        let reportedFault: String? = switch await backend.reportedModeOrigin() {
+        case .changedOutside(let detail)?:
+            "Charging control changed outside CellKeeper: \(detail). Backend faulted; CellKeeper releases its own restrictions and does not override the change."
+        case .needsAcknowledgement(let detail)?:
+            "\(detail). Backend faulted: clear the fault to acknowledge it; until then only normal charging is requested."
+        default:
+            nil
+        }
+        guard let reportedFault else {
+            isReportedFaultHandled = false
+            return
+        }
+        guard !isReportedFaultHandled else { return }
+        isReportedFaultHandled = true
+        ownedMode = nil
+        unconfirmedRequests = []
+        consecutiveFailures = max(consecutiveFailures, Self.maximumConsecutiveFailures)
+        record(.safety, reportedFault, level: .fault)
     }
 
     /// Sets a mode and confirms it by read-back. On success the mode is

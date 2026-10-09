@@ -330,7 +330,8 @@ public enum ReportedModeOrigin: Sendable, Equatable {
     case releasedByBackend(HoldRelease)
     /// The backend found a change that CellKeeper did not make: another tool
     /// may be controlling charging (rule R27). Reported for as long as the
-    /// backend still sees it.
+    /// backend still sees it; one it found earlier, for example while
+    /// releasing a hold, is reported once, by the next read.
     case changedOutside(String)
     /// The backend stopped making changes until someone acknowledges a
     /// problem it found itself (a failed write, a restore it owes): the
@@ -384,7 +385,11 @@ public enum ReportedModeOrigin: Sendable, Equatable {
 /// - `.normal` releases only what CellKeeper set. The backend never
 ///   overrides another tool's change by itself: it reports it, as
 ///   ``BackendError/changedOutside(expected:found:)`` or
-///   ``ReportedModeOrigin/changedOutside(_:)``.
+///   ``ReportedModeOrigin/changedOutside(_:)``. An outside change found by a
+///   request that succeeds stays reported until the next read reports it.
+/// - A fault is reported with every read, also one that throws; the
+///   controller looks at ``reportedModeOrigin()`` after every call to
+///   ``currentMode()``, including the confirmation of a request.
 public protocol ChargingBackend: Sendable {
     var descriptor: BackendDescriptor { get }
 
@@ -396,8 +401,10 @@ public protocol ChargingBackend: Sendable {
     func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome
 
     /// How the mode last reported by ``currentMode()`` came about, when the
-    /// backend knows; nil otherwise. Returns what is already known, without
-    /// new I/O. Default: nil.
+    /// backend knows; nil otherwise. After a ``currentMode()`` that threw,
+    /// only a fault (``ReportedModeOrigin/changedOutside(_:)``,
+    /// ``ReportedModeOrigin/needsAcknowledgement(_:)``) or nil. Returns what
+    /// is already known, without new I/O. Default: nil.
     func reportedModeOrigin() async -> ReportedModeOrigin?
 
     /// Extends CellKeeper's hold on `mode`, which CellKeeper set, confirmed

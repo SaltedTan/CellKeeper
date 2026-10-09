@@ -244,20 +244,27 @@ app. What is already in place, and tested against the simulated control:
   hold ended under the helper's own rules (an expired lease, a power or sleep
   interlock, the end of CellKeeper's session, a helper restart), by
   CellKeeper's own release, or otherwise. Anything else, including another
-  client of the helper clearing or restoring a control, faults the backend.
-  CellKeeper deactivates only controls it still owns by that record and never
-  restores defaults by itself; only the user clearing the fault restores
-  defaults, once. Limits: the helper sees an outside change only when it
-  reads the control, so a change undone between two reads goes unnoticed;
-  another client can still take over a control between CellKeeper's check
-  and its deactivation; and coexistence with macOS's Charge Limit and
-  Optimized Battery Charging is not done.
-- **Unconfirmed releases:** if the helper cannot be reached, is shutting
-  down, or a release fails while CellKeeper may still hold a control, the
-  backend keeps asking for normal charging, counts failures and keeps a
-  backend switch pending until a fresh read shows how the hold ended.
+  client of the helper clearing or restoring a control, faults the backend,
+  also when CellKeeper finds it while releasing and the release succeeds.
+  CellKeeper deactivates only controls it still owns by that record, and the
+  helper checks that record itself right before it clears
+  (`clearControlIfUnchanged`), so a control that changed hands in between
+  is left alone. CellKeeper never restores defaults by itself; only the
+  user clearing the fault restores defaults, once. Limits: the helper sees
+  an outside change only when it reads the control, so a change undone
+  between two reads goes unnoticed; and coexistence with macOS's Charge
+  Limit and Optimized Battery Charging is not done.
+- **Unconfirmed changes:** CellKeeper is responsible for a control from the
+  moment it sends an activation until the helper's history shows what came
+  of it, and for a hold until it sees it end. If the helper cannot be
+  reached, cannot read its controls back, is shutting down, or a release
+  fails meanwhile, the backend keeps asking for normal charging, counts
+  failures and keeps a backend switch pending. An activation whose outcome
+  is unknown never makes a control CellKeeper's, so nothing is cleared on
+  its account.
 - **Helper failures:** a failed write or an owed restore faults the backend
-  at once, and a new hardware error is counted as a failure.
+  at once, also while the helper cannot read its controls back, and a new
+  hardware error is counted as a failure.
 - **8, monotonic time:** one clock that counts sleep for the helper's leases,
   rate limits and power-state age.
 
