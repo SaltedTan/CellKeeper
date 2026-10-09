@@ -378,14 +378,28 @@ struct ChargeControllerTests {
         #expect(status.events.contains { $0.message.contains("Discharge not started") })
     }
 
-    @Test("Turning management off cancels overrides and restores normal charging")
+    @Test("Turning management off restores normal charging")
     func managementOff() async throws {
         let backend = MockChargingBackend()
         let (controller, _) = makeController(percent: 85, backend: backend)
         await takeFirstReading(controller)
         let holding = await controller.evaluate(.periodic)
         #expect(holding.currentMode == .inhibitCharging)
-        await controller.startFullCharge()
+
+        var settings = ChargingSettings.default
+        settings.isManagementEnabled = false
+        let status = try await controller.apply(settings: settings)
+        #expect(status.decision?.state == .unmanaged)
+        #expect(status.currentMode == .normal)
+        #expect(await backend.requestedModes == [.inhibitCharging, .normal])
+    }
+
+    @Test("Turning management off cancels an override")
+    func managementOffCancelsOverride() async throws {
+        let backend = MockChargingBackend()
+        let (controller, _) = makeController(percent: 85, backend: backend)
+        let started = await controller.startFullCharge()
+        #expect(started.activeOverride != nil)
 
         var settings = ChargingSettings.default
         settings.isManagementEnabled = false
@@ -393,7 +407,6 @@ struct ChargeControllerTests {
         #expect(status.activeOverride == nil)
         #expect(status.decision?.state == .unmanaged)
         #expect(status.currentMode == .normal)
-        #expect(await backend.requestedModes == [.inhibitCharging, .normal])
     }
 
     // MARK: - Lifecycle
