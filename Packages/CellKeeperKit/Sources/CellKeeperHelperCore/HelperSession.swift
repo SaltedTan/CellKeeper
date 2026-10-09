@@ -20,11 +20,13 @@ public struct HelperSessionID: Hashable, Sendable, CustomStringConvertible {
 /// `hello` must succeed before any other request is served, except
 /// ``restoreDefaults()`` and ``restoreDefaultsAndExit()``: they only move
 /// toward safety, so any live session may call them, also before the engine
-/// has started and during shutdown, and the request budget never refuses
-/// them. A session that was invalidated or revoked gets `notIntroduced` for
-/// everything. A session that keeps exceeding its request budget is revoked
-/// (``HelperEvent/sessionRevoked(_:)``); the transport should then close
-/// its connection.
+/// has started and during shutdown, and the request budget does not refuse
+/// them. A session that keeps exceeding its request budget is revoked
+/// (``HelperEvent/sessionRevoked(_:)``); the request that revokes it gets
+/// `rateLimited`, even a restore, and the transport should then close the
+/// connection. A session that was invalidated or revoked gets
+/// `notIntroduced` for its restores, and for everything else `notReady`,
+/// `shuttingDown` or `notIntroduced`, depending on the engine's phase.
 public struct HelperSession: Sendable {
     public let id: HelperSessionID
     private let engine: HelperEngine
@@ -58,8 +60,9 @@ public struct HelperSession: Sendable {
         await engine.acquireOrRenewLease(id, control: control, seconds: seconds)
     }
 
-    /// Ends this session's lease on `control` and clears the control. Never
-    /// refused by the request budget.
+    /// Ends this session's lease on `control` and clears the control. Not
+    /// refused by the request budget, unless the request revokes the
+    /// session.
     public func releaseLease(control: Int) async -> HelperStatus {
         await engine.releaseLease(id, control: control)
     }
@@ -67,17 +70,20 @@ public struct HelperSession: Sendable {
     /// Activates or deactivates `control`. Activation needs this session's
     /// lease (still valid when the write is made), the capability, no
     /// blocking interlock, and the activation limits; refused by those
-    /// limits, it restores defaults. Deactivation needs no lease, is never
-    /// rate-limited, and clears only what the engine set. A request for the
-    /// state already in effect writes nothing.
+    /// limits, it restores defaults. Deactivation needs no lease, is not
+    /// refused by the activation limits or the request budget (unless the
+    /// request revokes the session), and clears only what the engine set. A
+    /// request for the state already in effect writes nothing.
     public func setControl(control: Int, active: Bool) async -> HelperStatus {
         await engine.setControl(id, control: control, active: active)
     }
 
     /// Ends every lease and returns every control to macOS's default,
-    /// confirmed by read-back; writes nothing if the read-back already shows
-    /// defaults. A clean result also clears the `externalModification`,
-    /// `hardwareFault` and `writeFailed` interlocks.
+    /// confirmed by read-back. It reads the hardware afresh and writes
+    /// nothing if the read-back shows defaults and no restore is owed; an
+    /// owed restore is written even if defaults may already be in effect. A
+    /// clean result also clears the `externalModification`, `hardwareFault`
+    /// and `writeFailed` interlocks.
     public func restoreDefaults() async -> HelperStatus {
         await engine.restoreDefaults(id)
     }

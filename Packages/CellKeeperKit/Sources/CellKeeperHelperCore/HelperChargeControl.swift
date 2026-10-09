@@ -116,6 +116,10 @@ public final class SimulatedChargeControl: HelperChargeControl, @unchecked Senda
     private var pendingReadBackFailures = 0
     private var pendingRestoreFailures = 0
     private var pendingIgnoredRestores = 0
+    private var pendingMisrestores = 0
+    private var pendingPartialRestores: [HelperControl] = []
+    private var pendingFailuresAfterRestoring = 0
+    private var pendingReadBackFailuresAfterRestoring = 0
 
     public init(
         capabilities: HelperCapabilities = [.chargingInhibit, .adapterDisable],
@@ -186,7 +190,23 @@ public final class SimulatedChargeControl: HelperChargeControl, @unchecked Senda
                 pendingIgnoredRestores -= 1
                 return
             }
-            active = []
+            if pendingMisrestores > 0 {
+                pendingMisrestores -= 1
+                active = Set(HelperControl.allCases).subtracting(active)
+            } else if !pendingPartialRestores.isEmpty {
+                let kept = pendingPartialRestores.removeFirst()
+                active = active.intersection([kept])
+            } else {
+                active = []
+            }
+            if pendingReadBackFailuresAfterRestoring > 0 {
+                pendingReadBackFailuresAfterRestoring -= 1
+                pendingReadBackFailures += 1
+            }
+            if pendingFailuresAfterRestoring > 0 {
+                pendingFailuresAfterRestoring -= 1
+                throw HelperHardwareError.simulatedFailure
+            }
         }
     }
 
@@ -255,6 +275,31 @@ public final class SimulatedChargeControl: HelperChargeControl, @unchecked Senda
     /// changing state, so the read-back is not clean.
     public func ignoreNextRestores(_ count: Int) {
         lock.withLock { pendingIgnoredRestores += count }
+    }
+
+    /// Makes the next `count` calls to `restoreDefaults` change the wrong
+    /// controls: every active control is cleared and every inactive one is
+    /// set. They return normally.
+    public func misrestoreNextRestores(_ count: Int) {
+        lock.withLock { pendingMisrestores += count }
+    }
+
+    /// Makes the next `count` calls to `restoreDefaults` clear every
+    /// control except `kept`, and return normally.
+    public func partiallyRestoreNextRestores(_ count: Int, keeping kept: HelperControl) {
+        lock.withLock { pendingPartialRestores.append(contentsOf: Array(repeating: kept, count: count)) }
+    }
+
+    /// Makes the next `count` calls to `restoreDefaults` change the state
+    /// (as any other hook says) and then throw.
+    public func failNextRestoresAfterRestoring(_ count: Int) {
+        lock.withLock { pendingFailuresAfterRestoring += count }
+    }
+
+    /// After each of the next `count` calls to `restoreDefaults` that change
+    /// the state, makes the next `readBack` throw.
+    public func failReadBacksAfterNextRestores(_ count: Int) {
+        lock.withLock { pendingReadBackFailuresAfterRestoring += count }
     }
 
     /// Changes a control as if another tool had done it. Not counted as a

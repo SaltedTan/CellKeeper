@@ -111,6 +111,11 @@ struct HelperLeaseTests {
         #expect(await session.setControl(control: HelperControl.adapterDisabled.rawValue, active: true) == .noLease)
         #expect(h.recorder.contains(.requestRejected(session.id, .setControl, .noLease)))
         #expect(h.control.writeCount == 1)  // the start-up restore
+
+        // A missing lease is reported before an interlock.
+        h.power.update { $0.isUnavailable = true }
+        #expect(await session.setControl(control: HelperControl.adapterDisabled.rawValue, active: true) == .noLease)
+        #expect(await session.setControl(control: HelperControl.chargingInhibited.rawValue, active: true) == .blockedByInterlock)
     }
 
     @Test("Deactivation needs no lease and leaves the holder's lease in place")

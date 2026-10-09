@@ -29,14 +29,34 @@ struct RequestBudget {
 /// ``HelperEngine/maximumActivationsPerHour`` in total per rolling hour.
 struct ActivationHistory {
     private static let window: TimeInterval = 60 * 60
+    /// The latest records are enough for both limits: if a control's last
+    /// activation is older than this many others, the hourly cap refuses
+    /// anyway.
+    private static let capacity = HelperEngine.maximumActivationsPerHour
+    /// At most ``capacity`` records, oldest first.
     private(set) var records: [HelperActivationRecord]
 
-    /// Keeps the records of the last hour. Records from the future cannot
-    /// belong to this boot's clock and are dropped.
+    /// Keeps the latest ``capacity`` records of the last hour, in one pass
+    /// over `records`, whatever its size or order. Records from the future
+    /// cannot belong to this boot's clock and are dropped.
     init(records: [HelperActivationRecord], at now: TimeInterval) {
-        self.records = records
-            .filter { $0.uptime <= now && now - $0.uptime < Self.window }
-            .sorted { $0.uptime < $1.uptime }
+        var kept: [HelperActivationRecord] = []
+        kept.reserveCapacity(Self.capacity + 1)
+        for record in records where record.uptime <= now && now - record.uptime < Self.window {
+            if kept.count == Self.capacity, let oldest = kept.first, record.uptime <= oldest.uptime {
+                continue
+            }
+            if let newest = kept.last, record.uptime < newest.uptime {
+                let index = kept.firstIndex { $0.uptime > record.uptime } ?? kept.endIndex
+                kept.insert(record, at: index)
+            } else {
+                kept.append(record)
+            }
+            if kept.count > Self.capacity {
+                kept.removeFirst()
+            }
+        }
+        self.records = kept
     }
 
     func allows(_ control: HelperControl, at now: TimeInterval) -> Bool {
@@ -53,8 +73,16 @@ struct ActivationHistory {
     mutating func record(_ control: HelperControl, at now: TimeInterval) -> HelperActivationRecord {
         records.removeAll { now - $0.uptime >= Self.window }
         let record = HelperActivationRecord(control: control, uptime: now)
+        // At most `capacity`: `allows` refused any activation beyond it.
         records.append(record)
         return record
+    }
+
+    /// Moves the latest record to a later time, the moment its write is
+    /// made, so the limits measure from the real write.
+    mutating func moveLatestRecord(to uptime: TimeInterval) {
+        guard let last = records.indices.last, records[last].uptime < uptime else { return }
+        records[last].uptime = uptime
     }
 
     /// The records still within the window.

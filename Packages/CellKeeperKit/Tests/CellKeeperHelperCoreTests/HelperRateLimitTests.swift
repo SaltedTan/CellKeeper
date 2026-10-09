@@ -136,7 +136,14 @@ struct HelperRateLimitTests {
         #expect(await first.activate(.chargingInhibited, on: session) == .ok)
         let history = await first.engine.activationHistory
         #expect(history.map(\.control) == [.chargingInhibited])
-        #expect(first.recorder.contains(.activationRecorded(history[0])))
+        // The event reports the reservation; the engine keeps the write time,
+        // which is no earlier.
+        let reported = first.recorder.events.compactMap { event -> HelperActivationRecord? in
+            if case .activationRecorded(let record) = event { return record }
+            return nil
+        }
+        #expect(reported.map(\.control) == [.chargingInhibited])
+        #expect(reported.first.map { $0.uptime <= history[0].uptime } == true)
         _ = await session.restoreDefaultsAndExit()
 
         // launchd relaunches the helper; the app reconnects 10 s later.

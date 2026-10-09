@@ -141,6 +141,9 @@ public actor HelperEngine {
     private var sleepAnnouncedAt: TimeInterval?
     /// Power states read at or before this time are unavailable (R17).
     private var lastWakeAt: TimeInterval?
+    /// When the power state last found usable was read; nil if the last one
+    /// was not usable.
+    private var powerStateReadAt: TimeInterval?
     private var activations: ActivationHistory
     private var lastHardwareError = 0
     private var writeFailedAt: TimeInterval?
@@ -158,6 +161,10 @@ public actor HelperEngine {
     ///     relaunch cannot reset the activation limits. Records older than
     ///     an hour or later than now are dropped.
     ///   - events: receives every event, synchronously, for the audit log.
+    ///     It must not block: it runs inside the engine, between its checks
+    ///     and its writes. Persisting the activation history, for example,
+    ///     is done asynchronously; losing the last record in a crash is
+    ///     acceptable, because the next start restores defaults first.
     public init(
         control: any HelperChargeControl,
         power: any HelperPowerReading,
@@ -279,7 +286,8 @@ public actor HelperEngine {
     }
 
     /// True once shutdown was requested and defaults are confirmed: the
-    /// host may exit.
+    /// host may exit. It can turn false again if a client's restore during
+    /// shutdown fails, so the host checks it right before exiting.
     public var isSafeToExit: Bool {
         phase == .shuttingDown && !isRestoreOwed
     }
@@ -288,7 +296,9 @@ public actor HelperEngine {
     /// daemon persists them (an ``HelperEvent/activationRecorded(_:)`` event
     /// follows every change) and passes them to the next engine in the same
     /// boot; it discards them when the boot changes, because the clock
-    /// starts again.
+    /// starts again. The engine keeps at most the latest
+    /// ``maximumActivationsPerHour`` records it is given, which is enough
+    /// for both limits; the daemon's reader must bound what it reads too.
     public var activationHistory: [HelperActivationRecord] {
         activations.current(at: uptime())
     }
@@ -367,7 +377,8 @@ public actor HelperEngine {
     }
 
     func releaseLease(_ id: HelperSessionID, control rawControl: Int) -> HelperStatus {
-        // Only moves toward safety, so the budget never refuses it.
+        // Only moves toward safety, so the budget does not refuse it
+        // (unless this request revokes the session).
         let admission = admit(id, .releaseLease, metered: false)
         if let refusal = admission.refusal {
             return refusal
@@ -386,8 +397,8 @@ public actor HelperEngine {
     }
 
     func setControl(_ id: HelperSessionID, control rawControl: Int, active: Bool) -> HelperStatus {
-        // Deactivation only moves toward safety, so the budget never
-        // refuses it.
+        // Deactivation only moves toward safety, so the budget does not
+        // refuse it (unless this request revokes the session).
         let admission = admit(id, .setControl, metered: active)
         if let refusal = admission.refusal {
             return refusal
@@ -408,29 +419,38 @@ public actor HelperEngine {
             return reject(id, .setControl, .unsupportedControl)
         }
         refresh(.request)
-        guard leaseHolder == id, leases[control] != nil else {
+        // The checks read the hardware and the power state, and every event
+        // is a synchronous callback, all of which takes time: the lease is
+        // checked on a fresh clock.
+        guard isLeaseValid(control, for: id, at: uptime()) else {
             return reject(id, .setControl, .noLease)
         }
         guard interlocks.isDisjoint(with: control.blockingInterlocks) else {
             return reject(id, .setControl, .blockedByInterlock)
         }
-        // The checks read the hardware and the power state, which takes
-        // time: the lease must still be valid now, right before writing.
-        let now = uptime()
-        guard let deadline = leases[control], deadline > now else {
-            endLease(control, reason: .expired)
-            deactivate(control, reason: .leaseExpired)
-            return reject(id, .setControl, .noLease)
-        }
         guard !expected.contains(control) else { return .ok }
-        guard activations.allows(control, at: now) else {
+        let reservedAt = uptime()
+        guard activations.allows(control, at: reservedAt) else {
             // R13: the safe state, but no degraded mode (a deliberate
             // deviation; see architecture.md).
             ensureDefaults(reason: .activationLimited)
             return reject(id, .setControl, .rateLimited)
         }
-        // An attempted write counts, whatever its outcome.
-        emit(.activationRecorded(activations.record(control, at: now)))
+        // The activation is reserved before the event that reports it, and
+        // counts from here even if the write is then abandoned.
+        emit(.activationRecorded(activations.record(control, at: reservedAt)))
+        // Final checks on a fresh clock, after the last callback: nothing is
+        // emitted between them and the write.
+        let writeAt = uptime()
+        guard isLeaseValid(control, for: id, at: writeAt) else {
+            return reject(id, .setControl, .noLease)
+        }
+        guard let readAt = powerStateReadAt, writeAt - readAt <= Self.maximumPowerStateAge else {
+            raise(.powerStateUnavailable)
+            return reject(id, .setControl, .blockedByInterlock)
+        }
+        // The activation limits measure from the real write time.
+        activations.moveLatestRecord(to: writeAt)
         if let failure = write(control, active: true) {
             noteWriteFailure()
             restoreAll(reason: failure)
@@ -467,7 +487,8 @@ public actor HelperEngine {
 
     /// Admits a request: the phase, a live session, the request budget, and
     /// `hello`. Restores (`isRestore`) are served before start and during
-    /// shutdown, need no `hello`, and are never refused by the budget.
+    /// shutdown, need no `hello`, and are not refused by the budget
+    /// (`metered: false`), except by the request that revokes the session.
     /// Every request spends a token if one is left; `hasToken` says whether
     /// it did. A refusal is reported before it is returned.
     private func admit(
@@ -584,7 +605,7 @@ public actor HelperEngine {
         let readBack = readHardware()
         if isRestoreOwed {
             // Never from requests. Under externalModification only while a
-            // control the engine set may still be active (D27's quiet state
+            // control the engine set may still be active (D28's quiet state
             // begins once none can be).
             if trigger != .request, !owned.isEmpty || !interlocks.contains(.externalModification) {
                 restoreAll(reason: .faultRetry)
@@ -642,7 +663,9 @@ public actor HelperEngine {
             if state.isThermalPressureHigh {
                 found.insert(.thermalPressure)
             }
+            powerStateReadAt = state.readAtUptime
         } else {
+            powerStateReadAt = nil
             found.insert(.powerStateUnavailable)
         }
         if isBatteryFloorLatched {
@@ -694,6 +717,18 @@ public actor HelperEngine {
         if leases.isEmpty {
             leaseHolder = nil
         }
+    }
+
+    /// True if `id` holds an unexpired lease on `control` at `now`. A lease
+    /// found expired ends here, and its control is cleared.
+    private func isLeaseValid(_ control: HelperControl, for id: HelperSessionID, at now: TimeInterval) -> Bool {
+        guard leaseHolder == id, let deadline = leases[control] else { return false }
+        guard deadline > now else {
+            endLease(control, reason: .expired)
+            deactivate(control, reason: .leaseExpired)
+            return false
+        }
+        return true
     }
 
     private func endAllLeases(reason: HelperLeaseEndReason) {
@@ -803,10 +838,19 @@ public actor HelperEngine {
 
     /// Restores every control to its default and confirms by read-back. A
     /// failure means a restore is owed (`hardwareFault`); a clean read-back
-    /// settles it.
+    /// settles it. Whatever the restore may have made active counts as the
+    /// engine's: a control that reads back active and was not active before
+    /// it, and, if the restore threw or could not be read back, every
+    /// control not known to have been active before. A control active
+    /// before and after keeps its owner, so another tool's control does not
+    /// become the engine's.
     @discardableResult
     private func restoreAll(reason: HelperChangeReason) -> Bool {
         expected = []
+        // Unknown before the restore counts as nothing active, so that
+        // everything active after it counts as the engine's.
+        let before = lastReadBack ?? []
+        let mayHaveBeenIntroduced = Set(HelperControl.allCases).subtracting(before)
         func record(_ outcome: HelperWriteRecord.Outcome, _ readBack: Set<HelperControl>?) {
             emit(.write(HelperWriteRecord(target: .restoreDefaults, outcome: outcome, readBack: readBack)))
         }
@@ -815,13 +859,16 @@ public actor HelperEngine {
         } catch {
             let code = HelperHardwareError.code(for: error)
             recordHardwareError(code)
+            owned.formUnion(mayHaveBeenIntroduced)
             record(.threw(code: code), nil)
             return restoreFailed(reason)
         }
         guard let readBack = readHardware() else {
+            owned.formUnion(mayHaveBeenIntroduced)
             record(.readBackFailed(code: lastHardwareError), nil)
             return restoreFailed(reason)
         }
+        owned.formUnion(readBack.subtracting(before))
         guard readBack.isEmpty else {
             recordHardwareError(HelperHardwareError.restoreNotConfirmed.code)
             record(.readBackMismatch, readBack)
@@ -837,6 +884,10 @@ public actor HelperEngine {
     }
 
     private func restoreFailed(_ reason: HelperChangeReason) -> Bool {
+        if phase == .shuttingDown {
+            // A new debt during shutdown: announce safety again once settled.
+            hasAnnouncedSafeToExit = false
+        }
         emit(.restoreFailed(reason))
         raise(.hardwareFault)
         return false
@@ -853,7 +904,7 @@ public actor HelperEngine {
     }
 
     /// Ends every lease and restores defaults, always writing (an explicit
-    /// exception to D27), then serves only restores.
+    /// exception to D28's quiet state), then serves only restores.
     private func shutDown(reason: HelperChangeReason) -> Bool {
         endAllLeases(reason: .shutdown)
         let restored = restoreAll(reason: reason)

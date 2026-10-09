@@ -92,6 +92,8 @@ struct HelperSessionTests {
         #expect(await a.acquireOrRenewLease(control: HelperControl.adapterDisabled.rawValue, seconds: 60).status == .ok)
         #expect(await b.setControl(control: HelperControl.adapterDisabled.rawValue, active: true) == .noLease)
         #expect(h.control.activeControls == [.chargingInhibited])
+        // B's attempts reserved nothing: only A's activation counts.
+        #expect(await h.engine.activationHistory.map(\.control) == [.chargingInhibited])
         #expect(await b.readState().isLeaseHolder == false)
         #expect(await a.readState().isLeaseHolder)
         #expect(h.recorder.contains(.requestRejected(b.id, .acquireOrRenewLease, .leaseHeldByOtherClient)))

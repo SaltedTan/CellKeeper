@@ -586,16 +586,20 @@ reply block. Raw values never change and are never reused. Protocol version
 | `hello(clientProtocolVersion)` | — | no | yes | Status, helper protocol version, build, capabilities, whether simulated. Any failed `hello` withdraws the introduction |
 | `readState()` | refused | no | yes | Read-back controls, seconds left on each lease, whether the caller holds them, interlocks, last hardware error |
 | `acquireOrRenewLease(control, seconds)` | refused | — | yes | Grants or renews, clamped to 900 s (inhibit) or 120 s (adapter); one session holds leases at a time |
-| `releaseLease(control)` | refused | holder | never refused | Ends the lease and clears the control |
-| `setControl(control, true)` | refused | yes | yes | Capability, interlocks, the lease again on a fresh clock reading, activation limits, then write and read-back |
-| `setControl(control, false)` | refused | no | never refused | Clears the control if the engine set it |
-| `restoreDefaults()` | allowed | no | never refused | Ends every lease and restores defaults. Reads the hardware afresh, writes only if something is set. Also served before start and during shutdown |
-| `restoreDefaultsAndExit()` | allowed | no | never refused | Restores defaults, then shuts down so the host can exit (update, uninstall). During shutdown, the same as `restoreDefaults()` |
+| `releaseLease(control)` | refused | holder | not refused¹ | Ends the lease and clears the control |
+| `setControl(control, true)` | refused | yes | yes | Capability, the lease, interlocks, activation limits; reserves the activation, then checks the lease and the power state's age again on a fresh clock; then write and read-back |
+| `setControl(control, false)` | refused | no | not refused¹ | Clears the control if the engine set it |
+| `restoreDefaults()` | allowed | no | not refused¹ | Ends every lease and restores defaults. Reads the hardware afresh and writes nothing if it shows defaults and no restore is owed; an owed restore is written even if defaults may already be in effect. Also served before start and during shutdown |
+| `restoreDefaultsAndExit()` | allowed | no | not refused¹ | Restores defaults, then shuts down so the host can exit (update, uninstall). During shutdown, the same as `restoreDefaults()` |
 
-Only a live session is served: an invalidated or revoked session gets
-`notIntroduced` for everything, restores included. Requests the budget
-never refuses still spend a token when one is left, and still count toward
-revocation.
+¹ Except the one request that makes the session revoked (below), which
+gets `rateLimited`, even a restore.
+
+Only a live session is served. An invalidated or revoked session gets
+`notIntroduced` for its restores, and `notReady`, `shuttingDown` or
+`notIntroduced` for anything else, depending on the engine's phase.
+Requests the budget does not refuse still spend a token when one is left,
+and still count toward revocation.
 
 Statuses: `ok`, `incompatibleProtocol`, `notIntroduced`,
 `unsupportedControl`, `invalidArgument` (unknown control, lease of 0 s or
@@ -626,23 +630,33 @@ Other rules:
 - **Leases (R3).** Per control, bound to the session. A control is cleared
   when its lease expires, is released, or its session is invalidated or
   revoked (R1). Interlocks clear controls but leave leases in place. The
-  checks before an activation read the hardware and the power state, which
-  takes time, so the lease is checked again on a fresh clock reading right
-  before the write; a lease that ran out meanwhile ends there.
+  checks before an activation read the hardware and the power state, and
+  every event is a synchronous callback, all of which takes time. So an
+  activation is reserved and reported (`activationRecorded`) first, and
+  only then are the lease and the power state's age checked again, on a
+  fresh clock reading, with no callback between that check and the write.
+  A lease that ran out meanwhile ends there (`noLease`); a power state
+  that went stale refuses the activation (`blockedByInterlock`).
 - **Activation limits (R13).** An activation of each control at most once a
   minute, and at most 20 activations of all controls per rolling hour, on
-  the monotonic clock. Every attempted activation write counts. A request
-  for the state already in effect writes nothing and is not counted. An
-  activation refused by these limits restores defaults. Deactivations and
-  restores are never limited. The history is reported with each activation
-  (`activationRecorded`) and can be handed to the next engine
+  the monotonic clock, measured from the moment of each write. Every
+  reserved activation counts, also one whose write was then abandoned. A
+  request for the state already in effect writes nothing and is not
+  counted. An activation refused by these limits restores defaults.
+  Deactivations and restores are never limited. Each reservation is
+  reported (`activationRecorded`, with the reservation time), and the
+  history can be handed to the next engine
   (`HelperEngine(…, activationHistory:)`), so a relaunch, including one the
   client asks for with `restoreDefaultsAndExit`, cannot reset the limits.
-  The daemon must persist it and discard it when the boot changes.
+  The daemon must persist it and discard it when the boot changes. The
+  engine keeps only the latest 20 valid records it is given, found in one
+  pass, which is enough for both limits; the daemon's reader must bound
+  what it reads too.
 - **Request budget.** 10 at once and 2 per second per session. Requests
-  that only move toward safety are never refused by it. A session that makes
-  more than 20 requests in a row beyond its budget, refused or served, is
-  revoked: its controls are cleared, its leases end, and `sessionRevoked`
+  that only move toward safety are not refused by it, except the request
+  that makes the session revoked, which gets `rateLimited`. A session that
+  makes more than 20 requests in a row beyond its budget, refused or
+  served, is revoked: its controls are cleared, its leases end, and `sessionRevoked`
   tells the transport to close the connection (research note 04, §3.6).
   Beyond its budget, a deactivation or lease release skips the checks and
   writes only to clear what the engine set; a restore still reads the
@@ -656,15 +670,28 @@ Other rules:
   restore owed (`hardwareFault`); a clean one settles that, but not
   `writeFailed`. `readState` always reports read-back state, never intended
   state; if the read-back fails, its status is `hardwareError`.
-- **Checks.** Every request that is admitted and valid, other than `hello`
-  and the restores, and every `tick()` (every few seconds), sleep and wake,
-  runs the same checks: compare the read-back with what the engine set,
-  expire leases, recompute the interlocks and clear what they block. A
-  read-back that fails is an unknown state, so defaults are restored (R1).
+- **Checks.** Every admitted, valid request, except `hello`, the restores,
+  and deactivations and lease releases beyond the request budget, and
+  every `tick()` (every few seconds), sleep and wake, runs the same
+  checks: compare the read-back with what the engine set, expire leases,
+  recompute the interlocks and clear what they block. A read-back that
+  fails is an unknown state, so defaults are restored (R1).
 - **An owed restore** is retried once per `tick()` and per sleep or wake,
   by a client's restore or deactivation, and when the lease holder's session
   ends; never by other requests, so a failing control is not hammered.
-  Until it succeeds, nothing is activated.
+  It is written even if defaults may already be in effect, because only a
+  clean read-back after a restore settles it. Until it succeeds, nothing is
+  activated.
+- **The engine's own controls.** A control counts as the engine's while it
+  may be active because of the engine: it set it, or a failed write or
+  restore may have. After a write that threw or could not be read back,
+  that is every control; after a mismatch, every control that reads back
+  active. After a restore, it is a control that reads back active and was
+  not active before it, and, if the restore threw or could not be read
+  back, every control not known to have been active before. A control
+  active before and after a restore keeps its owner, so another tool's
+  control does not become the engine's. A control stops being the
+  engine's when it reads back inactive.
 - **Outside changes (R26, R27).** Defaults are restored, and retried while a
   control the engine set may still be active. Once none can be, and until a
   client's restore reads back clean, the engine writes nothing on its own,
@@ -680,16 +707,22 @@ Other rules:
   on, only restores are served (`shuttingDown` for everything else). If the
   restore was not confirmed, ticks, sleep and wake, `terminate()` and
   clients' restores keep retrying it. `isSafeToExit` and the `safeToExit`
-  event say when defaults are confirmed. The engine never exits the process
-  itself. Host policy for SIGTERM: call `terminate()`, retry about once a
-  second until `isSafeToExit` or until launchd's `ExitTimeOut` is nearly
-  used up, then exit anyway; the next start restores defaults first (R2).
+  event say when defaults are confirmed. A client's restore during
+  shutdown can fail and owe a restore again; `safeToExit` is then sent
+  again once that is settled, and the host checks `isSafeToExit` right
+  before exiting. The engine never exits the process itself. Host policy
+  for SIGTERM: call `terminate()`, retry about once a second until
+  `isSafeToExit` or until launchd's `ExitTimeOut` is nearly used up, then
+  exit anyway; the next start restores defaults first (R2).
 - **Audit.** Every hardware write (its target, the value asked for, the
   outcome and the read-back, or that it is unknown), lease grant, renewal
   and end, activation, deactivation, restore (with its reason), hardware
   error, interlock change, refused request and revoked session is an event
   for the host to log. A session over its request budget is reported once
-  until it is back within it.
+  until it is back within it. The event sink is called synchronously, inside
+  the engine, and must not block: the daemon logs and persists
+  asynchronously. Losing the last activation record in a crash is
+  acceptable, because the next start restores defaults first.
 - **Time (R22).** One monotonic clock that counts sleep, injected, shared
   with the power reading. `HelperEngine.continuousUptime` is the system's
   `CLOCK_MONOTONIC`: the same in every process, and counting from boot on
@@ -723,6 +756,8 @@ Remaining limitations:
   at each wake.
 - Persisting the activation history, closing revoked connections, keeping
   each connection's requests in order and exiting are the host's jobs.
+- A blocking event sink stalls the engine. It cannot make a write outlive
+  its lease or use a stale power state, but it delays every request.
 
 Not there yet: the daemon (SMAppService, launchd, SIGTERM), the NSXPC
 transport and code-signing requirements, the IOKit power reading and
@@ -882,5 +917,7 @@ decisions.
 | D31 | The helper separates "shutdown requested" from "safe to exit": after shutdown it serves only restores and keeps retrying until defaults are confirmed; the host exits then, or at its SIGTERM deadline | A transient failure during shutdown must leave a way to recover; if the deadline passes, the next start restores first (R2) |
 | D32 | A failed or mismatched control write raises `writeFailed`, which refuses activations until a client restores defaults or for an hour (R11); a successful safety restore does not clear it | The restore makes the state safe, but the control is no longer trusted; repeated failures must not keep producing restricting writes |
 | D33 | An activation refused by the activation limits restores defaults but raises no degraded mode (lead's decision, 2026-10-09; a deviation from R13) | A legitimate client can hit the per-control interval after a benign race, and its own fallback already asks for defaults |
-| D34 | A session that makes more than 20 requests in a row beyond its budget, refused or served, is revoked and its controls cleared | Requests the budget never refuses must not become a way around it (research note 04, §3.6) |
+| D34 | A session that makes more than 20 requests in a row beyond its budget, refused or served, is revoked and its controls cleared | Requests the budget does not refuse must not become a way around it (research note 04, §3.6) |
 | D35 | The helper's clock is the system's `CLOCK_MONOTONIC`, and a new engine takes the activation history of the previous one in the same boot | A relaunch the client asks for must not reset the activation limits; the daemon persists the history and discards it at a new boot |
+| D36 | An activation is reserved and reported before its final checks, which run on a fresh clock with no callback between them and the write; the activation limits measure from the write | Event callbacks take time: a slow sink must not let a write outlive its lease, use a stale power state, or land closer to the previous write than the limits allow. A reservation whose write is abandoned still counts |
+| D37 | A control that a failed or wrong restore may have made active counts as the engine's until it reads back inactive; a control active before and after a restore keeps its owner | A restore that went wrong must not leave a restriction that nothing retries, while another tool's control must not become the engine's to fight over |

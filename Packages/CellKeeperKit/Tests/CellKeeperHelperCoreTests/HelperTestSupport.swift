@@ -74,10 +74,17 @@ final class StubPowerReading: HelperPowerReading, @unchecked Sendable {
     }
 }
 
-/// Collects the engine's events.
+/// Collects the engine's events. A test can make the sink react to them,
+/// for example by advancing the clock to model a slow sink.
 final class EventRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: [HelperEvent] = []
+    private var reaction: (@Sendable (HelperEvent) -> Void)?
+
+    /// Runs `reaction` inside the sink for every later event; nil stops.
+    func react(_ reaction: (@Sendable (HelperEvent) -> Void)?) {
+        lock.withLock { self.reaction = reaction }
+    }
 
     var events: [HelperEvent] {
         lock.withLock { recorded }
@@ -92,7 +99,15 @@ final class EventRecorder: @unchecked Sendable {
     }
 
     func record(_ event: HelperEvent) {
-        lock.withLock { recorded.append(event) }
+        let reaction = lock.withLock {
+            recorded.append(event)
+            return self.reaction
+        }
+        reaction?(event)
+    }
+
+    func count(of event: HelperEvent) -> Int {
+        events.filter { $0 == event }.count
     }
 
     func contains(_ event: HelperEvent) -> Bool {

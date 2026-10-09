@@ -109,8 +109,11 @@ public enum HelperEvent: Sendable, Equatable {
     case leaseEnded(HelperSessionID, HelperControl, HelperLeaseEndReason)
     /// Every hardware write attempt, client-driven or internal.
     case write(HelperWriteRecord)
-    /// An activation write is about to be attempted; it counts toward the
-    /// activation limits. The host persists it (see
+    /// An activation was reserved: it counts toward the activation limits
+    /// from now on, even if its write is then abandoned. The record carries
+    /// the reservation time; the engine itself measures from the later write
+    /// time, which is the same while the event sink does not block. The host
+    /// persists it (see
     /// ``HelperEngine/activationHistory``).
     case activationRecorded(HelperActivationRecord)
     /// The control was set and confirmed by read-back.
@@ -133,6 +136,8 @@ public enum HelperEvent: Sendable, Equatable {
     /// Shutdown was requested: the engine serves only restores from now on.
     /// `restored` says whether defaults were confirmed at once.
     case shuttingDown(HelperChangeReason, restored: Bool)
-    /// Defaults are confirmed during shutdown: the host may exit now.
+    /// Defaults are confirmed during shutdown: the host may exit now. Sent
+    /// again if a later restore during shutdown fails and is then settled;
+    /// the host checks ``HelperEngine/isSafeToExit`` right before exiting.
     case safeToExit
 }
