@@ -152,8 +152,8 @@ list.
    *Implemented in the policy* for backends that switch charging themselves:
    the limit latch needs two consecutive distinct readings, and cooling
    alone ends a temperature pause no sooner than 5 minutes after it began
-   (see the safeguards table and the deviations below). A privileged helper must still enforce its own
-   guards (precondition 3).
+   (see the safeguards table and the deviations below). A privileged helper
+   must still enforce its own guards (precondition 3).
 7. **External-writer detection and coexistence.** Stop and restore if another
    tool changes the same state; detect macOS Charge Limit / Optimized Battery
    Charging and never fight them (R25–R27).
