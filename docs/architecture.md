@@ -646,7 +646,8 @@ Other rules:
   Any call that writes after that (an activation, a release, a
   deactivation, a client's restore, the end of a session) settles the
   time limits once more before it returns. During shutdown no lease
-  remains and the engine owns no control, so there is nothing to settle.
+  remains and nothing is expected to be active, so there is nothing to
+  settle; a restore still owed is retried by the shutdown path.
 - **Activation limits (R13).** An activation of each control at most once a
   minute, and at most 20 activations of all controls per rolling hour, on
   the monotonic clock, measured from the moment of each write. Every

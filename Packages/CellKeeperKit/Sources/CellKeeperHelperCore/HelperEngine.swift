@@ -525,8 +525,9 @@ public actor HelperEngine {
     /// since the time limits were last settled, for example a clearing
     /// write at the end of a request, that call took time, so they are
     /// settled again before the call returns. Then the events are
-    /// delivered. During shutdown no lease remains and the engine owns no
-    /// control, so there is nothing to settle.
+    /// delivered. During shutdown no lease remains and nothing is
+    /// expected to be active, so there is nothing to settle; a restore
+    /// still owed is retried by the shutdown path.
     private func finishOperation() {
         if phase == .running, hardwareCalls != hardwareCallsWhenSettled {
             settleTimeLimits()
