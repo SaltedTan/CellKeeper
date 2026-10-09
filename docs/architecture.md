@@ -119,9 +119,10 @@ Requirement → location:
     the app exits, and the next launch retries (see "Native Charge Limit
     backend").
 - **Time.** Wall-clock time is used for telemetry age and display. Override
-  expiry and rate limiting use a monotonic clock (`ContinuousClock`, which
-  keeps counting during sleep), so changing the system clock cannot extend a
-  temporary override or block restrictions.
+  expiry, rate limiting and the minimum temperature pause use a monotonic
+  clock (`ContinuousClock`, which keeps counting during sleep), so changing
+  the system clock cannot extend a temporary override or a pause, or block
+  restrictions.
 
 ## Charging policy
 
@@ -131,19 +132,50 @@ current mode, policy memory, fault flag, recent restricting requests,
 sleep-imminent flag) to a `PolicyDecision` (state, desired mode, action,
 reason, notes, next memory, override end).
 
-### Memory: three hysteresis latches
+### Memory: hysteresis latches, debounce and minimum pause
 
 The policy's only memory is `PolicyMemory`:
 
-- `limitReached` — set when charge ≥ limit, cleared when charge ≤ resume
+- `limitReached` — set when two consecutive distinct readings show
+  charge ≥ limit (see the debounce below), cleared when charge ≤ resume
   threshold, unchanged in between (the hysteresis band). Never set when the
   limit is 100%. Raising the limit above the one it was set at
-  (`latchedLimit`) clears it, so charging resumes toward the new limit; it
-  sets again at once if the charge has already reached it.
-- `temperatureTripped` — set at ≥ pause temperature, cleared at ≤ resume
-  temperature, and cleared when temperature is unknown so a lost sensor can
-  never hold charging off.
+  (`latchedLimit`) clears it, so charging resumes toward the new limit,
+  unless the charge has already reached the new limit: then the hold
+  continues without a gap.
+- `pendingLimitCrossing` — the debounce (research rule R14). The first
+  reading with charge ≥ limit while `limitReached` is clear is kept here
+  (its identity and charge), and the state stays `charging` with a note that
+  CellKeeper is confirming the limit with the next reading. The next
+  *distinct* reading at or above the limit sets `limitReached`. A reading's
+  identity is the driver's own update time (`sourceTimestamp`) where
+  reported, so several evaluations within one driver refresh count as one
+  reading. Otherwise it is CellKeeper's read time, and only evaluations of
+  the same read (the same timestamp) count as one. The pending reading is
+  judged against the current limit, so raising the limit past it starts
+  over. It is dropped by a reading below the limit and by any evaluation
+  that does not look at the charge (the fail-safe rows, including invalid
+  settings and a required release; management off; a native-limit
+  backend), so the two readings are always consecutive.
+- `temperatureTripped` — set at ≥ pause temperature on the first such
+  reading, cleared at ≤ resume temperature once it has been set for at least
+  5 minutes of monotonic time (`temperatureTrippedAtUptime`, research rule
+  R21). It is cleared at once when the temperature is unknown or protection
+  is turned off, so a lost sensor can never hold charging off. Once clear it
+  sets again on the next hot reading, with no minimum (see the deviations in
+  `safety.md`).
 - `belowSafetyFloor` — set at ≤ 10%, cleared at ≥ 15%.
+
+Only the limit latch is debounced. Every other rule acts on the first
+reading that calls for it: the safety floor, the sleep precaution and a
+temperature trip because they are safety actions, and the resume threshold,
+a raised limit, battery power, an unknown temperature, overrides and the
+fail-safe rows because they relax toward macOS defaults. Readings on battery
+power and during an override still count toward the debounce, so a latch
+confirmed then holds as soon as the rule that set it aside no longer applies.
+Invalid settings, management off, no battery, and a native-limit backend
+reset the whole memory, as before; a backend switch keeps it, because the
+latches describe the battery, not the backend.
 
 ### Overrides
 
@@ -169,13 +201,13 @@ even when the charge reading is unusable.
 | 3 | No/stale telemetry (by read time, or by the driver's own update time > 180 s), future timestamps, no battery, unknown % or power source | `failSafe` | normal (a discharge session is interrupted) |
 | 4 | Safety floor latched | `safetyFloor` | normal |
 | 5 | On battery power | `onBattery` | normal (restrictions cleared; limit latch kept) |
-| 6 | Temperature latch set | `temperaturePause` | inhibitCharging |
+| 6 | Temperature latch set (cooling clears it no sooner than 5 minutes after it was set) | `temperaturePause` | inhibitCharging |
 | 7 | Temporary full charge active | `fullChargeOverride` | normal |
 | 8 | Discharge session active | `discharging` | forceDischarge |
 | 9 | Limit is 100% | `charging` | normal |
-| 10 | Limit latch set | `holding` | inhibitCharging |
+| 10 | Limit latch set (by two consecutive distinct readings) | `holding` | inhibitCharging |
 | 11 | Sleep imminent and charge ≥ resume threshold | `holding` | inhibitCharging |
-| 12 | Otherwise | `charging` | normal |
+| 12 | Otherwise, including a first reading at or above the limit that awaits confirmation | `charging` | normal |
 
 ### Native Charge Limit
 
@@ -560,7 +592,6 @@ closed before a backend that changes hardware *itself* is enabled:
   handling (`IORegisterForSystemPower` with acknowledgement), per-control
   leases that lapse to `.normal`, and bounded operations (XPC timeouts with
   connection invalidation).
-- **Debounce and dwell** (research rules R14, R21) are not implemented.
 
 ## Telemetry
 
@@ -645,3 +676,4 @@ decisions.
 | D23 | "No limit" is recorded as 100% only after the user confirms it | The report cannot distinguish a 100% limit from temporary states; the owner's rule is never to assume 100% |
 | D24 | Invalid settings are rejected before use, never applied | The UI only offers valid values; a rejected change keeps the previous valid settings, so there is no "invalid settings" state to restore from at run time. The policy still fails safe if handed invalid settings directly |
 | D25 | An attempted restore stays owed until confirmed, across relaunches; any record found at launch makes it owed | Otherwise recognising an earlier change, a relaunch, or a marker that could not be saved could quietly abandon giving the user's limit back. The cost is one restore and re-apply after a crash |
+| D26 | Only the limit crossing is debounced (two consecutive distinct readings, identified by the driver's update time where reported); cooling alone ends a temperature pause no sooner than 5 minutes after it began, but a new pause needs no wait (rules R14, R21) | The limit crossing is the one restricting change that is not a safety trigger, so a single wrong reading should not cause it. Safety triggers and changes toward macOS defaults act at once; a minimum before re-pausing would only delay protection |

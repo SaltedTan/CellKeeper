@@ -110,11 +110,17 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
     case belowSafetyFloor(percent: Int, floor: Int)
     case temperatureHigh(celsius: Double, pauseAt: Double)
     case temperatureCooling(celsius: Double, resumeAt: Double)
+    /// Cooled to the resume threshold, but the pause has not yet lasted
+    /// ``ChargingPolicy/minimumTemperaturePause``; it ends at `resumesAt`.
+    case temperatureMinimumPause(celsius: Double, resumesAt: Date)
     case fullChargeRequested(percent: Int)
     case dischargingToLimit(percent: Int, limit: Int)
     case noChargeLimit
     case belowResumeThreshold(percent: Int, resumeThreshold: Int)
     case chargingTowardLimit(percent: Int, limit: Int)
+    /// One reading has reached the limit; charging continues until the next
+    /// distinct reading confirms it.
+    case confirmingLimit(percent: Int, limit: Int)
     case limitReached(percent: Int, limit: Int)
     case holdingAboveResumeThreshold(percent: Int, resumeThreshold: Int)
     case sleepPrecaution(percent: Int, resumeThreshold: Int)
@@ -155,6 +161,8 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
             "Battery at \(celsius.formatted(.number.precision(.fractionLength(1))))°C (pause at \(pauseAt.formatted())°C); charging paused."
         case .temperatureCooling(let celsius, let resumeAt):
             "Battery cooling at \(celsius.formatted(.number.precision(.fractionLength(1))))°C; charging resumes at \(resumeAt.formatted())°C."
+        case .temperatureMinimumPause(let celsius, let resumesAt):
+            "Battery has cooled to \(celsius.formatted(.number.precision(.fractionLength(1))))°C; charging stays paused until \(resumesAt.formatted(date: .omitted, time: .standard)), when the \(Int(ChargingPolicy.minimumTemperaturePause / 60))-minute minimum pause ends."
         case .fullChargeRequested(let percent):
             "Temporary full charge requested (now \(percent)%)."
         case .dischargingToLimit(let percent, let limit):
@@ -165,6 +173,8 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
             "Charge \(percent)% is at or below the resume threshold \(resume)%; charging."
         case .chargingTowardLimit(let percent, let limit):
             "Charging from \(percent)% toward the \(limit)% limit."
+        case .confirmingLimit(let percent, let limit):
+            "Charge \(percent)% has reached the \(limit)% limit on one reading; charging continues until the next reading confirms it."
         case .limitReached(let percent, let limit):
             "Charge \(percent)% has reached the \(limit)% limit; charging paused."
         case .holdingAboveResumeThreshold(let percent, let resume):
@@ -195,6 +205,9 @@ public enum PolicyNote: Sendable, Equatable, CustomStringConvertible {
     /// Telemetry is unusable, but a native limit stays as it is because macOS
     /// enforces it from its own measurements.
     case nativeLimitKeptWithoutTelemetry
+    /// One reading has reached the limit, and CellKeeper is waiting for the
+    /// next distinct reading to confirm it before pausing charging.
+    case confirmingLimit
 
     public var description: String {
         switch self {
@@ -206,6 +219,8 @@ public enum PolicyNote: Sendable, Equatable, CustomStringConvertible {
             "Temporary full charge is paused by \(state.rawValue)."
         case .nativeLimitKeptWithoutTelemetry:
             "Battery telemetry is unavailable. macOS keeps enforcing its Charge Limit from its own measurements, so CellKeeper leaves it unchanged."
+        case .confirmingLimit:
+            "CellKeeper is confirming the limit with the next battery reading before it pauses charging, so a single wrong reading cannot pause it."
         }
     }
 }
@@ -280,13 +295,34 @@ public struct ChargeOverride: Sendable, Equatable {
 }
 
 /// The policy's only memory between evaluations: three hysteresis latches,
-/// and the limit the first one was set at.
+/// the limit the first one was set at, a reading waiting to confirm that the
+/// limit was reached, and when the temperature latch was set.
 public struct PolicyMemory: Sendable, Equatable {
-    /// Set when the charge reaches the limit; cleared when it falls to the
-    /// resume threshold. While set, charging stays paused.
+    /// A reading that showed the charge at or above the limit while
+    /// ``limitReached`` was clear.
+    public struct LimitCrossing: Sendable, Equatable {
+        /// Identifies the reading: the driver's own update time
+        /// (``BatterySnapshot/sourceTimestamp``) where reported, otherwise
+        /// when CellKeeper read it (``BatterySnapshot/timestamp``). Readings
+        /// with the same sample time are the same reading.
+        public var sampleTime: Date
+        /// The charge the reading showed.
+        public var percent: Int
+
+        public init(sampleTime: Date, percent: Int) {
+            self.sampleTime = sampleTime
+            self.percent = percent
+        }
+    }
+
+    /// Set when two consecutive distinct readings show the charge at or above
+    /// the limit; cleared when it falls to the resume threshold. While set,
+    /// charging stays paused.
     public var limitReached: Bool
     /// Set when the temperature reaches the pause threshold; cleared when it
-    /// falls to the resume threshold or becomes unknown.
+    /// falls to the resume threshold once the pause has lasted
+    /// ``ChargingPolicy/minimumTemperaturePause``, and at once when it
+    /// becomes unknown or protection is turned off.
     public var temperatureTripped: Bool
     /// Set when the charge falls to the safety floor; cleared once it is five
     /// points above the floor.
@@ -294,12 +330,36 @@ public struct PolicyMemory: Sendable, Equatable {
     /// The charge limit in force while ``limitReached`` was last set, so that
     /// raising the limit can end the hold; nil while it is clear.
     public var latchedLimit: Int?
+    /// The first reading at or above the limit, waiting for the next
+    /// distinct reading to confirm it before ``limitReached`` is set. Nil
+    /// while none is waiting, and dropped by any evaluation that does not
+    /// show the charge at or above the limit.
+    public var pendingLimitCrossing: LimitCrossing?
+    /// The ``PolicyInput/uptime`` at which ``temperatureTripped`` was set;
+    /// nil while it is clear. If it is nil while the latch is set, the
+    /// minimum pause counts as over.
+    public var temperatureTrippedAtUptime: TimeInterval?
 
-    public init(limitReached: Bool = false, temperatureTripped: Bool = false, belowSafetyFloor: Bool = false, latchedLimit: Int? = nil) {
+    public init(
+        limitReached: Bool = false,
+        temperatureTripped: Bool = false,
+        belowSafetyFloor: Bool = false,
+        latchedLimit: Int? = nil,
+        pendingLimitCrossing: LimitCrossing? = nil,
+        temperatureTrippedAtUptime: TimeInterval? = nil
+    ) {
         self.limitReached = limitReached
         self.temperatureTripped = temperatureTripped
         self.belowSafetyFloor = belowSafetyFloor
         self.latchedLimit = latchedLimit
+        self.pendingLimitCrossing = pendingLimitCrossing
+        self.temperatureTrippedAtUptime = temperatureTrippedAtUptime
+    }
+
+    var withoutPendingLimitCrossing: PolicyMemory {
+        var memory = self
+        memory.pendingLimitCrossing = nil
+        return memory
     }
 }
 

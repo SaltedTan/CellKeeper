@@ -57,6 +57,15 @@ func input(
     )
 }
 
+/// The policy memory after one earlier reading of `percent`, a minute before
+/// `referenceDate`. A reading at or above the limit at `referenceDate` is
+/// then the second in a row, so it confirms the limit (rule R14).
+func memoryAfterReading(_ percent: Int, settings: ChargingSettings = .default, memory: PolicyMemory = PolicyMemory()) -> PolicyMemory {
+    let earlier = referenceDate.addingTimeInterval(-60)
+    let reading = snapshot(percent: percent, at: earlier)
+    return ChargingPolicy.evaluate(input(reading, settings: settings, memory: memory, now: earlier, uptime: 10_000 - 60)).memory
+}
+
 /// A telemetry provider whose readings are set by the test. When given a
 /// clock, readings are stamped with the clock's time, like real telemetry.
 actor StubTelemetry: TelemetryProvider {

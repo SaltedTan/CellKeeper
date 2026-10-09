@@ -9,7 +9,8 @@ public struct TemperatureProtection: Sendable, Equatable, Codable {
     /// Charging pauses when the battery temperature reaches this value.
     public var pauseAtCelsius: Double
     /// After a pause, charging may resume once the temperature has fallen to
-    /// this value or below.
+    /// this value or below and the pause has lasted
+    /// ``ChargingPolicy/minimumTemperaturePause``.
     public var resumeAtCelsius: Double
 
     public init(isEnabled: Bool, pauseAtCelsius: Double, resumeAtCelsius: Double) {
