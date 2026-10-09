@@ -1,6 +1,6 @@
 # CellKeeper architecture
 
-Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit), plus the logic of the future privileged helper with a simulated control only. Last reviewed 2026-10-09.
+Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper). Last reviewed 2026-10-09.
 
 This document describes how CellKeeper is put together and why. Research that
 informed these decisions is in [`docs/research/`](research/README.md); safety
@@ -13,8 +13,9 @@ rules are in [`docs/safety.md`](safety.md).
    interfaces, so every rule is unit-testable without a Mac battery.
 2. **Control is a narrow, swappable boundary.** All charging control goes
    through the `ChargingBackend` protocol. The implementations are a
-   simulated backend, a read-only backend, and a backend that sets macOS's
-   own Charge Limit through a user-created shortcut. Anything that touches
+   simulated backend, a read-only backend, a backend that sets macOS's
+   own Charge Limit through a user-created shortcut, and a backend that
+   drives CellKeeper's helper (simulated only so far). Anything that touches
    undocumented or privileged interfaces lives behind this protocol (and,
    for root operations, would live behind a separate helper process).
 3. **Fail toward macOS defaults.** The only "safe state" is `.normal`: macOS
@@ -47,6 +48,8 @@ rules are in [`docs/safety.md`](safety.md).
 │  ProcessRunner             – no shell, stdin closed, deadline, bounded output ││
 │  NativeChargeLimitSupport  – platform check; `NativeChargeLimitBackend.system`││
 │  FileOwnershipRecordStore  – durable record of the user's own Charge Limit    ││
+│  SystemHelperPowerReading  – the helper's own read-only power state;          ││
+│                              `HelperChargingBackend.simulatedHelper()`        ││
 └───────────────┬──────────────────────────────────────────────────────────────┘│
                 │ depends on                                                    │
 ┌───────────────▼──────────────── CellKeeperCore (pure Swift, no IOKit) ────────▼───────────────┐
@@ -55,12 +58,13 @@ rules are in [`docs/safety.md`](safety.md).
 │  Policy:     ChargingPolicy (pure state machine), PolicyInput/Decision/Memory, ChargeOverride  │
 │  Control:    ChargingBackend (protocol), MockChargingBackend, ReadOnlyChargingBackend,         │
 │              NativeChargeLimitBackend (+ ShortcutRunning / ChargeLimitReading /                │
-│              OwnershipRecordStore protocols)                                                   │
+│              OwnershipRecordStore protocols), HelperChargingBackend (+ HelperTransport /       │
+│              HelperConnection protocols, InProcessHelperTransport)                             │
 │  Controller: ChargeController (actor: telemetry → policy → backend, safety fallbacks, log)     │
 │  Support:    CellKeeperLog (os.Logger categories)                                              │
-└────────────────────────────────────────────────────────────────────────────────────────────────┘
-
-┌──────────────── CellKeeperHelperCore (pure Swift, Foundation only; not used yet) ──────────────┐
+└───────────────┬────────────────────────────────────────────────────────────────────────────────┘
+                │ depends on (Kit too)
+┌───────────────▼ CellKeeperHelperCore (pure Swift, Foundation only; run in process by the app) ─┐
 │  Wire:     HelperProtocolVersion, HelperControl, HelperControlSet, HelperCapabilities,         │
 │            HelperInterlocks, HelperStatus, reply values (primitives only, for NSXPC)           │
 │  Engine:   HelperEngine (actor: sessions, per-control leases, rate limits, interlocks,         │
@@ -79,16 +83,18 @@ rules are in [`docs/safety.md`](safety.md).
   `objectVersion = 77` (Xcode 16+); CI fails if a newer Xcode rewrites it.
 - The boundary is enforced by dependency direction: `CellKeeperCore` cannot
   import `CellKeeperKit`, so policy code cannot reach IOKit.
-- `CellKeeperHelperCore` depends on nothing, and nothing depends on it yet.
-  It holds the logic of the future privileged helper and the vocabulary the
-  app and the helper will share (see "Helper engine" below).
+- `CellKeeperHelperCore` depends on nothing. It holds the logic of the
+  future privileged helper and the vocabulary the app and the helper share
+  (see "Helper engine" below). `CellKeeperCore` depends on it for that
+  vocabulary, and the app runs its engine in process for the Simulated
+  helper (see "Helper backend").
 
 Requirement → location:
 
 | Concern | Where | Status |
 |---|---|---|
 | Telemetry | `TelemetryProvider` (Core), `SystemTelemetryProvider` (Kit) | Implemented, read-only |
-| Hardware/control backend | `ChargingBackend` (Core) | Simulated, read-only, native Charge Limit (experimental, opt-in) |
+| Hardware/control backend | `ChargingBackend` (Core) | Simulated, read-only, native Charge Limit (experimental, opt-in), Simulated helper |
 | Charging policy & state machine | `ChargingPolicy` (Core) | Implemented |
 | Orchestration & safety fallbacks | `ChargeController` (Core) | Implemented |
 | Persistence/settings | `ChargingSettings`, `SettingsStore` (Core) | Implemented |
@@ -96,7 +102,7 @@ Requirement → location:
 | Scheduler | — | Future: will feed overrides into `PolicyInput` |
 | Notifications | — | Future: driven from `ControlEvent`s |
 | Shortcuts/automation | — | Future: App Intents calling `AppModel` intents |
-| Privileged operations | `HelperEngine` (HelperCore) | Helper logic implemented with a simulated control only; no hardware control, and the app does not use it yet. The daemon, its XPC transport and the app's backend are future work |
+| Privileged operations | `HelperEngine` (HelperCore), `HelperChargingBackend` (Core) | Helper logic and the app's backend implemented, with a simulated control only, in process (the Simulated helper); no hardware control. The daemon and its XPC transport are future work |
 
 ## Data flow
 
@@ -279,6 +285,9 @@ public protocol ChargingBackend: Sendable {
     func capabilities() async -> ControlCapabilities     // availability, style, supported modes
     func currentMode() async throws -> ChargeControlMode? // nil = unknown
     func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome
+    func reportedModeOrigin() async -> ReportedModeOrigin? // default nil; no I/O
+    func renewHold(_ mode: ChargeControlMode) async throws // default: nothing
+    func resetAfterFault() async throws                     // default: nothing
     func nativeLimitStatus() async -> NativeLimitStatus?  // default nil; no I/O
     func takeAdoptedLimitChange() async -> AdoptedLimitChange? // native only; each adoption once
 }
@@ -303,6 +312,21 @@ public protocol ChargingBackend: Sendable {
 - `.normal` must always be accepted by a backend that accepts requests.
 - A backend that accepts requests must report its mode. `nil` ("unknown") or
   an error from `currentMode()` counts as a failure.
+- `reportedModeOrigin()` says how the mode last reported came about, when
+  the backend knows more than the controller's comparison with the mode
+  CellKeeper last confirmed: `cellKeeper` (CellKeeper set or restored it,
+  even if it could not confirm it then; the native backend decides this from
+  its record), `releasedByBackend(HoldRelease)` (the backend ended
+  CellKeeper's hold under its own safety rules: a lapsed lease, an
+  interlock, a lost connection), or `changedOutside(detail)` (the backend
+  found a change CellKeeper did not make, reported for as long as it sees
+  it).
+- Backends whose holds lapse unless renewed implement `renewHold(_:)`; the
+  others keep the default, which does nothing. A backend never overrides
+  another tool's change by itself; `resetAfterFault()` is called only when
+  the user clears the fault, and is where a backend that waits for an
+  acknowledgement (the helper after an outside change) may restore macOS
+  defaults.
 
 The native-limit extension of the contract:
 
@@ -399,7 +423,24 @@ The controller adds, independent of the backend:
   that could not be confirmed is remembered, so finding it later confirms it
   rather than counting as an outside change. A request the backend rejected
   is not remembered. Native backends decide this from their record and
-  report it as `isReportedStateOwn`;
+  report it as `reportedModeOrigin() == .cellKeeper`;
+- a hold the backend reports it ended itself (`releasedByBackend`: a
+  helper's lapsed lease, one of its interlocks, a lost connection) is not an
+  outside change: the controller logs that the backend released the hold and
+  why, takes the reported mode as its own, and evaluates as usual. An
+  outside change the backend reports (`changedOutside`) faults it at once,
+  like the controller's own detection, also while CellKeeper holds nothing;
+  it is logged once for as long as the backend keeps reporting it;
+- renewal of the hold at the end of every evaluation in which CellKeeper
+  holds a confirmed non-normal mode that the policy still wants, including
+  evaluations whose action is "no change", and only if the backend accepts
+  requests and is not faulted (`renewHold(_:)`). Nothing else renews, so a
+  hung or stalled loop lets a helper's lease lapse (research rule R3). A
+  failed renewal is counted like a failed request, and `.normal` is
+  requested at once;
+- clearing the fault (`resetBackendFault()`) calls the backend's
+  `resetAfterFault()` before evaluating: the user's deliberate
+  acknowledgement;
 - a restore of `.normal` that was attempted and not confirmed stays owed
   (`ReleaseReason.restoreUnfinished`) until it is confirmed, whatever the
   settings say. The native backend persists this (`isRestoring`), so the
@@ -435,6 +476,7 @@ Implementations today:
 | `MockChargingBackend` (default) | `simulated` | Records requests, tracks a simulated mode, supports failure injection for tests. Never touches hardware. |
 | `ReadOnlyChargingBackend` | `unavailable` | Accepts nothing; CellKeeper still computes and shows what it would do. |
 | `NativeChargeLimitBackend` (opt-in) | `experimental`, or `unavailable(reason)` | Sets macOS's Charge Limit by running the user's “CellKeeper Set Charge Limit” shortcut; reads it back with `pmset -g battlimit`. See below. |
+| `HelperChargingBackend` (Simulated helper) | `simulated`, or `unavailable(reason)` | CellKeeper's own charge control at any limit through the helper's logic, run in process on a simulated control: nothing on the Mac changes. See "Helper backend". |
 
 ## Native Charge Limit backend
 
@@ -516,6 +558,121 @@ How often the shortcut can run:
   apart when automatic).
 - Taking over a limit that is already in effect runs nothing.
 
+## Helper backend
+
+`HelperChargingBackend` (Core) controls charging through CellKeeper's helper
+(`HelperEngine`, see "Helper engine" below), reached through a
+`HelperTransport`. Its style is `chargingModes`, so the policy offers every
+limit from 20 to 100% with its resume threshold, temperature pause and
+discharge sessions. Today the only helper is the Simulated helper, which
+runs in process on a simulated control: nothing on the Mac changes.
+
+**Transport.** `HelperTransport.connect()` opens a `HelperConnection`: the
+helper's operations, with the same primitive arguments and reply types as
+`HelperSession`. A method throws only for a transport failure; the helper's
+refusals are reply statuses. `HelperSession` is a connection whose transport
+never fails. `InProcessHelperTransport` runs an engine inside the app: it
+starts it (restoring defaults) before serving the first connection, ticks it
+every 5 s while the transport exists (the ticking task holds the engine
+weakly and is cancelled with the transport), and forwards sleep and wake. An
+NSXPC transport will be a drop-in whose connection throws on interruption or
+timeout.
+
+| Mode | Helper control | Lease |
+|---|---|---|
+| `.normal` | neither | none |
+| `.inhibitCharging` | `chargingInhibited` | 900 s, renewed by evaluations |
+| `.forceDischarge` | `adapterDisabled` | 120 s, renewed by evaluations |
+| (both read back) | — | unknown: an error, so the controller fails safe |
+
+- **Connection.** The backend connects lazily and introduces itself with
+  `hello` at the current protocol version. A transport failure, or a session
+  the helper no longer knows (`notIntroduced`, `shuttingDown`), drops the
+  connection; the next request connects again, says hello and reads the
+  state. Nothing is assumed after reconnecting.
+- **Availability.** A helper that cannot be reached is `unavailable` (not
+  installed or not running); so is one with an incompatible protocol (update
+  needed) and one with no capabilities (it does not support this Mac yet:
+  monitor-only, R12a). A simulated helper is `simulated`; any other would be
+  `experimental` (not reached today). The supported modes follow the
+  capability bits, minus every mode an interlock the helper reports blocks
+  right now, so the policy refuses them as unsupported instead of counting
+  failures.
+- **Reading.** `currentMode()` comes from a fresh `readState`, never from
+  what CellKeeper asked for. A read-back the helper could not make is an
+  error. A helper that cannot be reached at all reports an unknown mode,
+  like a backend that accepts no requests, so it is not counted as failing.
+- **Setting.** The backend takes the control's longest lease, activates the
+  control, and only then clears the other control and ends its lease, so
+  switching between inhibit and discharge never allows charging the policy
+  did not ask for. A fresh read must then show exactly that control
+  (`verificationFailed` otherwise). The outcome is `simulated` for a
+  simulated helper, otherwise `applied`, or `unchanged` if it was already in
+  effect. An outside change found just before writing is `changedOutside`,
+  and nothing is written.
+- **`.normal`.** The backend clears only the controls CellKeeper set, ends
+  its leases, and confirms that nothing is active. A control CellKeeper did
+  not set is never touched: the request fails with `changedOutside`, which
+  faults the controller (R26, R27). The backend never asks the helper to
+  restore defaults by itself. If the helper flags an outside change but
+  nothing is active, `.normal` is in effect and confirmed, so quitting and
+  switching backend are not blocked; the change is reported through
+  `reportedModeOrigin()` and faults the controller.
+- **Renewal.** `renewHold(_:)` renews CellKeeper's lease for the longest the
+  helper grants. The backend keeps a deadline for each lease that is never
+  later than the helper's (the time before the request plus the seconds
+  granted). A lease past it is not renewed: a new lease would not bring back
+  a control the helper has cleared, and the next read reports the lapse.
+- **Releases.** When a control CellKeeper held is no longer active, the
+  backend works out why: the connection ended (`connectionLost`), one of the
+  helper's power or sleep interlocks that blocks the control is raised
+  (`interlock`, named), or the lease ended after its deadline
+  (`leaseExpired`). These are reported as
+  `releasedByBackend` until CellKeeper's next request. A control cleared
+  after a new hardware error is a failure (`currentMode()` throws). Anything
+  else, the helper's `externalModification` interlock, and any control
+  CellKeeper did not set are reported as `changedOutside` for as long as the
+  backend sees them.
+- **Acknowledgement.** `resetAfterFault()`, called only when the user clears
+  the fault, asks the helper to restore defaults if it waits for a client to
+  acknowledge something: an interlock other than the power and sleep
+  conditions (an outside change, a hardware fault), a control CellKeeper did
+  not set, or a failed read-back. That ends every lease and may undo another
+  tool's change, once, at the user's request.
+- **Request budget.** Requests are paced against a copy of the session's
+  request budget (with one token in reserve), so CellKeeper never exceeds it.
+
+**Simulated helper** (Kit). `HelperChargingBackend.simulatedHelper()` builds
+an engine on `SimulatedChargeControl` and `SystemHelperPowerReading`, with
+`HelperEngine.continuousUptime` as the one clock of the engine, the power
+reading and the backend. Releasing the backend (after a backend switch) ends
+its session and stops the ticking. The app forwards NSWorkspace's will-sleep
+and did-wake to the engine; unlike the daemon's, these are not acknowledged
+sleep notifications.
+
+`SystemHelperPowerReading` reads, read-only:
+- the charge and the power source from IOPowerSources;
+- adapter presence from `IOPSCopyExternalPowerAdapterDetails`, which is
+  documented to describe the attached adapter and to return nothing when
+  none is attached or on an error: present when it returns details, absent
+  when it returns none on battery, unknown when it returns none on external
+  power. Whether it still describes an adapter that a control has disabled is
+  unverified (safety precondition 12); reading such an adapter as absent
+  makes the helper clear the adapter-disable, the safe direction;
+- thermal pressure: `ProcessInfo.thermalState` serious or critical.
+
+Known limitations:
+- Evaluations run every 60 s and on events; the adapter-disable lease is
+  120 s. A delayed evaluation (App Nap, a long command) can let a
+  discharge's lease lapse. That is logged as the helper's release, and the
+  discharge is requested again when the rate limits allow.
+- The helper's activation limit also counts activations that the policy
+  treats as relaxing (from discharge back to inhibit). In rare sequences the
+  helper refuses an activation the policy allowed; that is a failed request.
+- A mode blocked by an interlock that waits for an acknowledgement stays
+  unsupported until the user clears a fault; while the backend is not
+  faulted there is no button for it.
+
 ## Future control backends
 
 Research ([02](research/02-charging-control-apple-silicon.md)) found no public
@@ -537,15 +694,17 @@ candidates, in the order we intend to evaluate them:
    daemon; XPC with code-signing requirements on both sides; a fixed set of
    typed operations (no raw keys, no command execution); a lease that restores
    `.normal` if not renewed, on client disconnect, at helper start, and on
-   SIGTERM; per-model allowlist and read-back. The helper would expose itself
-   to the app as another `ChargingBackend`. Apple's published power-management
+   SIGTERM; per-model allowlist and read-back. The helper exposes itself to
+   the app as another `ChargingBackend` (`HelperChargingBackend`, above).
+   Apple's published power-management
    source releases its private charge-inhibit assertions when the owning
    process exits, which would be a valuable fail-safe, but whether that holds
    on shipping Apple silicon is unverified.
 
 The helper's logic exists as `CellKeeperHelperCore` (below), with a
-simulated control only. There is no daemon, no XPC, and no hardware control,
-and the app does not use it yet. Real control will not be enabled without the
+simulated control only, and the app runs it in process as the Simulated
+helper. There is no daemon, no XPC, and no hardware control. Real control
+will not be enabled without the
 hardware verification protocol in research note 02 §7 and the rules in
 `safety.md`.
 
@@ -555,8 +714,9 @@ hardware verification protocol in research note 02 §7 and the rules in
 touch the system. It is pure Swift on Foundation: no IOKit, XPC, processes,
 files or network. The layers, from the client down:
 
-1. **Transport** (future). The app's in-process backend first, then an NSXPC
-   listener in the daemon. It opens one `HelperSession` per connection,
+1. **Transport.** In process today (`InProcessHelperTransport`, for the
+   Simulated helper), an NSXPC listener in the daemon later. It opens one
+   `HelperSession` per connection,
    forwards each request with its raw wire values, and invalidates the
    session when the connection ends. It must deliver one connection's
    requests in order; the engine itself is an actor. When the engine revokes
@@ -792,8 +952,8 @@ Remaining limitations:
   for every client.
 
 Not there yet: the daemon (SMAppService, launchd, SIGTERM), the NSXPC
-transport and code-signing requirements, the IOKit power reading and
-acknowledged sleep notifications, the app's backend, and any real control.
+transport and code-signing requirements, the daemon's own power reading and
+acknowledged sleep notifications, and any real control.
 
 ## Known limitations
 

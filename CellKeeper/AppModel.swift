@@ -11,6 +11,10 @@ enum ControlBackendChoice: String, CaseIterable, Identifiable {
     /// macOS's own Charge Limit, set through the user's shortcut. Experimental
     /// and opt-in: the UI asks for confirmation before selecting it.
     case nativeLimit
+    /// CellKeeper's own charge control through its helper's logic, running
+    /// in the app on a simulated control: nothing on the Mac changes, so no
+    /// confirmation is needed.
+    case simulatedHelper
 
     var id: String { rawValue }
 
@@ -20,6 +24,7 @@ enum ControlBackendChoice: String, CaseIterable, Identifiable {
         case MockChargingBackend().descriptor.identifier: self = .simulated
         case ReadOnlyChargingBackend().descriptor.identifier: self = .readOnly
         case NativeChargeLimitBackend.identifier: self = .nativeLimit
+        case HelperChargingBackend.simulatedHelperIdentifier: self = .simulatedHelper
         default: return nil
         }
     }
@@ -29,6 +34,7 @@ enum ControlBackendChoice: String, CaseIterable, Identifiable {
         case .simulated: "Simulated"
         case .readOnly: "Read-only"
         case .nativeLimit: "macOS Charge Limit (through Shortcuts)"
+        case .simulatedHelper: "Simulated helper (CellKeeper's own control)"
         }
     }
 
@@ -37,6 +43,7 @@ enum ControlBackendChoice: String, CaseIterable, Identifiable {
         case .simulated: MockChargingBackend()
         case .readOnly: ReadOnlyChargingBackend()
         case .nativeLimit: NativeChargeLimitBackend.system()
+        case .simulatedHelper: HelperChargingBackend.simulatedHelper()
         }
     }
 }
@@ -111,6 +118,10 @@ final class AppModel {
     @ObservationIgnored private var observers: [NSObjectProtocol] = []
     /// Outside changes to the Charge Limit already reflected in the settings.
     @ObservationIgnored private var handledAdoptionCount = 0
+    /// The in-process helpers of the Simulated helper backends made in this
+    /// session, held weakly: each lives only as long as its backend, and is
+    /// told about sleep and wake.
+    @ObservationIgnored private var inProcessHelpers: [WeakInProcessHelper] = []
 
     init(store: SettingsStore = SettingsStore(), telemetry: any TelemetryProvider = SystemTelemetryProvider()) {
         var loaded = store.loadChargingSettings()
@@ -138,6 +149,7 @@ final class AppModel {
         let backend = needsRecovery ? ControlBackendChoice.nativeLimit.makeBackend() : choice.makeBackend()
         self.controller = ChargeController(telemetry: telemetry, backend: backend, settings: loaded.settings, adoptionMarkerStore: FileOwnershipRecordStore.default)
         (commands, commandSink) = AsyncStream.makeStream(of: Command.self)
+        noteInProcessHelper(of: backend)
     }
 
     // MARK: - Lifecycle
@@ -189,6 +201,7 @@ final class AppModel {
     }
 
     private func didWake() {
+        forwardToInProcessHelpers { await $0.systemDidWake() }
         send(.evaluate(.didWake))
         postWakeReread?.cancel()
         postWakeReread = Task { [weak self] in
@@ -201,7 +214,30 @@ final class AppModel {
     private func willSleep() {
         postWakeReread?.cancel()
         postWakeReread = nil
+        forwardToInProcessHelpers { await $0.systemWillSleep() }
         send(.evaluate(.willSleep))
+    }
+
+    /// Notes the in-process helper of a Simulated helper backend, so it is
+    /// told about sleep and wake as the daemon will be.
+    private func noteInProcessHelper(of backend: any ChargingBackend) {
+        inProcessHelpers.removeAll { $0.transport == nil }
+        if let transport = (backend as? HelperChargingBackend)?.transport as? InProcessHelperTransport {
+            inProcessHelpers.append(WeakInProcessHelper(transport: transport))
+        }
+    }
+
+    /// Delivers a system event to every in-process helper still alive. It
+    /// does not wait for the command queue: the helper handles sleep and wake
+    /// on its own, whatever the app is doing.
+    private func forwardToInProcessHelpers(_ event: @escaping @Sendable (InProcessHelperTransport) async -> Void) {
+        let transports = inProcessHelpers.compactMap(\.transport)
+        guard !transports.isEmpty else { return }
+        Task {
+            for transport in transports {
+                await event(transport)
+            }
+        }
     }
 
     private func readSystemConditions() {
@@ -392,7 +428,9 @@ final class AppModel {
         case .cancelOverride:
             status = await controller.cancelOverride()
         case .switchBackend(let choice):
-            let newStatus = await controller.switchBackend(to: choice.makeBackend())
+            let backend = choice.makeBackend()
+            noteInProcessHelper(of: backend)
+            let newStatus = await controller.switchBackend(to: backend)
             status = newStatus
             // A switch the controller cannot make yet stays pending; anything
             // else is reflected as the backend actually in use.
@@ -457,6 +495,11 @@ final class AppModel {
         }
         return parts.joined(separator: ", ")
     }
+}
+
+/// An in-process helper, held without keeping it alive.
+private struct WeakInProcessHelper {
+    weak var transport: InProcessHelperTransport?
 }
 
 /// Resumes a continuation exactly once, from whichever caller gets there first.

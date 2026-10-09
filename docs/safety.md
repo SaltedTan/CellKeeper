@@ -14,6 +14,9 @@ battery telemetry through public, read-only interfaces and computes what it
 - The default control backend is simulated: requests are recorded and
   labelled "Simulated — hardware unchanged".
 - The read-only backend performs no control at all.
+- The **Simulated helper** runs CellKeeper's own charge control, at any
+  limit from 20 to 100%, through the logic of the future privileged helper
+  inside the app, on a simulated control. It too changes nothing.
 
 **The one real control is opt-in:** the **macOS Charge Limit** backend. It
 changes a single, user-level macOS setting, the Charge Limit (80–100%), and
@@ -208,6 +211,38 @@ hardware writes and a helper, and do not apply. For the rest:
   always set the limit, with or without CellKeeper. The value to set is the
   one CellKeeper shows as "your own limit" (also in the activity log).
 
+### Where the helper backend stands
+
+The helper backend (`HelperChargingBackend`) drives the helper's logic
+(`HelperEngine`), which runs only in process and only on a simulated
+control. Nothing is written to hardware, so none of these preconditions is
+met for a real backend yet. What is already in place, and tested against the
+simulated control:
+
+- **3, lease / dead-man switch:** per-control leases with their own
+  deadlines (15 min for the charging inhibit, 2 min for the adapter-disable)
+  that end on expiry, on disconnect, at helper start and at shutdown, and the
+  helper's own floor, AC-loss, adapter, thermal, sleep and freshness guards
+  (`HelperEngine`). Renewal is tied to policy evaluations: the controller
+  renews a hold only at the end of an evaluation that still wants it,
+  including one whose action is "no change", so a hung or stalled loop lets
+  the lease lapse. A failed renewal counts as a failure and normal charging
+  is requested at once (`ChargeController.renewHoldIfStillWanted`). The
+  helper's own power reading uses public, read-only interfaces in process; the
+  daemon's is still to come.
+- **7, external-writer detection (in part):** an outside change the helper
+  finds faults the backend at once; CellKeeper releases only what it set and
+  never restores defaults over another tool's change by itself. Only the user
+  clearing the fault restores defaults, once. A hold the helper ended itself
+  (lapse, interlock, lost connection) is logged and is not mistaken for an
+  outside change. Coexistence with macOS's Charge Limit and Optimized
+  Battery Charging is not done.
+- **8, monotonic time:** one clock that counts sleep for the helper's leases,
+  rate limits and power-state age.
+
+Everything else, including the daemon, the authenticated XPC transport, a
+verified mechanism, and acknowledged sleep handling, is still missing.
+
 ### Deliberate deviations from research note 06
 
 - **Rate budget (R13).** Only restricting changes are counted; relaxing
@@ -274,8 +309,8 @@ hardware writes and a helper, and do not apply. For the rest:
 
 ## If charging does not resume
 
-With the simulated or read-only backend, CellKeeper cannot affect charging.
-With the macOS Charge Limit backend, the only thing CellKeeper changes is
+With the simulated, read-only or Simulated helper backend, CellKeeper cannot
+affect charging. With the macOS Charge Limit backend, the only thing CellKeeper changes is
 macOS's Charge Limit, which never goes below 80%. If your Mac shows "Not
 Charging", macOS's own Charge Limit, Optimized Battery Charging, battery
 health management, a weak adapter, or another battery tool may be

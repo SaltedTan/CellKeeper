@@ -253,9 +253,6 @@ public struct NativeLimitStatus: Sendable, Equatable {
     /// CellKeeper started restoring the user's limit and has not confirmed
     /// it, possibly in an earlier session.
     public var isRestoreUnfinished: Bool
-    /// The state last reported by `currentMode()` is one CellKeeper set or
-    /// restored, even if it could not confirm it at the time.
-    public var isReportedStateOwn: Bool
     /// An outside change was adopted but its marker could not be stored
     /// yet, so the record it replaced may still be on disk. Until it is
     /// stored, CellKeeper does not switch backend or turn management on.
@@ -273,7 +270,6 @@ public struct NativeLimitStatus: Sendable, Equatable {
         isRecordUnreadable: Bool = false,
         needsNoLimitConfirmation: Bool = false,
         isRestoreUnfinished: Bool = false,
-        isReportedStateOwn: Bool = false,
         isAdoptionUnsaved: Bool = false,
         isShortcutFound: Bool? = nil
     ) {
@@ -285,7 +281,6 @@ public struct NativeLimitStatus: Sendable, Equatable {
         self.isRecordUnreadable = isRecordUnreadable
         self.needsNoLimitConfirmation = needsNoLimitConfirmation
         self.isRestoreUnfinished = isRestoreUnfinished
-        self.isReportedStateOwn = isReportedStateOwn
         self.isAdoptionUnsaved = isAdoptionUnsaved
         self.isShortcutFound = isShortcutFound
     }
@@ -296,6 +291,43 @@ public struct NativeLimitStatus: Sendable, Equatable {
     /// True while CellKeeper may have changed the setting and has not
     /// confirmed giving it back, including when its record is unreadable.
     public var hasUnresolvedOwnership: Bool { ownerLimit != nil || isRecordUnreadable }
+}
+
+/// Why a backend ended CellKeeper's hold by itself.
+public enum HoldRelease: Sendable, Equatable, CustomStringConvertible {
+    /// CellKeeper's lease ran out before CellKeeper renewed it (research rule
+    /// R3: a stalled policy loop lets a restriction lapse).
+    case leaseExpired
+    /// One of the backend's own safety interlocks cleared it; the text names
+    /// the interlocks.
+    case interlock(String)
+    /// The connection to the backend ended, and with it every hold made
+    /// through it (rule R1).
+    case connectionLost
+
+    public var description: String {
+        switch self {
+        case .leaseExpired: "its lease expired before CellKeeper renewed it"
+        case .interlock(let interlocks): "a safety interlock required it (\(interlocks))"
+        case .connectionLost: "the connection to it ended"
+        }
+    }
+}
+
+/// What a backend knows about how the mode it last reported came about,
+/// beyond what the controller can tell by comparing it with the mode
+/// CellKeeper last confirmed.
+public enum ReportedModeOrigin: Sendable, Equatable {
+    /// CellKeeper set or restored it, even if it could not confirm it at the
+    /// time.
+    case cellKeeper
+    /// The backend ended CellKeeper's hold itself, under one of its own
+    /// safety rules. It is not an outside change.
+    case releasedByBackend(HoldRelease)
+    /// The backend found a change that CellKeeper did not make: another tool
+    /// may be controlling charging (rule R27). Reported for as long as the
+    /// backend still sees it.
+    case changedOutside(String)
 }
 
 /// A charging-control backend.
@@ -330,6 +362,20 @@ public struct NativeLimitStatus: Sendable, Equatable {
 ///   reported once by ``takeAdoptedLimitChange()``.
 /// - Only a fresh read of the setting from macOS confirms a change. A
 ///   shortcut or command finishing successfully does not.
+///
+/// Additional contract for backends whose holds lapse unless renewed (a
+/// helper's leases):
+/// - `renewHold(_:)` extends the hold on a mode CellKeeper holds. The
+///   controller calls it only at the end of an evaluation that still wants
+///   that mode, so a stalled policy loop lets the hold lapse (rule R3).
+/// - A hold the backend ended itself (lapse, interlock, lost connection) is
+///   reported by ``reportedModeOrigin()`` as
+///   ``ReportedModeOrigin/releasedByBackend(_:)``, so the controller does not
+///   take it for an outside change.
+/// - `.normal` releases only what CellKeeper set. The backend never
+///   overrides another tool's change by itself: it reports it, as
+///   ``BackendError/changedOutside(expected:found:)`` or
+///   ``ReportedModeOrigin/changedOutside(_:)``.
 public protocol ChargingBackend: Sendable {
     var descriptor: BackendDescriptor { get }
 
@@ -339,6 +385,22 @@ public protocol ChargingBackend: Sendable {
     func currentMode() async throws -> ChargeControlMode?
 
     func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome
+
+    /// How the mode last reported by ``currentMode()`` came about, when the
+    /// backend knows; nil otherwise. Returns what is already known, without
+    /// new I/O. Default: nil.
+    func reportedModeOrigin() async -> ReportedModeOrigin?
+
+    /// Extends CellKeeper's hold on `mode`, which CellKeeper set, confirmed
+    /// and still wants. Throws if the hold could not be extended. Default:
+    /// nothing, for backends whose holds do not lapse.
+    func renewHold(_ mode: ChargeControlMode) async throws
+
+    /// The user cleared the controller's fault, a deliberate act. A backend
+    /// that stopped making changes until someone acknowledges a problem (a
+    /// helper after an outside change or a hardware error) may restore
+    /// macOS's defaults now. Default: nothing.
+    func resetAfterFault() async throws
 
     /// State of macOS's Charge Limit for native-limit backends; nil for
     /// others. Returns what is already known, without new I/O.
@@ -350,6 +412,9 @@ public protocol ChargingBackend: Sendable {
 }
 
 extension ChargingBackend {
+    public func reportedModeOrigin() async -> ReportedModeOrigin? { nil }
+    public func renewHold(_ mode: ChargeControlMode) async throws {}
+    public func resetAfterFault() async throws {}
     public func nativeLimitStatus() async -> NativeLimitStatus? { nil }
     public func takeAdoptedLimitChange() async -> AdoptedLimitChange? { nil }
 }

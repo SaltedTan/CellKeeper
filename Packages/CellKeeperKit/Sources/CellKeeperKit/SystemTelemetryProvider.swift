@@ -36,6 +36,21 @@ public struct SystemTelemetryProvider: TelemetryProvider {
     }
 
     static func readRawPowerData() throws -> RawPowerData {
+        var raw = readPowerSources()
+        raw.registry = readSmartBatteryRegistry()
+
+        if raw.providingPowerSourceType == nil, raw.powerSource == nil, raw.registry == nil {
+            throw SystemTelemetryError.powerSourcesUnavailable
+        }
+        return raw
+    }
+
+    /// The documented IOPowerSources part of ``readRawPowerData()``: the
+    /// internal battery's description, the providing power source, and the
+    /// attached adapter's details (nil when `IOPSCopyExternalPowerAdapterDetails`
+    /// returns nothing: no adapter is attached, or they could not be read).
+    /// Reads no registry properties.
+    static func readPowerSources() -> RawPowerData {
         var raw = RawPowerData()
 
         if let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue() {
@@ -52,11 +67,6 @@ public struct SystemTelemetryProvider: TelemetryProvider {
         }
         raw.adapter = (IOPSCopyExternalPowerAdapterDetails()?.takeRetainedValue() as? [String: Any])?
             .filter { BatteryTelemetryParser.adapterKeys.contains($0.key) }
-        raw.registry = readSmartBatteryRegistry()
-
-        if raw.providingPowerSourceType == nil, raw.powerSource == nil, raw.registry == nil {
-            throw SystemTelemetryError.powerSourcesUnavailable
-        }
         return raw
     }
 

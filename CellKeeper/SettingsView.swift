@@ -189,7 +189,7 @@ private struct ControlSettingsTab: View {
                     Text("CellKeeper will set macOS's own Charge Limit (80–100%) by running your “\(NativeChargeLimitBackend.defaultShortcutName)” shortcut, and macOS will enforce it. Before its first change CellKeeper records your current limit, and it restores exactly that value when you turn off management, switch backend, quit, or if anything fails. If you change the limit yourself in System Settings, CellKeeper keeps your new value as your own and turns off Manage charging. This backend is experimental.")
                 }
             } footer: {
-                Text("Simulated records what CellKeeper would do without changing your Mac. Read-only performs no control. macOS Charge Limit lets macOS enforce the limit you choose here; it is the only real control in this version.")
+                Text("Simulated records what CellKeeper would do without changing your Mac. Read-only performs no control. macOS Charge Limit lets macOS enforce the limit you choose here; it is the only real control in this version. Simulated helper tries CellKeeper's own charge control at any limit from 20 to 100%, simulated: nothing on your Mac changes. Real control needs a signed helper and a verified mechanism (roadmap milestone 4).")
                     .footerParagraph()
             }
 
