@@ -332,6 +332,7 @@ public protocol ChargingBackend: Sendable {
     func currentMode() async throws -> ChargeControlMode? // nil = unknown
     func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome
     func reportedModeOrigin() async -> ReportedModeOrigin? // default nil; no I/O
+    func outsideChangeEvidence() async -> Set<RecordedChange> // default []; no I/O
     func renewHold(_ mode: ChargeControlMode) async throws // default: nothing
     func resetAfterFault() async throws                     // default: nothing
     func recheckAvailability() async                        // default: nothing
@@ -380,6 +381,19 @@ public protocol ChargingBackend: Sendable {
   recorded change. The controller calls a restriction someone else's, and
   ends its responsibility for it, only on false; a reported outside change
   alone never does.
+- `outsideChangeEvidence()` identifies, by the backend's own records, the
+  changes behind the outside change it last reported with a read
+  (`ReportedModeOrigin.changedOutside`) or threw
+  (`BackendError.changedOutside`): a `RecordedChange` is the source that
+  recorded it, the control and the change's generation. The helper
+  backend gives, for each control whose latest change is another client's
+  activation or a change made outside the helper (and for a control it
+  held that ended that way), the helper's instance, the control's raw
+  value and the generation, the same for a read and for a request. The
+  controller uses it to log each outside change once: the same change read
+  again is not news, and a newer one (a new generation, or one a restarted
+  helper recorded) is, whatever the message says. Empty for a backend
+  without such records; the controller then goes by the message.
 - `recheckAvailability()` is the user's "check again": the next
   `capabilities()` must not rely on what the backend cached about what it
   depends on (the native backend's shortcut check; macOS's Charge Limit for
@@ -531,8 +545,12 @@ The controller adds, independent of the backend:
   every read, not only an evaluation's: also when it confirms a request
   (including a successful `.normal`, which still counts as confirmed), in a
   fallback, and when the read itself fails, which then counts as no further
-  failure. Each is logged once for as long as the backend keeps reporting
-  it;
+  failure (nor does the request whose confirming read it was). A problem
+  needing acknowledgement is logged once for as long as the backend keeps
+  reporting faults; an outside change once per change the backend recorded
+  (`outsideChangeEvidence()`), or per message for a backend without
+  records, so the same change read again is not logged twice and a newer
+  one is never hidden behind the same message;
 - renewal of the hold at the end of every evaluation in which CellKeeper
   holds a confirmed non-normal mode that the policy still wants, including
   evaluations whose action is "no change", and only if the backend accepts
@@ -874,10 +892,12 @@ The app does not use the XPC transport until the daemon can be registered
   `BackendError.needsAcknowledgement` to match. The controller handles
   both the same way whether a read reports them or a request throws them,
   in every path (an evaluation, a restore, a backend switch, quitting): it
-  faults at once, counts the fault once, and logs each kind once while the
-  backend keeps reporting faults, except that a new outside change is
-  logged again, also after a problem needing acknowledgement, so an
-  existing fault never hides fresh evidence of another writer. The helper's
+  faults at once, counts the fault once, and logs a problem needing
+  acknowledgement once while the backend keeps reporting faults, and each
+  outside change once by what identifies it in the helper's history (the
+  helper's instance, the control, the generation), also after a problem
+  needing acknowledgement, so an existing fault never hides fresh evidence
+  of another writer and the same change read again adds nothing. The helper's
   `externalModification` interlock is reported as `changedOutside`, and
   says whether its restore read back clean; if not, the helper retries only
   while a control it set itself may still be active, and otherwise writes

@@ -328,8 +328,10 @@ the simulated control:
   faults the backend just the same, as a restriction CellKeeper cannot
   attribute or the helper's own failure. Every path faults at once,
   whether a read reports the fault or a request throws it (an evaluation,
-  a restore, a backend switch, quitting), and a later outside change is
-  logged even while an earlier helper failure keeps the backend faulted.
+  a restore, a backend switch, quitting), and each new outside change (a
+  new generation of a control, or one a restarted helper recorded) is
+  logged even while an earlier fault keeps the backend faulted; the same
+  change read again is not logged twice, and no notice is counted twice.
   CellKeeper deactivates only controls it still owns by that record, and the
   helper checks that record itself right before it clears
   (`clearControlIfUnchanged`), so a control that changed hands in between
