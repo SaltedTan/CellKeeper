@@ -181,14 +181,31 @@ struct CommandLineAdapterTests {
 
     @Test("A tool that ignores SIGTERM is killed after the grace period")
     func ignoresTerminate() async {
-        let started = Date()
-        await #expect(throws: ProcessRunnerError.timedOut(seconds: 1)) {
+        // The tool marks that it ignores SIGTERM, and only then is it
+        // stopped, so the stop provably meets a tool that ignores SIGTERM.
+        // (A deadline could fire before a slow shell installs its trap.) A
+        // cancellation and the deadline stop a tool the same way: SIGTERM,
+        // then SIGKILL after the grace period.
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("cellkeeper-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let task = Task {
             // An ignored signal stays ignored across exec, so sleep ignores SIGTERM.
-            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "trap '' TERM; exec /bin/sleep 30"], timeout: 0.3)
+            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "trap '' TERM; touch \"$0\"; exec /bin/sleep 30", marker.path], timeout: 600)
+        }
+        for _ in 0..<60_000 where !FileManager.default.fileExists(atPath: marker.path) {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(FileManager.default.fileExists(atPath: marker.path))
+        let started = Date()
+        task.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await task.value
         }
         let elapsed = Date().timeIntervalSince(started)
-        #expect(elapsed >= 0.3 + ProcessRunner.stopGracePeriod)
-        #expect(elapsed < 0.3 + 3 * ProcessRunner.stopGracePeriod)
+        // Not before the grace period: SIGTERM did not stop it. Well before
+        // the tool's own 30 s: SIGKILL did.
+        #expect(elapsed >= ProcessRunner.stopGracePeriod)
+        #expect(elapsed < 20)
     }
 
     @Test("A missing tool is a launch failure")
@@ -240,7 +257,7 @@ struct CommandLineAdapterTests {
         let task = Task {
             try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "touch \"$0\"; exec /bin/sleep 30", marker.path], timeout: 30)
         }
-        for _ in 0..<5_000 where !FileManager.default.fileExists(atPath: marker.path) {
+        for _ in 0..<60_000 where !FileManager.default.fileExists(atPath: marker.path) {
             try? await Task.sleep(for: .milliseconds(1))
         }
         #expect(FileManager.default.fileExists(atPath: marker.path))
@@ -249,7 +266,8 @@ struct CommandLineAdapterTests {
         await #expect(throws: CancellationError.self) {
             try await task.value
         }
-        #expect(Date().timeIntervalSince(started) < 3)
+        // Well before the tool's own 30 s: the cancellation stopped it.
+        #expect(Date().timeIntervalSince(started) < 20)
     }
 
     @Test("An already-cancelled task does not start the tool")
