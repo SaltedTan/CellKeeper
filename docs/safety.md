@@ -320,6 +320,11 @@ the simulated control:
   CellKeeper's own release, or otherwise. Anything else, including another
   client of the helper clearing or restoring a control, faults the backend,
   also when CellKeeper finds it while releasing and the release succeeds.
+  The fault names an outside writer only when the helper's history names
+  one (another client, or an outside change the helper reports); a control
+  the helper's own failed restore or failed start left active, or one with
+  no recorded change, faults the backend just the same, as a restriction
+  CellKeeper cannot attribute or the helper's own failure.
   CellKeeper deactivates only controls it still owns by that record, and the
   helper checks that record itself right before it clears
   (`clearControlIfUnchanged`), so a control that changed hands in between

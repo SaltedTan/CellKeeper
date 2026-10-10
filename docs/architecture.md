@@ -551,7 +551,10 @@ The controller adds, independent of the backend:
 - a backend that finds an outside change itself, just before writing
   (`BackendError.changedOutside`), faults at once, like the controller's own
   detection. A native backend adopts it instead (`adoptedOutsideChange`),
-  which counts as nothing written;
+  which counts as nothing written. A backend that finds a problem it cannot
+  attribute to anyone, or one of its own, throws
+  `BackendError.needsAcknowledgement` instead, which faults at once too but
+  names no outside writer;
 - on the first read from a backend, ownership that the backend remembers from
   an earlier session (`nativeLimitStatus().target`) is taken on as
   CellKeeper's own. A change made while CellKeeper was not running is then
@@ -841,16 +844,32 @@ The app does not use the XPC transport until the daemon can be registered
   | The next generation, control off, `interlock` with only power and sleep interlocks (as they were then, even if lifted since) | `releasedByBackend(.interlock(…))`, named |
   | The next generation, control off, `sessionEnded` or `sessionRevoked` of a CellKeeper session | `releasedByBackend(.connectionLost)` |
   | The next generation, control off, `shutdown` or `start`; or a hold made with an earlier helper process, now off | `releasedByBackend(.backendStopped)` |
+  | A hold made with an earlier helper process, still active | by the new process's record of the control (the row below for an active control); a start whose restore failed records no outside change, so this is a fault that needs acknowledging, naming no writer |
   | The next generation, control off, cleared by one of CellKeeper's sessions (also an earlier one, after a reconnect) | `cellKeeper`: CellKeeper's own release |
   | The next generation, control off, a restore after a failed write or read-back, or an interlock that needs an acknowledgement | a failure, reported by `currentMode()` |
   | The next generation, control off, cleared by another session (a deactivation or a restore), `changedOutside` or the restore after it | `changedOutside` |
-  | Any other generation, or the control active again | `changedOutside`, and CellKeeper no longer owns the control |
+  | The next generation, control off, `setByClient` or no recorded cause | `needsAcknowledgement`: a change the history does not explain |
+  | Any other generation, or the control active again | by the latest change only (changes in between are unknown): another client's activation, clear or restore, or an outside change (for an active control, only while the helper reports `externalModification`) → `changedOutside`; anything else, including one of the helper's own restores after a failure, its start or shutdown, or no recorded change → `needsAcknowledgement`, naming no writer. Either way CellKeeper no longer owns the control |
 
-  Releases are reported until CellKeeper's next request; an outside change
-  found in the history is kept until a read reports it. The helper's
-  `externalModification` interlock and any active control CellKeeper does
-  not own are reported as `changedOutside` for as long as the backend sees
-  them. An outside change takes precedence over everything else.
+  Releases are reported until CellKeeper's next request; an outside change,
+  or a change the history does not explain, found in the history is kept
+  until a read reports it. The engine reports causality; the backend does
+  not infer it. An active control CellKeeper does not own is classified by
+  its latest recorded change, as in the last row: `changedOutside` only if
+  the history names another client of the helper or an outside change
+  while the helper reports one; a control one of the helper's own restores
+  after a failure, its start or shutdown left active, or one with no
+  recorded change, is `needsAcknowledgement` with what the helper reports
+  (a restriction CellKeeper cannot attribute, the helper's failure). Both
+  fault the controller at once (R27), for as long as the backend sees them,
+  and the backend refuses to set a control meanwhile; a request for normal
+  charging that finds such a control fails with `changedOutside` or
+  `BackendError.needsAcknowledgement` to match. The helper's
+  `externalModification` interlock is reported as `changedOutside`, and
+  says whether its restore read back clean; if not, the helper retries only
+  while a control it set itself may still be active, and otherwise writes
+  nothing until the user clears the fault (D28). An outside change takes
+  precedence over everything else.
 - **Helper failures.** A helper that waits for an acknowledgement (an
   interlock other than the power and sleep conditions and an outside change:
   `writeFailed`, `hardwareFault`, or one this version does not know) is
@@ -1829,7 +1848,7 @@ The helper daemon logs under its own subsystem,
 | D37 | A control that a failed or wrong restore may have made active counts as the engine's until it reads back inactive; a control active before and after a restore keeps its owner, and the state before is read afresh, falling back to the controls last known to be another tool's | A restore that went wrong must not leave a restriction that nothing retries, while another tool's control must not become the engine's to fight over. A tool that sets an inactive control during each restore still looks like a wrong restore (a known limitation) |
 | D38 | `readState` reports, per control, a change generation and the cause, interlocks and session of its latest change, and how many hardware errors there have been; `hello` gives the caller's session number and the helper's instance. Any live session may still clear a control toward safety (lead's decisions, 2026-10-09) | Snapshots of active bits, current interlocks and lease state cannot establish why a control changed; the engine knows, so a client's classification becomes a lookup. Limiting deactivation to the lease holder would make a move toward safety depend on who asks |
 | D39 | The app renews a helper lease only at the end of an evaluation that still wants the mode it holds, including one that changes nothing; a failed renewal is a failure and `.normal` is requested at once | Safety precondition 3 and rule R3: a hung or stalled policy loop must let the restriction lapse, and a renewal that cannot be made must not leave one in place |
-| D40 | The helper backend owns a control only while the change generation it recorded at activation is current, and classifies how a hold ended by the cause the helper recorded for the next change. An expired lease, a power or sleep interlock (as raised then), the end of one of CellKeeper's sessions, or a helper shutdown or start is logged as the helper's release; CellKeeper's own deactivation, also from an earlier session, is its own; anything else, including any later generation, another client's restore or deactivation and `externalModification`, faults the backend at once | Only the helper knows why a control changed; inferring it from active bits, current interlocks or lease state misreads handoffs, later expiries and lifted interlocks. The helper's releases are its safety rules working, and faulting on them would stop control for nothing; anything else may be another tool, which R27 says to stop for |
+| D40 | The helper backend owns a control only while the change generation it recorded at activation is current, and classifies how a hold ended by the cause the helper recorded for the next change. An expired lease, a power or sleep interlock (as raised then), the end of one of CellKeeper's sessions, or a helper shutdown or start is logged as the helper's release; CellKeeper's own deactivation, also from an earlier session, is its own; anything else, including any later generation, another client's restore or deactivation and `externalModification`, faults the backend at once. The fault names an outside writer only when the helper's history does (another client's change, or an outside change the helper reports); otherwise it says what the helper reports, without a writer (amended 2026-10-10) | Only the helper knows why a control changed; inferring it from active bits, current interlocks or lease state misreads handoffs, later expiries and lifted interlocks. The helper's releases are its safety rules working, and faulting on them would stop control for nothing; anything else may be another tool, which R27 says to stop for |
 | D41 | The helper backend never asks the helper to restore defaults by itself; `.normal` clears only controls CellKeeper still owns, each with `clearControlIfUnchanged` naming its own activation (D48), ends only leases it holds, and succeeds when nothing is active, even after an outside change, which faults the controller through `reportedModeOrigin()`. Only the user clearing the fault restores defaults, and only if the helper waits for that (lead's decision, 2026-10-09) | A restore or deactivation may undo another tool's change (R26, R27), so it must be a deliberate act; and quitting or switching backend must not be blocked while macOS's defaults are in effect |
 | D42 | Modes an interlock of the helper blocks are not offered by the backend's capabilities | The policy then refuses them as unsupported instead of counting each refusal as a failure, which would fault the backend for conditions such as a warm Mac or a low battery |
 | D43 | The helper backend paces its requests against a copy of the session's request budget, and sends at most 4 requests in a row beyond it | A well-behaved client must never be refused or revoked (20 in a row), including during bursts of user actions; moves toward safety must not wait for a token |
