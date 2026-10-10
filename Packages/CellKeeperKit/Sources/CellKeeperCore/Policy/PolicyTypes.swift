@@ -216,9 +216,9 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
         case .nativeLimitUnsupported(let limit, let steps):
             "A \(limit)% limit cannot be set with macOS's Charge Limit (\(steps.map { "\($0)%" }.joined(separator: ", "))); your own macOS limit stays in effect."
         case .macOSChargeLimitActive(let limit):
-            "macOS reports its own Charge Limit on at \(limit)%. While it is on, CellKeeper does not enforce its own limit: it asks for normal charging, to end any restriction of its own, and withholds new ones, so the two limits never compete. To let CellKeeper manage charging, turn macOS's Charge Limit off in System Settings › Battery › Charging (set it to 100%)."
+            "macOS reports its own Charge Limit on at \(limit)%. While it is on, CellKeeper does not enforce its own limit: it withholds new restrictions and asks for the release of any restriction of its own. To let CellKeeper manage charging, turn macOS's Charge Limit off in System Settings › Battery › Charging (set it to 100%)."
         case .macOSChargeLimitUnknown(let problem):
-            "CellKeeper could not read macOS's Charge Limit report (\(problem)), so macOS may be limiting charging, for example with its Charge Limit or Optimized Battery Charging. Until the report shows no active limit, CellKeeper does not enforce its own limit: it asks for normal charging, to end any restriction of its own, and withholds new ones. Check that macOS's Charge Limit is off in System Settings › Battery › Charging (set to 100%)."
+            "CellKeeper could not read macOS's Charge Limit report (\(problem)), so macOS may be limiting charging, for example with its Charge Limit or Optimized Battery Charging. Until the report shows no active limit, CellKeeper does not enforce its own limit: it withholds new restrictions and asks for the release of any restriction of its own. Check that macOS's Charge Limit is off in System Settings › Battery › Charging (set to 100%)."
         }
     }
 }

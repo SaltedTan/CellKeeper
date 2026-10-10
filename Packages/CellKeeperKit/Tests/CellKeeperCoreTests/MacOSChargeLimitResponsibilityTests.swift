@@ -86,3 +86,134 @@ struct MacOSChargeLimitSettledReadTests {
         #expect(kept == survivorStatus)
     }
 }
+
+@Suite("What CellKeeper may still have in effect")
+struct OwnRestrictionResponsibilityTests {
+    @Test("While an activation's reply is outstanding, the status no longer shows the read taken before it")
+    func pendingActivation() async {
+        let rig = HelperRig()
+        let hooks = RequestHooks()
+        let backend = rig.hookedBackend(hooks)
+        let controller = rig.controller(on: backend, percent: 85)
+        let before = await controller.evaluate(.launch)
+        #expect(before.currentMode == .normal)
+        #expect(before.ownRestriction == .noneInEffect)
+        let seen = StatusBox()
+        hooks.onNextActivation {
+            // The activation has been applied; its reply has not arrived.
+            seen.status = await controller.status
+        }
+        rig.clock.advance(by: 60)
+        let held = await controller.evaluate(.periodic)
+        #expect(held.currentMode == .inhibitCharging)
+        let during = seen.status
+        #expect(during?.currentMode == nil)
+        #expect(during?.ownRestriction == .unconfirmed(.inhibitCharging))
+        #expect(during?.ownRestriction.mayBeInEffect == true)
+    }
+
+    @Test("A restore that failed leaves CellKeeper's hold its own, also once macOS's limit turns on during the retry wait, and the gate's safety event names it")
+    func failedRestoreThenGate() async {
+        let reader = StubMacOSChargeLimit(.noLimit)
+        let rig = HelperRig(macOSReader: reader)
+        let (controller, telemetry) = rig.controller(percent: 85)
+        await rig.confirmedEvaluation(controller)
+        // The charge falls to the resume threshold: CellKeeper asks for the
+        // release, and both the clear and the helper's restore fail.
+        await telemetry.set(snapshot(percent: 70))
+        rig.control.failNextApplies(1)
+        rig.control.failNextRestores(1)
+        rig.clock.advance(by: 60)
+        let failed = await controller.evaluate(.periodic)
+        #expect(rig.control.activeControls == [.chargingInhibited])
+        #expect(failed.ownRestriction.mayBeInEffect)
+        if case .notCellKeepers = failed.ownRestriction {
+            Issue.record("CellKeeper's own hold reported as someone else's: \(failed.ownRestriction)")
+        }
+
+        // macOS's limit turns on while the automatic retry still waits.
+        reader.set(.limit(80))
+        rig.clock.advance(by: 31)
+        let gated = await controller.evaluate(.periodic)
+        #expect(rig.control.activeControls == [.chargingInhibited])
+        #expect(gated.currentMode == .inhibitCharging)
+        #expect(gated.ownRestriction == .inEffect(.inhibitCharging, own: .inhibitCharging))
+        let event = gated.events.last { $0.kind == .safety && $0.message.contains("macOS's Charge Limit was turned on (80%) while CellKeeper held inhibitCharging") }
+        #expect(event?.message.contains("No read-back has confirmed that this restriction ended, so it may remain") == true)
+        let limit = gated.capabilities.macOSChargeLimit
+        let guidance = limit.map { MacOSChargeLimitWording.guidance($0, ownRestriction: gated.ownRestriction, isSimulated: gated.isControlSimulated) } ?? ""
+        #expect(guidance.contains("The last read-back still shows CellKeeper's inhibitCharging"))
+        #expect(!guidance.contains("set by something other than CellKeeper"))
+        #expect(!guidance.contains("never compete"))
+    }
+
+    @Test("An activation that applied before it threw stays CellKeeper's responsibility")
+    func failedActivationThatApplied() async {
+        let reader = StubMacOSChargeLimit(.noLimit)
+        let rig = HelperRig(macOSReader: reader)
+        let (controller, _) = rig.controller(percent: 85)
+        await controller.evaluate(.launch)
+        // The activation takes effect but reports an error, and the helper's
+        // restores keep failing, so the control stays active.
+        rig.control.failNextAppliesAfterApplying(1)
+        rig.control.failNextRestores(20)
+        rig.clock.advance(by: 60)
+        let failed = await controller.evaluate(.periodic)
+        #expect(rig.control.activeControls == [.chargingInhibited])
+        #expect(failed.ownRestrictionMode == .inhibitCharging)
+        #expect(failed.ownRestriction.mayBeInEffect)
+        if case .notCellKeepers = failed.ownRestriction {
+            Issue.record("CellKeeper's own activation reported as someone else's: \(failed.ownRestriction)")
+        }
+
+        reader.set(.limit(80))
+        rig.clock.advance(by: 31)
+        let gated = await controller.evaluate(.periodic)
+        if case .notCellKeepers = gated.ownRestriction {
+            Issue.record("CellKeeper's own activation reported as someone else's: \(gated.ownRestriction)")
+        }
+        #expect(gated.ownRestriction.mayBeInEffect)
+        #expect(gated.events.contains { $0.kind == .safety && $0.message.contains("while CellKeeper held inhibitCharging") })
+    }
+
+    @Test("A genuine takeover by another client stays someone else's, by the helper's history")
+    func takeoverIsForeign() async {
+        let reader = StubMacOSChargeLimit(.noLimit)
+        let rig = HelperRig(macOSReader: reader)
+        let (controller, _) = rig.controller(percent: 85)
+        let held = await rig.confirmedEvaluation(controller)
+        #expect(held.currentMode == .inhibitCharging)
+        // Another tool changes the controls: the helper restores defaults,
+        // which ends CellKeeper's hold, and then stops fighting the tool,
+        // which sets its own inhibit.
+        rig.control.simulateOutsideChange(.adapterDisabled, active: true)
+        rig.clock.advance(by: 5)
+        let restored = await controller.evaluate(.periodic)
+        #expect(restored.isBackendFaulted)
+        #expect(restored.currentMode == .normal)
+        #expect(restored.ownRestrictionMode == nil)
+        rig.control.simulateOutsideChange(.chargingInhibited, active: true)
+        rig.clock.advance(by: 61)
+        // This evaluation's request for normal charging is refused as an
+        // outside change; the next one waits before retrying it.
+        await controller.evaluate(.periodic)
+        rig.clock.advance(by: 5)
+        let taken = await controller.evaluate(.periodic)
+        #expect(taken.isBackendFaulted)
+        #expect(taken.currentMode == .inhibitCharging)
+        #expect(taken.isReportedModeOwn == false)
+        #expect(taken.ownRestriction == .notCellKeepers(.inhibitCharging))
+        #expect(taken.ownRestrictionMode == nil)
+    }
+}
+
+/// Holds a status captured inside a hook.
+final class StatusBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: ControllerStatus?
+
+    var status: ControllerStatus? {
+        get { lock.withLock { value } }
+        set { lock.withLock { value = newValue } }
+    }
+}

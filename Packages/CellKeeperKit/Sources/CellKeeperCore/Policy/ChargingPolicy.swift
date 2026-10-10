@@ -16,10 +16,10 @@ import Foundation
 ///    time), without a battery, or with an unknown power source → fail safe.
 ///    A discharge session never survives this.
 /// 5. macOS's own Charge Limit is on, or its report cannot be read and
-///    recognised (``ControlCapabilities/macOSChargeLimit``) → normal
-///    charging is requested and every restriction withheld, so two limits
-///    never compete (safety precondition 7). A discharge session ends. The
-///    latches still follow the readings.
+///    recognised (``ControlCapabilities/macOSChargeLimit``) → new
+///    restrictions are withheld and normal charging is requested, to release
+///    any restriction of CellKeeper's own (safety precondition 7). A
+///    discharge session ends. The latches still follow the readings.
 /// 6. Safety floor latched (≤ 10%, until ≥ 15%) → charging always allowed.
 /// 7. On battery power → CellKeeper's restrictions cleared (a later plug-in
 ///    then charges normally even if CellKeeper has stopped; the limit latch

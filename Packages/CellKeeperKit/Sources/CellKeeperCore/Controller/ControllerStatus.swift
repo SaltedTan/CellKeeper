@@ -89,10 +89,19 @@ public struct ControllerStatus: Sendable, Equatable {
     public var capabilities: ControlCapabilities
     /// The backend's reported mode, or nil if unknown.
     public var currentMode: ChargeControlMode?
-    /// The non-normal mode CellKeeper last confirmed, or asked for without
-    /// confirmation, on this backend and has not seen end; nil if none.
-    /// Asking for `.normal` does not clear it; a read-back of the end does.
+    /// The non-normal mode CellKeeper may have put into effect on this
+    /// backend and has not seen end; nil if none. Set before a non-normal
+    /// request is sent; cleared only by a read taken after it showing normal
+    /// charging, or by the backend's records showing that nothing in effect
+    /// is CellKeeper's. Asking for `.normal`, a fault, or losing track of
+    /// ownership does not clear it.
     public var ownRestrictionMode: ChargeControlMode?
+    /// Whether what the last read reported is CellKeeper's by the backend's
+    /// records (``ChargingBackend/isReportedModeOwn()``); nil if unknown.
+    public var isReportedModeOwn: Bool?
+    /// The last successful read came with an outside change reported
+    /// (``ReportedModeOrigin/changedOutside(_:)``).
+    public var isOutsideChangeReported: Bool
     /// macOS's Charge Limit as seen by a native-limit backend; nil otherwise.
     public var nativeLimit: NativeLimitStatus?
     /// The latest change to macOS's Charge Limit made outside CellKeeper and

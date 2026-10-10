@@ -422,7 +422,7 @@ struct MacOSChargeLimitControllerTests {
         #expect(rig.control.activeControls.isEmpty)
         let safety = released.events.filter { $0.kind == .safety && $0.message.contains("macOS's Charge Limit was turned on (80%)") }
         #expect(safety.count == 1)
-        #expect(safety.first?.message.contains("a read-back confirms that its restriction ended") == true)
+        #expect(safety.first?.message.contains("A read-back confirms that this restriction ended") == true)
         #expect(released.ownRestriction == .noneInEffect)
         #expect(!released.events.contains { $0.message.contains("outside CellKeeper") })
     }
@@ -491,7 +491,7 @@ struct MacOSChargeLimitControllerTests {
         #expect(released.decision?.reason == .macOSChargeLimitUnknown(problem: "unrecognised report (a limit with reason optimizedBatteryCharging)"))
         #expect(released.currentMode == .normal)
         #expect(!released.isBackendFaulted)
-        #expect(released.events.contains { $0.kind == .safety && $0.message.contains("could not read macOS's Charge Limit report") && $0.message.contains("a read-back confirms that its restriction ended") })
+        #expect(released.events.contains { $0.kind == .safety && $0.message.contains("could not read macOS's Charge Limit report") && $0.message.contains("A read-back confirms that this restriction ended") })
     }
 
     @Test("A discharge session ends when macOS's limit is turned on, and the adapter is given back")
@@ -541,7 +541,7 @@ struct MacOSChargeLimitControllerTests {
         let environment = DiagnosticsEnvironment(appVersion: "0.1.0 (1)", systemVersion: "Version 27.0.1", modelIdentifier: "Mac16,1")
         let report = DiagnosticsReport.text(status: status, environment: environment, generatedAt: referenceDate)
         #expect(report.contains("macOS Charge Limit: Could not be read, read "))
-        #expect(report.contains("; CellKeeper defers to it: it asks for normal charging and withholds its own restrictions"))
+        #expect(report.contains("; CellKeeper defers to it: it withholds new restrictions and asks for the release of any restriction of its own"))
         #expect(report.contains("Own restriction: The last read-back shows no restriction in effect."))
         #expect(report.contains("macOS Charge Limit read problem: unrecognised report (a limit with reason optimizedBatteryCharging)"))
         #expect(report.contains("State: deferringToMacOS"))

@@ -195,7 +195,7 @@ struct MacOSChargeLimitReleasePathTests {
 @Suite("What CellKeeper claims about a release while macOS's Charge Limit is on")
 struct MacOSChargeLimitReleaseClaimsTests {
     /// Claims a status must never make while a restriction may remain.
-    static let overclaims = ["restricts nothing", "released its hold", "confirms that its restriction ended", "no restriction in effect"]
+    static let overclaims = ["restricts nothing", "released its hold", "confirms that this restriction ended", "no restriction in effect", "never compete"]
 
     @Test("A release that fails is never reported as done; continuing failures stay honest; a read-back of the end is reported once")
     func failedReleaseThenRecovery() async throws {
@@ -214,13 +214,13 @@ struct MacOSChargeLimitReleaseClaimsTests {
         #expect(failed.ownRestriction == .unconfirmed(.inhibitCharging))
         #expect(failed.ownRestriction.mayBeInEffect)
         let event = failed.events.last { $0.kind == .safety && $0.message.contains("macOS's Charge Limit was turned on (80%)") }
-        #expect(event?.message.contains("no read-back has confirmed that its restriction ended, so it may remain") == true)
+        #expect(event?.message.contains("No read-back has confirmed that this restriction ended, so it may remain") == true)
         for claim in Self.overclaims {
             #expect(!failed.events.contains { $0.message.contains(claim) })
             #expect(failed.decision?.reason.description.contains(claim) == false)
         }
         let failedLimit = try #require(failed.capabilities.macOSChargeLimit)
-        let guidance = MacOSChargeLimitWording.guidance(failedLimit, ownRestriction: failed.ownRestriction)
+        let guidance = MacOSChargeLimitWording.guidance(failedLimit, ownRestriction: failed.ownRestriction, isSimulated: false)
         #expect(guidance.contains("may remain"))
         let report = DiagnosticsReport.text(status: failed, environment: DiagnosticsEnvironment(appVersion: "1", systemVersion: "27", modelIdentifier: nil), generatedAt: referenceDate)
         #expect(report.contains("Own restriction: No read-back has confirmed that CellKeeper's inhibitCharging ended, so it may remain."))
@@ -234,7 +234,7 @@ struct MacOSChargeLimitReleaseClaimsTests {
             #expect(still.ownRestriction.mayBeInEffect)
             #expect(!still.events.contains { $0.message.contains("has ended") })
             let stillLimit = try #require(still.capabilities.macOSChargeLimit)
-            let stillGuidance = MacOSChargeLimitWording.guidance(stillLimit, ownRestriction: still.ownRestriction)
+            let stillGuidance = MacOSChargeLimitWording.guidance(stillLimit, ownRestriction: still.ownRestriction, isSimulated: false)
             #expect(!stillGuidance.contains("no restriction in effect"))
         }
 
@@ -251,7 +251,7 @@ struct MacOSChargeLimitReleaseClaimsTests {
         #expect(status.events.filter { $0.kind == .safety && $0.message.contains("has ended") }.count == 1)
         #expect(status.events.contains { $0.message.contains("A read-back now shows normal charging: CellKeeper's inhibitCharging") })
         let afterLimit = try #require(status.capabilities.macOSChargeLimit)
-        let after = MacOSChargeLimitWording.guidance(afterLimit, ownRestriction: status.ownRestriction)
+        let after = MacOSChargeLimitWording.guidance(afterLimit, ownRestriction: status.ownRestriction, isSimulated: false)
         #expect(after.contains("The last read-back shows no restriction in effect."))
     }
 }
@@ -314,7 +314,7 @@ struct MacOSChargeLimitWordingTests {
     @Test("No active limit: says what macOS reports, not that the setting is 100% or that macOS holds nothing")
     func noActiveLimit() {
         #expect(MacOSChargeLimitWording.summary(Self.noLimit) == "No active limit reported")
-        let text = MacOSChargeLimitWording.guidance(Self.noLimit, ownRestriction: .noneInEffect)
+        let text = MacOSChargeLimitWording.guidance(Self.noLimit, ownRestriction: .noneInEffect, isSimulated: false)
         #expect(text.contains("macOS reports no active Charge Limit"))
         #expect(text.contains("does not establish that the setting is 100% or that macOS holds nothing"))
         #expect(text.contains("a temporary full charge may look the same"))
@@ -326,35 +326,42 @@ struct MacOSChargeLimitWordingTests {
     @Test("A reported 100% limit is named as such")
     func hundredPercent() {
         #expect(MacOSChargeLimitWording.summary(Self.hundred) == "A 100% limit reported")
-        #expect(MacOSChargeLimitWording.guidance(Self.hundred, ownRestriction: .noneInEffect).contains("macOS reports a Charge Limit of 100%"))
+        #expect(MacOSChargeLimitWording.guidance(Self.hundred, ownRestriction: .noneInEffect, isSimulated: false).contains("macOS reports a Charge Limit of 100%"))
     }
 
     @Test("While macOS's limit is on, the text says only what the read-back establishes", arguments: [
         (OwnRestrictionState.noneInEffect, "The last read-back shows no restriction in effect."),
-        (.inEffect(.inhibitCharging), "The last read-back still shows CellKeeper's inhibitCharging"),
+        (.inEffect(.inhibitCharging, own: .inhibitCharging), "The last read-back still shows CellKeeper's inhibitCharging"),
+        (.inEffect(.forceDischarge, own: .inhibitCharging), "cannot rule out that it is its own (it asked for inhibitCharging)"),
+        (.unexplained(.inhibitCharging), "knows of no request of its own that set it"),
         (.unconfirmed(.forceDischarge), "No read-back has confirmed that CellKeeper's forceDischarge ended, so it may remain."),
         (.unknown, "it cannot confirm that nothing it set remains"),
-        (.noneKnown, "knows of no restriction it set there"),
-        (.notCellKeepers(.inhibitCharging), "which CellKeeper did not set"),
+        (.noneKnown, "knows of no request of its own that could be in effect there"),
+        (.notCellKeepers(.inhibitCharging), "set by something other than CellKeeper"),
     ])
     func onWithEachReleaseState(own: OwnRestrictionState, expected: String) {
         for status in [Self.on, Self.unreadable] {
-            let text = MacOSChargeLimitWording.guidance(status, ownRestriction: own)
+            let text = MacOSChargeLimitWording.guidance(status, ownRestriction: own, isSimulated: false)
             #expect(text.contains(expected))
-            #expect(text.contains("withholds its own restrictions and asks for normal charging"))
+            #expect(text.contains("withholds new restrictions and asks for the release of any restriction of its own"))
+            #expect(!text.contains("never compete"))
+            #expect(!text.contains("simulated"))
+            let simulated = MacOSChargeLimitWording.guidance(status, ownRestriction: own, isSimulated: true)
+            #expect(simulated.contains("These are the simulated helper's controls; your Mac's charging is not changed."))
             #expect(!text.contains("restricts nothing"))
             #expect(!text.contains("released"))
             #expect(text.contains("never changes it itself"))
         }
-        #expect(MacOSChargeLimitWording.guidance(Self.on, ownRestriction: own).contains("macOS reports its Charge Limit on at 80%"))
-        #expect(MacOSChargeLimitWording.guidance(Self.unreadable, ownRestriction: own).contains("pmset -g battlimit failed: exit status 1"))
+        #expect(MacOSChargeLimitWording.guidance(Self.on, ownRestriction: own, isSimulated: false).contains("macOS reports its Charge Limit on at 80%"))
+        #expect(MacOSChargeLimitWording.guidance(Self.unreadable, ownRestriction: own, isSimulated: false).contains("pmset -g battlimit failed: exit status 1"))
     }
 
     @Test("The policy's reasons describe a request, not an outcome")
     func reasonsDescribeRequests() {
         for reason in [DecisionReason.macOSChargeLimitActive(limit: 80), .macOSChargeLimitUnknown(problem: "unrecognised report (x)")] {
             let text = reason.description
-            #expect(text.contains("asks for normal charging, to end any restriction of its own, and withholds new ones"))
+            #expect(text.contains("withholds new restrictions and asks for the release of any restriction of its own"))
+            #expect(!text.contains("never compete"))
             #expect(!text.contains("restricts nothing"))
         }
         #expect(!PolicyNote.dischargeEndedForMacOSChargeLimit.description.contains("does not run the Mac"))

@@ -249,8 +249,8 @@ struct SimulatedHelperCoexistenceTests {
         let failed = await controller.evaluate(.periodic)
         #expect(control.activeControls == [.chargingInhibited])
         #expect(failed.ownRestriction.mayBeInEffect)
-        #expect(failed.events.contains { $0.kind == .safety && $0.message.contains("no read-back has confirmed that its restriction ended, so it may remain") })
-        #expect(!failed.events.contains { $0.message.contains("restricts nothing") || $0.message.contains("confirms that its restriction ended") })
+        #expect(failed.events.contains { $0.kind == .safety && $0.message.contains("No read-back has confirmed that this restriction ended, so it may remain") && $0.message.contains("(simulated; your Mac's charging is not changed)") })
+        #expect(!failed.events.contains { $0.message.contains("restricts nothing") || $0.message.contains("confirms that this restriction ended") || $0.message.contains("never compete") })
 
         var recovered: ControllerStatus?
         for _ in 0..<6 where recovered == nil {
@@ -261,7 +261,9 @@ struct SimulatedHelperCoexistenceTests {
         let status = try #require(recovered)
         #expect(control.activeControls.isEmpty)
         #expect(status.ownRestriction == .noneInEffect)
-        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("A read-back now shows normal charging") })
+        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("A read-back now shows normal charging") && $0.message.contains("(simulated; your Mac's charging is not changed)") })
+        let notice = MacOSChargeLimitWording.releaseState(failed.ownRestriction, isSimulated: failed.isControlSimulated)
+        #expect(notice.contains("These are the simulated helper's controls; your Mac's charging is not changed."))
     }
 
     @Test("Only a Mac with macOS's Charge Limit gets a monitor, and making one reads nothing")

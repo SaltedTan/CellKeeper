@@ -421,6 +421,14 @@ public protocol ChargingBackend: Sendable {
 
     func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome
 
+    /// Whether what the last ``currentMode()`` reported is CellKeeper's, by
+    /// the backend's own records (for the helper, its change history): true
+    /// if a control CellKeeper set, or may have set, is in effect; false if
+    /// nothing in effect is CellKeeper's; nil if that read failed or the
+    /// backend keeps no such records. Returns what is already known, without
+    /// new I/O. Default: nil.
+    func isReportedModeOwn() async -> Bool?
+
     /// How the mode last reported by ``currentMode()`` came about, when the
     /// backend knows; nil otherwise. After a ``currentMode()`` that threw,
     /// only a fault (``ReportedModeOrigin/changedOutside(_:)``,
@@ -456,6 +464,7 @@ public protocol ChargingBackend: Sendable {
 
 extension ChargingBackend {
     public func capabilitiesForRelease() async -> ControlCapabilities { await capabilities() }
+    public func isReportedModeOwn() async -> Bool? { nil }
     public func reportedModeOrigin() async -> ReportedModeOrigin? { nil }
     public func renewHold(_ mode: ChargeControlMode) async throws {}
     public func resetAfterFault() async throws {}

@@ -79,13 +79,13 @@ extension PolicyState {
 /// again after changing it in System Settings.
 struct MacOSChargeLimitNotice: View {
     let macOSLimit: MacOSChargeLimitStatus
-    let ownRestriction: OwnRestrictionState
+    let status: ControllerStatus
     let recheck: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             LabeledContent("macOS's Charge Limit", value: MacOSChargeLimitWording.summary(macOSLimit))
-            Text(MacOSChargeLimitWording.guidance(macOSLimit, ownRestriction: ownRestriction))
+            Text(MacOSChargeLimitWording.guidance(macOSLimit, ownRestriction: status.ownRestriction, isSimulated: status.isControlSimulated))
                 .font(.caption)
                 .foregroundStyle(macOSLimit.isLimiting ? Color.orange : Color.secondary)
                 .fixedSize(horizontal: false, vertical: true)

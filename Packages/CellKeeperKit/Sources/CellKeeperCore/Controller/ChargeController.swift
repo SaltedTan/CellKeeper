@@ -134,6 +134,18 @@ public actor ChargeController {
     /// A restriction CellKeeper asked to end when macOS's Charge Limit
     /// started to apply, whose end no read-back has shown yet.
     private var macOSLimitReleaseUnconfirmed: ChargeControlMode?
+    /// The non-normal mode CellKeeper may have put into effect and has not
+    /// seen end: set before a non-normal request is sent, and cleared only by
+    /// a read taken after it that shows normal charging, or by the backend's
+    /// records showing that nothing in effect is CellKeeper's. Faults and
+    /// ownership bookkeeping (``ownedMode``) never clear it.
+    private var responsibleMode: ChargeControlMode?
+    /// What the last successful read's backend records say about who set
+    /// the mode in effect (``ChargingBackend/isReportedModeOwn()``); nil
+    /// after a failed read or a request that may have changed it.
+    private var reportedModeIsOwn: Bool?
+    /// The last successful read came with an outside change reported.
+    private var isOutsideChangeReported = false
     private var managementRefusal: String?
     private var events: [ControlEvent] = []
     private var nextEventID = 0
@@ -185,7 +197,9 @@ public actor ChargeController {
             backend: backend.descriptor,
             capabilities: capabilities,
             currentMode: currentMode,
-            ownRestrictionMode: ownRestrictionMode,
+            ownRestrictionMode: responsibleMode,
+            isReportedModeOwn: reportedModeIsOwn,
+            isOutsideChangeReported: isOutsideChangeReported,
             nativeLimit: nativeLimit,
             adoptedChange: adoptedChange,
             adoptionCount: adoptionCount,
@@ -389,6 +403,9 @@ public actor ChargeController {
         nativeLimit = nil
         macOSLimitGate = nil
         macOSLimitReleaseUnconfirmed = nil
+        responsibleMode = nil
+        reportedModeIsOwn = nil
+        isOutsideChangeReported = false
         lastExecution = nil
         record(.settings, "Control backend changed from \(previousName) to \(newBackend.descriptor.displayName).")
         await performEvaluation(.backendChanged)
@@ -543,7 +560,7 @@ public actor ChargeController {
             recordMacOSLimitRelease(of: held)
         } else if let held = macOSLimitReleaseUnconfirmed, currentMode == .normal {
             macOSLimitReleaseUnconfirmed = nil
-            record(.safety, "A read-back now shows normal charging: CellKeeper's \(describeTarget(held)), which it asked to end when macOS's Charge Limit started to apply, has ended.")
+            record(.safety, "A read-back now shows normal charging: CellKeeper's \(describeTarget(held))\(simulationNote), which it asked to end when macOS's Charge Limit started to apply, has ended.")
         }
         await renewHoldIfStillWanted(newDecision)
 
@@ -661,14 +678,10 @@ public actor ChargeController {
         }
     }
 
-    /// The non-normal mode CellKeeper last confirmed, or asked for without
-    /// confirmation, and has not seen end; also one it asked to end when
-    /// macOS's Charge Limit started to apply, until a read-back shows the
-    /// end, even if a fault made it stop counting it as its own.
-    private var ownRestrictionMode: ChargeControlMode? {
-        if let owned = ownedMode, owned != .normal { return owned }
-        return unconfirmedRequests.filter { $0 != .normal }.max { $0.restrictionLevel < $1.restrictionLevel }
-            ?? macOSLimitReleaseUnconfirmed
+    /// Marks restrictions as simulated in safety events, so a standalone
+    /// message is never read as a change to the Mac's charging.
+    private var simulationNote: String {
+        capabilities.availability == .simulated ? " (simulated; your Mac's charging is not changed)" : ""
     }
 
     /// Logs a change of macOS's own Charge Limit as the backend reports it
@@ -692,13 +705,13 @@ public actor ChargeController {
             return nil
         }
         if previous?.isLimiting == true {
-            record(.decision, "\(gate.summary). CellKeeper keeps deferring to it: it asks for normal charging and withholds its own restrictions.")
+            record(.decision, "\(gate.summary). CellKeeper keeps deferring to it: it withholds new restrictions and asks for the release of any restriction of its own.")
             return nil
         }
-        if let held = ownRestrictionMode {
+        if let held = responsibleMode {
             return held
         }
-        record(.decision, "\(gate.summary). CellKeeper defers to it: it asks for normal charging and withholds its own restrictions, so two limits never compete. To let CellKeeper manage charging, turn macOS's Charge Limit off in System Settings › Battery › Charging (set it to 100%).")
+        record(.decision, "\(gate.summary). CellKeeper defers to it: it withholds new restrictions and asks for the release of any restriction of its own. To let CellKeeper manage charging, turn macOS's Charge Limit off in System Settings › Battery › Charging (set it to 100%).")
         return nil
     }
 
@@ -714,12 +727,13 @@ public actor ChargeController {
         case .unknown, .off: gate.summary
         }
         let deferring = "CellKeeper withholds new restrictions until macOS reports no active limit."
+        let heldText = "\(describeTarget(held))\(simulationNote)"
         if currentMode == .normal {
             macOSLimitReleaseUnconfirmed = nil
-            record(.safety, "\(started) while CellKeeper held \(describeTarget(held)). CellKeeper asked for normal charging, and a read-back confirms that its restriction ended. \(deferring)")
+            record(.safety, "\(started) while CellKeeper held \(heldText). A read-back confirms that this restriction ended. \(deferring)")
         } else {
             macOSLimitReleaseUnconfirmed = held
-            record(.safety, "\(started) while CellKeeper held \(describeTarget(held)). CellKeeper asked for normal charging, but no read-back has confirmed that its restriction ended, so it may remain; CellKeeper keeps asking for normal charging. \(deferring)", level: .error)
+            record(.safety, "\(started) while CellKeeper held \(heldText). No read-back has confirmed that this restriction ended, so it may remain; CellKeeper keeps asking for its release. \(deferring)", level: .error)
         }
     }
 
@@ -779,6 +793,14 @@ public actor ChargeController {
         }
         let target = describeTarget(mode)
         let ownerLimitBefore = nativeLimit?.ownerLimit
+        if mode != .normal {
+            // From here on the request may take effect, whatever its reply:
+            // no read taken before it can show what is in effect.
+            responsibleMode = mode
+            currentMode = nil
+            reportedModeIsOwn = nil
+            isOutsideChangeReported = false
+        }
         record(.request, "Requesting \(target) from \(backend.descriptor.displayName) backend.")
         do {
             let result = try await setAndConfirm(mode)
@@ -878,9 +900,12 @@ public actor ChargeController {
         do {
             mode = try await backend.currentMode()
         } catch {
+            reportedModeIsOwn = nil
+            isOutsideChangeReported = false
             await handleReportedFault()
             throw error
         }
+        await noteResponsibility(after: mode)
         if let change = await backend.takeAdoptedLimitChange() {
             nativeLimit = await backend.nativeLimitStatus()
             // A marker from an earlier session needs nothing more if
@@ -891,6 +916,32 @@ public actor ChargeController {
         }
         await handleReportedFault()
         return mode
+    }
+
+    /// Updates what CellKeeper may still have in effect after a successful
+    /// read (requests are serialised, so it was taken after the last one).
+    /// Only normal charging, or the backend's records showing that nothing
+    /// in effect is CellKeeper's, ends the responsibility; a fault does not.
+    private func noteResponsibility(after mode: ChargeControlMode?) async {
+        guard let mode else {
+            reportedModeIsOwn = nil
+            isOutsideChangeReported = false
+            return
+        }
+        reportedModeIsOwn = await backend.isReportedModeOwn()
+        if case .changedOutside? = await backend.reportedModeOrigin() {
+            isOutsideChangeReported = true
+        } else {
+            isOutsideChangeReported = false
+        }
+        if mode == .normal {
+            responsibleMode = nil
+        } else if reportedModeIsOwn == false {
+            // Someone else's, by the backend's records: CellKeeper's own
+            // restriction has ended, but not as the release it asked for.
+            responsibleMode = nil
+            macOSLimitReleaseUnconfirmed = nil
+        }
     }
 
     /// Faults the backend for a fault it reported with its last read
@@ -1050,6 +1101,7 @@ public actor ChargeController {
     private func adopt(_ change: AdoptedLimitChange?) {
         currentMode = .normal
         ownedMode = .normal
+        responsibleMode = nil
         unconfirmedRequests = []
         isRestoreOutstanding = false
         isOwnedStateUnverified = false

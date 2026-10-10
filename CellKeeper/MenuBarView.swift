@@ -106,26 +106,24 @@ private struct ControlSummary: View {
             if status.capabilities.isEnforcedByMacOS {
                 NativeLimitSummary(status: status)
             }
+            // What macOS reports and how to turn it off, whatever the policy
+            // says first (an unfinished restore, for example).
+            if let macOSLimit = status.capabilities.macOSChargeLimit, macOSLimit.isLimiting, !status.capabilities.isEnforcedByMacOS {
+                MacOSChargeLimitNotice(macOSLimit: macOSLimit, status: status, recheck: recheck)
+                    .font(.caption)
+            }
             PendingSwitchNotice(status: status, select: selectBackend)
 
             if let decision = status.decision, !isSettled {
                 LabeledContent("Policy", value: decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS))
                 LabeledContent("Wants", value: decision.desiredMode.intentTitle(nativeLimit: status.capabilities.isEnforcedByMacOS))
-                Text(status.displayedReason ?? decision.reason.description)
-                    .font(.caption)
-                    .foregroundStyle(decision.state == .deferringToMacOS ? Color.orange : Color.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if status.capabilities.macOSChargeLimit?.isLimiting == true, !status.capabilities.isEnforcedByMacOS {
-                    if status.ownRestriction.mayBeInEffect {
-                        // Asking for normal charging is not the same as having it.
-                        Label(MacOSChargeLimitWording.releaseState(status.ownRestriction), systemImage: "exclamationmark.triangle")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Button("Check Again", action: recheck)
-                        .controlSize(.small)
-                        .help("Reads macOS's Charge Limit again now, for example after you turned it off in System Settings. CellKeeper also reads it about once a minute.")
+                // While the policy defers to macOS's limit, the notice above
+                // says all its reason would.
+                if decision.state != .deferringToMacOS {
+                    Text(status.displayedReason ?? decision.reason.description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let execution = status.lastExecution {
                     LabeledContent("Last action") {

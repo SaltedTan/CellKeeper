@@ -7,7 +7,7 @@ import Testing
 // and the first five tests are the reviewer's probes.
 
 /// Code to run inside a connection's requests, once each.
-private final class RequestHooks: @unchecked Sendable {
+final class RequestHooks: @unchecked Sendable {
     private let lock = NSLock()
     private var readHook: (@Sendable () async throws -> Void)?
     private var activationHook: (@Sendable () async throws -> Void)?
@@ -33,7 +33,7 @@ private final class RequestHooks: @unchecked Sendable {
     }
 }
 
-private struct HookedTransport: HelperTransport {
+struct HookedTransport: HelperTransport {
     let base: TestHelperTransport
     let hooks: RequestHooks
 
@@ -42,7 +42,7 @@ private struct HookedTransport: HelperTransport {
     }
 }
 
-private struct HookedConnection: HelperConnection {
+struct HookedConnection: HelperConnection {
     let base: any HelperConnection
     let hooks: RequestHooks
 
@@ -79,7 +79,7 @@ private struct HookedConnection: HelperConnection {
     func invalidate() async { await base.invalidate() }
 }
 
-private extension HelperRig {
+extension HelperRig {
     /// A backend on this rig's helper whose requests run `hooks`.
     func hookedBackend(_ hooks: RequestHooks) -> HelperChargingBackend {
         let clock = clock

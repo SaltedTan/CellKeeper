@@ -46,13 +46,16 @@ import Foundation
 ///   the lease on time.
 /// - With a ``MacOSChargeLimitMonitor`` (on a Mac that has macOS's Charge
 ///   Limit), every mode but `.normal` is withheld while macOS's own Charge
-///   Limit is on or its report cannot be read and recognised, so two limits
-///   never compete (safety precondition 7). The availability is kept: the
-///   backend is fine, macOS is in the way. Withholding new requests says
-///   nothing about a hold already in place; that ends only through a
-///   release, confirmed by a read like any other. Releasing never waits for
-///   a read of macOS's limit. CellKeeper never turns macOS's limit off
-///   itself.
+///   Limit is on or its report cannot be read and recognised, so CellKeeper
+///   starts no restriction on top of macOS's (safety precondition 7). The
+///   availability is kept: the backend is fine, macOS is in the way.
+///   Withholding new requests says nothing about a hold already in place;
+///   that ends only through a release, confirmed by a read like any other.
+///   Releasing never waits for a read of macOS's limit. CellKeeper never
+///   turns macOS's limit off itself.
+/// - ``isReportedModeOwn()`` says, from the helper's history, whether a
+///   control CellKeeper set or may have set is in effect, so that only that
+///   history makes a restriction someone else's.
 ///
 /// The controller serialises all calls into it.
 public actor HelperChargingBackend: ChargingBackend {
@@ -134,6 +137,9 @@ public actor HelperChargingBackend: ChargingBackend {
     /// of one, that ``currentMode()`` has not reported yet.
     private var unreportedHardwareError: String?
     private var origin: ReportedModeOrigin?
+    /// Whether a control CellKeeper set, or may have set, was in effect at
+    /// the last ``currentMode()``; nil if that read failed.
+    private var isLastReportedOwn: Bool?
     /// Whether ``activity`` is held.
     private var isActivityHeld = false
 
@@ -256,6 +262,7 @@ public actor HelperChargingBackend: ChargingBackend {
     public func currentMode() async throws -> ChargeControlMode? {
         defer { updateActivity() }
         origin = nil
+        isLastReportedOwn = nil
         let state: HelperStateReply
         do {
             state = try await fetchState()
@@ -288,6 +295,10 @@ public actor HelperChargingBackend: ChargingBackend {
         }
         observe(state)
         let active = state.activeControls.controls
+        // By the helper's history: a hold is CellKeeper's only while its
+        // generation is current, and a pending activation may have set its
+        // control.
+        isLastReportedOwn = !active.isDisjoint(with: unresolvedControls)
         // A fault reported here makes a hardware error moot.
         let loss = takeOutsideLoss()
         if let outside = currentOutsideChange ?? loss {
@@ -317,6 +328,10 @@ public actor HelperChargingBackend: ChargingBackend {
 
     public func reportedModeOrigin() async -> ReportedModeOrigin? {
         origin
+    }
+
+    public func isReportedModeOwn() async -> Bool? {
+        isLastReportedOwn
     }
 
     /// The controls CellKeeper may have set on the helper and has not seen
