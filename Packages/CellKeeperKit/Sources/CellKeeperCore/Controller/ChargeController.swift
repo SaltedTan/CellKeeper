@@ -480,6 +480,60 @@ public actor ChargeController {
         }
     }
 
+    /// Removes CellKeeper's helper (safety precondition 9). If a helper is
+    /// registered, first restores normal charging on the current backend and
+    /// confirms it (with macOS's Charge Limit: your own limit, its record
+    /// deleted only after the read-back); only then runs `removal`
+    /// (``HelperRemoval/remove()``). If normal charging is not confirmed,
+    /// the helper is not contacted and nothing is removed. The command lock
+    /// is held throughout, so no evaluation can apply a restriction between
+    /// the confirmed restore and the helper's own. Every step is recorded in
+    /// the activity log. With no helper registered, nothing is restored or
+    /// removed.
+    @discardableResult
+    public func removeHelper(using removal: HelperRemoval) async -> HelperUninstallOutcome {
+        await performHelperRemoval(removal, force: nil)
+    }
+
+    /// As ``removeHelper(using:)``, except that a helper whose restore went
+    /// unconfirmed because the transport failed or no reply arrived in time,
+    /// at any stage (connecting, `hello` or the restore), is unregistered
+    /// anyway, and the outcome says that its restore was not confirmed
+    /// (``HelperRemoval/remove(force:)``). An explicit reply other than `ok`
+    /// to the restore (`hardwareError`, `notIntroduced`, `rateLimited`) is
+    /// never overridden: such a helper is not unregistered.
+    @discardableResult
+    public func removeHelper(using removal: HelperRemoval, force: HelperRemovalForce) async -> HelperUninstallOutcome {
+        await performHelperRemoval(removal, force: force)
+    }
+
+    private func performHelperRemoval(_ removal: HelperRemoval, force: HelperRemovalForce?) async -> HelperUninstallOutcome {
+        await acquire()
+        defer { release() }
+        guard !isShutDown else { return .controllerShutDown }
+        let registration = await removal.registrationStatus()
+        guard !registration.meansNoHelperRegistered else {
+            let outcome = HelperUninstallOutcome.nothingToRemove(registration)
+            record(.safety, "Remove helper: \(outcome.summary)")
+            return outcome
+        }
+        let backendName = backend.descriptor.displayName
+        record(.safety, "Remove helper: confirming normal charging on \(backendName) before contacting the helper.")
+        guard await restoreNormal(reason: "removing the helper") else {
+            let outcome = HelperUninstallOutcome.normalChargingNotConfirmed(backend: backendName)
+            record(.safety, "Remove helper: \(outcome.summary)", level: .fault)
+            return outcome
+        }
+        let result: HelperRemovalOutcome
+        if let force {
+            result = await removal.remove(force: force)
+        } else {
+            result = await removal.remove()
+        }
+        record(.safety, "Remove helper: \(result.summary)", level: result.isHelperRemoved && result.isRestoreConfirmed ? .default : .error)
+        return .helperRemoval(result)
+    }
+
     // MARK: - Evaluation
 
     private func performEvaluation(_ trigger: EvaluationTrigger) async {

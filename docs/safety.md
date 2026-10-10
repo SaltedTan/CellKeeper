@@ -186,6 +186,17 @@ list.
 8. **Monotonic time for leases and expiries** (R22).
 9. **Uninstall that restores the safe state** before unregistering any helper
    (R4).
+   *Logic implemented and tested against fakes; no helper is registered in
+   this phase*: CellKeeper confirms normal charging on its own backend,
+   then asks the helper to restore defaults and exit, and unregisters it
+   only once the helper replies that its restore read back clean. The one
+   exception is a removal you force after reading the recovery procedure,
+   when the connection failed or no reply arrived in time; its result says
+   that defaults were not confirmed. The daemon's side is implemented as
+   well: it restores defaults on that request and on SIGTERM, and exits
+   with status 0 only once they are confirmed (see "Where the helper
+   backend stands"). The button for the removal comes with phase 4a's
+   interface work, and the real unregistration with phase 4b.
 10. **Opt-in.** Real control is off by default and marked experimental until
     verified on that model.
 11. **Tested independent recovery.** Before the first experimental write, prove
@@ -421,13 +432,40 @@ the simulated control:
   across relaunches within a boot, in a file keyed by the boot session UUID
   that the kernel sets once per boot (never by wall-clock time), and
   discards it at a new boot, when that clock starts again.
-- **9, uninstall that restores the safe state (the daemon's part):** a
-  client's `restoreDefaultsAndExit` (once the daemon serves the transport)
-  and SIGTERM, which launchd sends when it stops the job, both run the same
-  bounded shutdown: the reply to `restoreDefaultsAndExit` is sent, with
-  send completion confirmed, before that client's session ends (receipt
-  by the client is not confirmed), and the daemon exits with 0 only once
-  defaults are confirmed as above. The app's uninstall flow is not done.
+- **9, uninstall that restores the safe state (logic only; nothing is
+  registered):** both sides are implemented and tested without
+  registering anything.
+  - *The app's removal* (`ChargeController.removeHelper`, `HelperRemoval`)
+    first restores normal charging on CellKeeper's current backend and
+    confirms it by read-back (with macOS's Charge Limit, your own limit),
+    and stops there if it cannot. Then it asks the helper to restore
+    defaults and exit, and unregisters it only after the helper replies
+    `ok`, which it does only when its restore read back clean; finally it
+    checks that the system no longer reports the helper registered. A
+    helper that answers with anything other than `ok` is never
+    unregistered: after `hardwareError` it is the process that keeps
+    retrying the restore, and any other refusal is its answer. If nothing
+    confirmed the restore because the connection failed or a reply did not
+    arrive in time, at any stage, the helper is unregistered only if you
+    ask for it after reading the recovery procedure below. The result then
+    says that its restore was not confirmed, that its exit restore is only
+    an attempt, and that no helper starts at the next startup to restore
+    defaults. Every step has a deadline (20 s for the helper, 15 s for each
+    call to the registration), judged on a monotonic clock when each reply
+    arrives: a reply that arrives after the deadline counts for nothing,
+    however late the timer is. Every result says only what was confirmed;
+    with the Simulated helper, that its simulated controls were restored
+    and your Mac's charging was not changed. In this phase no helper is
+    registered (`NoHelperRegistration`), so the flow stops at its first
+    step, nothing calls `SMAppService`, and there is no button for it yet.
+  - *The daemon's part:* a client's `restoreDefaultsAndExit` (once the
+    daemon serves the transport) and SIGTERM, which launchd sends when it
+    stops the job, both run the same bounded shutdown: the reply to
+    `restoreDefaultsAndExit` is sent, with send completion confirmed,
+    before that client's session ends (receipt by the client is not
+    confirmed), and the daemon exits with 0 only once defaults are
+    confirmed as above. A reply the app does not receive in time counts,
+    for the removal, as a missing reply.
 - **13, sleep interlock and bounded operations:** on the app's side, every
   call over the XPC transport has a timeout (10 s by default). A timeout,
   an interruption or any other transport failure invalidates the
@@ -557,9 +595,109 @@ responsible; see Apple's guidance on the "Not Charging" status.
    `~/Library/Containers/io.github.saltedtan.CellKeeper/Data/Library/Application Support/CellKeeper/native-charge-limit-ownership.json`.
    Builds with another bundle identifier use their own container path.
 
-A recovery procedure for future privileged backends (restore normal
-charging, uninstall the helper, restart) will be documented before such a
-backend ships (R31).
+### Recovery if charging does not resume (CellKeeper's own charge control)
+
+This procedure is for CellKeeper's own charge control through its helper
+(roadmap milestone 4, research rule R31). Today that control is only
+simulated: the Simulated helper runs inside CellKeeper on a simulated
+control, and no helper is installed, so it cannot keep your Mac from
+charging. The procedure is written down before any helper that changes
+charging ships, and each step says what has been verified. Go through
+the steps in order and stop as soon as your Mac charges again: plugged
+in, the battery menu shows it charging, or the percentage rises.
+
+Each step tells two things apart: whether the helper has **stopped** (it
+no longer runs) and whether **defaults are confirmed** (a read-back showed
+them, by the helper or by CellKeeper). A helper that stopped has not
+necessarily restored anything.
+
+1. **In CellKeeper: turn off Manage charging, or quit CellKeeper.**
+   Either asks CellKeeper's backend for normal charging and reads it back.
+   *How to tell:* with Manage charging off, the menu shows CellKeeper's
+   decision, and the activity log (Settings › Activity) records the
+   request and whether the read-back confirmed it (defaults confirmed for
+   what CellKeeper held); with the Simulated helper it says that the
+   hardware was unchanged. If it could not be confirmed, the log says so
+   and why. When quitting, CellKeeper restores normal charging before it
+   exits and writes the result ("Restored normal charging", or why not)
+   to the system log. Quitting also ends CellKeeper's session with the
+   helper, and the helper then clears whatever CellKeeper held (tested
+   against the helper's logic).
+2. **In CellKeeper Settings: remove the helper.** CellKeeper first
+   confirms normal charging on its own backend, then asks the helper to
+   restore macOS's defaults and exit, and unregisters it only after the
+   helper confirms that its restore read back clean.
+   *How to tell:* the result names what was confirmed. Defaults confirmed
+   and the helper removed reads, for example, "The helper restored macOS's
+   default charging and confirmed it by reading its controls back. The
+   helper was then unregistered, and the system no longer reports it
+   registered." If the helper replied that its restore did not read back
+   clean, CellKeeper keeps it, because the helper keeps retrying the
+   restore; if it refused the request, CellKeeper keeps it as well. Go on
+   with step 3 in either case. If the connection failed or a reply did not
+   arrive in time, nothing is known about the restore: CellKeeper keeps the
+   helper, and can remove it anyway once you have read this procedure. The
+   result of such a forced removal is "helper removed, defaults not
+   confirmed": it says so, and that no helper starts at the next startup
+   to restore defaults (see step 5).
+   *Status:* the logic is implemented and tested against simulated parts.
+   The button comes with phase 4a's interface work, and the real
+   unregistration (`SMAppService`) with phase 4b.
+3. **Without CellKeeper: turn off its background item.** In System
+   Settings › General › Login Items & Extensions, turn off CellKeeper's
+   item under Allow in the Background. This revokes the helper's approval,
+   which is expected to stop it with the termination signal (SIGTERM). The
+   helper (`CellKeeperHelper`) then attempts to restore defaults, retrying
+   about once a second until they read back clean or until about 7 s after
+   the signal, which keeps the rest of its 8 s shutdown deadline for its
+   log and a final check; it exits with status 0 only if that final check
+   confirms defaults, and with status 75 otherwise (D31, D59).
+   *How to tell:* stopped, when CellKeeper (if it is running) reports the
+   helper as unavailable and
+   `sudo launchctl list io.github.saltedtan.CellKeeper.Helper` no longer
+   finds it. Defaults confirmed only if the helper's log says "defaults
+   are confirmed: exiting with status 0"
+   (`/usr/bin/log show --info --predicate 'subsystem == "io.github.saltedtan.CellKeeper.Helper"'`);
+   stopping alone does not confirm them. Status 75 makes launchd start a
+   job again only while it is still loaded and approved: once the approval
+   is revoked, macOS does not start the helper again, not at the next
+   restart either, so no start restore follows this step, whatever the
+   helper's last log line says about its next start. *Status:* the
+   daemon's shutdown is implemented and tested in `swift test`, without
+   registering anything; that turning off the item stops the helper is
+   expected, not verified (phase 4b).
+4. **From Terminal, as an administrator:**
+   `sudo launchctl bootout system/io.github.saltedtan.CellKeeper.Helper`
+   stops a running helper (research note 04, §1.4). As in step 3, the
+   helper then attempts its exit restore, which may end unconfirmed (exit
+   status 75). CellKeeper itself never runs this command. *How to tell:*
+   stopped, when `sudo launchctl list io.github.saltedtan.CellKeeper.Helper`
+   no longer finds it; defaults confirmed only as in step 3. After
+   `bootout`, launchd does not start the helper again before the next
+   restart. *Status:* the command is launchd's; its effect on CellKeeper's
+   helper is to be verified in phase 4b.
+5. **Restart the Mac.** Only a helper that is still registered **and**
+   approved starts at boot; it then restores defaults before it serves
+   anyone (rule R2, tested against the helper's logic and its daemon).
+   *How to tell:* defaults confirmed if the helper's log says that its
+   start restore read back clean. After step 3 or after a removal, no
+   helper starts at boot, so no start restore happens: after a removal
+   that confirmed defaults none is needed, but after a forced removal or
+   step 3, a restart helps only if the restart itself clears what a
+   mechanism set. On Apple silicon, Apple's procedure for resetting the
+   system management controller is a restart. *Status:* whether a restart
+   clears state that a future charge-control mechanism writes is not
+   known, and must be verified for each mechanism on a test Mac before it
+   is offered (phase 4c, safety precondition 11). The helper of this phase
+   writes nothing to hardware, so there is nothing for a restart to clear.
+6. **Check macOS's own charging settings.** macOS's Charge Limit and
+   Optimized Battery Charging (System Settings › Battery › ⓘ next to
+   Charging) hold charging below full on their own, as can battery health
+   management, a weak adapter or another battery tool; see Apple's
+   guidance on the "Not Charging" status. *How to tell:* the Charge Limit
+   and Optimized Battery Charging are set as you want them. For a limit
+   CellKeeper set through macOS's Charge Limit, see "Getting your own
+   Charge Limit back" above.
 
 ## Disclaimer
 

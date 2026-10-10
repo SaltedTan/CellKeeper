@@ -138,12 +138,19 @@ hardware.
   on or its report cannot be read; coexistence with Optimized Battery
   Charging and battery health management is partial and unverified, as
   they are visible only through that report); an uninstall flow that
-  restores defaults (9); a documented recovery procedure (research rule
-  R31).
+  restores defaults (9, done in logic: the removal flow, `HelperRemoval`
+  and `ChargeController.removeHelper`, confirms normal charging, then the
+  helper's restore, and only then unregisters, tested against fakes, and
+  the daemon restores defaults on `restoreDefaultsAndExit` and SIGTERM);
+  a documented recovery procedure (research rule R31, done in
+  `safety.md`). Still to come for 9: its button (with the UI below) and
+  the real unregistration (phase 4b).
 - UI: limits at any level with the helper backend, honest status
   (Simulated or Unavailable), and guidance for turning macOS's Charge Limit
   off (a first version: the menu and Settings › Control say when macOS's
-  limit is on, how to turn it off, and offer Check Again).
+  limit is on, how to turn it off, and offer Check Again). Still to come:
+  a way to remove the helper, after which the app switches to the
+  Simulated backend.
 
 ### Phase 4b — Signed helper (needs an Apple Developer ID)
 
@@ -155,7 +162,12 @@ Tracked in [issue #57](https://github.com/SaltedTan/CellKeeper/issues/57).
   [05](research/05-distribution-and-signing.md)).
 - Release code-signing requirements checked with `codesign --verify -R`;
   separate identities for development builds.
-- Installation, update and uninstall verified on a clean Mac.
+- Installation, update and uninstall verified on a clean Mac. Uninstall
+  supplies the `SMAppService` implementation of `HelperRegistration`
+  ("already unregistered" errors count as gone), and verifies steps 3 and
+  4 of the recovery procedure in `safety.md` (whether turning off the
+  background item and `launchctl bootout` stop the helper, and whether its
+  exit restore then confirms defaults).
 
 ### Phase 4c — A verified mechanism (needs a dedicated test Mac)
 

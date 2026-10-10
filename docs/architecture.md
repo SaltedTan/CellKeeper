@@ -1,6 +1,6 @@
 # CellKeeper architecture
 
-Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper), the helper's NSXPC transport, tested over an anonymous listener but not used by the app yet, and the helper daemon's executable, which controls no hardware, does not serve that transport yet, and is neither installed nor embedded. Last reviewed 2026-10-10.
+Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper), the helper's NSXPC transport, tested over an anonymous listener but not used by the app yet, and the helper daemon's executable, which controls no hardware, does not serve that transport yet, and is neither installed nor embedded, and the logic that removes the helper only after its restore, tested against fakes. Last reviewed 2026-10-10.
 
 This document describes how CellKeeper is put together and why. Research that
 informed these decisions is in [`docs/research/`](research/README.md); safety
@@ -52,6 +52,7 @@ rules are in [`docs/safety.md`](safety.md).
 │                              `HelperChargingBackend.simulatedHelper()`,       ││
 │                              `MacOSChargeLimitMonitor.system()`               ││
 │  XPCHelperTransport        – `HelperTransport` over NSXPC (not used yet)      ││
+│  NoHelperRegistration      – the helper's registration: none in phase 4a      ││
 └───────────────┬──────────────────────────────────────────────────────────────┘│
                 │ depends on                                                    │
 ┌───────────────▼──────────────── CellKeeperCore (pure Swift, no IOKit) ────────▼───────────────┐
@@ -61,7 +62,8 @@ rules are in [`docs/safety.md`](safety.md).
 │  Control:    ChargingBackend (protocol), MockChargingBackend, ReadOnlyChargingBackend,         │
 │              NativeChargeLimitBackend (+ ShortcutRunning / ChargeLimitReading /                │
 │              OwnershipRecordStore protocols), HelperChargingBackend (+ HelperTransport /       │
-│              HelperConnection protocols, InProcessHelperTransport), MacOSChargeLimitMonitor    │
+│              HelperConnection protocols, InProcessHelperTransport), MacOSChargeLimitMonitor,   │
+│              HelperRemoval (+ HelperRegistration protocol)                                     │
 │  Controller: ChargeController (actor: telemetry → policy → backend, safety fallbacks, log)     │
 │  Support:    CellKeeperLog (os.Logger categories)                                              │
 └───────────────┬────────────────────────────────────────────────────────────────────────────────┘
@@ -132,7 +134,7 @@ Requirement → location:
 | Scheduler | — | Future: will feed overrides into `PolicyInput` |
 | Notifications | — | Future: driven from `ControlEvent`s |
 | Shortcuts/automation | — | Future: App Intents calling `AppModel` intents |
-| Privileged operations | `HelperEngine` (HelperCore), `HelperChargingBackend` (Core), `HelperXPCServer` / `HelperXPCClient` (HelperXPC), `XPCHelperTransport` (Kit), `HelperDaemon` (HelperDaemon), `CellKeeperHelper` | Helper logic and the app's backend implemented, with a simulated control only, in process (the Simulated helper); no hardware control. The NSXPC transport with code-signing requirements on both sides is implemented and tested over an anonymous listener. The daemon executable and its launchd property list exist, control nothing, and do not serve the transport yet; wiring the transport into the daemon, embedding and registration are future work |
+| Privileged operations | `HelperEngine` (HelperCore), `HelperChargingBackend` (Core), `HelperXPCServer` / `HelperXPCClient` (HelperXPC), `XPCHelperTransport` (Kit), `HelperDaemon` (HelperDaemon), `CellKeeperHelper` | Helper logic and the app's backend implemented, with a simulated control only, in process (the Simulated helper); no hardware control. The NSXPC transport with code-signing requirements on both sides is implemented and tested over an anonymous listener. The removal of the helper (`HelperRemoval`, `ChargeController.removeHelper`) is implemented and tested against fakes. The daemon executable and its launchd property list exist, control nothing, and do not serve the transport yet; wiring the transport into the daemon, embedding and registration are future work |
 
 ## Data flow
 
@@ -1002,6 +1004,162 @@ Known limitations:
   own SMC user-client attempt (note 08, O7), now about once a minute while
   the helper backend is selected; the report is unaffected and no
   entitlement is added.
+
+### Helper removal (`HelperRemoval`)
+
+Safety precondition 9 and research rule R4: the helper is unregistered
+only after it has confirmed that it restored defaults, and CellKeeper's
+own state is back to normal before that. The one exception is a removal
+the user forces, after reading the recovery procedure, when nothing could
+confirm the restore (step 5 below). The logic is in Core and tested against fakes;
+the app has no button for it yet, and no helper is registered in this
+phase.
+
+**Seam.** `HelperRegistration` (Core) is the system's registration of the
+daemon: `status()` returns a `HelperRegistrationStatus` (`notRegistered`,
+`enabled`, `requiresApproval`, `notFound`, or `unknown(detail)`, mirroring
+`SMAppService.Status`, research note 04 §1.3, without importing
+ServiceManagement), and `unregister()` removes it. The only implementation
+in phase 4a is `NoHelperRegistration` (Kit): always `notRegistered`, so the
+flow stops at its first step; its `unregister()` does nothing and is never
+reached. Nothing in this phase calls `SMAppService`. Phase 4b supplies an
+implementation on `SMAppService.daemon(plistName:)`, whose `unregister()`
+also terminates a running daemon (note 04, §1.4); it treats the errors
+that mean "already unregistered", `kSMErrorJobNotFound` and the EPERM that
+macOS 26 is reported (unverified) to return instead, as already gone.
+
+**Flow** (`HelperRemoval.remove()`):
+
+1. Read the registration. `notRegistered` or `notFound`: nothing to remove,
+   and no helper is contacted. Any other status, `unknown` included, goes
+   on.
+2. Connect, say `hello`, and send `restoreDefaultsAndExit`. A `hello`
+   answered with a refusal (`incompatibleProtocol`, `notReady`,
+   `shuttingDown`, `notIntroduced`, `rateLimited`) does not stop the flow:
+   the engine serves restores without an introduction, before start and
+   during shutdown. Only `ok` confirms defaults. The engine's other replies
+   to this request are `hardwareError` (its restore did not read back
+   clean; it keeps retrying, D30, D31), `notIntroduced` (the session no
+   longer existed) and `rateLimited` (this request revoked the session);
+   `notReady` and `shuttingDown` cannot occur.
+3. Only after `ok`: `unregister()`, then read the registration again. The
+   helper counts as removed only if that read says `notRegistered` or
+   `notFound`, also when `unregister()` threw; anything else is
+   `unregisterIncomplete` with the status and the error.
+4. An explicit reply to `restoreDefaultsAndExit` other than `ok` is never
+   overridden, with or without force (a refused `hello` is not such a
+   reply: the restore is still sent, and may confirm). `hardwareError` means the restore did not read back clean and the
+   helper keeps retrying it, so unregistering would stop the one process
+   that is restoring; `notIntroduced` and `rateLimited` mean the request
+   was refused, and nothing is known about defaults.
+5. If nothing confirmed the restore because the transport failed or no
+   reply arrived in time, at any stage (connecting, `hello` or the
+   restore), the helper is not unregistered either.
+   `remove(force: .userHasSeenRecoveryProcedure)` unregisters it anyway,
+   and the outcome says that its restore was not confirmed. Such a helper
+   can be broken in a way that would block its removal forever, for
+   example one that answers `hello` and then never replies to the restore.
+   Force is an acknowledged loss of assurance: unregistering terminates a
+   running daemon, whose SIGTERM path attempts the restore, retrying until
+   it is confirmed or about 7 s have passed (the rest of the 8 s shutdown
+   deadline is kept for the log and the final check; D31, D59), and exits
+   with status 75 if it is not confirmed; a missing reply does not
+   show that the helper had stopped retrying; and an unregistered helper
+   does not start at the next boot, so no start restore (R2) follows. What
+   remains is a mechanism whose state outlives the helper, which is what
+   the recovery procedure in `safety.md` covers.
+
+| Outcome (`HelperRemovalOutcome`) | Helper confirmed defaults | Unregistered |
+|---|---|---|
+| `nothingToRemove(status)` | not asked | no |
+| `removed(kind)` | yes | yes, and the status says it is gone |
+| `unregisterIncomplete(kind, status:, error:)` | yes | asked; the status says it is still there |
+| `restoreRefused(status, helper:)` | no: an explicit reply to the restore other than `ok` | no, and force is not offered |
+| `restoreUnconfirmed(reason)` | unknown: the transport failed or no reply came in time | no; force is offered |
+| `removedWithoutConfirmedRestore(reason)` (forced) | unknown | yes, and the status says it is gone |
+| `forcedUnregisterIncomplete(reason, status:, error:)` (forced) | unknown | asked; the status says it is still there |
+
+The reasons (`HelperNoConfirmationReason`) are `connectFailed`,
+`helloFailed`, `noHello` (no `hello` within the deadline),
+`restoreConnectionFailed` and `noRestoreReply` (the helper answered
+`hello`, then the connection failed or the restore's reply did not
+arrive in time).
+
+Each outcome has a `summary` that says only what was confirmed. The kind
+of helper comes from its `hello`: `simulated` ("restored its simulated
+controls … your Mac's charging was not changed"), `monitorOnly` (no
+capabilities, like the daemon of this phase: it "controls no charging on
+this Mac" and changed nothing), `controlsCharging` ("restored macOS's
+default charging and confirmed it"), or `unknown` when `hello` was refused
+("its controls are back at their defaults"). No outcome without `ok` says
+that defaults were restored, and only `hardwareError` says that the helper
+keeps retrying: after any other refusal, a failure or a missing reply,
+whether it restored defaults and whether it is still trying is unknown.
+A forced removal also says that no helper starts at the next boot to
+restore defaults, and that a mechanism's state may outlast the helper.
+
+**Deadlines.** The conversation with the helper (connecting, `hello` and
+the restore together) has 20 s; each NSXPC request also times out after
+10 s on its own (D53). Each call to the registration has 15 s, more than
+launchd's 10 s `ExitTimeOut`, in case unregistering waits for the daemon
+to exit (unverified). Each deadline is an absolute expiry on a monotonic
+clock that keeps counting during sleep (`ContinuousClock`, injected for
+tests as `RemovalClock`). Whenever evidence arrives (a `hello`, a reply, a
+failure, a registration result), it is judged against that expiry under
+the lock that holds the decision (`HelperConversation`, and
+`DeadlineResult` for each registration call): at or after the expiry, the
+timeout outcome is frozen from the evidence recorded before, and the new
+evidence is refused. The timer only wakes the same check; which callback
+reaches the lock first never decides whether the deadline has passed. A
+confirmation recorded before the expiry counts, also while the connection
+is still being closed; a reply or a `hello` that arrives at or after it
+authorises nothing, so a late `ok` never leads to unregistering, a helper
+whose `hello` arrives late is not asked to exit, and a late registration
+result changes nothing (a late status is `unknown`, a late unregistering
+counts as unanswered). A deadline ends the wait, not the call: the call is
+cancelled and its late result dropped. The flow runs in a task of its own and ignores the caller's
+cancellation, so a confirmed restore is never left without its
+unregistering and its report. `HelperRemoval` alone ends within about
+65 s (20 s plus three registration calls); the controller adds its own
+registration read and the backend's restore. Ignoring the caller's
+cancellation bounds the waiting, not work that does not cooperate with
+cancellation: such a call keeps running on its own, so the phase-4b
+`SMAppService` adapter, like the NSXPC transport, must bound its own
+completion and clean-up.
+
+**CellKeeper's own state first.** `ChargeController.removeHelper(using:)`
+(and `removeHelper(using:force:)`) runs under the controller's command
+lock: it reads the registration and stops if no helper is registered,
+without restoring anything; otherwise it restores normal charging on the
+current backend and confirms it by read-back (`restoreNormal`; with
+macOS's Charge Limit, the user's own limit, its record deleted only after
+the read-back). If that is not confirmed, it stops
+(`normalChargingNotConfirmed`) without contacting the helper. Only then
+does it run the helper's flow. Holding the lock throughout keeps an
+evaluation from applying a restriction between the two restores (lead's
+decision, 2026-10-10). Each step and the outcome (`HelperUninstallOutcome`)
+are recorded in the activity log.
+
+Limitations:
+- The app does not call it yet; the button comes with phase 4a's UI work.
+- In the app today the registration is `NoHelperRegistration`, so a
+  removal ends at its first step with "nothing to remove": nothing is
+  restored, no helper is contacted, and the in-process Simulated helper
+  keeps running. Only the tests, with a fake registration, take the flow
+  further, and there a removal through the in-process transport leaves
+  that engine shut down.
+- After a removal, the controller keeps its backend; a helper backend then
+  finds the helper gone and reports it unavailable. The UI work is to
+  switch the app to the Simulated backend after a removal (lead's
+  decision, 2026-10-10).
+- While a removal runs, other commands wait for the lock, up to its
+  deadlines; quitting waits for it at most 10 s, as for any slow restore
+  (see "Data flow").
+- Whether `unregister()` waits for the daemon to exit, and whether turning
+  off the background item stops the daemon, are verified only with a
+  registered helper (phase 4b). A helper whose approval was revoked
+  (`requiresApproval`) may not run at all; it is then unreachable, and
+  removing it needs force.
 
 ## Future control backends
 
@@ -1912,3 +2070,9 @@ The helper daemon logs under its own subsystem,
 | D62 | Nothing that may block runs on Swift's cooperative thread pool: the helper engine runs on a serial dispatch queue of its own (a custom actor executor), and the daemon writes its log, saves its history and calls its blocking seams on dispatch queues of their own. Tests that stall on purpose stall on those queues (review of PR #65, after #64) | The pool has as many threads as cores (three on CI's macOS 15 image). A synchronous control call, a log write or a file write that blocks there takes one of them, and a few at once take every thread: nothing else runs, neither the daemon's shutdown and sleep handling nor, in tests, other suites in the same process, until the stalls end. A dispatch queue's thread blocks alone. `.serialized` only orders tests within one suite, so it could not prevent that |
 | D63 | While macOS's own Charge Limit is on, or its `pmset -g battlimit` report cannot be read and recognised, a backend that switches charging itself is asked for nothing but `.normal`: it offers only `.normal` and keeps its availability, the policy wants `.normal` (`deferringToMacOS`, before the safety floor, temperature, overrides and the limit), a hold in place is asked to end through the ordinary path and counts as ended only once a read taken after CellKeeper's last restricting request shows it (logged as safety events either way; a restriction is someone else's only on the backend's records), and CellKeeper asks the user to turn macOS's limit off; it never turns it off itself. macOS's limit is read at most every 30 s, and never on the release path (lead's decision, 2026-10-10; a deviation from R25) | The owner's direction (2026-10-06, 2026-10-09): CellKeeper controls charging, and the user turns macOS's limit off, so two limits never compete. The lower limit wins anyway (R25), so CellKeeper's status would be dishonest, and restricting on top of macOS fights it (R26). Restrictions toward safety are not needed while macOS enforces its own limit, and macOS has its own thermal limiting. An unreadable report is not guessed to be off, and `.unavailable` would misreport a backend that works |
 | D64 | `ChargingBackend.isReportedModeOwn()` is false only on positive evidence in the backend's records that nothing in effect is CellKeeper's (for the helper: nothing active, or every active control last changed by another client's activation or an outside change, with no restore owed and no failed write); it is nil when the records cannot establish it and after a read that threw. The controller ends its responsibility for a restriction only on a read showing normal charging or on false (reviewer's principle, 2026-10-10) | Missing activation bookkeeping, an attempted restore or a new helper instance does not prove that CellKeeper's restriction ended or became someone else's: a failed or wrong restore of the helper's can leave or make a control active on CellKeeper's account (D37), and a helper serves sessions after a failed start restore. Calling such a control someone else's would drop CellKeeper's responsibility and the safety event for it |
+| D65 | The helper is unregistered only after it replies `ok` to `restoreDefaultsAndExit`, and counts as removed only when the registration then reads `notRegistered` or `notFound`. An explicit reply to that restore request other than `ok` (`hardwareError`, `notIntroduced`, `rateLimited`) is never overridden, even when forced (lead's decision, 2026-10-10) | Safety precondition 9 and R4. After `hardwareError` the helper is the one process still retrying the restore (D30, D31), and unregistering terminates it; a refusal is the helper's answer and says nothing about defaults. Only the status read afterwards shows that the helper is gone |
+| D66 | A helper whose restore went unconfirmed because the transport failed or no reply arrived in time, at any stage (connecting, `hello`, the restore), is unregistered only with an explicit `HelperRemovalForce` (the user has seen the recovery procedure). The forced outcome says that the restore was not confirmed, that the exit restore is only an attempt, that a missing reply does not show the helper had stopped trying, that no helper starts at the next boot to restore defaults, and that a mechanism's state may outlast the helper (lead's decision and review of PR #66, 2026-10-10) | Such a helper can be broken in a way that would block its removal forever, for example by answering `hello` and never replying to the restore. Unregistering terminates a running daemon, whose SIGTERM path attempts the restore (D31) but may exit unconfirmed at its deadline; force is therefore an acknowledged loss of assurance, and the remaining risk is what the recovery procedure in `safety.md` covers |
+| D67 | The registration is behind a `HelperRegistration` seam in Core that mirrors `SMAppService.Status`; in phase 4a its only implementation is `NoHelperRegistration`, always `notRegistered`. The `SMAppService` implementation (phase 4b) treats "already unregistered" errors (`kSMErrorJobNotFound`, and the EPERM reported on macOS 26) as gone (lead's decision, 2026-10-10) | Nothing in phase 4a may register or unregister anything with launchd, and the removal logic must be testable without ServiceManagement |
+| D68 | The conversation with the helper has one 20 s deadline, and each registration call 15 s. Each is an absolute expiry on a monotonic clock that keeps counting during sleep; every piece of evidence (a `hello`, a reply, a failure, a registration result) is judged against it under the lock that holds the decision, when it arrives. At or after the expiry the timeout outcome is frozen and the evidence refused, so a late reply or `hello` authorises nothing (no unregistering, no request to exit) and a late registration result changes nothing. The timer only wakes that check. The flow ignores the caller's cancellation (reviews of PR #66, 2026-10-10) | Every call must be bounded (precondition 13), and a time limit must be judged on the clock when evidence is accepted, not by which callback reaches the lock first: a reply that completes after the deadline, while the timer's wake-up is delayed or set off by the deadline's own cancellation, could otherwise authorise unregistering. 20 s covers two NSXPC requests at their own 10 s timeout (D53); 15 s exceeds launchd's 10 s `ExitTimeOut` in case unregistering waits for the daemon to exit. A cancellation between a confirmed restore and the unregistering would leave the outcome unreported |
+| D69 | `ChargeController.removeHelper` restores and confirms normal charging on the current backend before it contacts the helper, holding the command lock throughout; if that is not confirmed it stops, and with no helper registered it restores nothing (lead's decision on the order, 2026-10-10) | The app holds state of its own, such as the user's Charge Limit; holding the lock keeps an evaluation from applying a restriction between the two restores. Restoring when there is nothing to remove would only cost a write and a re-apply |
+| D70 | Removal outcomes are typed, and each says only what was confirmed, worded by the kind of helper its `hello` reported (simulated, monitor-only, controls charging, unknown). Only `hardwareError` is described as a helper that keeps retrying; otherwise whether it restored defaults or is still trying is stated as unknown. A `hello` answered with a refusal does not stop the flow: `restoreDefaultsAndExit` is still sent (review of PR #66, 2026-10-10) | R30: nothing unconfirmed is claimed, including a recovery in progress that the reply does not establish, and a simulated or monitor-only helper never claims to have changed the Mac's charging. The engine serves restores without an introduction, so an incompatible or shutting-down helper can still confirm defaults |
