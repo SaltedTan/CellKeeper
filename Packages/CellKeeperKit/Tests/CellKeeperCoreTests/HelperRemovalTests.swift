@@ -3,12 +3,68 @@ import CellKeeperHelperCore
 import Foundation
 import Testing
 
+/// Where the conversation with the helper fails or goes silent.
+struct ConversationFault: Sendable, CustomStringConvertible {
+    enum Kind: Sendable {
+        case failure, timeout
+    }
+
+    var step: RemovalTestTransport.Step
+    var kind: Kind
+
+    static let all: [ConversationFault] = [
+        ConversationFault(step: .connect, kind: .failure),
+        ConversationFault(step: .hello, kind: .failure),
+        ConversationFault(step: .restoreAndExit, kind: .failure),
+        ConversationFault(step: .connect, kind: .timeout),
+        ConversationFault(step: .hello, kind: .timeout),
+        ConversationFault(step: .restoreAndExit, kind: .timeout),
+    ]
+
+    /// The log entry made when the step starts.
+    var logEntry: String {
+        switch step {
+        case .connect: "helper.connect"
+        case .hello: "helper.hello"
+        case .restoreAndExit: "helper.restoreDefaultsAndExit"
+        case .invalidate: "helper.invalidate"
+        }
+    }
+
+    /// The reason the removal reports, with the helper's deadline.
+    func reason(deadline: Duration) -> HelperNoConfirmationReason {
+        switch (step, kind) {
+        case (.connect, .failure): .connectFailed("test transport failure")
+        case (.hello, .failure): .helloFailed("test transport failure")
+        case (.restoreAndExit, .failure): .restoreConnectionFailed("test transport failure", helper: .simulated)
+        case (.connect, .timeout), (.hello, .timeout): .noHello(deadline)
+        case (.restoreAndExit, .timeout): .noRestoreReply(deadline, helper: .simulated)
+        case (.invalidate, _): .noHello(deadline)
+        }
+    }
+
+    var description: String {
+        "\(kind) at \(step)"
+    }
+}
+
 /// Safety precondition 9: the helper is unregistered only after it has
 /// confirmed that it restored defaults, and every outcome says only what was
 /// confirmed.
 @Suite("Helper removal")
 struct HelperRemovalTests {
     private static let unregisterSteps: Set<String> = ["helper.restoreDefaultsAndExit", "registration.unregister"]
+    private static let deadline: Duration = HelperRemoval.defaultHelperDeadline
+
+    /// Runs the removal while the test drives the helper's deadline.
+    private func remove(_ removal: HelperRemoval, force: Bool) -> Task<HelperRemovalOutcome, Never> {
+        Task {
+            if force {
+                return await removal.remove(force: .userHasSeenRecoveryProcedure)
+            }
+            return await removal.remove()
+        }
+    }
 
     // MARK: - The registration decides whether there is anything to remove
 
@@ -60,14 +116,32 @@ struct HelperRemovalTests {
         #expect(rig.registration.unregisterCount == 1)
     }
 
-    @Test("A helper that refuses hello still gets the restore, which needs no introduction")
+    @Test("A confirmation that arrives before the deadline counts, also while the connection is still being closed")
+    func confirmationBeforeTheDeadlineCounts() async {
+        let rig = RemovalRig()
+        let deadline = Gate()
+        defer {
+            deadline.open()
+            rig.transport.gate.open()
+        }
+        rig.transport.stall(at: .invalidate)
+        // The deadline never passes during the removal.
+        let outcome = await rig.removal(deadline: deadline).remove()
+        #expect(outcome == .removed(.simulated))
+        #expect(rig.log.count(of: "helper.invalidate") == 1)
+    }
+
+    @Test("A helper that really refuses hello still gets the restore, which needs no introduction")
     func refusedHelloStillRestores() async {
         let rig = RemovalRig(chargeControl: UnsimulatedChargeControl(inner: SimulatedChargeControl()))
-        rig.transport.replaceHelloStatus(with: .incompatibleProtocol)
+        rig.transport.sayHello(withClientVersion: HelperProtocolVersion.current + 1)
         let outcome = await rig.removal().remove()
+        #expect(rig.log.all.contains("helper.hello replied incompatibleProtocol"))
         // It did not complete hello, so it did not say what it controls.
         #expect(outcome == .removed(.unknown))
         #expect(outcome.summary.contains("The helper confirmed that its controls are back at their defaults."))
+        let isSafeToExit = await rig.engine.isSafeToExit
+        #expect(isSafeToExit)
     }
 
     @Test("A helper already shutting down confirms defaults with its restore")
@@ -79,22 +153,22 @@ struct HelperRemovalTests {
         #expect(outcome == .removed(.simulated))
     }
 
-    // MARK: - A restore that is not confirmed
+    // MARK: - An explicit refusal is never overridden
 
-    @Test("A helper that replies hardwareError is never unregistered, and keeps retrying the restore itself")
-    func hardwareErrorIsNotUnregistered() async {
+    @Test("A helper that replies hardwareError is never unregistered, even when forced, and keeps retrying the restore itself", arguments: [false, true])
+    func hardwareErrorIsNotUnregistered(force: Bool) async {
         let rig = RemovalRig()
         await rig.engine.start()
         await rig.holdInhibit()
         rig.control.failNextRestores(1)
 
-        let outcome = await rig.removal().remove()
+        let outcome = await remove(rig.removal(), force: force).value
 
-        #expect(outcome == .restoreNotConfirmed(.refused(.hardwareError), helper: .simulated))
+        #expect(outcome == .restoreRefused(.hardwareError, helper: .simulated))
         #expect(!outcome.isRestoreConfirmed)
         #expect(!outcome.offersForcedRemoval)
         #expect(rig.registration.unregisterCount == 0)
-        #expect(rig.log.count(of: "registration.unregister") == 0)
+        #expect(outcome.summary.contains("keeps retrying the restore by itself"))
         let isSafeToExit = await rig.engine.isSafeToExit
         #expect(!isSafeToExit)
         // The helper that was not unregistered is the one that finishes the
@@ -105,49 +179,158 @@ struct HelperRemovalTests {
         #expect(rig.control.activeControls.isEmpty)
     }
 
-    @Test("Every reply other than ok stops before unregistering", arguments: [HelperStatus.hardwareError, .notIntroduced, .rateLimited])
-    func otherRepliesStop(reply: HelperStatus) async {
+    @Test("Each explicit reply other than ok stops before unregistering, with or without force", arguments: [HelperStatus.hardwareError, .notIntroduced, .rateLimited], [false, true])
+    func refusalsAreNeverOverridden(reply: HelperStatus, force: Bool) async {
         let rig = RemovalRig()
         rig.transport.replaceRestoreReply(with: reply)
-        let outcome = await rig.removal().remove()
-        #expect(outcome == .restoreNotConfirmed(.refused(reply), helper: .simulated))
+        let outcome = await remove(rig.removal(), force: force).value
+        #expect(outcome == .restoreRefused(reply, helper: .simulated))
+        #expect(!outcome.offersForcedRemoval)
         #expect(rig.registration.unregisterCount == 0)
+        #expect(rig.log.count(of: "registration.unregister") == 0)
+        if reply != .hardwareError {
+            // Only hardwareError establishes that the helper keeps retrying.
+            #expect(!outcome.summary.contains("retrying"))
+            #expect(outcome.summary.contains("refused the request"))
+        }
     }
 
-    @Test("A connection that fails after hello, before the restore's reply, is not confirmed and not unregistered")
-    func connectionFailsDuringRestore() async {
+    @Test("A session that ended before the restore reached the helper gets notIntroduced, which is not overridden", arguments: [false, true])
+    func invalidatedSessionIsRefused(force: Bool) async {
         let rig = RemovalRig()
-        rig.transport.fail(at: .restoreAndExit)
-        let outcome = await rig.removal().remove(force: .userHasSeenRecoveryProcedure)
-        #expect(outcome == .restoreNotConfirmed(.connectionFailed("test transport failure"), helper: .simulated))
+        rig.transport.invalidateSessionBeforeRestore()
+        let outcome = await remove(rig.removal(), force: force).value
+        #expect(outcome == .restoreRefused(.notIntroduced, helper: .simulated))
+        #expect(rig.log.all.contains("helper.restoreDefaultsAndExit replied notIntroduced"))
         #expect(rig.registration.unregisterCount == 0)
+        #expect(!outcome.summary.contains("retrying"))
+        // The engine did not start shutting down for that request.
+        let isShuttingDown = await rig.engine.isShuttingDown
+        #expect(!isShuttingDown)
     }
 
-    // MARK: - A helper that cannot be reached
+    // MARK: - No confirmation: a transport failure or a missing reply
 
-    @Test("A helper that cannot be reached is not unregistered without force", arguments: [RemovalTestTransport.Step.connect, .hello])
-    func unreachableIsNotUnregistered(step: RemovalTestTransport.Step) async {
+    @Test("A failure or a missing reply at any stage leaves the restore unconfirmed; only force unregisters", arguments: ConversationFault.all, [false, true])
+    func unconfirmedAtEveryStage(fault: ConversationFault, force: Bool) async {
         let rig = RemovalRig()
-        rig.transport.fail(at: step)
-        let outcome = await rig.removal().remove()
-        let expected: HelperUnreachableReason = step == .connect ? .connectFailed("test transport failure") : .helloFailed("test transport failure")
-        #expect(outcome == .helperUnreachable(expected))
-        #expect(outcome.offersForcedRemoval)
+        let deadline = Gate()
+        defer {
+            deadline.open()
+            rig.transport.gate.open()
+        }
+        switch fault.kind {
+        case .failure: rig.transport.fail(at: fault.step)
+        case .timeout: rig.transport.stall(at: fault.step)
+        }
+
+        let running = remove(rig.removal(deadline: deadline), force: force)
+        if fault.kind == .timeout {
+            await rig.log.waitFor(fault.logEntry)
+            deadline.open()
+        }
+        let outcome = await running.value
+
+        let reason = fault.reason(deadline: Self.deadline)
         #expect(!outcome.isRestoreConfirmed)
-        #expect(rig.registration.unregisterCount == 0)
-        #expect(rig.log.count(of: "helper.restoreDefaultsAndExit") == 0)
+        #expect(!outcome.summary.contains("keeps retrying"))
+        if force {
+            #expect(outcome == .removedWithoutConfirmedRestore(reason))
+            #expect(outcome.isHelperRemoved)
+            #expect(rig.registration.unregisterCount == 1)
+        } else {
+            #expect(outcome == .restoreUnconfirmed(reason))
+            #expect(outcome.offersForcedRemoval)
+            #expect(rig.registration.unregisterCount == 0)
+            #expect(outcome.summary.contains("whether it is still trying, is unknown"))
+        }
     }
 
-    @Test("A forced removal of an unreachable helper unregisters it and says its restore was not confirmed")
-    func forcedRemovalOfUnreachableHelper() async {
+    @Test("A reply that the deadline's cancellation sets off never authorises unregistering")
+    func lateRestoreReplyIsIgnored() async {
+        for _ in 0..<20 {
+            let rig = RemovalRig()
+            let deadline = Gate()
+            rig.transport.answerOnlyWhenCancelled(at: .restoreAndExit)
+
+            let running = remove(rig.removal(deadline: deadline), force: false)
+            await rig.log.waitFor("helper.restoreDefaultsAndExit")
+            deadline.open()
+            let outcome = await running.value
+
+            #expect(outcome == .restoreUnconfirmed(.noRestoreReply(Self.deadline, helper: .simulated)))
+            // The late ok did arrive, and changed nothing.
+            await rig.log.waitFor("helper.restoreDefaultsAndExit replied ok")
+            await rig.log.waitFor("helper.invalidate")
+            #expect(rig.registration.unregisterCount == 0)
+        }
+    }
+
+    @Test("A hello that the deadline's cancellation sets off does not get the helper asked to exit")
+    func lateHelloAuthorisesNothing() async {
+        let rig = RemovalRig()
+        let deadline = Gate()
+        rig.transport.answerOnlyWhenCancelled(at: .hello)
+
+        let running = remove(rig.removal(deadline: deadline), force: false)
+        await rig.log.waitFor("helper.hello")
+        deadline.open()
+        let outcome = await running.value
+
+        #expect(outcome == .restoreUnconfirmed(.noHello(Self.deadline)))
+        await rig.log.waitFor("helper.hello replied ok")
+        await rig.log.waitFor("helper.invalidate")
+        #expect(rig.log.count(of: "helper.restoreDefaultsAndExit") == 0)
+        let isShuttingDown = await rig.engine.isShuttingDown
+        #expect(!isShuttingDown)
+        #expect(rig.registration.unregisterCount == 0)
+    }
+
+    @Test("With a real timer, a helper slower than the deadline is not unregistered, even when it confirms later")
+    func slowRestoreHitsTheDeadline() async {
+        let rig = RemovalRig()
+        rig.transport.stall(at: .restoreAndExit)
+        defer { rig.transport.gate.open() }
+
+        let outcome = await rig.removal(helperDeadline: .milliseconds(50)).remove()
+
+        #expect(outcome == .restoreUnconfirmed(.noRestoreReply(.milliseconds(50), helper: .simulated)))
+        #expect(rig.registration.unregisterCount == 0)
+        rig.transport.gate.open()
+        await rig.log.waitFor("helper.restoreDefaultsAndExit replied ok")
+        await rig.log.waitFor("helper.invalidate")
+        #expect(rig.registration.unregisterCount == 0)
+    }
+
+    @Test("With a real timer, a helper that does not answer hello in time is not asked to exit afterwards")
+    func slowHelloHitsTheDeadline() async {
+        let rig = RemovalRig()
+        rig.transport.stall(at: .hello)
+        defer { rig.transport.gate.open() }
+
+        let outcome = await rig.removal(helperDeadline: .milliseconds(50)).remove()
+
+        #expect(outcome == .restoreUnconfirmed(.noHello(.milliseconds(50))))
+        rig.transport.gate.open()
+        await rig.log.waitFor("helper.invalidate")
+        #expect(rig.log.count(of: "helper.restoreDefaultsAndExit") == 0)
+        let isShuttingDown = await rig.engine.isShuttingDown
+        #expect(!isShuttingDown)
+        #expect(rig.registration.unregisterCount == 0)
+    }
+
+    @Test("A forced removal says what it could not confirm, and what removing the helper gives up")
+    func forcedRemovalWording() async {
         let rig = RemovalRig()
         rig.transport.fail(at: .hello)
         let outcome = await rig.removal().remove(force: .userHasSeenRecoveryProcedure)
         #expect(outcome == .removedWithoutConfirmedRestore(.helloFailed("test transport failure")))
-        #expect(outcome.isHelperRemoved)
         #expect(!outcome.isRestoreConfirmed)
-        #expect(rig.registration.unregisterCount == 1)
-        #expect(outcome.summary.contains("its restore of defaults was not confirmed"))
+        #expect(outcome.summary.contains("Nothing confirmed that the helper restored defaults"))
+        #expect(outcome.summary.contains("attempts the restore as it exits, but nothing confirmed that"))
+        #expect(outcome.summary.contains("a missing reply does not show that the helper had stopped trying"))
+        #expect(outcome.summary.contains("no helper starts at the next startup to restore defaults"))
+        #expect(outcome.summary.contains("may outlast the helper"))
         #expect(outcome.summary.contains(HelperRemoval.recoveryProcedureTitle))
     }
 
@@ -159,16 +342,7 @@ struct HelperRemovalTests {
         let outcome = await rig.removal().remove(force: .userHasSeenRecoveryProcedure)
         #expect(outcome == .forcedUnregisterIncomplete(.connectFailed("test transport failure"), status: .enabled, error: nil))
         #expect(!outcome.isHelperRemoved)
-    }
-
-    @Test("Force never unregisters a helper that answers without confirming")
-    func forceDoesNotOverrideAnUnconfirmedRestore() async {
-        let rig = RemovalRig()
-        await rig.engine.start()
-        rig.control.failNextRestores(1)
-        let outcome = await rig.removal().remove(force: .userHasSeenRecoveryProcedure)
-        #expect(outcome == .restoreNotConfirmed(.refused(.hardwareError), helper: .simulated))
-        #expect(rig.registration.unregisterCount == 0)
+        #expect(outcome.summary.contains("Nothing confirms that defaults are in effect"))
     }
 
     @Test("Force with a helper that confirms is an ordinary, confirmed removal")
@@ -179,51 +353,7 @@ struct HelperRemovalTests {
         #expect(outcome.isRestoreConfirmed)
     }
 
-    // MARK: - Deadlines
-
-    @Test("A helper slower than the deadline is not unregistered, even when it confirms later")
-    func slowRestoreHitsTheDeadline() async {
-        let rig = RemovalRig()
-        rig.transport.stall(at: .restoreAndExit)
-        defer { rig.transport.gate.open() }
-
-        let outcome = await rig.removal(helperDeadline: .milliseconds(50)).remove()
-
-        #expect(outcome == .restoreNotConfirmed(.noReply(.milliseconds(50)), helper: .simulated))
-        #expect(rig.registration.unregisterCount == 0)
-        // The late ok changes nothing.
-        rig.transport.gate.open()
-        await rig.log.waitFor("helper.restoreDefaultsAndExit replied ok")
-        await rig.log.waitFor("helper.invalidate")
-        #expect(rig.registration.unregisterCount == 0)
-    }
-
-    @Test("A helper that does not answer hello in time is unreachable, and is not asked to exit afterwards")
-    func slowHelloHitsTheDeadline() async {
-        let rig = RemovalRig()
-        rig.transport.stall(at: .hello)
-        defer { rig.transport.gate.open() }
-
-        let outcome = await rig.removal(helperDeadline: .milliseconds(50)).remove()
-
-        #expect(outcome == .helperUnreachable(.noAnswer(.milliseconds(50))))
-        rig.transport.gate.open()
-        await rig.log.waitFor("helper.invalidate")
-        #expect(rig.log.count(of: "helper.restoreDefaultsAndExit") == 0)
-        let isShuttingDown = await rig.engine.isShuttingDown
-        #expect(!isShuttingDown)
-        #expect(rig.registration.unregisterCount == 0)
-    }
-
-    @Test("A connection that does not open in time is unreachable")
-    func slowConnectHitsTheDeadline() async {
-        let rig = RemovalRig()
-        rig.transport.stall(at: .connect)
-        defer { rig.transport.gate.open() }
-        let outcome = await rig.removal(helperDeadline: .milliseconds(50)).remove()
-        #expect(outcome == .helperUnreachable(.noAnswer(.milliseconds(50))))
-        #expect(rig.registration.unregisterCount == 0)
-    }
+    // MARK: - Unregistering
 
     @Test("An unregistering that does not answer in time is incomplete")
     func slowUnregister() async {
@@ -254,8 +384,6 @@ struct HelperRemovalTests {
         #expect(detail.contains("no answer within"))
         #expect(rig.registration.unregisterCount == 1)
     }
-
-    // MARK: - Unregistering
 
     @Test("Unregistering that throws while the helper stays registered is incomplete")
     func unregisterThrows() async {
@@ -315,15 +443,17 @@ struct HelperRemovalTests {
         #expect(!outcome.summary.contains("restored macOS"))
     }
 
-    @Test("No outcome without ok says defaults were restored")
+    @Test("No outcome without ok says defaults were restored; only hardwareError says the helper keeps retrying")
     func unconfirmedOutcomesClaimNoRestore() {
         let unconfirmed: [HelperRemovalOutcome] = [
             .nothingToRemove(.notRegistered),
-            .restoreNotConfirmed(.refused(.hardwareError), helper: .controlsCharging),
-            .restoreNotConfirmed(.noReply(.seconds(20)), helper: .simulated),
-            .restoreNotConfirmed(.connectionFailed("interrupted"), helper: .unknown),
-            .helperUnreachable(.connectFailed("invalidated")),
-            .removedWithoutConfirmedRestore(.noAnswer(.seconds(20))),
+            .restoreRefused(.hardwareError, helper: .controlsCharging),
+            .restoreRefused(.notIntroduced, helper: .controlsCharging),
+            .restoreRefused(.rateLimited, helper: .unknown),
+            .restoreUnconfirmed(.connectFailed("invalidated")),
+            .restoreUnconfirmed(.restoreConnectionFailed("interrupted", helper: .controlsCharging)),
+            .restoreUnconfirmed(.noRestoreReply(.seconds(20), helper: .simulated)),
+            .removedWithoutConfirmedRestore(.noHello(.seconds(20))),
             .forcedUnregisterIncomplete(.helloFailed("invalidated"), status: .enabled, error: "denied"),
         ]
         for outcome in unconfirmed {
@@ -331,7 +461,10 @@ struct HelperRemovalTests {
             for claim in ["restored macOS", "restored its simulated controls", "confirmed that its controls are back", "confirmed that none of its controls"] {
                 #expect(!outcome.summary.contains(claim), "\(outcome) claims \"\(claim)\"")
             }
+            let saysRetrying = outcome.summary.contains("keeps retrying")
+            #expect(saysRetrying == (outcome == .restoreRefused(.hardwareError, helper: .controlsCharging)), "\(outcome)")
         }
-        #expect(HelperRemovalOutcome.restoreNotConfirmed(.refused(.hardwareError), helper: .simulated).summary.contains("your Mac's charging is not affected"))
+        #expect(HelperRemovalOutcome.restoreUnconfirmed(.noRestoreReply(.seconds(20), helper: .simulated)).summary.contains("your Mac's charging is not affected"))
+        #expect(HelperRemovalOutcome.restoreRefused(.notIntroduced, helper: .simulated).summary.contains("your Mac's charging is not affected"))
     }
 }

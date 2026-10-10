@@ -48,7 +48,7 @@ struct HelperRemovalControllerTests {
         rig.transport.replaceRestoreReply(with: .hardwareError)
         let controller = controller(backend: RecordingBackend(log: rig.log))
         let outcome = await controller.removeHelper(using: rig.removal())
-        #expect(outcome == .helperRemoval(.restoreNotConfirmed(.refused(.hardwareError), helper: .simulated)))
+        #expect(outcome == .helperRemoval(.restoreRefused(.hardwareError, helper: .simulated)))
         #expect(rig.log.order(of: Self.steps) == ["backend.normal", "helper.restoreDefaultsAndExit"])
         let events = await controller.status.events
         #expect(events.contains { $0.message.contains("so CellKeeper did not remove it") })

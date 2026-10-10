@@ -1,4 +1,4 @@
-import CellKeeperCore
+@testable import CellKeeperCore
 import CellKeeperHelperCore
 import Foundation
 
@@ -157,6 +157,8 @@ final class FakeHelperRegistration: HelperRegistration, @unchecked Sendable {
 final class RemovalTestTransport: HelperTransport, @unchecked Sendable {
     enum Step: Sendable {
         case connect, hello, restoreAndExit
+        /// Closing the connection; only stalling applies.
+        case invalidate
     }
 
     let inner: any HelperTransport
@@ -166,7 +168,9 @@ final class RemovalTestTransport: HelperTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var failingStep: Step?
     private var stallingStep: Step?
-    private var helloStatusValue: HelperStatus?
+    private var cancellationStep: Step?
+    private var clientVersionValue: Int?
+    private var invalidatesBeforeRestore = false
     private var restoreReplyValue: HelperStatus?
     private var restoreObserver: (@Sendable () -> Void)?
 
@@ -185,10 +189,23 @@ final class RemovalTestTransport: HelperTransport, @unchecked Sendable {
         lock.withLock { stallingStep = step }
     }
 
-    /// Replaces the status of `hello`'s reply; the rest of the reply is the
-    /// helper's.
-    func replaceHelloStatus(with status: HelperStatus) {
-        lock.withLock { helloStatusValue = status }
+    /// Makes `step` wait until its task is cancelled (as the deadline
+    /// cancels it), and only then go on to the helper and answer: a reply
+    /// that the cancellation itself sets off.
+    func answerOnlyWhenCancelled(at step: Step) {
+        lock.withLock { cancellationStep = step }
+    }
+
+    /// Says hello to the helper with `version` instead of the client's own,
+    /// so a real engine refuses it.
+    func sayHello(withClientVersion version: Int) {
+        lock.withLock { clientVersionValue = version }
+    }
+
+    /// Ends the helper session just before `restoreDefaultsAndExit` reaches
+    /// the helper, as if the session had been invalidated meanwhile.
+    func invalidateSessionBeforeRestore() {
+        lock.withLock { invalidatesBeforeRestore = true }
     }
 
     /// Answers `restoreDefaultsAndExit` with `status` without asking the
@@ -210,8 +227,16 @@ final class RemovalTestTransport: HelperTransport, @unchecked Sendable {
         lock.withLock { stallingStep == step }
     }
 
-    var helloStatus: HelperStatus? {
-        lock.withLock { helloStatusValue }
+    func answersOnlyWhenCancelled(_ step: Step) -> Bool {
+        lock.withLock { cancellationStep == step }
+    }
+
+    var clientVersion: Int? {
+        lock.withLock { clientVersionValue }
+    }
+
+    var invalidatesSessionBeforeRestore: Bool {
+        lock.withLock { invalidatesBeforeRestore }
     }
 
     var restoreReply: HelperStatus? {
@@ -222,14 +247,28 @@ final class RemovalTestTransport: HelperTransport, @unchecked Sendable {
         lock.withLock { restoreObserver }
     }
 
-    func connect() async throws -> any HelperConnection {
-        log.append("helper.connect")
-        if stalls(.connect) {
+    /// The injected behaviour of `step`, before it reaches the helper.
+    func intervene(at step: Step, name: String) async throws {
+        log.append(name)
+        if stalls(step) {
             await gate.wait()
         }
-        if fails(.connect) {
+        if answersOnlyWhenCancelled(step) {
+            let cancelled = Gate()
+            await withTaskCancellationHandler {
+                await cancelled.wait()
+            } onCancel: {
+                cancelled.open()
+            }
+            log.append("\(name) cancelled")
+        }
+        if fails(step) {
             throw TransportTestError()
         }
+    }
+
+    func connect() async throws -> any HelperConnection {
+        try await intervene(at: .connect, name: "helper.connect")
         return RemovalTestConnection(inner: try await inner.connect(), transport: self)
     }
 }
@@ -240,30 +279,27 @@ struct RemovalTestConnection: HelperConnection {
     let transport: RemovalTestTransport
 
     func hello(clientProtocolVersion: Int) async throws -> HelperHelloReply {
-        transport.log.append("helper.hello")
-        if transport.stalls(.hello) {
-            await transport.gate.wait()
-        }
-        if transport.fails(.hello) {
+        do {
+            try await transport.intervene(at: .hello, name: "helper.hello")
+        } catch {
             await inner.invalidate()
-            throw TransportTestError()
+            throw error
         }
-        var reply = try await inner.hello(clientProtocolVersion: clientProtocolVersion)
-        if let status = transport.helloStatus {
-            reply.status = status
-        }
+        let reply = try await inner.hello(clientProtocolVersion: transport.clientVersion ?? clientProtocolVersion)
+        transport.log.append("helper.hello replied \(reply.status)")
         return reply
     }
 
     func restoreDefaultsAndExit() async throws -> HelperStatus {
-        transport.log.append("helper.restoreDefaultsAndExit")
         transport.onRestore?()
-        if transport.stalls(.restoreAndExit) {
-            await transport.gate.wait()
-        }
-        if transport.fails(.restoreAndExit) {
+        do {
+            try await transport.intervene(at: .restoreAndExit, name: "helper.restoreDefaultsAndExit")
+        } catch {
             await inner.invalidate()
-            throw TransportTestError()
+            throw error
+        }
+        if transport.invalidatesSessionBeforeRestore {
+            await inner.invalidate()
         }
         let status: HelperStatus
         if let replaced = transport.restoreReply {
@@ -277,6 +313,9 @@ struct RemovalTestConnection: HelperConnection {
 
     func invalidate() async {
         transport.log.append("helper.invalidate")
+        if transport.stalls(.invalidate) {
+            await transport.gate.wait()
+        }
         await inner.invalidate()
     }
 
@@ -337,11 +376,31 @@ struct RemovalRig {
         helper.engine
     }
 
+    /// - Parameter deadline: if given, the helper's deadline passes when the
+    ///   test opens it, and not before; the registration's deadlines stay
+    ///   real.
     func removal(
         helperDeadline: Duration = HelperRemoval.defaultHelperDeadline,
-        registrationDeadline: Duration = HelperRemoval.defaultRegistrationDeadline
+        registrationDeadline: Duration = HelperRemoval.defaultRegistrationDeadline,
+        deadline: Gate? = nil
     ) -> HelperRemoval {
-        HelperRemoval(transport: transport, registration: registration, helperDeadline: helperDeadline, registrationDeadline: registrationDeadline)
+        guard let deadline else {
+            return HelperRemoval(transport: transport, registration: registration, helperDeadline: helperDeadline, registrationDeadline: registrationDeadline)
+        }
+        precondition(helperDeadline != registrationDeadline, "the injected timer tells the deadlines apart by length")
+        return HelperRemoval(
+            transport: transport,
+            registration: registration,
+            helperDeadline: helperDeadline,
+            registrationDeadline: registrationDeadline,
+            waitForDeadline: { duration in
+                if duration == helperDeadline {
+                    await deadline.wait()
+                } else {
+                    try? await Task.sleep(for: duration)
+                }
+            }
+        )
     }
 
     /// Another client of the helper holds the charging inhibit, so the

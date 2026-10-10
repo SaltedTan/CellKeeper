@@ -10,36 +10,44 @@ import os
 /// 1. Read the registration. No helper registered (`notRegistered`,
 ///    `notFound`): nothing to remove, and no helper is contacted.
 /// 2. Otherwise connect, say `hello`, and ask the helper to
-///    `restoreDefaultsAndExit`. Only a reply of `ok` confirms defaults: the
-///    engine replies `hardwareError` when its restore did not read back
-///    clean, and keeps retrying it. A helper that refuses `hello` still gets
-///    the request, because restores need no introduction.
+///    `restoreDefaultsAndExit`. Only a reply of `ok` confirms defaults. A
+///    helper that refuses `hello` still gets the request, because the engine
+///    serves restores without an introduction.
 /// 3. Only after `ok`: unregister, then read the registration again. The
 ///    helper counts as removed only if it is then `notRegistered` or
 ///    `notFound`.
-/// 4. A helper that answered but did not confirm defaults is never
-///    unregistered, also with `force`: unregistering terminates the daemon,
-///    which is the one process still retrying the restore.
-/// 5. A helper that cannot be reached at all (the connection, or `hello`,
-///    failed or did not answer in time) is not unregistered either, unless
-///    the caller passes ``HelperRemovalForce`` to ``remove(force:)``: the
-///    user has seen the recovery procedure and wants the helper removed
-///    although its restore could not be confirmed. An unreachable helper can
-///    be broken in a way that would block its removal forever, and
-///    unregistering terminates a running daemon, whose SIGTERM path restores
-///    defaults itself (D31). What remains is a mechanism whose state
-///    outlives the helper, which is what the recovery procedure covers.
+/// 4. An explicit reply other than `ok` is never overridden, not even with
+///    force. `hardwareError` means the helper's restore did not read back
+///    clean and the helper keeps retrying it, so unregistering would stop
+///    the one process that is restoring; `notIntroduced` and `rateLimited`
+///    mean it refused the request.
+/// 5. If nothing confirmed the restore because the transport failed or no
+///    reply arrived in time, at any stage (connecting, `hello`, the
+///    restore), the helper is not unregistered either, unless the caller
+///    passes ``HelperRemovalForce`` to ``remove(force:)``: the user has seen
+///    the recovery procedure and wants the helper removed although its
+///    restore could not be confirmed. Such a helper can be broken in a way
+///    that would block its removal forever. Unregistering terminates a
+///    running daemon, whose SIGTERM path attempts the restore itself (D31),
+///    but nothing confirms that attempt, a missing reply does not show that
+///    the helper had stopped trying, and an unregistered helper does not
+///    restore defaults at the next startup. The forced outcome says so; the
+///    remaining risk is what the recovery procedure covers.
 ///
 /// Every step has a deadline: ``helperDeadline`` for the whole
 /// conversation with the helper (connecting, `hello` and the restore; the
 /// NSXPC transport also times out each request on its own), and
-/// ``registrationDeadline`` for each call to the registration. A helper
-/// whose reply has not arrived when the deadline passes is treated as not
-/// confirmed, and nothing is unregistered, even if it confirms later; a
-/// helper whose `hello` had not arrived by then counts as unreachable, and
-/// is not asked to exit afterwards. The flow ignores the caller's
-/// cancellation, so it always finishes within its deadlines and reports
-/// what happened.
+/// ``registrationDeadline`` for each call to the registration. The
+/// conversation's evidence and its deadline share one lock: whichever comes
+/// first, conclusive evidence (a failure, or the restore's reply) or the
+/// deadline, decides, and the evidence is frozen at that moment. A reply or
+/// a `hello` recorded after the deadline authorises nothing: a late `ok`
+/// never leads to unregistering, and a helper whose `hello` arrives late is
+/// not asked to exit. The flow ignores the caller's cancellation, so it
+/// always finishes within its deadlines and reports what happened. That
+/// bounds the waiting, not the work behind it: a call that does not
+/// cooperate with cancellation keeps running on its own, so the transport
+/// and the registration must bound their own calls and clean-up.
 ///
 /// The outcome (``HelperRemovalOutcome``) states only what was confirmed:
 /// no case says defaults were restored unless the helper replied `ok`.
@@ -61,6 +69,9 @@ public struct HelperRemoval: Sendable {
     public let registration: any HelperRegistration
     public let helperDeadline: Duration
     public let registrationDeadline: Duration
+    /// Returns once a deadline of the given length has passed; tests inject
+    /// their own timer.
+    let waitForDeadline: @Sendable (Duration) async -> Void
 
     public init(
         transport: any HelperTransport,
@@ -68,23 +79,40 @@ public struct HelperRemoval: Sendable {
         helperDeadline: Duration = HelperRemoval.defaultHelperDeadline,
         registrationDeadline: Duration = HelperRemoval.defaultRegistrationDeadline
     ) {
+        self.init(
+            transport: transport,
+            registration: registration,
+            helperDeadline: helperDeadline,
+            registrationDeadline: registrationDeadline,
+            waitForDeadline: { try? await Task.sleep(for: $0) }
+        )
+    }
+
+    init(
+        transport: any HelperTransport,
+        registration: any HelperRegistration,
+        helperDeadline: Duration,
+        registrationDeadline: Duration,
+        waitForDeadline: @escaping @Sendable (Duration) async -> Void
+    ) {
         self.transport = transport
         self.registration = registration
         self.helperDeadline = helperDeadline
         self.registrationDeadline = registrationDeadline
+        self.waitForDeadline = waitForDeadline
     }
 
     /// Removes the helper if, and only if, it confirms that it restored
-    /// defaults. Never unregisters a helper that did not confirm, including
-    /// one that cannot be reached.
+    /// defaults. Never unregisters a helper that did not confirm.
     public func remove() async -> HelperRemovalOutcome {
         await runDetached(force: nil)
     }
 
-    /// As ``remove()``, but a helper that cannot be reached at all is
-    /// unregistered anyway, and the outcome says that its restore was not
-    /// confirmed. A helper that answers but does not confirm defaults is
-    /// still never unregistered.
+    /// As ``remove()``, but a helper whose restore went unconfirmed because
+    /// the transport failed or no reply arrived in time is unregistered
+    /// anyway, and the outcome says that its restore was not confirmed. A
+    /// helper that replies with anything other than `ok` is still never
+    /// unregistered.
     public func remove(force: HelperRemovalForce) async -> HelperRemovalOutcome {
         await runDetached(force: force)
     }
@@ -94,7 +122,7 @@ public struct HelperRemoval: Sendable {
     /// ``registrationDeadline``.
     public func registrationStatus() async -> HelperRegistrationStatus {
         let registration = registration
-        return await Self.withDeadline(registrationDeadline) { await registration.status() }
+        return await withDeadline(registrationDeadline) { await registration.status() }
             ?? .unknown("no answer within \(Self.describe(registrationDeadline))")
     }
 
@@ -120,13 +148,13 @@ public struct HelperRemoval: Sendable {
                 return logged(.removed(helper))
             }
             return logged(.unregisterIncomplete(helper, status: unregistering.status, error: unregistering.error))
-        case .notConfirmed(let failure, let helper):
-            return logged(.restoreNotConfirmed(failure, helper: helper))
-        case .unreachable(let reason):
+        case .refused(let status, let helper):
+            return logged(.restoreRefused(status, helper: helper))
+        case .unconfirmed(let reason):
             guard force != nil else {
-                return logged(.helperUnreachable(reason))
+                return logged(.restoreUnconfirmed(reason))
             }
-            CellKeeperLog.safety.error("Helper removal: the helper cannot be reached (\(reason.description, privacy: .public)); unregistering it anyway at the user's request.")
+            CellKeeperLog.safety.error("Helper removal: nothing confirmed the helper's restore (\(reason.description, privacy: .public)); unregistering it anyway at the user's request.")
             let unregistering = await unregisterAndCheck()
             if unregistering.status.meansNoHelperRegistered {
                 return logged(.removedWithoutConfirmedRestore(reason))
@@ -138,7 +166,7 @@ public struct HelperRemoval: Sendable {
     private func logged(_ outcome: HelperRemovalOutcome) -> HelperRemovalOutcome {
         let level: OSLogType = switch outcome {
         case .nothingToRemove, .removed: .default
-        case .unregisterIncomplete, .restoreNotConfirmed, .helperUnreachable, .removedWithoutConfirmedRestore, .forcedUnregisterIncomplete: .error
+        case .unregisterIncomplete, .restoreRefused, .restoreUnconfirmed, .removedWithoutConfirmedRestore, .forcedUnregisterIncomplete: .error
         }
         CellKeeperLog.safety.log(level: level, "Helper removal: \(outcome.summary, privacy: .public)")
         return outcome
@@ -149,7 +177,7 @@ public struct HelperRemoval: Sendable {
     /// unregistering; the status alone decides whether the helper is gone.
     private func unregisterAndCheck() async -> (status: HelperRegistrationStatus, error: String?) {
         let registration = registration
-        let answer = await Self.withDeadline(registrationDeadline) { () async -> String? in
+        let answer = await withDeadline(registrationDeadline) { () async -> String? in
             do {
                 try await registration.unregister()
                 return nil
@@ -164,68 +192,59 @@ public struct HelperRemoval: Sendable {
         return (await registrationStatus(), error)
     }
 
-    /// What the conversation with the helper established.
-    private enum Conversation: Sendable {
-        case confirmed(HelperKind)
-        case notConfirmed(HelperRestoreFailure, HelperKind)
-        case unreachable(HelperUnreachableReason)
-    }
-
     /// Connects, says hello, and asks the helper to restore defaults and
-    /// exit, all within ``helperDeadline``.
-    private func askHelperToRestoreAndExit() async -> Conversation {
-        let progress = ConversationProgress()
+    /// exit. Conclusive evidence or ``helperDeadline``, whichever comes
+    /// first, decides; see ``HelperConversation``.
+    private func askHelperToRestoreAndExit() async -> HelperConversation.Result {
+        let conversation = HelperConversation(deadline: helperDeadline)
         let transport = transport
-        if let finished = await Self.withDeadline(helperDeadline, { await Self.converse(with: transport, progress: progress) }) {
-            return finished
-        }
-        // The deadline passed first. A reply that has arrived by now (the
-        // connection was still being closed) counts; a later one is ignored.
-        let seen = progress.snapshot
-        guard let hello = seen.hello else {
-            return .unreachable(.noAnswer(helperDeadline))
-        }
-        let helper = HelperKind(hello: hello)
-        switch seen.restore {
-        case .ok?: return .confirmed(helper)
-        case let status?: return .notConfirmed(.refused(status), helper)
-        case nil: return .notConfirmed(.noReply(helperDeadline), helper)
+        let wait = waitForDeadline
+        let deadline = helperDeadline
+        return await withCheckedContinuation { continuation in
+            conversation.install(continuation)
+            conversation.attach(work: Task { await Self.converse(with: transport, in: conversation) })
+            conversation.attach(timer: Task {
+                await wait(deadline)
+                conversation.expire()
+            })
         }
     }
 
-    private static func converse(with transport: any HelperTransport, progress: ConversationProgress) async -> Conversation {
+    private static func converse(with transport: any HelperTransport, in conversation: HelperConversation) async {
         let connection: any HelperConnection
         do {
             connection = try await transport.connect()
         } catch {
-            return .unreachable(.connectFailed(String(describing: error)))
+            conversation.conclude(.unconfirmed(.connectFailed(String(describing: error))))
+            return
         }
         let hello: HelperHelloReply
         do {
             hello = try await connection.hello(clientProtocolVersion: HelperProtocolVersion.current)
         } catch {
+            conversation.conclude(.unconfirmed(.helloFailed(String(describing: error))))
             await connection.invalidate()
-            return .unreachable(.helloFailed(String(describing: error)))
+            return
         }
-        progress.record(hello: hello)
+        // A hello recorded after the deadline authorises nothing: the
+        // helper is not asked to exit.
+        guard conversation.record(hello: hello) else {
+            await connection.invalidate()
+            return
+        }
         let helper = HelperKind(hello: hello)
-        guard !Task.isCancelled else {
-            // Only the deadline cancels this task: the outcome has been
-            // reported, and this result is dropped. The helper is not asked
-            // to exit after that.
-            await connection.invalidate()
-            return .notConfirmed(.noReply(.zero), helper)
-        }
         let status: HelperStatus
         do {
             status = try await connection.restoreDefaultsAndExit()
         } catch {
+            conversation.conclude(.unconfirmed(.restoreConnectionFailed(String(describing: error), helper: helper)))
             await connection.invalidate()
-            return .notConfirmed(.connectionFailed(String(describing: error)), helper)
+            return
         }
-        progress.record(restore: status)
+        // Decided before the connection is closed, so closing it cannot
+        // delay a confirmation past the deadline.
+        conversation.conclude(status == .ok ? .confirmed(helper) : .refused(status, helper))
         await connection.invalidate()
-        return status == .ok ? .confirmed(helper) : .notConfirmed(.refused(status), helper)
     }
 
     // MARK: - Deadlines
@@ -234,13 +253,14 @@ public struct HelperRemoval: Sendable {
     /// if `deadline` passes first. The operation is then cancelled but not
     /// awaited: a call stuck in a transport keeps running on its own, and
     /// its result is dropped.
-    static func withDeadline<T: Sendable>(_ deadline: Duration, _ operation: @escaping @Sendable () async -> T) async -> T? {
+    func withDeadline<T: Sendable>(_ deadline: Duration, _ operation: @escaping @Sendable () async -> T) async -> T? {
         let race = FirstResult<T>()
+        let wait = waitForDeadline
         return await withCheckedContinuation { continuation in
             race.install(continuation)
             race.attach(Task { race.finish(await operation()) })
             race.attach(Task {
-                try? await Task.sleep(for: deadline)
+                await wait(deadline)
                 race.finish(nil)
             })
         }
@@ -255,8 +275,8 @@ public struct HelperRemoval: Sendable {
     }
 }
 
-/// Consent to unregister a helper that could not be reached, so that its
-/// restore of defaults could not be confirmed. See
+/// Consent to unregister a helper whose restore of defaults could not be
+/// confirmed because the transport failed or no reply arrived in time. See
 /// ``HelperRemoval/remove(force:)``.
 public enum HelperRemovalForce: Sendable, Equatable {
     /// The user has seen the recovery procedure ("Recovery if charging does
@@ -299,47 +319,39 @@ public enum HelperKind: Sendable, Equatable, CustomStringConvertible {
     }
 }
 
-/// Why a helper that answered did not confirm that it restored defaults.
-public enum HelperRestoreFailure: Sendable, Equatable, CustomStringConvertible {
-    /// It answered `restoreDefaultsAndExit` with this status instead of
-    /// `ok`. The engine replies `hardwareError` when its restore did not
-    /// read back clean (it keeps retrying it), `notIntroduced` when the
-    /// session no longer existed (invalidated or revoked), and `rateLimited`
-    /// when this request revoked the session for exceeding its request
-    /// budget; restores are served before start and during shutdown, so
-    /// `notReady` and `shuttingDown` do not occur. Any other status is
-    /// reported as it is.
-    case refused(HelperStatus)
-    /// The connection failed after `hello`, before the reply arrived (for
-    /// example, the helper crashed).
-    case connectionFailed(String)
-    /// No reply within the deadline.
-    case noReply(Duration)
-
-    public var description: String {
-        switch self {
-        case .refused(let status): "the helper replied \(status)"
-        case .connectionFailed(let detail): "the connection failed: \(detail)"
-        case .noReply(let deadline): "no reply within \(HelperRemoval.describe(deadline))"
-        }
-    }
-}
-
-/// Why the helper could not be reached at all.
-public enum HelperUnreachableReason: Sendable, Equatable, CustomStringConvertible {
+/// Why nothing confirmed the helper's restore although the helper did not
+/// refuse it: the transport failed, or no reply arrived in time. Whether the
+/// helper restored defaults, and whether it is still trying, is unknown.
+public enum HelperNoConfirmationReason: Sendable, Equatable, CustomStringConvertible {
     /// Opening the connection failed.
     case connectFailed(String)
     /// The connection failed before the helper answered `hello` (over NSXPC,
     /// the first request is where a helper that cannot be reached shows).
     case helloFailed(String)
-    /// No answer to `hello` within the deadline.
-    case noAnswer(Duration)
+    /// `hello` was not answered within the deadline.
+    case noHello(Duration)
+    /// The helper answered `hello`, then the connection failed before the
+    /// restore's reply arrived (the helper may have crashed or exited).
+    case restoreConnectionFailed(String, helper: HelperKind)
+    /// The helper answered `hello`, but the restore's reply did not arrive
+    /// within the deadline.
+    case noRestoreReply(Duration, helper: HelperKind)
+
+    /// The helper's kind, if it answered `hello`.
+    public var helper: HelperKind? {
+        switch self {
+        case .connectFailed, .helloFailed, .noHello: nil
+        case .restoreConnectionFailed(_, let helper), .noRestoreReply(_, let helper): helper
+        }
+    }
 
     public var description: String {
         switch self {
-        case .connectFailed(let detail): "the connection could not be opened: \(detail)"
-        case .helloFailed(let detail): "the connection failed: \(detail)"
-        case .noAnswer(let deadline): "no answer within \(HelperRemoval.describe(deadline))"
+        case .connectFailed(let detail): "the connection could not be opened (\(detail))"
+        case .helloFailed(let detail): "the connection failed before the helper answered (\(detail))"
+        case .noHello(let deadline): "the helper did not answer within \(HelperRemoval.describe(deadline))"
+        case .restoreConnectionFailed(let detail, _): "the connection failed after the helper answered, before its reply to the restore (\(detail))"
+        case .noRestoreReply(let deadline, _): "the helper answered, but its reply to the restore did not arrive within \(HelperRemoval.describe(deadline))"
         }
     }
 }
@@ -357,25 +369,29 @@ public enum HelperRemovalOutcome: Sendable, Equatable {
     /// system still reports `status`; `error` describes a failed or
     /// unanswered unregistering.
     case unregisterIncomplete(HelperKind, status: HelperRegistrationStatus, error: String?)
-    /// The helper answered but did not confirm that it restored defaults,
-    /// so it was not unregistered.
-    case restoreNotConfirmed(HelperRestoreFailure, helper: HelperKind)
-    /// The helper could not be reached, so nothing was confirmed and it was
-    /// not unregistered. ``HelperRemoval/remove(force:)`` can remove it.
-    case helperUnreachable(HelperUnreachableReason)
-    /// Forced: the helper could not be reached, so its restore was not
-    /// confirmed; it was unregistered, and the system no longer reports it
-    /// registered.
-    case removedWithoutConfirmedRestore(HelperUnreachableReason)
-    /// Forced: the helper could not be reached, and unregistering it did not
+    /// The helper replied to `restoreDefaultsAndExit` with this status
+    /// instead of `ok`. It was not unregistered, and force never overrides
+    /// such a reply. From the engine: `hardwareError` (its restore did not
+    /// read back clean; it keeps retrying it), `notIntroduced` (the session
+    /// no longer existed) or `rateLimited` (the request revoked the session
+    /// for exceeding its request budget).
+    case restoreRefused(HelperStatus, helper: HelperKind)
+    /// Nothing confirmed the restore because the transport failed or no
+    /// reply arrived in time; the helper was not unregistered.
+    /// ``HelperRemoval/remove(force:)`` can remove it.
+    case restoreUnconfirmed(HelperNoConfirmationReason)
+    /// Forced: nothing confirmed the restore; the helper was unregistered,
+    /// and the system no longer reports it registered.
+    case removedWithoutConfirmedRestore(HelperNoConfirmationReason)
+    /// Forced: nothing confirmed the restore, and unregistering did not
     /// complete either: the system still reports `status`.
-    case forcedUnregisterIncomplete(HelperUnreachableReason, status: HelperRegistrationStatus, error: String?)
+    case forcedUnregisterIncomplete(HelperNoConfirmationReason, status: HelperRegistrationStatus, error: String?)
 
     /// True only if the helper replied `ok` to `restoreDefaultsAndExit`.
     public var isRestoreConfirmed: Bool {
         switch self {
         case .removed, .unregisterIncomplete: true
-        case .nothingToRemove, .restoreNotConfirmed, .helperUnreachable, .removedWithoutConfirmedRestore, .forcedUnregisterIncomplete: false
+        case .nothingToRemove, .restoreRefused, .restoreUnconfirmed, .removedWithoutConfirmedRestore, .forcedUnregisterIncomplete: false
         }
     }
 
@@ -384,15 +400,15 @@ public enum HelperRemovalOutcome: Sendable, Equatable {
     public var isHelperRemoved: Bool {
         switch self {
         case .removed, .removedWithoutConfirmedRestore: true
-        case .nothingToRemove, .unregisterIncomplete, .restoreNotConfirmed, .helperUnreachable, .forcedUnregisterIncomplete: false
+        case .nothingToRemove, .unregisterIncomplete, .restoreRefused, .restoreUnconfirmed, .forcedUnregisterIncomplete: false
         }
     }
 
     /// True if ``HelperRemoval/remove(force:)`` may remove the helper
-    /// although its restore cannot be confirmed: only when it could not be
-    /// reached at all.
+    /// although its restore cannot be confirmed: only when the transport
+    /// failed or no reply arrived in time, never after an explicit reply.
     public var offersForcedRemoval: Bool {
-        if case .helperUnreachable = self { return true }
+        if case .restoreUnconfirmed = self { return true }
         return false
     }
 
@@ -406,14 +422,16 @@ public enum HelperRemovalOutcome: Sendable, Equatable {
             return "\(helper.confirmedRestore) The helper was then unregistered, and the system no longer reports it registered."
         case .unregisterIncomplete(let helper, let status, let error):
             return "\(helper.confirmedRestore) Unregistering the helper did not complete: the system still reports it \(status)\(Self.detail(error)). Try again, or turn off CellKeeper's background item in System Settings › General › Login Items & Extensions."
-        case .restoreNotConfirmed(let failure, let helper):
-            return "The helper did not confirm that it restored defaults (\(failure)), so CellKeeper did not remove it: it is the process that keeps retrying the restore, and removing it would stop that.\(helper.simulatedNote) Try again later. \(recovery)"
-        case .helperUnreachable(let reason):
-            return "CellKeeper could not reach the helper (\(reason)), so nothing confirms that the helper restored defaults, and CellKeeper did not remove it. \(recovery) Once you have read it, you can remove the helper anyway."
+        case .restoreRefused(.hardwareError, let helper):
+            return "The helper replied that its restore of defaults did not read back clean (hardwareError). It keeps retrying the restore by itself, and removing it would stop that, so CellKeeper did not remove it.\(helper.simulatedNote) Try again later. \(recovery)"
+        case .restoreRefused(let status, let helper):
+            return "The helper refused the request to restore defaults and exit (\(status)), so nothing confirms that defaults are in effect. CellKeeper does not override a refusal and did not remove it.\(helper.simulatedNote) Try again later. \(recovery)"
+        case .restoreUnconfirmed(let reason):
+            return "Nothing confirmed that the helper restored defaults: \(reason). Whether it restored them, and whether it is still trying, is unknown, so CellKeeper did not remove it.\(reason.helper?.simulatedNote ?? "") Try again later. \(recovery) Once you have read it, you can remove the helper anyway."
         case .removedWithoutConfirmedRestore(let reason):
-            return "The helper could not be reached (\(reason)), so its restore of defaults was not confirmed. At your request CellKeeper unregistered it anyway, and the system no longer reports it registered. Unregistering stops a running helper, which is designed to restore defaults as it exits, but nothing confirmed that. \(recovery)"
+            return "Nothing confirmed that the helper restored defaults: \(reason). At your request CellKeeper unregistered it anyway, and the system no longer reports it registered. Unregistering stops a running helper, which then attempts the restore as it exits, but nothing confirmed that, and a missing reply does not show that the helper had stopped trying. Once unregistered, no helper starts at the next startup to restore defaults, and state that a charge-control mechanism wrote may outlast the helper.\(reason.helper?.simulatedNote ?? "") \(recovery)"
         case .forcedUnregisterIncomplete(let reason, let status, let error):
-            return "The helper could not be reached (\(reason)), so its restore of defaults was not confirmed. At your request CellKeeper tried to unregister it anyway, but that did not complete: the system still reports it \(status)\(Self.detail(error)). \(recovery)"
+            return "Nothing confirmed that the helper restored defaults: \(reason). At your request CellKeeper tried to unregister it anyway, but that did not complete: the system still reports it \(status)\(Self.detail(error)). Nothing confirms that defaults are in effect.\(reason.helper?.simulatedNote ?? "") \(recovery)"
         }
     }
 
@@ -476,26 +494,116 @@ extension HelperKind {
     }
 }
 
-/// What the helper has answered so far, readable when the deadline passes.
-private final class ConversationProgress: @unchecked Sendable {
-    struct Seen {
-        var hello: HelperHelloReply?
-        var restore: HelperStatus?
+/// One conversation with the helper and its deadline, decided once under
+/// one lock: by conclusive evidence (a failure, or the restore's reply) or
+/// by the deadline, whichever comes first. The deadline decides from the
+/// evidence recorded before it, and freezes it: nothing recorded afterwards
+/// counts, and a `hello` that arrives afterwards is refused, so the helper
+/// is not asked to exit.
+final class HelperConversation: @unchecked Sendable {
+    /// What the conversation established.
+    enum Result: Sendable, Equatable {
+        case confirmed(HelperKind)
+        case refused(HelperStatus, HelperKind)
+        case unconfirmed(HelperNoConfirmationReason)
     }
 
     private let lock = NSLock()
-    private var seen = Seen()
+    private let deadline: Duration
+    private var continuation: CheckedContinuation<Result, Never>?
+    private var result: Result?
+    private var hello: HelperHelloReply?
+    private var work: Task<Void, Never>?
+    private var timer: Task<Void, Never>?
 
-    var snapshot: Seen {
-        lock.withLock { seen }
+    init(deadline: Duration) {
+        self.deadline = deadline
     }
 
-    func record(hello: HelperHelloReply) {
-        lock.withLock { seen.hello = hello }
+    /// Called once, before the work and the timer start.
+    func install(_ continuation: CheckedContinuation<Result, Never>) {
+        lock.withLock { self.continuation = continuation }
     }
 
-    func record(restore: HelperStatus) {
-        lock.withLock { seen.restore = restore }
+    /// The task that talks to the helper; cancelled if the deadline decides.
+    func attach(work task: Task<Void, Never>) {
+        lock.withLock {
+            if result == nil {
+                work = task
+            }
+        }
+    }
+
+    /// The deadline's task; cancelled once the conversation is decided.
+    func attach(timer task: Task<Void, Never>) {
+        let isDecided = lock.withLock {
+            if result == nil {
+                timer = task
+            }
+            return result != nil
+        }
+        if isDecided {
+            task.cancel()
+        }
+    }
+
+    /// Records the helper's `hello`. False if the conversation is already
+    /// decided: the deadline has passed, and the helper must not be asked
+    /// anything more.
+    func record(hello reply: HelperHelloReply) -> Bool {
+        lock.withLock {
+            guard result == nil else { return false }
+            hello = reply
+            return true
+        }
+    }
+
+    /// Conclusive evidence from the conversation decides, unless the
+    /// deadline already has.
+    func conclude(_ evidence: Result) {
+        decide(byDeadline: false) { _ in evidence }
+    }
+
+    /// The deadline decides from the evidence recorded so far, unless
+    /// conclusive evidence already has.
+    func expire() {
+        let deadline = deadline
+        decide(byDeadline: true) { hello in
+            if let hello {
+                .unconfirmed(.noRestoreReply(deadline, helper: HelperKind(hello: hello)))
+            } else {
+                .unconfirmed(.noHello(deadline))
+            }
+        }
+    }
+
+    private func decide(byDeadline: Bool, _ make: (HelperHelloReply?) -> Result) {
+        var decided: Result?
+        var resume: CheckedContinuation<Result, Never>?
+        var stopping: [Task<Void, Never>] = []
+        lock.withLock {
+            guard result == nil else { return }
+            let outcome = make(hello)
+            result = outcome
+            decided = outcome
+            resume = continuation
+            continuation = nil
+            if let timer {
+                stopping.append(timer)
+            }
+            if byDeadline, let work {
+                // Too late: whatever it still records is ignored.
+                stopping.append(work)
+            }
+            timer = nil
+            work = nil
+        }
+        for task in stopping {
+            task.cancel()
+        }
+        if let resume, let decided {
+            resume.resume(returning: decided)
+        }
     }
 }
 

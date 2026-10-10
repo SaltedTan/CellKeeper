@@ -53,15 +53,19 @@ public enum HelperRegistrationStatus: Sendable, Equatable, CustomStringConvertib
 /// - ``status()`` maps `.notRegistered`, `.enabled`, `.requiresApproval`
 ///   and `.notFound`, and anything else to ``HelperRegistrationStatus/unknown(_:)``.
 /// - ``unregister()`` calls `unregister()`, which also terminates a running
-///   daemon (research note 04, §1.4); the daemon's SIGTERM path restores
-///   defaults before it exits (decision D31). An error that means the
+///   daemon (research note 04, §1.4); the daemon's SIGTERM path then
+///   attempts to restore defaults before it exits, and may exit at its
+///   deadline without confirming them (decision D31). It must bound its own
+///   completion and clean-up: ``HelperRemoval`` stops waiting at its
+///   deadline but cannot stop a call that ignores cancellation. An error
+///   that means the
 ///   helper is already unregistered, `kSMErrorJobNotFound`, and the EPERM
 ///   that macOS 26 is reported (unverified) to return instead, is treated
 ///   as already gone: ``unregister()`` returns normally. Any other error is
 ///   thrown.
 ///
-/// Implementations must not block indefinitely; ``HelperRemoval`` bounds
-/// every call all the same.
+/// Implementations must not block indefinitely. ``HelperRemoval`` bounds
+/// how long it waits for every call, not the call itself.
 public protocol HelperRegistration: Sendable {
     /// The helper's registration as the system reports it now.
     func status() async -> HelperRegistrationStatus
