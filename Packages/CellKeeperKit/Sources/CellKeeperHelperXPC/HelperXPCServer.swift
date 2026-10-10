@@ -28,9 +28,10 @@ import Foundation
 /// - **Lifecycle.** ``start()`` starts the engine, which restores defaults
 ///   before anything is served (R2), and then the listener. ``stop()``
 ///   invalidates the listener and every connection, which invalidates their
-///   sessions. Starting and stopping the listener, and setting up, starting
-///   and closing each connection, are serialised with each other, so a stop
-///   can never be undone by a start or an acceptance in progress. Ticks,
+///   sessions. Starting and stopping the listener and accepting each
+///   connection are serialised with each other, so a stop can never be
+///   undone by a start or an acceptance in progress; each connection's close
+///   is recorded atomically with the decision to close it. Ticks,
 ///   sleep and wake, and termination (SIGTERM) are the host's: call them on
 ///   ``engine``.
 /// - **Audit.** Connection events (``HelperXPCConnectionEvent``) go to the
@@ -236,11 +237,14 @@ private final class ListenerDelegate: NSObject, NSXPCListenerDelegate, Sendable 
     }
 }
 
-/// The server's lifecycle and connections. Every transition that touches an
-/// NSXPC object (resuming or invalidating the listener; configuring,
-/// resuming and publishing a connection; closing them all) happens under
-/// one lock, together with the decision to make it, so none can interleave
-/// with a transition that would undo it.
+/// The server's lifecycle and connections. The listener's lifecycle
+/// (resuming, invalidating), the acceptance of each connection
+/// (configuring, resuming, publishing) and closing every connection at a
+/// stop happen under this registry's lock, each together with the decision
+/// to make it, so none can interleave with a transition that would undo it.
+/// A single connection's close is recorded under that connection's own lock
+/// instead (see ``HelperXPCConnectionHandler``), and its side effects follow
+/// outside any lock.
 final class ConnectionRegistry: @unchecked Sendable {
     // @unchecked Sendable: all state is guarded by `lock`. NSXPC objects are
     // only messaged under it here; their handlers run later, on NSXPC's

@@ -280,10 +280,12 @@ struct XPCHelperServerTests {
         // running request ends and the consumer gets every chance to take
         // the activation: it may take it off the queue, but must not run it.
         let server = rig.server
-        server.onOverflowDecided {
+        // Weak: the server keeps the hook, so a strong reference would keep
+        // the server, its listener and the control alive after the test.
+        server.onOverflowDecided { [weak server] in
             control.release()
             let deadline = Date().addingTimeInterval(5)
-            while server.queuedRequestCount == limit, Date() < deadline {
+            while server?.queuedRequestCount == limit, Date() < deadline {
                 usleep(1_000)
             }
             usleep(200_000)
