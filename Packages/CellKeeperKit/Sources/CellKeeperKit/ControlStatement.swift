@@ -56,8 +56,10 @@ public enum ControlStatement {
     /// macOS's Charge Limit; nil otherwise. It states only what macOS's
     /// report and CellKeeper's read-backs establish: whether macOS reports
     /// its limit on or the report could not be read, that CellKeeper
-    /// applies no new restriction, and whether one of its own may remain.
-    public static func limitNote(for status: ControllerStatus) -> String? {
+    /// applies no new restriction, and, with `includesOwnRestriction`,
+    /// whether one of its own may remain. The menu leaves that warning to
+    /// its macOS Charge Limit notice, which already gives it.
+    public static func limitNote(for status: ControllerStatus, includesOwnRestriction: Bool = true) -> String? {
         guard status.settings.isManagementEnabled, isDeferringToMacOS(status) else { return nil }
         let reason: String
         if let macOSLimit = status.capabilities.macOSChargeLimit, macOSLimit.isLimiting {
@@ -67,7 +69,7 @@ public enum ControlStatement {
             reason = "While CellKeeper defers to macOS's Charge Limit"
         }
         var note = "\(reason), CellKeeper withholds new restrictions: its own limit, temperature pause and discharge are not applied."
-        if let caveat = MacOSChargeLimitWording.ownRestrictionCaveat(status.ownRestriction, isSimulated: status.isControlSimulated) {
+        if includesOwnRestriction, let caveat = MacOSChargeLimitWording.ownRestrictionCaveat(status.ownRestriction, isSimulated: status.isControlSimulated) {
             note += " \(caveat)."
         }
         return note

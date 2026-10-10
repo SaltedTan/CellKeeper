@@ -313,7 +313,8 @@ private struct ChargeLimitSlider: View {
             Text("Resumes charging at \(model.settings.resumeThreshold)%.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            if let status = model.status, let note = ControlStatement.limitNote(for: status) {
+            // The notice above already warns of a restriction that may remain.
+            if let status = model.status, let note = ControlStatement.limitNote(for: status, includesOwnRestriction: false) {
                 Text(note)
                     .font(.caption)
                     .foregroundStyle(.orange)

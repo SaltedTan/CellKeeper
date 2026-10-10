@@ -70,6 +70,8 @@ struct ControlStatementTests {
         let note = ControlStatement.limitNote(for: status)
         #expect(note == "While macOS reports its Charge Limit on at 80%, CellKeeper withholds new restrictions: its own limit, temperature pause and discharge are not applied. CellKeeper's own restriction (a charging pause, simulated) may remain until a read-back shows it ended.")
         #expect(note?.contains("no limit") == false)
+        // The menu's short note leaves the warning to its notice.
+        #expect(ControlStatement.limitNote(for: status, includesOwnRestriction: false) == "While macOS reports its Charge Limit on at 80%, CellKeeper withholds new restrictions: its own limit, temperature pause and discharge are not applied.")
     }
 
     @Test("An unavailable backend says so and why; it is never said to defer, and its policy is not applied")

@@ -2018,9 +2018,10 @@ tested.
   Limit offers its steps. While CellKeeper defers to macOS's limit, the
   menu and Settings › Charging say that it withholds new restrictions (its
   own limit, temperature pause and discharge are not applied), whether
-  macOS reports its limit on or its report could not be read, and keep the
-  warning that a restriction of its own may remain until a read-back shows
-  it ended (`ControlStatement.limitNote`).
+  macOS reports its limit on or its report could not be read. Settings
+  also keeps the warning that a restriction of its own may remain until a
+  read-back shows it ended (`ControlStatement.limitNote`); in the menu, the
+  macOS Charge Limit notice gives that warning.
 
 ## Known limitations
 
