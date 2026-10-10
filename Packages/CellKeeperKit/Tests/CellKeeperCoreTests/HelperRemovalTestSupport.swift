@@ -546,6 +546,10 @@ final class Observed<Value: Sendable>: @unchecked Sendable {
 /// advances it, and a timer wakes once its time has come, unless the test
 /// holds the timers back: then the deadline has passed by the clock, but no
 /// timer has woken to check it.
+///
+/// A timer checks its deadline once before it first waits, so holding the
+/// timers keeps one from deciding only once it waits. A test that holds
+/// the timers therefore first awaits ``waitForSuspendedTimer(dueIn:)``.
 final class ManualDeadlineClock: @unchecked Sendable {
     private let lock = NSLock()
     private let origin = ContinuousClock.now
@@ -554,6 +558,9 @@ final class ManualDeadlineClock: @unchecked Sendable {
     private var sleepers: [Int: (due: Duration, continuation: CheckedContinuation<Void, Never>)] = [:]
     private var cancelledSleepers: Set<Int> = []
     private var nextSleeper = 0
+    private var suspensionWaiters: [Int: (due: Duration, continuation: CheckedContinuation<Bool, Never>)] = [:]
+    private var suspensionTimeouts: [Int: Task<Void, Never>] = [:]
+    private var nextSuspensionWaiter = 0
 
     var removalClock: RemovalClock {
         RemovalClock(now: { self.now() }, wake: { await self.wake(at: $0) })
@@ -590,6 +597,48 @@ final class ManualDeadlineClock: @unchecked Sendable {
         }
     }
 
+    /// Returns true once a timer due `duration` from now (by this clock) is
+    /// suspended in its wake-up, where it checks nothing until the clock
+    /// reaches its deadline with the timers not held; false after
+    /// ``testWaitLimit``. The waiter is registered before its timeout
+    /// starts, so the timeout always finds it.
+    func waitForSuspendedTimer(dueIn duration: Duration) async -> Bool {
+        let expiresAt = ContinuousClock.now.advanced(by: testWaitLimit)
+        let (id, due) = lock.withLock {
+            nextSuspensionWaiter += 1
+            return (nextSuspensionWaiter, elapsed + duration)
+        }
+        let isSuspended = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let isAlreadySuspended = lock.withLock {
+                if sleepers.values.contains(where: { $0.due == due }) { return true }
+                suspensionWaiters[id] = (due, continuation)
+                return false
+            }
+            if isAlreadySuspended {
+                continuation.resume(returning: true)
+                return
+            }
+            let timeout = Task { [weak self] in
+                try? await Task.sleep(until: expiresAt, clock: .continuous)
+                self?.giveUpWaitingForSuspension(id)
+            }
+            let isWaiting = lock.withLock {
+                guard suspensionWaiters[id] != nil else { return false }
+                suspensionTimeouts[id] = timeout
+                return true
+            }
+            if !isWaiting {
+                timeout.cancel()
+            }
+        }
+        lock.withLock { suspensionTimeouts.removeValue(forKey: id) }?.cancel()
+        return isSuspended
+    }
+
+    private func giveUpWaitingForSuspension(_ id: Int) {
+        lock.withLock { suspensionWaiters.removeValue(forKey: id) }?.continuation.resume(returning: false)
+    }
+
     private func takeDue() -> [CheckedContinuation<Void, Never>] {
         let ready = sleepers.filter { $0.value.due <= elapsed }
         for id in ready.keys {
@@ -608,14 +657,18 @@ final class ManualDeadlineClock: @unchecked Sendable {
         }
         await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                let wakesNow: Bool = lock.withLock {
-                    if cancelledSleepers.remove(id) != nil { return true }
-                    if !isHeld, due <= elapsed { return true }
+                let (wakesNow, suspended): (Bool, [CheckedContinuation<Bool, Never>]) = lock.withLock {
+                    if cancelledSleepers.remove(id) != nil { return (true, []) }
+                    if !isHeld, due <= elapsed { return (true, []) }
                     sleepers[id] = (due, continuation)
-                    return false
+                    let ids = suspensionWaiters.filter { $0.value.due == due }.map(\.key)
+                    return (false, ids.compactMap { suspensionWaiters.removeValue(forKey: $0)?.continuation })
                 }
                 if wakesNow {
                     continuation.resume()
+                }
+                for waiter in suspended {
+                    waiter.resume(returning: true)
                 }
             }
         } onCancel: {

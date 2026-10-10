@@ -288,6 +288,9 @@ struct HelperRemovalTests {
 
         let running = remove(rig.removal(clock: clock), force: force)
         await expectLogged(rig.log, "helper.restoreDefaultsAndExit")
+        // The held call is waiting; its deadline's timer must be waiting
+        // too before time moves, or its first check could decide.
+        await expectTimerSuspended(clock, dueIn: Self.deadline)
         clock.holdTimers()
         clock.advance(by: Self.deadline)
         rig.transport.gate.open()
@@ -314,6 +317,9 @@ struct HelperRemovalTests {
 
         let running = remove(rig.removal(clock: clock), force: false)
         await expectLogged(rig.log, "helper.hello")
+        // The held call is waiting; its deadline's timer must be waiting
+        // too before time moves, or its first check could decide.
+        await expectTimerSuspended(clock, dueIn: Self.deadline)
         clock.holdTimers()
         clock.advance(by: Self.deadline)
         rig.transport.gate.open()
@@ -338,6 +344,9 @@ struct HelperRemovalTests {
 
         let running = remove(rig.removal(clock: clock), force: false)
         await expectLogged(rig.log, "helper.connect")
+        // The held call is waiting; its deadline's timer must be waiting
+        // too before time moves, or its first check could decide.
+        await expectTimerSuspended(clock, dueIn: Self.deadline)
         clock.holdTimers()
         clock.advance(by: Self.deadline)
         rig.transport.gate.open()
@@ -359,6 +368,9 @@ struct HelperRemovalTests {
 
         let running = remove(rig.removal(clock: clock), force: false)
         await expectLogged(rig.log, "registration.status")
+        // The held call is waiting; its deadline's timer must be waiting
+        // too before time moves, or its first check could decide.
+        await expectTimerSuspended(clock, dueIn: HelperRemoval.defaultRegistrationDeadline)
         clock.holdTimers()
         clock.advance(by: HelperRemoval.defaultRegistrationDeadline)
         gate.open()
@@ -383,6 +395,9 @@ struct HelperRemovalTests {
 
         let running = remove(rig.removal(clock: clock), force: false)
         await expectLogged(rig.log, "registration.status", occurrences: 2)
+        // The held call is waiting; its deadline's timer must be waiting
+        // too before time moves, or its first check could decide.
+        await expectTimerSuspended(clock, dueIn: HelperRemoval.defaultRegistrationDeadline)
         clock.holdTimers()
         clock.advance(by: HelperRemoval.defaultRegistrationDeadline)
         gate.open()
@@ -406,6 +421,9 @@ struct HelperRemovalTests {
 
         let running = remove(rig.removal(clock: clock), force: false)
         await expectLogged(rig.log, "registration.unregister")
+        // The held call is waiting; its deadline's timer must be waiting
+        // too before time moves, or its first check could decide.
+        await expectTimerSuspended(clock, dueIn: HelperRemoval.defaultRegistrationDeadline)
         clock.holdTimers()
         clock.advance(by: HelperRemoval.defaultRegistrationDeadline)
         gate.open()
@@ -627,4 +645,13 @@ struct HelperRemovalTests {
 func expectLogged(_ log: CallLog, _ entry: String, occurrences: Int = 1) async {
     let isLogged = await log.waitFor(entry, occurrences: occurrences)
     #expect(isLogged, "\"\(entry)\" was not logged in time")
+}
+
+/// Waits, bounded by ``testWaitLimit``, until the timer of a deadline
+/// `dueIn` from now is suspended in its wake-up, and records an issue if it
+/// is not. Holding the timers after that leaves the evidence that arrives
+/// next as the only thing that can decide.
+func expectTimerSuspended(_ clock: ManualDeadlineClock, dueIn duration: Duration) async {
+    let isSuspended = await clock.waitForSuspendedTimer(dueIn: duration)
+    #expect(isSuspended, "no timer due in \(duration) was waiting in time")
 }
