@@ -119,14 +119,10 @@ struct HelperRemovalTests {
     @Test("A confirmation that arrives before the deadline counts, also while the connection is still being closed")
     func confirmationBeforeTheDeadlineCounts() async {
         let rig = RemovalRig()
-        let deadline = Gate()
-        defer {
-            deadline.open()
-            rig.transport.gate.open()
-        }
+        defer { rig.transport.gate.open() }
         rig.transport.stall(at: .invalidate)
-        // The deadline never passes during the removal.
-        let outcome = await rig.removal(deadline: deadline).remove()
+        // The clock never moves, so the deadline never passes.
+        let outcome = await rig.removal(clock: ManualDeadlineClock()).remove()
         #expect(outcome == .removed(.simulated))
         #expect(rig.log.count(of: "helper.invalidate") == 1)
     }
@@ -214,20 +210,17 @@ struct HelperRemovalTests {
     @Test("A failure or a missing reply at any stage leaves the restore unconfirmed; only force unregisters", arguments: ConversationFault.all, [false, true])
     func unconfirmedAtEveryStage(fault: ConversationFault, force: Bool) async {
         let rig = RemovalRig()
-        let deadline = Gate()
-        defer {
-            deadline.open()
-            rig.transport.gate.open()
-        }
+        let clock = ManualDeadlineClock()
+        defer { rig.transport.gate.open() }
         switch fault.kind {
         case .failure: rig.transport.fail(at: fault.step)
         case .timeout: rig.transport.stall(at: fault.step)
         }
 
-        let running = remove(rig.removal(deadline: deadline), force: force)
+        let running = remove(rig.removal(clock: clock), force: force)
         if fault.kind == .timeout {
             await rig.log.waitFor(fault.logEntry)
-            deadline.open()
+            clock.advance(by: Self.deadline)
         }
         let outcome = await running.value
 
@@ -250,12 +243,12 @@ struct HelperRemovalTests {
     func lateRestoreReplyIsIgnored() async {
         for _ in 0..<20 {
             let rig = RemovalRig()
-            let deadline = Gate()
+            let clock = ManualDeadlineClock()
             rig.transport.answerOnlyWhenCancelled(at: .restoreAndExit)
 
-            let running = remove(rig.removal(deadline: deadline), force: false)
+            let running = remove(rig.removal(clock: clock), force: false)
             await rig.log.waitFor("helper.restoreDefaultsAndExit")
-            deadline.open()
+            clock.advance(by: Self.deadline)
             let outcome = await running.value
 
             #expect(outcome == .restoreUnconfirmed(.noRestoreReply(Self.deadline, helper: .simulated)))
@@ -269,12 +262,12 @@ struct HelperRemovalTests {
     @Test("A hello that the deadline's cancellation sets off does not get the helper asked to exit")
     func lateHelloAuthorisesNothing() async {
         let rig = RemovalRig()
-        let deadline = Gate()
+        let clock = ManualDeadlineClock()
         rig.transport.answerOnlyWhenCancelled(at: .hello)
 
-        let running = remove(rig.removal(deadline: deadline), force: false)
+        let running = remove(rig.removal(clock: clock), force: false)
         await rig.log.waitFor("helper.hello")
-        deadline.open()
+        clock.advance(by: Self.deadline)
         let outcome = await running.value
 
         #expect(outcome == .restoreUnconfirmed(.noHello(Self.deadline)))
@@ -284,6 +277,141 @@ struct HelperRemovalTests {
         let isShuttingDown = await rig.engine.isShuttingDown
         #expect(!isShuttingDown)
         #expect(rig.registration.unregisterCount == 0)
+    }
+
+    @Test("Once the deadline has passed by the clock, a restore reply is refused even before any timer wakes", arguments: [false, true])
+    func elapsedDeadlineRefusesRestoreReply(force: Bool) async {
+        let rig = RemovalRig()
+        let clock = ManualDeadlineClock()
+        rig.transport.stall(at: .restoreAndExit)
+        defer { clock.releaseTimers() }
+
+        let running = remove(rig.removal(clock: clock), force: force)
+        await rig.log.waitFor("helper.restoreDefaultsAndExit")
+        clock.holdTimers()
+        clock.advance(by: Self.deadline)
+        rig.transport.gate.open()
+        let outcome = await running.value
+
+        // The ok arrived, but after the expiry: it counts for nothing.
+        #expect(rig.log.all.contains("helper.restoreDefaultsAndExit replied ok"))
+        let reason = HelperNoConfirmationReason.noRestoreReply(Self.deadline, helper: .simulated)
+        if force {
+            #expect(outcome == .removedWithoutConfirmedRestore(reason))
+        } else {
+            #expect(outcome == .restoreUnconfirmed(reason))
+            #expect(rig.registration.unregisterCount == 0)
+        }
+        #expect(!outcome.isRestoreConfirmed)
+    }
+
+    @Test("Once the deadline has passed by the clock, a hello is refused and the helper is not asked to exit")
+    func elapsedDeadlineRefusesHello() async {
+        let rig = RemovalRig()
+        let clock = ManualDeadlineClock()
+        rig.transport.stall(at: .hello)
+        defer { clock.releaseTimers() }
+
+        let running = remove(rig.removal(clock: clock), force: false)
+        await rig.log.waitFor("helper.hello")
+        clock.holdTimers()
+        clock.advance(by: Self.deadline)
+        rig.transport.gate.open()
+        let outcome = await running.value
+
+        #expect(outcome == .restoreUnconfirmed(.noHello(Self.deadline)))
+        #expect(rig.log.all.contains("helper.hello replied ok"))
+        await rig.log.waitFor("helper.invalidate")
+        #expect(rig.log.count(of: "helper.restoreDefaultsAndExit") == 0)
+        let isShuttingDown = await rig.engine.isShuttingDown
+        #expect(!isShuttingDown)
+        #expect(rig.registration.unregisterCount == 0)
+    }
+
+    @Test("Once the deadline has passed by the clock, a failure is not taken as the reason: the timeout is")
+    func elapsedDeadlineRefusesLateFailure() async {
+        let rig = RemovalRig()
+        let clock = ManualDeadlineClock()
+        rig.transport.stall(at: .connect)
+        rig.transport.fail(at: .connect)
+        defer { clock.releaseTimers() }
+
+        let running = remove(rig.removal(clock: clock), force: false)
+        await rig.log.waitFor("helper.connect")
+        clock.holdTimers()
+        clock.advance(by: Self.deadline)
+        rig.transport.gate.open()
+        let outcome = await running.value
+
+        #expect(outcome == .restoreUnconfirmed(.noHello(Self.deadline)))
+    }
+
+    @Test("A registration status that answers after its deadline counts as unknown, not as \"nothing to remove\"")
+    func lateStatusBeforeIsRefused() async {
+        let rig = RemovalRig(registration: .notRegistered)
+        let clock = ManualDeadlineClock()
+        let gate = Gate()
+        rig.registration.holdStatus(call: 1, on: gate)
+        defer {
+            gate.open()
+            clock.releaseTimers()
+        }
+
+        let running = remove(rig.removal(clock: clock), force: false)
+        await rig.log.waitFor("registration.status")
+        clock.holdTimers()
+        clock.advance(by: HelperRemoval.defaultRegistrationDeadline)
+        gate.open()
+        let outcome = await running.value
+
+        // A timely notRegistered would have stopped the removal here.
+        #expect(outcome != .nothingToRemove(.notRegistered))
+        #expect(rig.log.count(of: "helper.connect") == 1)
+        #expect(outcome == .removed(.simulated))
+    }
+
+    @Test("A registration status after unregistering that answers after its deadline counts as unknown, not as removed")
+    func lateStatusAfterIsRefused() async {
+        let rig = RemovalRig()
+        let clock = ManualDeadlineClock()
+        let gate = Gate()
+        rig.registration.holdStatus(call: 2, on: gate)
+        defer {
+            gate.open()
+            clock.releaseTimers()
+        }
+
+        let running = remove(rig.removal(clock: clock), force: false)
+        await rig.log.waitFor("registration.status", occurrences: 2)
+        clock.holdTimers()
+        clock.advance(by: HelperRemoval.defaultRegistrationDeadline)
+        gate.open()
+        let outcome = await running.value
+
+        #expect(outcome == .unregisterIncomplete(.simulated, status: .unknown("no answer within 15 s"), error: nil))
+        #expect(!outcome.isHelperRemoved)
+    }
+
+    @Test("An unregistering that returns after its deadline counts as unanswered")
+    func lateUnregisterIsRefused() async {
+        let rig = RemovalRig()
+        let clock = ManualDeadlineClock()
+        let gate = Gate()
+        rig.registration.holdUnregister(on: gate)
+        rig.registration.statusAfterUnregister = .enabled
+        defer {
+            gate.open()
+            clock.releaseTimers()
+        }
+
+        let running = remove(rig.removal(clock: clock), force: false)
+        await rig.log.waitFor("registration.unregister")
+        clock.holdTimers()
+        clock.advance(by: HelperRemoval.defaultRegistrationDeadline)
+        gate.open()
+        let outcome = await running.value
+
+        #expect(outcome == .unregisterIncomplete(.simulated, status: .enabled, error: "no answer within 15 s"))
     }
 
     @Test("With a real timer, a helper slower than the deadline is not unregistered, even when it confirms later")

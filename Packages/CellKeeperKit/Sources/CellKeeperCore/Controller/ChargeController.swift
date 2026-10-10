@@ -495,8 +495,13 @@ public actor ChargeController {
         await performHelperRemoval(removal, force: nil)
     }
 
-    /// As ``removeHelper(using:)``, except that a helper that cannot be
-    /// reached at all is unregistered anyway (``HelperRemoval/remove(force:)``).
+    /// As ``removeHelper(using:)``, except that a helper whose restore went
+    /// unconfirmed because the transport failed or no reply arrived in time,
+    /// at any stage (connecting, `hello` or the restore), is unregistered
+    /// anyway, and the outcome says that its restore was not confirmed
+    /// (``HelperRemoval/remove(force:)``). An explicit reply other than `ok`
+    /// to the restore (`hardwareError`, `notIntroduced`, `rateLimited`) is
+    /// never overridden: such a helper is not unregistered.
     @discardableResult
     public func removeHelper(using removal: HelperRemoval, force: HelperRemovalForce) async -> HelperUninstallOutcome {
         await performHelperRemoval(removal, force: force)

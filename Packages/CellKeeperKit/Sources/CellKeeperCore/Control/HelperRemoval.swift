@@ -37,13 +37,17 @@ import os
 /// Every step has a deadline: ``helperDeadline`` for the whole
 /// conversation with the helper (connecting, `hello` and the restore; the
 /// NSXPC transport also times out each request on its own), and
-/// ``registrationDeadline`` for each call to the registration. The
-/// conversation's evidence and its deadline share one lock: whichever comes
-/// first, conclusive evidence (a failure, or the restore's reply) or the
-/// deadline, decides, and the evidence is frozen at that moment. A reply or
-/// a `hello` recorded after the deadline authorises nothing: a late `ok`
-/// never leads to unregistering, and a helper whose `hello` arrives late is
-/// not asked to exit. The flow ignores the caller's cancellation, so it
+/// ``registrationDeadline`` for each call to the registration. Each deadline
+/// is an absolute expiry on a monotonic clock that keeps counting during
+/// sleep. Whenever evidence arrives (a `hello`, a reply, a failure, a
+/// registration result), it is checked against that expiry under the lock
+/// that also holds the decision: evidence that arrives at or after the
+/// expiry is refused, and the timeout outcome is frozen first. The timer
+/// only wakes the same check up; which callback reaches the lock first
+/// never decides whether the deadline has passed. So a late `ok` never
+/// leads to unregistering, a helper whose `hello` arrives late is not asked
+/// to exit, and a late registration result changes nothing. The flow
+/// ignores the caller's cancellation, so it
 /// always finishes within its deadlines and reports what happened. That
 /// bounds the waiting, not the work behind it: a call that does not
 /// cooperate with cancellation keeps running on its own, so the transport
@@ -69,9 +73,9 @@ public struct HelperRemoval: Sendable {
     public let registration: any HelperRegistration
     public let helperDeadline: Duration
     public let registrationDeadline: Duration
-    /// Returns once a deadline of the given length has passed; tests inject
-    /// their own timer.
-    let waitForDeadline: @Sendable (Duration) async -> Void
+    /// The clock the deadlines are judged on, and the timer that wakes the
+    /// check; tests inject their own.
+    let clock: RemovalClock
 
     public init(
         transport: any HelperTransport,
@@ -84,7 +88,7 @@ public struct HelperRemoval: Sendable {
             registration: registration,
             helperDeadline: helperDeadline,
             registrationDeadline: registrationDeadline,
-            waitForDeadline: { try? await Task.sleep(for: $0) }
+            clock: .system
         )
     }
 
@@ -93,13 +97,13 @@ public struct HelperRemoval: Sendable {
         registration: any HelperRegistration,
         helperDeadline: Duration,
         registrationDeadline: Duration,
-        waitForDeadline: @escaping @Sendable (Duration) async -> Void
+        clock: RemovalClock
     ) {
         self.transport = transport
         self.registration = registration
         self.helperDeadline = helperDeadline
         self.registrationDeadline = registrationDeadline
-        self.waitForDeadline = waitForDeadline
+        self.clock = clock
     }
 
     /// Removes the helper if, and only if, it confirms that it restored
@@ -193,19 +197,16 @@ public struct HelperRemoval: Sendable {
     }
 
     /// Connects, says hello, and asks the helper to restore defaults and
-    /// exit. Conclusive evidence or ``helperDeadline``, whichever comes
-    /// first, decides; see ``HelperConversation``.
+    /// exit, within ``helperDeadline`` from now; see ``HelperConversation``.
     private func askHelperToRestoreAndExit() async -> HelperConversation.Result {
-        let conversation = HelperConversation(deadline: helperDeadline)
+        let clock = clock
+        let conversation = HelperConversation(deadline: helperDeadline, expiresAt: clock.now().advanced(by: helperDeadline), now: clock.now)
         let transport = transport
-        let wait = waitForDeadline
-        let deadline = helperDeadline
         return await withCheckedContinuation { continuation in
             conversation.install(continuation)
             conversation.attach(work: Task { await Self.converse(with: transport, in: conversation) })
             conversation.attach(timer: Task {
-                await wait(deadline)
-                conversation.expire()
+                await clock.wakeUntil(conversation.expiresAt) { conversation.expireIfDue() }
             })
         }
     }
@@ -250,18 +251,18 @@ public struct HelperRemoval: Sendable {
     // MARK: - Deadlines
 
     /// Runs `operation` in a task of its own and returns its result, or nil
-    /// if `deadline` passes first. The operation is then cancelled but not
-    /// awaited: a call stuck in a transport keeps running on its own, and
-    /// its result is dropped.
+    /// if `deadline` (from now, on ``clock``) passes first. A result that
+    /// arrives at or after the expiry is refused, whenever the timer runs.
+    /// The operation is then cancelled but not awaited: a call stuck in a
+    /// transport keeps running on its own, and its result is dropped.
     func withDeadline<T: Sendable>(_ deadline: Duration, _ operation: @escaping @Sendable () async -> T) async -> T? {
-        let race = FirstResult<T>()
-        let wait = waitForDeadline
+        let clock = clock
+        let race = DeadlineResult<T>(expiresAt: clock.now().advanced(by: deadline), now: clock.now)
         return await withCheckedContinuation { continuation in
             race.install(continuation)
             race.attach(Task { race.finish(await operation()) })
             race.attach(Task {
-                await wait(deadline)
-                race.finish(nil)
+                await clock.wakeUntil(race.expiresAt) { race.expireIfDue() }
             })
         }
     }
@@ -494,12 +495,38 @@ extension HelperKind {
     }
 }
 
+/// The clock the removal judges its deadlines on, and the timer that wakes
+/// the check. `now` must be monotonic and keep counting during sleep, like
+/// `ContinuousClock`. The timer only wakes the check: whether a deadline
+/// has passed is always read from `now`.
+struct RemovalClock: Sendable {
+    var now: @Sendable () -> ContinuousClock.Instant
+    /// Returns at about the given instant of `now`, or sooner once the
+    /// calling task is cancelled. An absolute instant, so a wake-up that is
+    /// set late is not set late by that much again.
+    var wake: @Sendable (ContinuousClock.Instant) async -> Void
+
+    static let system = RemovalClock(
+        now: { ContinuousClock.now },
+        wake: { try? await Task.sleep(until: $0, clock: .continuous) }
+    )
+
+    /// Runs `expireIfDue` whenever the timer wakes, until it reports the
+    /// race decided (by the expiry or by evidence) or the task is cancelled.
+    func wakeUntil(_ expiresAt: ContinuousClock.Instant, _ expireIfDue: () -> Bool) async {
+        while !Task.isCancelled, !expireIfDue() {
+            await wake(expiresAt)
+        }
+    }
+}
+
 /// One conversation with the helper and its deadline, decided once under
 /// one lock: by conclusive evidence (a failure, or the restore's reply) or
-/// by the deadline, whichever comes first. The deadline decides from the
-/// evidence recorded before it, and freezes it: nothing recorded afterwards
-/// counts, and a `hello` that arrives afterwards is refused, so the helper
-/// is not asked to exit.
+/// by the deadline. Every piece of evidence is judged against the absolute
+/// expiry, on the monotonic clock, when it arrives: at or after the expiry,
+/// the timeout outcome is frozen from the evidence recorded before, and the
+/// new evidence is refused. A `hello` refused that way means the helper is
+/// not asked to exit. The timer only wakes the same check.
 final class HelperConversation: @unchecked Sendable {
     /// What the conversation established.
     enum Result: Sendable, Equatable {
@@ -508,16 +535,23 @@ final class HelperConversation: @unchecked Sendable {
         case unconfirmed(HelperNoConfirmationReason)
     }
 
-    private let lock = NSLock()
+    let expiresAt: ContinuousClock.Instant
     private let deadline: Duration
+    private let now: @Sendable () -> ContinuousClock.Instant
+    private let lock = NSLock()
     private var continuation: CheckedContinuation<Result, Never>?
     private var result: Result?
     private var hello: HelperHelloReply?
     private var work: Task<Void, Never>?
     private var timer: Task<Void, Never>?
 
-    init(deadline: Duration) {
+    /// - Parameters:
+    ///   - deadline: its length, for the outcome.
+    ///   - expiresAt: when it passes, on `now`.
+    init(deadline: Duration, expiresAt: ContinuousClock.Instant, now: @escaping @Sendable () -> ContinuousClock.Instant) {
         self.deadline = deadline
+        self.expiresAt = expiresAt
+        self.now = now
     }
 
     /// Called once, before the work and the timer start.
@@ -534,7 +568,7 @@ final class HelperConversation: @unchecked Sendable {
         }
     }
 
-    /// The deadline's task; cancelled once the conversation is decided.
+    /// The timer's task; cancelled once the conversation is decided.
     func attach(timer task: Task<Void, Never>) {
         let isDecided = lock.withLock {
             if result == nil {
@@ -547,43 +581,59 @@ final class HelperConversation: @unchecked Sendable {
         }
     }
 
-    /// Records the helper's `hello`. False if the conversation is already
-    /// decided: the deadline has passed, and the helper must not be asked
-    /// anything more.
+    /// Records the helper's `hello`. False if the conversation is decided,
+    /// or the deadline has passed (which decides it now): the helper must
+    /// then not be asked anything more.
     func record(hello reply: HelperHelloReply) -> Bool {
-        lock.withLock {
-            guard result == nil else { return false }
-            hello = reply
-            return true
-        }
+        var accepted = false
+        decide(evidence: { _ in
+            // Not expired: keep it, and leave the conversation open.
+            self.hello = reply
+            accepted = true
+            return nil
+        }, reportDecided: { _ in })
+        return accepted
     }
 
     /// Conclusive evidence from the conversation decides, unless the
-    /// deadline already has.
+    /// conversation is decided already, or the deadline has passed, in
+    /// which case the evidence is refused and the timeout decides.
     func conclude(_ evidence: Result) {
-        decide(byDeadline: false) { _ in evidence }
+        decide(evidence: { _ in evidence }, reportDecided: { _ in })
     }
 
-    /// The deadline decides from the evidence recorded so far, unless
-    /// conclusive evidence already has.
-    func expire() {
-        let deadline = deadline
-        decide(byDeadline: true) { hello in
-            if let hello {
-                .unconfirmed(.noRestoreReply(deadline, helper: HelperKind(hello: hello)))
-            } else {
-                .unconfirmed(.noHello(deadline))
-            }
-        }
+    /// The timer's check: decides on the timeout if the deadline has
+    /// passed. True once the conversation is decided.
+    func expireIfDue() -> Bool {
+        var isDecided = false
+        decide(evidence: { _ in nil }, reportDecided: { isDecided = $0 })
+        return isDecided
     }
 
-    private func decide(byDeadline: Bool, _ make: (HelperHelloReply?) -> Result) {
+    /// Under the lock: if undecided and expired, decides on the timeout and
+    /// refuses the evidence; if undecided and not expired, `evidence` may
+    /// record something and return the decision, or nil to stay open.
+    /// `reportDecided` says whether the conversation is decided afterwards.
+    private func decide(evidence: (HelperHelloReply?) -> Result?, reportDecided: (Bool) -> Void) {
         var decided: Result?
         var resume: CheckedContinuation<Result, Never>?
         var stopping: [Task<Void, Never>] = []
         lock.withLock {
-            guard result == nil else { return }
-            let outcome = make(hello)
+            guard result == nil else {
+                reportDecided(true)
+                return
+            }
+            let outcome: Result
+            let isExpired = now() >= expiresAt
+            if isExpired {
+                outcome = hello.map { .unconfirmed(.noRestoreReply(deadline, helper: HelperKind(hello: $0))) }
+                    ?? .unconfirmed(.noHello(deadline))
+            } else if let concluded = evidence(hello) {
+                outcome = concluded
+            } else {
+                reportDecided(false)
+                return
+            }
             result = outcome
             decided = outcome
             resume = continuation
@@ -591,12 +641,13 @@ final class HelperConversation: @unchecked Sendable {
             if let timer {
                 stopping.append(timer)
             }
-            if byDeadline, let work {
-                // Too late: whatever it still records is ignored.
+            if isExpired, let work {
+                // Too late: whatever it still records is refused.
                 stopping.append(work)
             }
             timer = nil
             work = nil
+            reportDecided(true)
         }
         for task in stopping {
             task.cancel()
@@ -607,20 +658,29 @@ final class HelperConversation: @unchecked Sendable {
     }
 }
 
-/// The first of several tasks to finish resumes one continuation; the
-/// others are cancelled.
-private final class FirstResult<T: Sendable>: @unchecked Sendable {
+/// One call under a deadline, decided once under one lock: by its result
+/// if it arrives before the absolute expiry, otherwise by the timeout. A
+/// result that arrives at or after the expiry is refused, whenever the
+/// timer runs.
+private final class DeadlineResult<T: Sendable>: @unchecked Sendable {
+    let expiresAt: ContinuousClock.Instant
+    private let now: @Sendable () -> ContinuousClock.Instant
     private let lock = NSLock()
     private var continuation: CheckedContinuation<T?, Never>?
     private var isFinished = false
     private var tasks: [Task<Void, Never>] = []
+
+    init(expiresAt: ContinuousClock.Instant, now: @escaping @Sendable () -> ContinuousClock.Instant) {
+        self.expiresAt = expiresAt
+        self.now = now
+    }
 
     /// Called once, before any task that may finish is started.
     func install(_ continuation: CheckedContinuation<T?, Never>) {
         lock.withLock { self.continuation = continuation }
     }
 
-    /// Cancels `task` once the race is decided, or at once if it already is.
+    /// Cancels `task` once the call is decided, or at once if it already is.
     func attach(_ task: Task<Void, Never>) {
         let isDecided = lock.withLock {
             if !isFinished {
@@ -633,22 +693,42 @@ private final class FirstResult<T: Sendable>: @unchecked Sendable {
         }
     }
 
-    /// The first call resumes the continuation with `value`; later calls do
-    /// nothing.
-    func finish(_ value: T?) {
+    /// The call's result: it decides, unless the call is decided already or
+    /// the deadline has passed, in which case it is refused and the timeout
+    /// decides.
+    func finish(_ value: T) {
+        settle { isExpired in isExpired ? .some(nil) : .some(value) }
+    }
+
+    /// The timer's check: decides on the timeout if the deadline has
+    /// passed. True once the call is decided.
+    func expireIfDue() -> Bool {
+        settle { isExpired in isExpired ? .some(nil) : nil }
+    }
+
+    /// Under the lock: `decision` maps whether the deadline has passed to
+    /// the value to resume with, or nil to stay open. Returns whether the
+    /// call is decided.
+    @discardableResult
+    private func settle(_ decision: (Bool) -> T??) -> Bool {
         var winner: CheckedContinuation<T?, Never>?
+        var value: T?
         var losers: [Task<Void, Never>] = []
-        lock.withLock {
-            guard !isFinished else { return }
+        let isDecided: Bool = lock.withLock {
+            guard !isFinished else { return true }
+            guard let decided = decision(now() >= expiresAt) else { return false }
             isFinished = true
+            value = decided
             winner = continuation
             losers = tasks
             continuation = nil
             tasks = []
+            return true
         }
         for task in losers {
             task.cancel()
         }
         winner?.resume(returning: value)
+        return isDecided
     }
 }

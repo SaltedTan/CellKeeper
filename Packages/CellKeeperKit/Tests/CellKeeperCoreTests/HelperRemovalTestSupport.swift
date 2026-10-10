@@ -7,7 +7,7 @@ import Foundation
 final class CallLog: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [String] = []
-    private var waiters: [(entry: String, continuation: CheckedContinuation<Void, Never>)] = []
+    private var waiters: [(entry: String, occurrences: Int, continuation: CheckedContinuation<Void, Never>)] = []
 
     var all: [String] {
         lock.withLock { entries }
@@ -16,8 +16,12 @@ final class CallLog: @unchecked Sendable {
     func append(_ entry: String) {
         let ready: [CheckedContinuation<Void, Never>] = lock.withLock {
             entries.append(entry)
-            let matching = waiters.filter { $0.entry == entry }.map(\.continuation)
-            waiters.removeAll { $0.entry == entry }
+            let recorded = entries.filter { $0 == entry }.count
+            let isReady = { (waiter: (entry: String, occurrences: Int, continuation: CheckedContinuation<Void, Never>)) in
+                waiter.entry == entry && waiter.occurrences <= recorded
+            }
+            let matching = waiters.filter(isReady).map(\.continuation)
+            waiters.removeAll(where: isReady)
             return matching
         }
         for continuation in ready {
@@ -25,12 +29,12 @@ final class CallLog: @unchecked Sendable {
         }
     }
 
-    /// Returns once `entry` has been recorded.
-    func waitFor(_ entry: String) async {
+    /// Returns once `entry` has been recorded `occurrences` times.
+    func waitFor(_ entry: String, occurrences: Int = 1) async {
         await withCheckedContinuation { continuation in
             let isRecorded = lock.withLock {
-                if entries.contains(entry) { return true }
-                waiters.append((entry, continuation))
+                if entries.filter({ $0 == entry }).count >= occurrences { return true }
+                waiters.append((entry, occurrences, continuation))
                 return false
             }
             if isRecorded {
@@ -94,6 +98,8 @@ final class FakeHelperRegistration: HelperRegistration, @unchecked Sendable {
     private var unregisterCalls = 0
     /// Status reads and unregistering wait on these while set.
     private var statusGate: Gate?
+    private var statusCallGates: [Int: Gate] = [:]
+    private var statusCalls = 0
     private var unregisterGate: Gate?
 
     init(_ status: HelperRegistrationStatus, log: CallLog? = nil) {
@@ -123,6 +129,11 @@ final class FakeHelperRegistration: HelperRegistration, @unchecked Sendable {
         lock.withLock { statusGate = gate }
     }
 
+    /// Makes the status read number `call` (from 1) wait on `gate`.
+    func holdStatus(call: Int, on gate: Gate) {
+        lock.withLock { statusCallGates[call] = gate }
+    }
+
     /// Makes `unregister()` wait on `gate` before it does anything.
     func holdUnregister(on gate: Gate) {
         lock.withLock { unregisterGate = gate }
@@ -130,7 +141,11 @@ final class FakeHelperRegistration: HelperRegistration, @unchecked Sendable {
 
     func status() async -> HelperRegistrationStatus {
         log?.append("registration.status")
-        if let gate = lock.withLock({ statusGate }) {
+        let gate: Gate? = lock.withLock {
+            statusCalls += 1
+            return statusCallGates[statusCalls] ?? statusGate
+        }
+        if let gate {
             await gate.wait()
         }
         return lock.withLock { current }
@@ -376,30 +391,19 @@ struct RemovalRig {
         helper.engine
     }
 
-    /// - Parameter deadline: if given, the helper's deadline passes when the
-    ///   test opens it, and not before; the registration's deadlines stay
-    ///   real.
+    /// - Parameter clock: if given, every deadline is judged on it, and its
+    ///   timers wake only when the test advances it; otherwise the system's.
     func removal(
         helperDeadline: Duration = HelperRemoval.defaultHelperDeadline,
         registrationDeadline: Duration = HelperRemoval.defaultRegistrationDeadline,
-        deadline: Gate? = nil
+        clock: ManualDeadlineClock? = nil
     ) -> HelperRemoval {
-        guard let deadline else {
-            return HelperRemoval(transport: transport, registration: registration, helperDeadline: helperDeadline, registrationDeadline: registrationDeadline)
-        }
-        precondition(helperDeadline != registrationDeadline, "the injected timer tells the deadlines apart by length")
-        return HelperRemoval(
+        HelperRemoval(
             transport: transport,
             registration: registration,
             helperDeadline: helperDeadline,
             registrationDeadline: registrationDeadline,
-            waitForDeadline: { duration in
-                if duration == helperDeadline {
-                    await deadline.wait()
-                } else {
-                    try? await Task.sleep(for: duration)
-                }
-            }
+            clock: clock?.removalClock ?? .system
         )
     }
 
@@ -455,5 +459,94 @@ final class Observed<Value: Sendable>: @unchecked Sendable {
     var value: Value? {
         get { lock.withLock { stored } }
         set { lock.withLock { stored = newValue } }
+    }
+}
+
+/// A monotonic clock for deadline tests. Time moves only when the test
+/// advances it, and a timer wakes once its time has come, unless the test
+/// holds the timers back: then the deadline has passed by the clock, but no
+/// timer has woken to check it.
+final class ManualDeadlineClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private let origin = ContinuousClock.now
+    private var elapsed: Duration = .zero
+    private var isHeld = false
+    private var sleepers: [Int: (due: Duration, continuation: CheckedContinuation<Void, Never>)] = [:]
+    private var cancelledSleepers: Set<Int> = []
+    private var nextSleeper = 0
+
+    var removalClock: RemovalClock {
+        RemovalClock(now: { self.now() }, wake: { await self.wake(at: $0) })
+    }
+
+    func now() -> ContinuousClock.Instant {
+        lock.withLock { origin.advanced(by: elapsed) }
+    }
+
+    /// Moves time on, and wakes the timers now due unless they are held.
+    func advance(by duration: Duration) {
+        let due: [CheckedContinuation<Void, Never>] = lock.withLock {
+            elapsed += duration
+            return isHeld ? [] : takeDue()
+        }
+        for continuation in due {
+            continuation.resume()
+        }
+    }
+
+    /// From now on, timers do not wake, even once their time has come.
+    func holdTimers() {
+        lock.withLock { isHeld = true }
+    }
+
+    /// Lets timers wake again, and wakes those now due.
+    func releaseTimers() {
+        let due: [CheckedContinuation<Void, Never>] = lock.withLock {
+            isHeld = false
+            return takeDue()
+        }
+        for continuation in due {
+            continuation.resume()
+        }
+    }
+
+    private func takeDue() -> [CheckedContinuation<Void, Never>] {
+        let ready = sleepers.filter { $0.value.due <= elapsed }
+        for id in ready.keys {
+            sleepers.removeValue(forKey: id)
+        }
+        return ready.values.map(\.continuation)
+    }
+
+    /// Returns once the clock has reached `instant` and timers are not
+    /// held, or when the calling task is cancelled.
+    private func wake(at instant: ContinuousClock.Instant) async {
+        let due = origin.duration(to: instant)
+        let id = lock.withLock {
+            nextSleeper += 1
+            return nextSleeper
+        }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let wakesNow: Bool = lock.withLock {
+                    if cancelledSleepers.remove(id) != nil { return true }
+                    if !isHeld, due <= elapsed { return true }
+                    sleepers[id] = (due, continuation)
+                    return false
+                }
+                if wakesNow {
+                    continuation.resume()
+                }
+            }
+        } onCancel: {
+            let continuation: CheckedContinuation<Void, Never>? = lock.withLock {
+                if let sleeper = sleepers.removeValue(forKey: id) {
+                    return sleeper.continuation
+                }
+                cancelledSleepers.insert(id)
+                return nil
+            }
+            continuation?.resume()
+        }
     }
 }
