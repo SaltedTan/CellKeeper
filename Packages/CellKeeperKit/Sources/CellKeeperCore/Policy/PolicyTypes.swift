@@ -28,10 +28,12 @@ public enum PolicyState: String, Sendable, Equatable, Codable {
     /// with a native-limit backend.
     case osEnforcedLimit
     /// macOS's own Charge Limit is on, or its report cannot be read and
-    /// recognised, so a backend that switches charging itself restricts
-    /// nothing and CellKeeper's own limit is not enforced (safety
-    /// precondition 7). macOS, not CellKeeper, decides charging until the
-    /// user turns macOS's limit off. Never used with a native-limit backend.
+    /// recognised, so CellKeeper's own limit is not enforced: the policy asks
+    /// a backend that switches charging itself for normal charging and
+    /// withholds every restriction (safety precondition 7), until macOS
+    /// reports no active limit. Whether a restriction already in place has
+    /// ended is up to the read-back, not this state. Never used with a
+    /// native-limit backend.
     case deferringToMacOS
 }
 
@@ -136,13 +138,14 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
     case nativeFullCharge
     /// The charge limit cannot be expressed as macOS's Charge Limit.
     case nativeLimitUnsupported(limit: Int, steps: [Int])
-    /// macOS's own Charge Limit is on at `limit`% (below 100), so a backend
-    /// that switches charging itself restricts nothing until the user turns
-    /// it off.
+    /// macOS reports its own Charge Limit on at `limit`% (below 100), so the
+    /// policy asks a backend that switches charging itself for normal
+    /// charging and withholds its restrictions until the user turns it off.
     case macOSChargeLimitActive(limit: Int)
     /// macOS's Charge Limit report could not be read or recognised (the
-    /// detail says why), so macOS may be limiting charging, and a backend
-    /// that switches charging itself restricts nothing.
+    /// detail says why), so macOS may be limiting charging, and the policy
+    /// asks a backend that switches charging itself for normal charging and
+    /// withholds its restrictions.
     case macOSChargeLimitUnknown(problem: String)
 
     /// The reason, independent of the backend: what CellKeeper restores is
@@ -213,9 +216,9 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
         case .nativeLimitUnsupported(let limit, let steps):
             "A \(limit)% limit cannot be set with macOS's Charge Limit (\(steps.map { "\($0)%" }.joined(separator: ", "))); your own macOS limit stays in effect."
         case .macOSChargeLimitActive(let limit):
-            "macOS's own Charge Limit is on at \(limit)%. While it is on, CellKeeper does not enforce its own limit and restricts nothing, so the two limits never compete; macOS decides charging. To let CellKeeper manage charging, turn macOS's Charge Limit off in System Settings › Battery › Charging (set it to 100%)."
+            "macOS reports its own Charge Limit on at \(limit)%. While it is on, CellKeeper does not enforce its own limit: it asks for normal charging, to end any restriction of its own, and withholds new ones, so the two limits never compete. To let CellKeeper manage charging, turn macOS's Charge Limit off in System Settings › Battery › Charging (set it to 100%)."
         case .macOSChargeLimitUnknown(let problem):
-            "CellKeeper could not read macOS's Charge Limit report (\(problem)), so macOS may be limiting charging, for example with its Charge Limit or Optimized Battery Charging. Until the report shows the limit off, CellKeeper does not enforce its own limit and restricts nothing. Check that macOS's Charge Limit is off in System Settings › Battery › Charging (set to 100%)."
+            "CellKeeper could not read macOS's Charge Limit report (\(problem)), so macOS may be limiting charging, for example with its Charge Limit or Optimized Battery Charging. Until the report shows no active limit, CellKeeper does not enforce its own limit: it asks for normal charging, to end any restriction of its own, and withholds new ones. Check that macOS's Charge Limit is off in System Settings › Battery › Charging (set to 100%)."
         }
     }
 }
@@ -236,7 +239,7 @@ public enum PolicyNote: Sendable, Equatable, CustomStringConvertible {
     /// next distinct reading to confirm it before pausing charging.
     case confirmingLimit
     /// A discharge session ended because macOS's own Charge Limit is on or
-    /// cannot be read, so CellKeeper restricts nothing.
+    /// cannot be read, so the policy withholds every restriction.
     case dischargeEndedForMacOSChargeLimit
 
     public var description: String {
@@ -252,7 +255,7 @@ public enum PolicyNote: Sendable, Equatable, CustomStringConvertible {
         case .confirmingLimit:
             "CellKeeper is confirming the limit with the next battery reading before it pauses charging, so a single wrong reading cannot pause it."
         case .dischargeEndedForMacOSChargeLimit:
-            "The discharge session ended: CellKeeper does not run the Mac from its battery while macOS's Charge Limit is on or cannot be read."
+            "The discharge session ended: while macOS's Charge Limit is on or cannot be read, CellKeeper starts no discharge and asks to end one in progress."
         }
     }
 }

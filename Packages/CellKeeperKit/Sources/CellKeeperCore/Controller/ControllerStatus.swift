@@ -89,6 +89,10 @@ public struct ControllerStatus: Sendable, Equatable {
     public var capabilities: ControlCapabilities
     /// The backend's reported mode, or nil if unknown.
     public var currentMode: ChargeControlMode?
+    /// The non-normal mode CellKeeper last confirmed, or asked for without
+    /// confirmation, on this backend and has not seen end; nil if none.
+    /// Asking for `.normal` does not clear it; a read-back of the end does.
+    public var ownRestrictionMode: ChargeControlMode?
     /// macOS's Charge Limit as seen by a native-limit backend; nil otherwise.
     public var nativeLimit: NativeLimitStatus?
     /// The latest change to macOS's Charge Limit made outside CellKeeper and

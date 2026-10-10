@@ -208,7 +208,7 @@ private struct ControlSettingsTab: View {
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     if let macOSLimit = status.capabilities.macOSChargeLimit, !status.capabilities.isEnforcedByMacOS {
-                        MacOSChargeLimitNotice(status: macOSLimit, recheck: { model.recheckBackend() })
+                        MacOSChargeLimitNotice(macOSLimit: macOSLimit, ownRestriction: status.ownRestriction, recheck: { model.recheckBackend() })
                     }
                     if status.isBackendFaulted {
                         Label(faultExplanation(for: status),

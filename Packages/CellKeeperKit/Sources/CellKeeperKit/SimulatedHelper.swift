@@ -79,11 +79,13 @@ extension HelperChargingBackend {
     /// ``InProcessHelperTransport``. While CellKeeper holds a control,
     /// `activity` keeps the app from being napped.
     ///
-    /// On a Mac that has macOS's own Charge Limit, the backend restricts
-    /// nothing while that limit is on or cannot be read (safety
+    /// On a Mac that has macOS's own Charge Limit, the backend withholds its
+    /// restrictions while that limit is on or cannot be read (safety
     /// precondition 7), as the real helper backend will.
     ///
     /// - Parameters:
+    ///   - control: the simulated control; a test can inject failures
+    ///     through it.
     ///   - power: the helper's power reading; the system's by default. It
     ///     must stamp its readings with `uptime`.
     ///   - uptime: one monotonic clock for the engine, the power reading and
@@ -92,6 +94,7 @@ extension HelperChargingBackend {
     ///     through `pmset -g battlimit` (read-only) on a Mac that has the
     ///     Charge Limit, and nil on one that does not.
     public static func simulatedHelper(
+        control: SimulatedChargeControl = SimulatedChargeControl(),
         power: (any HelperPowerReading)? = nil,
         tickInterval: Duration = .seconds(5),
         uptime: @escaping @Sendable () -> TimeInterval = HelperEngine.continuousUptime,
@@ -106,7 +109,7 @@ extension HelperChargingBackend {
                 summary: "CellKeeper's own charge control, at any limit from 20 to 100%, simulated: the helper's logic runs inside CellKeeper with a simulated control, so nothing on your Mac changes. Real control needs a signed helper and a verified mechanism (roadmap milestone 4)."
             ),
             transport: InProcessHelperTransport(
-                control: SimulatedChargeControl(),
+                control: control,
                 power: power ?? SystemHelperPowerReading(uptime: uptime),
                 build: Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "") ?? 0,
                 uptime: uptime,

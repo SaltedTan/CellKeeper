@@ -49,7 +49,7 @@ extension MacOSChargeLimitMonitor {
     /// charging itself; nil if this Mac has no Charge Limit
     /// (`featureIssue`), so there is nothing to coexist with. If pmset is
     /// missing, its reads fail, the limit counts as unreadable, and the
-    /// backend restricts nothing.
+    /// backend withholds its restrictions.
     public static func system(
         featureIssue: String? = NativeChargeLimitSupport.featureIssue(),
         uptime: @escaping @Sendable () -> TimeInterval = HelperEngine.continuousUptime

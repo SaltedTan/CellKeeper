@@ -49,9 +49,12 @@ import os
 /// - While macOS's own Charge Limit is on, or its report cannot be read, a
 ///   backend that switches charging itself is asked for nothing but
 ///   `.normal` (the policy defers to macOS; safety precondition 7). If that
-///   starts while CellKeeper holds a restriction, the evaluation releases it
-///   and logs a safety event; other changes of macOS's limit are logged as
-///   notices.
+///   starts while CellKeeper holds a restriction, the evaluation asks for
+///   its release and a safety event says whether a read-back confirmed it;
+///   if not, a later one says when a read-back shows it ended. Other changes
+///   of macOS's limit are logged as notices, which never claim more than
+///   the report: in particular, macOS's limit going off does not mean that
+///   CellKeeper manages charging again.
 /// - With a native-limit backend, `.normal` means the user's own macOS Charge
 ///   Limit, so every path above restores exactly that value. If the backend
 ///   remembers a limit it set in an earlier session (which a normal quit
@@ -128,6 +131,9 @@ public actor ChargeController {
     /// (``ControlCapabilities/macOSChargeLimit``), for logging its changes;
     /// nil if the backend does not check it, or has not reported it yet.
     private var macOSLimitGate: MacOSLimitGate?
+    /// A restriction CellKeeper asked to end when macOS's Charge Limit
+    /// started to apply, whose end no read-back has shown yet.
+    private var macOSLimitReleaseUnconfirmed: ChargeControlMode?
     private var managementRefusal: String?
     private var events: [ControlEvent] = []
     private var nextEventID = 0
@@ -179,6 +185,7 @@ public actor ChargeController {
             backend: backend.descriptor,
             capabilities: capabilities,
             currentMode: currentMode,
+            ownRestrictionMode: ownRestrictionMode,
             nativeLimit: nativeLimit,
             adoptedChange: adoptedChange,
             adoptionCount: adoptionCount,
@@ -381,6 +388,7 @@ public actor ChargeController {
         isReportedFaultHandled = false
         nativeLimit = nil
         macOSLimitGate = nil
+        macOSLimitReleaseUnconfirmed = nil
         lastExecution = nil
         record(.settings, "Control backend changed from \(previousName) to \(newBackend.descriptor.displayName).")
         await performEvaluation(.backendChanged)
@@ -533,6 +541,9 @@ public actor ChargeController {
         nativeLimit = await backend.nativeLimitStatus()
         if let held = heldWhenMacOSLimitStarted {
             recordMacOSLimitRelease(of: held)
+        } else if let held = macOSLimitReleaseUnconfirmed, currentMode == .normal {
+            macOSLimitReleaseUnconfirmed = nil
+            record(.safety, "A read-back now shows normal charging: CellKeeper's \(describeTarget(held)), which it asked to end when macOS's Charge Limit started to apply, has ended.")
         }
         await renewHoldIfStillWanted(newDecision)
 
@@ -640,14 +651,24 @@ public actor ChargeController {
 
         var isLimiting: Bool { self != .off }
 
-        /// What macOS's limit is now, for the activity log.
+        /// What macOS's report shows now, for the activity log.
         var summary: String {
             switch self {
-            case .off: "macOS's Charge Limit is off"
-            case .on(let limit): "macOS's Charge Limit is on at \(limit)%"
+            case .off: "macOS reports no active Charge Limit"
+            case .on(let limit): "macOS reports its Charge Limit on at \(limit)%"
             case .unknown(let problem): "CellKeeper could not read macOS's Charge Limit report (\(problem)), so macOS may be limiting charging"
             }
         }
+    }
+
+    /// The non-normal mode CellKeeper last confirmed, or asked for without
+    /// confirmation, and has not seen end; also one it asked to end when
+    /// macOS's Charge Limit started to apply, until a read-back shows the
+    /// end, even if a fault made it stop counting it as its own.
+    private var ownRestrictionMode: ChargeControlMode? {
+        if let owned = ownedMode, owned != .normal { return owned }
+        return unconfirmedRequests.filter { $0 != .normal }.max { $0.restrictionLevel < $1.restrictionLevel }
+            ?? macOSLimitReleaseUnconfirmed
     }
 
     /// Logs a change of macOS's own Charge Limit as the backend reports it
@@ -661,39 +682,44 @@ public actor ChargeController {
         macOSLimitGate = gate
         guard let gate, gate != previous else { return nil }
         guard gate.isLimiting else {
-            // Nothing to report the first time macOS's limit is seen off.
+            // Nothing to report the first time macOS's limit is seen off. A
+            // release still unconfirmed stays a failure like any other, and
+            // the decision log says what CellKeeper wants now.
+            macOSLimitReleaseUnconfirmed = nil
             if previous != nil {
-                record(.decision, "\(gate.summary): CellKeeper manages charging with its own limit again.")
+                record(.decision, "\(gate.summary) any more, so CellKeeper stops deferring to it. This does not establish that the setting is 100% or that macOS holds nothing else.")
             }
             return nil
         }
         if previous?.isLimiting == true {
-            record(.decision, "\(gate.summary). CellKeeper still restricts nothing until macOS's Charge Limit is off.")
+            record(.decision, "\(gate.summary). CellKeeper keeps deferring to it: it asks for normal charging and withholds its own restrictions.")
             return nil
         }
-        let held = ownedMode.flatMap { $0 == .normal ? nil : $0 }
-            ?? unconfirmedRequests.first { $0 != .normal }
-        if let held {
+        if let held = ownRestrictionMode {
             return held
         }
-        record(.decision, "\(gate.summary). CellKeeper restricts nothing while macOS may be limiting charging, so two limits never compete; turn macOS's Charge Limit off in System Settings › Battery › Charging (set it to 100%) to let CellKeeper manage charging.")
+        record(.decision, "\(gate.summary). CellKeeper defers to it: it asks for normal charging and withholds its own restrictions, so two limits never compete. To let CellKeeper manage charging, turn macOS's Charge Limit off in System Settings › Battery › Charging (set it to 100%).")
         return nil
     }
 
     /// After an evaluation that found macOS's own Charge Limit starting to
-    /// apply while CellKeeper held `held`: logs, as a safety event, that
-    /// CellKeeper released its hold, or that the release is not confirmed
-    /// yet (normal charging then keeps being requested).
+    /// apply while CellKeeper held `held`: logs, as a safety event, whether
+    /// a read-back confirmed that the restriction ended. If not, it may
+    /// remain; normal charging keeps being requested, and a later safety
+    /// event says when a read-back shows it ended.
     private func recordMacOSLimitRelease(of held: ChargeControlMode) {
         let gate = macOSLimitGate ?? .unknown("no report")
         let started: String = switch gate {
         case .on(let limit): "macOS's Charge Limit was turned on (\(limit)%)"
         case .unknown, .off: gate.summary
         }
+        let deferring = "CellKeeper withholds new restrictions until macOS reports no active limit."
         if currentMode == .normal {
-            record(.safety, "\(started) while CellKeeper held \(describeTarget(held)). CellKeeper released its hold and restricts nothing until macOS's Charge Limit is off again, so two limits never compete.")
+            macOSLimitReleaseUnconfirmed = nil
+            record(.safety, "\(started) while CellKeeper held \(describeTarget(held)). CellKeeper asked for normal charging, and a read-back confirms that its restriction ended. \(deferring)")
         } else {
-            record(.safety, "\(started) while CellKeeper held \(describeTarget(held)). CellKeeper could not confirm releasing its hold yet; it keeps asking for normal charging and restricts nothing until macOS's Charge Limit is off again.", level: .error)
+            macOSLimitReleaseUnconfirmed = held
+            record(.safety, "\(started) while CellKeeper held \(describeTarget(held)). CellKeeper asked for normal charging, but no read-back has confirmed that its restriction ended, so it may remain; CellKeeper keeps asking for normal charging. \(deferring)", level: .error)
         }
     }
 

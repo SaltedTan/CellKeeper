@@ -180,13 +180,90 @@ final class StubChargeLimitReader: ChargeLimitReading, @unchecked Sendable {
         self.reading = reading
     }
 
+    func set(_ newReading: NativeChargeLimitReading) {
+        lock.withLock { reading = newReading }
+    }
+
     func readChargeLimit() async throws -> NativeChargeLimitReading {
         lock.withLock { reading }
     }
 }
 
+/// Wall time and monotonic uptime that advance together, set by the test.
+final class KitTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var elapsed: TimeInterval = 0
+    private let start = Date(timeIntervalSince1970: 1_800_000_000)
+
+    var now: Date { lock.withLock { start.addingTimeInterval(elapsed) } }
+    var uptime: TimeInterval { lock.withLock { 10_000 + elapsed } }
+
+    func advance(by interval: TimeInterval) {
+        lock.withLock { elapsed += interval }
+    }
+}
+
+/// Battery telemetry on external power at a fixed charge, stamped with the
+/// test clock.
+struct KitStubTelemetry: TelemetryProvider {
+    let percent: Int
+    let clock: KitTestClock
+
+    func currentSnapshot() async throws -> BatterySnapshot {
+        BatterySnapshot(timestamp: clock.now, chargePercent: percent, powerSource: .externalPower, isCharging: true, isFullyCharged: false, temperatureCelsius: 30)
+    }
+
+    func powerSourceChanges() -> AsyncStream<Void> {
+        AsyncStream { $0.finish() }
+    }
+}
+
 @Suite("Simulated helper and macOS's Charge Limit")
 struct SimulatedHelperCoexistenceTests {
+    @Test("A release that fails on the Simulated helper is reported as possibly remaining, until a read-back shows it ended")
+    func failedReleaseOnSimulatedHelper() async throws {
+        let clock = KitTestClock()
+        let control = SimulatedChargeControl()
+        let reader = StubChargeLimitReader(.noLimit)
+        let uptime: @Sendable () -> TimeInterval = { clock.uptime }
+        let monitor = MacOSChargeLimitMonitor(reader: reader, now: { clock.now }, uptime: uptime)
+        let backend = HelperChargingBackend.simulatedHelper(
+            control: control,
+            power: CountingPower(uptime: uptime),
+            tickInterval: .seconds(3600),
+            uptime: uptime,
+            pause: { _ in },
+            activity: NoLeaseActivity(),
+            macOSChargeLimit: monitor
+        )
+        let controller = ChargeController(telemetry: KitStubTelemetry(percent: 85, clock: clock), backend: backend, settings: .default, now: { clock.now }, uptime: uptime)
+        await controller.evaluate(.launch)
+        clock.advance(by: 60)
+        let held = await controller.evaluate(.periodic)
+        #expect(held.currentMode == .inhibitCharging)
+
+        reader.set(.limit(80))
+        control.failNextApplies(4)
+        control.failNextRestores(4)
+        clock.advance(by: 60)
+        let failed = await controller.evaluate(.periodic)
+        #expect(control.activeControls == [.chargingInhibited])
+        #expect(failed.ownRestriction.mayBeInEffect)
+        #expect(failed.events.contains { $0.kind == .safety && $0.message.contains("no read-back has confirmed that its restriction ended, so it may remain") })
+        #expect(!failed.events.contains { $0.message.contains("restricts nothing") || $0.message.contains("confirms that its restriction ended") })
+
+        var recovered: ControllerStatus?
+        for _ in 0..<6 where recovered == nil {
+            clock.advance(by: 60)
+            let status = await controller.evaluate(.periodic)
+            if status.currentMode == .normal { recovered = status }
+        }
+        let status = try #require(recovered)
+        #expect(control.activeControls.isEmpty)
+        #expect(status.ownRestriction == .noneInEffect)
+        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("A read-back now shows normal charging") })
+    }
+
     @Test("Only a Mac with macOS's Charge Limit gets a monitor, and making one reads nothing")
     func monitorOnlyWithTheFeature() async {
         #expect(MacOSChargeLimitMonitor.system(featureIssue: "macOS's Charge Limit needs a Mac with Apple silicon.") == nil)

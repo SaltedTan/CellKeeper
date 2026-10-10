@@ -16,9 +16,10 @@ import Foundation
 ///    time), without a battery, or with an unknown power source → fail safe.
 ///    A discharge session never survives this.
 /// 5. macOS's own Charge Limit is on, or its report cannot be read and
-///    recognised (``ControlCapabilities/macOSChargeLimit``) → CellKeeper
-///    restricts nothing, so two limits never compete (safety precondition
-///    7). A discharge session ends. The latches still follow the readings.
+///    recognised (``ControlCapabilities/macOSChargeLimit``) → normal
+///    charging is requested and every restriction withheld, so two limits
+///    never compete (safety precondition 7). A discharge session ends. The
+///    latches still follow the readings.
 /// 6. Safety floor latched (≤ 10%, until ≥ 15%) → charging always allowed.
 /// 7. On battery power → CellKeeper's restrictions cleared (a later plug-in
 ///    then charges normally even if CellKeeper has stopped; the limit latch
@@ -190,11 +191,11 @@ public enum ChargingPolicy {
             decision(state, mode, reason, memory: memory, input: input, notes: notes, overrideEnded: overrideEnded)
         }
 
-        // macOS's own Charge Limit decides charging: nothing below restricts,
-        // not even temperature protection or the limit (macOS has its own
-        // thermal limiting). The latches above still follow the readings, as
-        // they describe the battery, so a limit confirmed meanwhile holds as
-        // soon as macOS's limit is off.
+        // macOS's own Charge Limit decides charging: nothing below may ask for
+        // a restriction, not even temperature protection or the limit (macOS
+        // has its own thermal limiting). The latches above still follow the
+        // readings, as they describe the battery, so a limit confirmed
+        // meanwhile holds as soon as macOS's limit is off.
         if let macOSLimit {
             return make(.deferringToMacOS, .normal, macOSLimit)
         }
@@ -261,9 +262,10 @@ public enum ChargingPolicy {
 
     // MARK: - macOS's own Charge Limit
 
-    /// Why a backend that switches charging itself must restrict nothing:
-    /// macOS's own Charge Limit is on, or its report could not be read and
-    /// recognised. Nil if the backend does not check it or it is off.
+    /// Why the policy must ask a backend that switches charging itself for
+    /// normal charging and withhold every restriction: macOS's own Charge
+    /// Limit is on, or its report could not be read and recognised. Nil if
+    /// the backend does not check it or macOS reports no active limit.
     static func macOSChargeLimitReason(_ capabilities: ControlCapabilities) -> DecisionReason? {
         guard !capabilities.isEnforcedByMacOS, let status = capabilities.macOSChargeLimit, status.isLimiting else { return nil }
         if let limit = status.reportedLimit {

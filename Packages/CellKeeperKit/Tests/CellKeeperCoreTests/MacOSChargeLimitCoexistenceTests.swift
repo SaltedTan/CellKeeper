@@ -136,6 +136,7 @@ struct MacOSChargeLimitMonitorTests {
             let status = await monitor.refresh()
             #expect(status.reportedLimit == limit)
             #expect(status.isLimiting == isLimiting)
+            #expect(status.isNoLimitReported == (reading == .noLimit))
             #expect((status.readProblem != nil) == (limit == nil))
         }
         let unrecognised = await monitor.refresh()
@@ -279,7 +280,7 @@ struct HelperMacOSChargeLimitBackendTests {
 
 @Suite("Policy and macOS's Charge Limit")
 struct MacOSChargeLimitPolicyTests {
-    @Test("While macOS's Charge Limit is on, the policy restricts nothing and names the limit")
+    @Test("While macOS's Charge Limit is on, the policy asks for normal charging, withholds restrictions, and names the limit")
     func defers() {
         let decision = ChargingPolicy.evaluate(input(snapshot(percent: 50), capabilities: helperCapabilities(macOSLimit: 80)))
         #expect(decision.state == .deferringToMacOS)
@@ -421,11 +422,12 @@ struct MacOSChargeLimitControllerTests {
         #expect(rig.control.activeControls.isEmpty)
         let safety = released.events.filter { $0.kind == .safety && $0.message.contains("macOS's Charge Limit was turned on (80%)") }
         #expect(safety.count == 1)
-        #expect(safety.first?.message.contains("released its hold") == true)
+        #expect(safety.first?.message.contains("a read-back confirms that its restriction ended") == true)
+        #expect(released.ownRestriction == .noneInEffect)
         #expect(!released.events.contains { $0.message.contains("outside CellKeeper") })
     }
 
-    @Test("While macOS's limit is on nothing is restricted, even hot or at the limit; once it is off, the limit holds again")
+    @Test("While macOS's limit is on nothing is requested but normal charging, even hot or at the limit; once it is off, the limit holds again")
     func nothingWhileOnThenHoldsAgain() async {
         let reader = StubMacOSChargeLimit(.noLimit)
         let rig = HelperRig(macOSReader: reader)
@@ -457,7 +459,7 @@ struct MacOSChargeLimitControllerTests {
         let holding = await controller.evaluate(.periodic)
         #expect(holding.decision?.state == .holding)
         #expect(holding.currentMode == .inhibitCharging)
-        #expect(holding.events.contains { $0.kind == .decision && $0.message.contains("macOS's Charge Limit is off") })
+        #expect(holding.events.contains { $0.kind == .decision && $0.message.contains("macOS reports no active Charge Limit any more, so CellKeeper stops deferring to it") })
     }
 
     @Test("macOS's limit on at launch: a notice, never a restriction, and no safety event")
@@ -469,7 +471,7 @@ struct MacOSChargeLimitControllerTests {
         #expect(status.decision?.state == .deferringToMacOS)
         #expect(status.currentMode == .normal)
         #expect(status.lastExecution == nil)
-        let notices = status.events.filter { $0.message.contains("macOS's Charge Limit is on at 80%") }
+        let notices = status.events.filter { $0.message.contains("macOS reports its Charge Limit on at 80%") }
         #expect(notices.count == 1)
         #expect(notices.first?.kind == .decision)
         #expect(notices.first?.message.contains("System Settings › Battery › Charging") == true)
@@ -489,7 +491,7 @@ struct MacOSChargeLimitControllerTests {
         #expect(released.decision?.reason == .macOSChargeLimitUnknown(problem: "unrecognised report (a limit with reason optimizedBatteryCharging)"))
         #expect(released.currentMode == .normal)
         #expect(!released.isBackendFaulted)
-        #expect(released.events.contains { $0.kind == .safety && $0.message.contains("could not read macOS's Charge Limit report") && $0.message.contains("released its hold") })
+        #expect(released.events.contains { $0.kind == .safety && $0.message.contains("could not read macOS's Charge Limit report") && $0.message.contains("a read-back confirms that its restriction ended") })
     }
 
     @Test("A discharge session ends when macOS's limit is turned on, and the adapter is given back")
@@ -530,7 +532,7 @@ struct MacOSChargeLimitControllerTests {
         #expect(rechecked.currentMode == .inhibitCharging)
     }
 
-    @Test("The diagnostics report shows macOS's limit and that CellKeeper restricts nothing")
+    @Test("The diagnostics report shows macOS's limit, that CellKeeper defers to it, and what the read-back shows")
     func diagnostics() async {
         let reader = StubMacOSChargeLimit(.unrecognized("a limit with reason optimizedBatteryCharging"))
         let rig = HelperRig(macOSReader: reader)
@@ -538,8 +540,9 @@ struct MacOSChargeLimitControllerTests {
         let status = await controller.evaluate(.launch)
         let environment = DiagnosticsEnvironment(appVersion: "0.1.0 (1)", systemVersion: "Version 27.0.1", modelIdentifier: "Mac16,1")
         let report = DiagnosticsReport.text(status: status, environment: environment, generatedAt: referenceDate)
-        #expect(report.contains("macOS Charge Limit: unreadable, read "))
-        #expect(report.contains("; CellKeeper restricts nothing while it is on"))
+        #expect(report.contains("macOS Charge Limit: Could not be read, read "))
+        #expect(report.contains("; CellKeeper defers to it: it asks for normal charging and withholds its own restrictions"))
+        #expect(report.contains("Own restriction: The last read-back shows no restriction in effect."))
         #expect(report.contains("macOS Charge Limit read problem: unrecognised report (a limit with reason optimizedBatteryCharging)"))
         #expect(report.contains("State: deferringToMacOS"))
     }
@@ -554,7 +557,7 @@ struct MacOSChargeLimitControllerTests {
         rig.clock.advance(by: 60)
         let status = await controller.evaluate(.periodic)
         #expect(status.decision?.reason == .macOSChargeLimitActive(limit: 90))
-        #expect(status.events.contains { $0.kind == .decision && $0.message.contains("macOS's Charge Limit is on at 90%") && $0.message.contains("still restricts nothing") })
+        #expect(status.events.contains { $0.kind == .decision && $0.message.contains("macOS reports its Charge Limit on at 90%") && $0.message.contains("keeps deferring to it") })
         #expect(!status.events.contains { $0.kind == .safety && $0.message.contains("macOS's Charge Limit") })
     }
 }

@@ -115,7 +115,14 @@ private struct ControlSummary: View {
                     .font(.caption)
                     .foregroundStyle(decision.state == .deferringToMacOS ? Color.orange : Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                if decision.state == .deferringToMacOS {
+                if status.capabilities.macOSChargeLimit?.isLimiting == true, !status.capabilities.isEnforcedByMacOS {
+                    if status.ownRestriction.mayBeInEffect {
+                        // Asking for normal charging is not the same as having it.
+                        Label(MacOSChargeLimitWording.releaseState(status.ownRestriction), systemImage: "exclamationmark.triangle")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     Button("Check Again", action: recheck)
                         .controlSize(.small)
                         .help("Reads macOS's Charge Limit again now, for example after you turned it off in System Settings. CellKeeper also reads it about once a minute.")
