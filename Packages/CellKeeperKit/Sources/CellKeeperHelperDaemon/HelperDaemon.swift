@@ -83,8 +83,8 @@ public struct HelperDaemonEnvironment: Sendable {
 ///    and approved, launchd's `KeepAlive.SuccessfulExit = false` starts the
 ///    daemon again after a non-zero exit, and that start restores defaults
 ///    first; after a removal, a bootout or a revoked approval no start
-///    follows (see the recovery procedure in `safety.md`). Ticks and
-///    SIGTERM handling stay live until this point.
+///    follows (see "Recovery if charging does not resume" in `safety.md`).
+///    Ticks and SIGTERM handling stay live until this point.
 ///
 /// The deadline holds even if the engine is stuck in a call to the control
 /// or the log cannot be written. The daemon exits only from its own tasks,
@@ -461,7 +461,7 @@ public actor HelperDaemon {
         if status == 0 {
             queue.log(.notice, .lifecycle, "The frontend stopped and defaults are confirmed: exiting with status 0.")
         } else {
-            queue.log(.fault, .safety, "Defaults or the frontend's stop not confirmed: exiting with status \(status). If launchd starts the helper again, it restores defaults before anything else; after a removal, bootout or revoked approval, no start follows (see the recovery procedure in docs/safety.md).")
+            queue.log(.fault, .safety, "Defaults or the frontend's stop not confirmed: exiting with status \(status). If launchd starts the helper again, it restores defaults before anything else; after a removal, bootout or revoked approval, no start follows (see \"Recovery if charging does not resume\" in docs/safety.md).")
         }
         let clock = environment.clock
         let queue = queue

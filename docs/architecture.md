@@ -1856,11 +1856,11 @@ with no time left is skipped. In order:
    otherwise 75 (`EX_TEMPFAIL`). While the job is loaded and approved,
    launchd restarts it after a non-zero exit (`KeepAlive.SuccessfulExit =
    false`), and that start restores defaults first; after a removal, a
-   bootout or a revoked approval no start follows (see the recovery
-   procedure in `safety.md`). The log says so. Ticks keep retrying an owed
-   restore, and SIGTERM stays
-   handled (a second one is ignored), until this point. The decision is
-   logged, and the log waited for within what is left of the deadline.
+   bootout or a revoked approval no start follows (see "Recovery if
+   charging does not resume" in `safety.md`). The log says so. Ticks keep
+   retrying an owed restore, and SIGTERM stays handled (a second one is
+   ignored), until this point. The decision is logged, and the log waited
+   for within what is left of the deadline.
 
 The deadline holds with a stuck engine, a log that cannot be written, or
 a timer that starts late: the daemon stops waiting and exits, though it
