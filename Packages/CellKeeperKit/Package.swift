@@ -24,11 +24,13 @@
 //   Depends on CellKeeperHelperCore.
 // - CellKeeperHelperDaemon: the host of the helper daemon (start, ticks,
 //   SIGTERM, acknowledged sleep, its own read-only power reading, the
-//   activation history file, the audit log). Depends on CellKeeperHelperCore
-//   only, never on the app's modules.
+//   activation history file, the audit log) and its NSXPC frontend. Depends
+//   on CellKeeperHelperCore and CellKeeperHelperXPC, never on the app's
+//   modules.
 // - CellKeeperHelper: the daemon executable. It controls no hardware
-//   (`UnknownHardwareChargeControl`), serves no clients yet, and is neither
-//   installed nor embedded in the app in this phase.
+//   (`UnknownHardwareChargeControl`), serves CellKeeper over the
+//   authenticated NSXPC transport, and is neither installed nor embedded in
+//   the app in this phase.
 
 import PackageDescription
 
@@ -53,7 +55,7 @@ let package = Package(
         .target(name: "CellKeeperHelperXPC", dependencies: ["CellKeeperHelperCore"]),
         .target(
             name: "CellKeeperHelperDaemon",
-            dependencies: ["CellKeeperHelperCore"],
+            dependencies: ["CellKeeperHelperCore", "CellKeeperHelperXPC"],
             linkerSettings: [.linkedFramework("IOKit")]
         ),
         .executableTarget(name: "CellKeeperHelper", dependencies: ["CellKeeperHelperDaemon"]),
@@ -61,6 +63,6 @@ let package = Package(
         .testTarget(name: "CellKeeperKitTests", dependencies: ["CellKeeperKit", "CellKeeperHelperCore", "CellKeeperHelperXPC"]),
         .testTarget(name: "CellKeeperHelperCoreTests", dependencies: ["CellKeeperHelperCore"]),
         .testTarget(name: "CellKeeperHelperXPCTests", dependencies: ["CellKeeperHelperXPC", "CellKeeperHelperCore"]),
-        .testTarget(name: "CellKeeperHelperDaemonTests", dependencies: ["CellKeeperHelperDaemon", "CellKeeperHelperCore"]),
+        .testTarget(name: "CellKeeperHelperDaemonTests", dependencies: ["CellKeeperHelperDaemon", "CellKeeperHelperCore", "CellKeeperHelperXPC"]),
     ]
 )

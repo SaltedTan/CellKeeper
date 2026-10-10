@@ -21,14 +21,20 @@ struct HelperDaemonThreadTests {
             Task { await writer.pump(queue.items) }
             queue.log(.notice, .lifecycle, "held")
         }
-        // Seam calls that block.
+        // Seam calls that block; each counts itself in before it does.
         let seam = DispatchSemaphore(value: 0)
+        let entered = EntryCounter()
         let calls = (0..<count).map { _ in
-            Task { await HelperDaemon.blocking { _ = seam.wait(timeout: .now() + 10) } }
+            Task {
+                await HelperDaemon.blocking {
+                    entered.increment()
+                    _ = seam.wait(timeout: .now() + 10)
+                }
+            }
         }
 
-        // Every log write is blocked at the same time ...
-        let blocked = await eventually { logs.allSatisfy(\.isWaiting) }
+        // Every log write and every seam call is blocked at the same time ...
+        let blocked = await eventually { logs.allSatisfy(\.isWaiting) && entered.count == count }
         #expect(blocked)
         // ... and work on the cooperative pool still runs at once.
         let began = ContinuousClock.now
@@ -56,5 +62,19 @@ struct HelperDaemonThreadTests {
         for queue in queues {
             queue.finish()
         }
+    }
+}
+
+/// Counts entries from any thread.
+final class EntryCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries = 0
+
+    var count: Int {
+        lock.withLock { entries }
+    }
+
+    func increment() {
+        lock.withLock { entries += 1 }
     }
 }

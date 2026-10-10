@@ -67,9 +67,10 @@ public struct HelperDaemonEnvironment: Sendable {
 /// start. Whatever began it, one absolute deadline,
 /// ``terminationDeadline`` after it began, bounds all of it, logging and
 /// the final decision included, and every wait is bounded by what is left:
-/// 1. The frontend is told to stop; it confirms once everything it
-///    accepted is answered and every session invalidated (see
-///    ``HelperFrontend/stop()``).
+/// 1. The frontend is told to stop by ``finalisationReserve`` before the
+///    deadline; it confirms once everything it accepted is answered and
+///    every session invalidated (see ``HelperFrontend/stop(by:)``), and a
+///    confirmation after that deadline does not count.
 /// 2. `terminate()`, retried about once a second until the frontend has
 ///    confirmed and the engine is safe to exit, or until
 ///    ``finalisationReserve`` before the deadline.
@@ -78,10 +79,12 @@ public struct HelperDaemonEnvironment: Sendable {
 ///    if the frontend has confirmed, because only then can nothing else
 ///    change the state.
 /// 5. Only then is the exit status committed: 0 if that check passed,
-///    ``restoreNotConfirmedExitStatus`` otherwise (launchd's
-///    `KeepAlive.SuccessfulExit = false` then starts the daemon again, and
-///    the next start restores defaults first). Ticks and SIGTERM handling
-///    stay live until this point.
+///    ``restoreNotConfirmedExitStatus`` otherwise. While the job is loaded
+///    and approved, launchd's `KeepAlive.SuccessfulExit = false` starts the
+///    daemon again after a non-zero exit, and that start restores defaults
+///    first; after a removal, a bootout or a revoked approval no start
+///    follows (see "Recovery if charging does not resume" in `safety.md`).
+///    Ticks and SIGTERM handling stay live until this point.
 ///
 /// The deadline holds even if the engine is stuck in a call to the control
 /// or the log cannot be written. The daemon exits only from its own tasks,
@@ -120,7 +123,8 @@ public actor HelperDaemon {
     /// writing the log stops this long before the deadline.
     public static let finalCheckReserve: TimeInterval = 0.5
     /// The exit status when defaults could not be confirmed (`EX_TEMPFAIL`).
-    /// Being non-zero, it makes launchd start the daemon again.
+    /// Being non-zero, it makes launchd start the daemon again, but only
+    /// while the job is still loaded and approved.
     public static let restoreNotConfirmedExitStatus: Int32 = 75
     /// How often the engine runs its periodic checks.
     public static let tickInterval: TimeInterval = 5
@@ -169,8 +173,10 @@ public actor HelperDaemon {
             build: environment.build,
             uptime: { clock.uptime() },
             activationHistory: Self.loadHistory(environment, log: queue),
-            events: { event in
+            events: { [frontend = environment.frontend] event in
                 queue.event(event)
+                // The frontend closes the connection of a revoked session.
+                frontend.handle(event)
                 // Seen here rather than when the log reaches it, so a slow
                 // log cannot delay the shutdown. The daemon reacts on a
                 // task of its own.
@@ -386,9 +392,15 @@ public actor HelperDaemon {
         let queue = queue
         queue.log(.notice, .lifecycle, "\(reason): stopping the frontend and restoring defaults; exiting within \(Int(Self.terminationDeadline)) s.")
 
-        // 1. Stop the frontend (once a start in progress has returned); its
-        // confirmation may come later.
-        let stop = FrontendStop(environment.frontend, after: frontendStart)
+        // 1. Stop the frontend (once a start in progress has returned) by
+        // the end of the retries, on the same deadline; its confirmation may
+        // come later.
+        let stop = FrontendStop(
+            environment.frontend,
+            after: frontendStart,
+            by: HelperDaemonDeadline(uptime: deadline - Self.finalisationReserve, on: clock),
+            log: queue
+        )
 
         // 2. Restore and retry until the frontend has confirmed and the
         // engine is safe to exit, keeping the reserve.
@@ -449,7 +461,7 @@ public actor HelperDaemon {
         if status == 0 {
             queue.log(.notice, .lifecycle, "The frontend stopped and defaults are confirmed: exiting with status 0.")
         } else {
-            queue.log(.fault, .safety, "Defaults or the frontend's stop not confirmed: exiting with status \(status). The next start restores defaults before anything else.")
+            queue.log(.fault, .safety, "Defaults or the frontend's stop not confirmed: exiting with status \(status). If launchd starts the helper again, it restores defaults before anything else; after a removal, bootout or revoked approval, no start follows (see \"Recovery if charging does not resume\" in docs/safety.md).")
         }
         let clock = environment.clock
         let queue = queue
@@ -528,8 +540,8 @@ final class DaemonRelay: @unchecked Sendable {
 }
 
 /// The frontend's stop, on a task of its own. The daemon waits for it only
-/// within its budget, and counts it as confirmed only once `stop()` has
-/// returned true.
+/// within its budget, and counts it as confirmed only once `stop(by:)` has
+/// returned true before its deadline.
 final class FrontendStop: @unchecked Sendable {
     enum Outcome: Equatable {
         case pending
@@ -541,12 +553,22 @@ final class FrontendStop: @unchecked Sendable {
     private var current = Outcome.pending
     private var task: Task<Void, Never>?
 
-    /// Stops `frontend` once `start`, if any, has returned.
-    init(_ frontend: any HelperFrontend, after start: Task<Void, any Error>?) {
+    /// Stops `frontend` by `deadline` once `start`, if any, has returned,
+    /// and logs when its stop returns. A true that comes after the deadline
+    /// is not counted: the daemon has stopped waiting for it by then.
+    init(_ frontend: any HelperFrontend, after start: Task<Void, any Error>?, by deadline: HelperDaemonDeadline, log: DaemonEventQueue) {
         let task = Task.detached { [self] in
             _ = await start?.result
-            let confirmed = await frontend.stop()
+            let returned = await frontend.stop(by: deadline)
+            let confirmed = returned && !deadline.hasPassed
             lock.withLock { current = confirmed ? .confirmed : .refused }
+            if confirmed {
+                log.log(.info, .xpc, "The frontend stopped and confirmed that everything it accepted was answered.")
+            } else if returned {
+                log.log(.fault, .xpc, "The frontend confirmed its stop only after its deadline: not counted.")
+            } else {
+                log.log(.fault, .xpc, "The frontend stopped without confirming that everything it accepted was answered.")
+            }
         }
         lock.withLock { self.task = task }
     }
@@ -555,7 +577,7 @@ final class FrontendStop: @unchecked Sendable {
         lock.withLock { current }
     }
 
-    /// Returns when `stop()` has returned.
+    /// Returns when `stop(by:)` has returned.
     func wait() async {
         let task = lock.withLock { self.task }
         await task?.value

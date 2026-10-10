@@ -1,6 +1,6 @@
 # CellKeeper architecture
 
-Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper), the helper's NSXPC transport, tested over an anonymous listener but not used by the app yet, and the helper daemon's executable, which controls no hardware, does not serve that transport yet, and is neither installed nor embedded, and the logic that removes the helper only after its restore, tested against fakes. Last reviewed 2026-10-10.
+Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper), the helper's NSXPC transport, tested over an anonymous listener but not used by the app yet, and the helper daemon's executable, which serves its engine over that transport to CellKeeper only, controls no hardware, refuses to listen when built without a team identifier, and is neither installed nor embedded, and the logic that removes the helper only after its restore, tested against fakes. Last reviewed 2026-10-10.
 
 This document describes how CellKeeper is put together and why. Research that
 informed these decisions is in [`docs/research/`](research/README.md); safety
@@ -84,10 +84,11 @@ rules are in [`docs/safety.md`](safety.md).
 │  HelperXPCClient (client side: requirement, timeouts, unusable after any failure)              │
 │  HelperCodeSigningRequirement (requirements both sides place on each other)                    │
 └────────────────────────────────────────────────────────────────────────────────────────────────┘
-                  (the daemon depends on CellKeeperHelperCore only; its XPC frontend comes later)
+                  (the daemon depends on CellKeeperHelperCore and CellKeeperHelperXPC: it serves the server)
 ┌─ CellKeeperHelperDaemon (IOKit, os; never the app's modules) ──────────────────────────────────┐
 │  HelperDaemon (actor: start, ticks, SIGTERM, acknowledged sleep, exit), HelperFrontend         │
-│  (NoFrontend), DaemonPowerReading, SystemSleepNotifications, SystemTerminationSignals,         │
+│  (XPCFrontend, NoFrontend), DaemonPowerReading, SystemSleepNotifications,                      │
+│  SystemTerminationSignals,                                                                     │
 │  FileActivationHistoryStore (boot session UUID), UnifiedHelperLog                              │
 │  CellKeeperHelper (executable): main.swift assembles HelperDaemonEnvironment.system and runs   │
 │  the daemon. Not embedded in the app, not registered with launchd                              │
@@ -117,9 +118,8 @@ rules are in [`docs/safety.md`](safety.md).
   `HelperTransport`. The app does not use it yet.
 - `CellKeeperHelperDaemon` depends on `CellKeeperHelperCore` only, never on
   `CellKeeperCore` or `CellKeeperKit`, so the root process carries none of
-  the app (D27, D58). See "Helper daemon" below. It does not use
-  `CellKeeperHelperXPC` yet: the change that wires the transport in adds
-  that dependency.
+  the app (D27, D58). See "Helper daemon" below. It also depends on
+  `CellKeeperHelperXPC`, whose server its frontend runs (D71).
 
 Requirement → location:
 
@@ -134,7 +134,7 @@ Requirement → location:
 | Scheduler | — | Future: will feed overrides into `PolicyInput` |
 | Notifications | — | Future: driven from `ControlEvent`s |
 | Shortcuts/automation | — | Future: App Intents calling `AppModel` intents |
-| Privileged operations | `HelperEngine` (HelperCore), `HelperChargingBackend` (Core), `HelperXPCServer` / `HelperXPCClient` (HelperXPC), `XPCHelperTransport` (Kit), `HelperDaemon` (HelperDaemon), `CellKeeperHelper` | Helper logic and the app's backend implemented, with a simulated control only, in process (the Simulated helper); no hardware control. The NSXPC transport with code-signing requirements on both sides is implemented and tested over an anonymous listener. The removal of the helper (`HelperRemoval`, `ChargeController.removeHelper`) is implemented and tested against fakes. The daemon executable and its launchd property list exist, control nothing, and do not serve the transport yet; wiring the transport into the daemon, embedding and registration are future work |
+| Privileged operations | `HelperEngine` (HelperCore), `HelperChargingBackend` (Core), `HelperXPCServer` / `HelperXPCClient` (HelperXPC), `XPCHelperTransport` (Kit), `HelperDaemon` (HelperDaemon), `CellKeeperHelper` | Helper logic and the app's backend implemented, with a simulated control only, in process (the Simulated helper); no hardware control. The NSXPC transport with code-signing requirements on both sides is implemented and tested over an anonymous listener. The removal of the helper (`HelperRemoval`, `ChargeController.removeHelper`) is implemented and tested against fakes. The daemon executable serves its engine over that transport (when signed with a team identifier) and controls nothing; it and its launchd property list are neither embedded nor registered, and the app does not use the transport yet |
 
 ## Data flow
 
@@ -1193,9 +1193,9 @@ The helper's logic exists as `CellKeeperHelperCore` (below), with a
 simulated control only, and the app runs it in process as the Simulated
 helper. Its NSXPC transport exists as `CellKeeperHelperXPC` (below), tested
 inside the test process only. The daemon executable (`CellKeeperHelper`,
-below) runs the same engine with no hardware control, but does not serve
-the transport yet. Nothing is registered with launchd, and there is no
-hardware control. Real control
+below) runs the same engine with no hardware control and serves it over
+that transport, to CellKeeper only. Nothing is registered with launchd,
+and there is no hardware control. Real control
 will not be enabled without the
 hardware verification protocol in research note 02 §7 and the rules in
 `safety.md`.
@@ -1208,8 +1208,8 @@ files or network. The layers, from the client down:
 
 1. **Transport.** In process for the Simulated helper
    (`InProcessHelperTransport`), and over NSXPC (`HelperXPCServer`, which
-   the daemon will serve as its `HelperFrontend`; see "Helper transport"
-   and "Helper daemon" below). It opens one `HelperSession` per
+   the daemon runs as its frontend; see "Helper transport" and "Helper
+   daemon" below). It opens one `HelperSession` per
    connection, forwards each request with its raw wire values, and
    invalidates the session when the connection ends. It delivers one
    connection's requests in order, one at a time; the engine itself is an
@@ -1436,7 +1436,8 @@ Other rules:
   before exiting. The engine never exits the process itself. Host policy
   for SIGTERM: call `terminate()`, retry about once a second until
   `isSafeToExit` or until launchd's `ExitTimeOut` is nearly used up, then
-  exit anyway; the next start restores defaults first (R2).
+  exit anyway; if the helper is started again, that start restores
+  defaults first (R2).
 - **Audit.** Every hardware write (its target, the value asked for, the
   outcome and the read-back, or that it is unknown), lease grant, renewal
   and end, activation, deactivation, restore (with its reason), hardware
@@ -1506,11 +1507,12 @@ Remaining limitations:
   events, the host's acknowledgement of sleep, and every later operation,
   for every client.
 
-Not there yet: the daemon serving the NSXPC transport, the daemon's
-registration (SMAppService) and embedding, and any real control. The NSXPC
-transport and its code-signing requirements exist (below), and so does the
-daemon with SIGTERM, acknowledged sleep and its own power reading (further
-below), but nothing serves or uses the transport outside the tests.
+Not there yet: the daemon's registration (SMAppService) and embedding,
+the app's use of the transport, and any real control. The daemon serves
+its engine over the NSXPC transport and its code-signing requirements
+(below), with SIGTERM, acknowledged sleep and its own power reading
+(further below), but nothing registers it and the app does not connect to
+it yet.
 
 ### Helper transport (`CellKeeperHelperXPC`)
 
@@ -1530,12 +1532,14 @@ process.
   status is `malformedReply`, never read as `ok`. Unknown capability,
   interlock and control bits and unknown change causes are kept as they
   came, as with the in-process transport.
-- **Server** (`HelperXPCServer`, the daemon's side). It builds the engine,
-  as `InProcessHelperTransport` does, so it sees the sessions the engine
-  revokes. It sets the client requirement on the listener
-  (`setConnectionCodeSigningRequirement`) before resuming it, and `start()`
-  starts the engine, which restores defaults first, before the listener
-  accepts anything. Each accepted connection gets its own session. A
+- **Server** (`HelperXPCServer`, the daemon's side). It serves the engine
+  its host made, the daemon's (D71): the host starts the engine, which
+  restores defaults first, and only then the listener (`startListening()`),
+  and the host's event sink passes every engine event to `handle(_:)`, so
+  the server sees the sessions the engine revokes. (For tests it can build
+  the engine itself; `start()` then starts both.) It sets the client
+  requirement on the listener (`setConnectionCodeSigningRequirement`)
+  before resuming it. Each accepted connection gets its own session. A
   client can make the helper do only bounded work, and cannot delay the
   release of what it holds:
   - *Order.* NSXPC calls the exported object on the connection's own
@@ -1550,29 +1554,69 @@ process.
     the server closes the connection, never drops a request silently. At
     most 8 clients are served at once (`maximumConnections`); one more is
     refused.
-  - *End of a connection.* When a connection closes for any reason (the
-    client quit, crashed or invalidated it, a protocol violation, a
-    revocation, a stop), the session is invalidated at once, which clears
-    what it held. The request in progress finishes, since the engine runs
-    one call at a time, and nothing queued behind it runs. Every decision
-    that ends admission (an overflow, a revocation, a stop, the connection's
-    end) records the close in the same critical section that takes it,
-    before the consumer can take another request; ending the queue and
-    invalidating the connection and the session follow outside the lock.
+  - *End of a connection.* A connection ends either at once or after its
+    sent replies. At once (the client quit, crashed or invalidated it, a
+    protocol violation, a stop cut off at its deadline): the connection
+    and the session are invalidated now, which clears what it held; the
+    request in progress finishes, since the engine runs one call at a
+    time, and nothing queued behind it runs. After its sent replies (a
+    revocation, the end of a draining stop): the consumer schedules a
+    closing send barrier, invalidates the connection when it runs, and
+    only then invalidates the session (the engine ended a revoked session
+    itself, at the revocation); the connection keeps its place, so
+    a cut-off can still invalidate it, and the wait for the barrier ends
+    exactly once, when it runs or when the connection ends otherwise.
+    Every decision that ends admission (an overflow, a revocation, a stop,
+    the connection's end) records the close in the same critical section
+    that takes it, before the consumer can take another request; the side
+    effects follow outside the lock.
   - *Revocation.* The engine's `sessionRevoked` event, delivered before the
-    revoking call returns, marks the session. After that request the server
-    invalidates the connection behind a send barrier, so the reply
-    (`rateLimited`) is sent first; requests behind it never run.
+    revoking call returns, marks the session. After that request the
+    connection ends after its sent replies (above), so the reply
+    (`rateLimited`) is confirmed sent before the connection closes; the
+    connection has ended, for a stop too, only once that barrier has run.
+    Requests behind it never run.
+  - *What each connection can prove.* Each connection counts the requests
+    it admitted and answered, and the replies whose send a barrier
+    confirmed: after each reply the consumer schedules a send barrier, and
+    one that runs while the connection is still valid confirms that reply
+    and those before it (one that runs after the connection ended confirms
+    nothing). Its drain outcome is complete only if every request it ever
+    admitted was answered, every reply's send was confirmed, it was not
+    cut off by the server, and its session has been invalidated. Requests
+    discarded behind a revocation, queued when the client went away, or
+    cut off make it incomplete.
+  - *Stop (D72).* `stop(by:)` takes one absolute deadline
+    (`HelperXPCServer.Deadline`: whether it has passed, and a wait for
+    it; `stop(timeout:)` makes one 5 s from now). It admits nothing more:
+    a connection that arrives is refused, and no connection admits another
+    request (one that arrives gets no reply, and its client sees the
+    connection end). Every request already admitted runs, in order, and
+    its reply is sent, a `restoreDefaultsAndExit`'s included; then each
+    connection ends after its sent replies, and then its session. Receipt
+    by the client is not confirmed: the protocol has no acknowledgement. A
+    request is admitted under its connection's lock, together with being
+    put on the queue, so a drain that begins meanwhile finds it queued or
+    refuses it. The listener is invalidated only at the end, because
+    invalidating it also ended its accepted connections in the tests
+    (anonymous listener, macOS 27). The stop returns true only if every
+    connection it waited for (those not yet ended when it began) reports a
+    complete drain outcome, and only if the drain completed before the
+    deadline, which it checks again when the drain completes; a consumer
+    task finishing is not that proof. At the deadline it cuts off what
+    remains (queued requests never run, a connection waiting for its
+    closing barrier is invalidated without it, every session's
+    invalidation begins) and returns false, without waiting for a request
+    still in the engine.
   - *Lifecycle.* Resuming and invalidating the listener, and configuring,
     resuming and publishing each accepted connection, all happen under one
     lock together with the decision to do them, so `start()` cannot resume
-    a listener `stop()` has invalidated, and a connection accepted while
-    the server stops is either closed by the stop or refused. A server
-    stopped before it ever listened resumes its listener once, already
-    stopped, so that clients waiting to connect are refused rather than
-    left waiting; it then invalidates it. `stop()` returns when every
-    session is invalidated. Ticks, sleep and wake, SIGTERM and exit stay
-    with the host, on `server.engine`.
+    a listener a stop has ended, and a connection accepted while the
+    server stops is either drained or closed by the stop, or refused. A
+    server stopped before it ever listened resumes its listener once,
+    already stopped, so that clients waiting to connect are refused rather
+    than left waiting; it then invalidates it. Ticks, sleep and wake,
+    SIGTERM and exit stay with the host, on `server.engine`.
   - *Audit.* The host gets each accepted connection (its session, process
     ID and effective user ID), each refusal and each close with its reason,
     asynchronously and in order on a queue of its own. Process and user IDs
@@ -1624,7 +1668,18 @@ process.
   request is blocked in the engine; the queue bound, also when the request
   in progress ends just as an overflow is decided; the connection limit;
   a timeout against a stalled engine; start and stop racing; connections
-  arriving while the server stops; the audit events; and
+  arriving while the server stops; a draining stop, with a request in the
+  engine and one queued behind it answered and a late one not admitted,
+  and a stop cut off at its deadline; a revocation during a drain, whose
+  discarded requests make the stop return false; a drain that completes
+  after its deadline; a revocation whose closing barrier is held (the
+  stop does not confirm until it runs); a deadline that expires while a
+  drained connection's closing barrier is held (the connection is cut
+  off and its session ends without the barrier); a client that leaves
+  during a drain after its replies were confirmed (the stop confirms),
+  with the barriers held by a test hook; a server serving its host's engine
+  closing a revoked session's connection; the audit events (waited for as
+  they arrive, since they reach the host asynchronously); and
   `HelperChargingBackend` reconnecting after the server drops its
   connection.
 
@@ -1660,11 +1715,13 @@ Limitations:
 
 `CellKeeperHelper` is the executable launchd will run as root once it is
 installed (phase 4b). Its `main.swift` only assembles
-`HelperDaemonEnvironment.system(frontend:)` with a `NoFrontend` and runs a
-`HelperDaemon`; everything else is in the `CellKeeperHelperDaemon` library,
-which depends on `CellKeeperHelperCore` only and links IOKit (D27, D58). In
-this phase it controls no hardware, serves no clients, and is neither
-embedded in the app nor registered.
+`HelperDaemonEnvironment.system(frontend:)` with an `XPCFrontend` and runs
+a `HelperDaemon`; everything else is in the `CellKeeperHelperDaemon`
+library, which depends on `CellKeeperHelperCore` and `CellKeeperHelperXPC`
+and links IOKit (D27, D58, D71). In this phase it controls no hardware,
+serves CellKeeper only over the authenticated NSXPC transport, refuses to
+listen when built without a team identifier (as every development build
+is), and is neither embedded in the app nor registered.
 
 **Seams.** Every system dependency is a protocol with a system
 implementation and a test fake. The tests run the real engine through the
@@ -1676,7 +1733,7 @@ daemon on a simulated control and a clock they move by hand, in
 | `HelperChargeControl` | `UnknownHardwareChargeControl` | No capabilities, nothing written, so `hello` reports no capabilities and clients stay monitor-only (R12a). `HelperDaemonEnvironment.system` is the only public way to build the daemon's environment, and it always uses this control |
 | `HelperPowerReading` | `DaemonPowerReading` | The daemon's own read-only power state (below) |
 | `HelperDaemonClock` | `SystemDaemonClock` | `CLOCK_MONOTONIC` (`HelperEngine.continuousUptime`) for the engine and the power reading; waits until absolute deadlines on that clock (`Task.sleep` on the continuous clock) for ticks, polls and deadlines |
-| `HelperFrontend` | `NoFrontend` | Serves clients. `NoFrontend` logs, through the daemon's asynchronous log, that this build has no listener, and serves nobody |
+| `HelperFrontend` | `XPCFrontend` | Serves clients over NSXPC (below). `NoFrontend` serves nobody and says so, through the daemon's asynchronous log |
 | `SleepNotifications` | `SystemSleepNotifications` | `IORegisterForSystemPower`, delivered on a dispatch queue |
 | `TerminationSignals` | `SystemTerminationSignals` | SIGTERM through a dispatch signal source, its default action ignored |
 | `ActivationHistoryStore` | `FileActivationHistoryStore` | The activation history file (below) |
@@ -1711,34 +1768,68 @@ starts late shortens its wait instead of postponing the deadline, a
 deadline already passed is not waited for, and a result that arrives
 after its deadline is not used.
 
-**Frontend.** `HelperFrontend` (`start(serving:log:)`, `stop()`) is the seam for
-the NSXPC listener: `HelperXPCServer` ("Helper transport" above) exists,
-and a follow-up wires it into `main.swift` as the daemon's frontend. Its
-contract, in the protocol's documentation: it is started
+**Frontend.** `HelperFrontend` (`start(serving:log:)`, `handle(_:)`,
+`stop(by:)`) is the seam for the listener; `XPCFrontend` (below) is the
+daemon's. The daemon's event sink passes every engine event to
+`handle(_:)`, synchronously and without blocking, so the frontend can close
+a revoked session's connection. Its contract, in the protocol's
+documentation: it is started
 once, only after `engine.start()` has returned, and never during shutdown;
 it checks every connection against a code-signing requirement for
 CellKeeper's app before it opens a session, and throws rather than start
 without one, in every build; it opens one session per connection, delivers
 each connection's requests in order, invalidates the session when the
 connection ends and closes the connection of a revoked session. A request
-is *accepted* once the frontend has received it from a connection, and its
-reply is *sent* once the transport has confirmed that the send completed:
+is *accepted* once the frontend has admitted it to be served (one that
+arrives after the stop began is not, gets no reply, and its client sees
+the connection end), and its reply is *sent* once the transport has
+confirmed that the send completed:
 for NSXPC, a send barrier (`scheduleSendBarrierBlock`) scheduled after the
-reply has run. That confirms the send, not receipt by the client, which
-would need an acknowledgement the protocol does not have. `stop()` stops
-accepting connections and requests, waits until every accepted request has
-been answered and its reply sent (the reply to a `restoreDefaultsAndExit`
-before that client's session is invalidated), invalidates every session
-and closes every connection, and returns true only once all of that is
-done. That return is the frontend's confirmation that nothing it accepted
-can still change the engine's state. An implementation that discards queued
-requests, or invalidates connections before their replies are sent,
-returns false unless every accepted request still got its reply sent.
-`HelperXPCServer` as merged with #64 builds its own engine, and its
-`stop()` invalidates connections before draining replies and discards
-queued requests; the change that wires it in must make it serve the
-daemon's engine and drain its replies before its `stop()` may return
-true.
+reply has run while the connection was valid. That confirms the send, not
+receipt by the client, which would need an acknowledgement the protocol
+does not have. `stop(by:)` stops accepting connections and requests,
+waits until every accepted request has been answered and its reply sent
+(the reply to a `restoreDefaultsAndExit` before that client's session is
+invalidated), invalidates every session and closes every connection. It
+returns true only if it can prove that for every connection it was still
+serving when the stop began (every request that connection ever accepted
+answered, every reply's send confirmed, the connection closed only after
+that, its session invalidated) and only before its deadline; that a
+connection's work has ended is not that proof. It returns false, never
+true, if an accepted request was discarded (behind a revocation, queued
+when its client went away, cut off), if a send was never confirmed, or if
+it is done only after the deadline. The deadline (`HelperDaemonDeadline`)
+is absolute, on the daemon's clock, fixed when shutdown began: the
+shutdown's deadline less the 1 s finalisation reserve, so a slow start or
+a late timer is taken from it, never added. The daemon counts the stop as
+confirmed only if it returned true before that deadline, and logs when it
+returns and whether it confirmed.
+
+**NSXPC frontend (D71, D73).** `XPCFrontend` runs a `HelperXPCServer` on the
+daemon's engine. On `start` it first builds the client requirement:
+CellKeeper (`io.github.saltedtan.CellKeeper`) signed with an Apple-issued
+certificate of this process's own team (`forClientApp(identifier:)`,
+research note 04, §2.4). Only then does it create the listener on the
+Mach service `io.github.saltedtan.CellKeeper.Helper`, serve the engine and
+listen. An ad-hoc or unsigned build has no team identifier, so `start`
+throws before any listener exists: the daemon logs why, serves nobody and
+shuts down, exiting with 0 once defaults are confirmed, so launchd starts
+it again only on demand. Accepted, refused and closed connections go to the
+log (category `xpc`); their process and user IDs are for the log only.
+`stop(by:)` is the server's draining stop on the daemon's deadline and
+clock, which is also when the daemon's retries end (7 s into a shutdown):
+a stop that cannot drain cuts off what remains and returns false then, and
+the daemon exits with 75. Tests inject an anonymous listener and the test
+binary's own designated requirement, and run the daemon end to end on its
+manual clock: a client sees no capabilities and no simulation, and every
+activation is unsupported; `restoreDefaultsAndExit` is answered and the
+daemon exits with 0; SIGTERM with a request in the engine answers it
+before the session ends and exits with 0; a stop that cannot drain by
+the deadline returns false and the daemon exits with 75; a stop whose
+timer starts only after its deadline returns false at once; and a build
+without a team identifier never listens. With a fake frontend: a slow
+frontend start leaves the stop's deadline where shutdown put it, and a
+confirmation after the deadline is not counted (exit 75).
 
 **Shutdown (R4, D31, D59).** It begins on SIGTERM, when the engine shuts
 down at a client's request (`restoreDefaultsAndExit`; the engine's
@@ -1749,8 +1840,10 @@ cannot start. Whatever began it, one absolute deadline, 8 s after it began
 final decision included. Every wait is bounded by what is left, and a step
 with no time left is skipped. In order:
 
-1. The frontend is told to stop. The daemon waits up to 1 s for its
-   confirmation before it restores, and keeps watching for it afterwards.
+1. The frontend is told to stop by 1 s before the deadline (when the
+   retries end), on the same clock. The daemon waits up to 1 s for its
+   confirmation before it restores, and keeps watching for it afterwards;
+   a confirmation after the frontend's deadline does not count.
 2. `terminate()`, then about once a second again, until the frontend has
    confirmed and the engine is safe to exit, or until 1 s before the
    deadline (a frontend that reports it could not stop cleanly ends this
@@ -1760,11 +1853,14 @@ with no time left is skipped. In order:
    the frontend has confirmed: until then a request it accepted could still
    make a restore owed, so nothing is safe.
 5. Only now is the exit status committed: 0 if that check passed, and
-   otherwise 75 (`EX_TEMPFAIL`). launchd restarts a job that exits non-zero
-   (`KeepAlive.SuccessfulExit = false`), and the next start restores
-   defaults first. Ticks keep retrying an owed restore, and SIGTERM stays
-   handled (a second one is ignored), until this point. The decision is
-   logged, and the log waited for within what is left of the deadline.
+   otherwise 75 (`EX_TEMPFAIL`). While the job is loaded and approved,
+   launchd restarts it after a non-zero exit (`KeepAlive.SuccessfulExit =
+   false`), and that start restores defaults first; after a removal, a
+   bootout or a revoked approval no start follows (see "Recovery if
+   charging does not resume" in `safety.md`). The log says so. Ticks keep
+   retrying an owed restore, and SIGTERM stays handled (a second one is
+   ignored), until this point. The decision is logged, and the log waited
+   for within what is left of the deadline.
 
 The deadline holds with a stuck engine, a log that cannot be written, or
 a timer that starts late: the daemon stops waiting and exits, though it
@@ -1850,21 +1946,20 @@ note 04, §1.2); `ProcessType` `Adaptive`; `ExitTimeOut` 10
 against those constants. `HelperBuild.number`, which `hello` reports,
 equals the app's `CURRENT_PROJECT_VERSION`; a test checks that too.
 
-**Not there yet:** serving the NSXPC transport (`HelperXPCServer` as the
-daemon's frontend, with the changes above) and its wiring into
-`main.swift`;
-embedding the executable and the property list in the app bundle; signing,
+**Not there yet:** the app's use of the transport; embedding the
+executable and the property list in the app bundle; signing,
 `SpawnConstraint` (it needs a team identifier) and `SMAppService`
 registration (phase 4b, issue #57); idle exit and a check that the app
 bundle still exists (research note 04, §3.5). Nothing in this repository
-registers a launchd job, installs the property list, or creates a Mach
-service.
+registers a launchd job or installs the property list. The daemon creates
+its Mach-service listener only when signed with a team identifier, and only
+a registered launchd job can provide that service.
 
 Limitations:
 
 - A SIGTERM in the first instants of the process, before the daemon's
   initialiser handles signals, ends it at once; nothing has been done yet,
-  and the next start restores defaults.
+  and a later start, if launchd makes one, restores defaults.
 - A hung control call cannot be interrupted. The daemon stops waiting for
   it to acknowledge sleep and to exit at the shutdown deadline, but
   requests and ticks wait behind it.
@@ -1934,9 +2029,9 @@ closed before a backend that changes hardware *itself* is enabled:
   connection invalidation). `HelperEngine` implements the leases and the
   sleep, wake and exit rules; the XPC client bounds every call with a
   timeout and invalidates the connection after one; and the daemon delivers
-  acknowledged sleep and SIGTERM to the engine with bounded waits. The
-  daemon does not serve the transport yet, and a real control still has to
-  bound its own calls.
+  acknowledged sleep and SIGTERM to the engine with bounded waits, and
+  its frontend's stop is bounded too. A real control still has to bound its
+  own calls.
 
 ## Telemetry
 
@@ -2063,8 +2158,8 @@ The helper daemon logs under its own subsystem,
 | D55 | A client can make the helper do only bounded work: at most 32 requests wait behind the one in progress on a connection, and one more closes the connection as a protocol violation; at most 8 connections are served. A closed connection runs nothing more and its session is invalidated at once (after review, 2026-10-10) | The engine's request budget is judged only when a request runs, so it cannot bound what waits; a flooding client could otherwise pile up work that delays the end of its own session, and with it the release of its restriction. A silent drop would leave a client waiting for a reply that never comes |
 | D56 | The server's registry lock serialises the listener's lifecycle (resume, invalidate) and the acceptance of each connection (configure, resume, publish), each together with the decision to make it; a server stopped before it ever listened resumes its listener, already stopped, and then invalidates it. Each connection's close is recorded under that connection's own lock, in the same critical section that decides it, which ends admission before its consumer can start another request; ending its queue and invalidating the connection and the session follow outside the lock | Releasing a lock between deciding and acting let a stop be undone by a start or an acceptance in progress, and let a consumer start a queued request after an overflow had been decided. A listener invalidated while still suspended left connecting clients waiting with no answer (seen in the start/stop race test) |
 | D57 | The server reports accepted connections (session, process ID, effective user ID), refusals and closes to the host asynchronously, for its log only | Research note 04 §3.7 asks for every accept and reject to be logged; process IDs are reused, so they never decide anything (§2.3). Clients that fail the requirement never reach the server; the XPC runtime logs them |
-| D58 | The daemon's library depends on `CellKeeperHelperCore` only and repeats the app's read-only power reading instead of sharing it; the only public way to build the daemon's environment uses `UnknownHardwareChargeControl` | D27: the root process carries none of the app, and a second copy of a few dozen lines costs less than linking the app's modules into it. With no public interface that accepts another control, a real control needs a reviewed change to `HelperDaemonEnvironment.system` |
-| D59 | Every shutdown (SIGTERM, a client's `restoreDefaultsAndExit`, a seam that cannot start) runs one procedure within one absolute deadline 8 s after it began: stop the frontend and have it confirm that everything it accepted is answered and every session invalidated; terminate and retry; write the log; then the final bounded `isSafeToExit` check, made only after that confirmation; only then commit the exit status, 0 if the check passed and 75 (`EX_TEMPFAIL`) otherwise. Retries and SIGTERM handling stay live until the commit. The daemon's actor only coordinates: nothing that can block (log writes, history saves, frontend calls, sleep and signal registration) runs on it, and every wait carries an absolute deadline that it recomputes when it starts (reviews of PR #65) | The exit status must come from the last safety check, after everything that could still change safety: a request the frontend accepted can still make a restore owed, so an unconfirmed stop establishes nothing, and a check before the log is written can be outdated by then. launchd restarts a job that exits non-zero (`KeepAlive.SuccessfulExit = false`), and the next start restores defaults first (R2, D31); one deadline that includes logging keeps the exit ahead of SIGKILL at `ExitTimeOut` even with a stuck engine or log; a coordinator blocked by a log write cannot even begin the shutdown, and a timer that restarts its duration when it starts late postpones the deadline into launchd's margin; a clean exit after a failed start is restarted only on demand, not in a loop |
+| D58 | The daemon's library depends on `CellKeeperHelperCore` only (and, since D71, on `CellKeeperHelperXPC`; never on the app's modules) and repeats the app's read-only power reading instead of sharing it; the only public way to build the daemon's environment uses `UnknownHardwareChargeControl` | D27: the root process carries none of the app, and a second copy of a few dozen lines costs less than linking the app's modules into it. With no public interface that accepts another control, a real control needs a reviewed change to `HelperDaemonEnvironment.system` |
+| D59 | Every shutdown (SIGTERM, a client's `restoreDefaultsAndExit`, a seam that cannot start) runs one procedure within one absolute deadline 8 s after it began: stop the frontend and have it confirm that everything it accepted is answered and every session invalidated; terminate and retry; write the log; then the final bounded `isSafeToExit` check, made only after that confirmation; only then commit the exit status, 0 if the check passed and 75 (`EX_TEMPFAIL`) otherwise. Retries and SIGTERM handling stay live until the commit. The daemon's actor only coordinates: nothing that can block (log writes, history saves, frontend calls, sleep and signal registration) runs on it, and every wait carries an absolute deadline that it recomputes when it starts (reviews of PR #65) | The exit status must come from the last safety check, after everything that could still change safety: a request the frontend accepted can still make a restore owed, so an unconfirmed stop establishes nothing, and a check before the log is written can be outdated by then. while the job is loaded and approved, launchd restarts it after a non-zero exit (`KeepAlive.SuccessfulExit = false`), and that start restores defaults first (R2, D31); after a removal, a bootout or a revoked approval no start follows; one deadline that includes logging keeps the exit ahead of SIGKILL at `ExitTimeOut` even with a stuck engine or log; a coordinator blocked by a log write cannot even begin the shutdown, and a timer that restarts its duration when it starts late postpones the deadline into launchd's margin; a clean exit after a failed start is restarted only on demand, not in a loop |
 | D60 | Sleep is acknowledged when the engine's sleep checks return or 5 s after the announcement, whichever comes first, with a fault logged at the deadline | Safety precondition 13 asks for acknowledged sleep handling in the privileged component; an unacknowledged notification only delays sleep (by up to 30 s) and the engine's leases count sleep, so holding sleep for a stuck engine would buy nothing |
 | D61 | The activation history file is keyed by the boot session UUID (`kern.bootsessionuuid`), with no fallback; it is bounded (64 KiB, 20 records), replaced by rename, opened without blocking and refused at once unless it is a regular file, discarded whole on anything unexpected, and loaded only after SIGTERM is handled (review of PR #65) | The engine's clock starts again at every boot (D35), and only a value the kernel sets once per boot identifies one: `kern.boottime` moves when the calendar time is set, which would discard valid records within a boot. A corrupt, foreign or special file must be neither trusted nor allowed to stop or delay the restore at start, and losing the history only loosens the limits for at most an hour |
 | D62 | Nothing that may block runs on Swift's cooperative thread pool: the helper engine runs on a serial dispatch queue of its own (a custom actor executor), and the daemon writes its log, saves its history and calls its blocking seams on dispatch queues of their own. Tests that stall on purpose stall on those queues (review of PR #65, after #64) | The pool has as many threads as cores (three on CI's macOS 15 image). A synchronous control call, a log write or a file write that blocks there takes one of them, and a few at once take every thread: nothing else runs, neither the daemon's shutdown and sleep handling nor, in tests, other suites in the same process, until the stalls end. A dispatch queue's thread blocks alone. `.serialized` only orders tests within one suite, so it could not prevent that |
@@ -2076,3 +2171,6 @@ The helper daemon logs under its own subsystem,
 | D68 | The conversation with the helper has one 20 s deadline, and each registration call 15 s. Each is an absolute expiry on a monotonic clock that keeps counting during sleep; every piece of evidence (a `hello`, a reply, a failure, a registration result) is judged against it under the lock that holds the decision, when it arrives. At or after the expiry the timeout outcome is frozen and the evidence refused, so a late reply or `hello` authorises nothing (no unregistering, no request to exit) and a late registration result changes nothing. The timer only wakes that check. The flow ignores the caller's cancellation (reviews of PR #66, 2026-10-10) | Every call must be bounded (precondition 13), and a time limit must be judged on the clock when evidence is accepted, not by which callback reaches the lock first: a reply that completes after the deadline, while the timer's wake-up is delayed or set off by the deadline's own cancellation, could otherwise authorise unregistering. 20 s covers two NSXPC requests at their own 10 s timeout (D53); 15 s exceeds launchd's 10 s `ExitTimeOut` in case unregistering waits for the daemon to exit. A cancellation between a confirmed restore and the unregistering would leave the outcome unreported |
 | D69 | `ChargeController.removeHelper` restores and confirms normal charging on the current backend before it contacts the helper, holding the command lock throughout; if that is not confirmed it stops, and with no helper registered it restores nothing (lead's decision on the order, 2026-10-10) | The app holds state of its own, such as the user's Charge Limit; holding the lock keeps an evaluation from applying a restriction between the two restores. Restoring when there is nothing to remove would only cost a write and a re-apply |
 | D70 | Removal outcomes are typed, and each says only what was confirmed, worded by the kind of helper its `hello` reported (simulated, monitor-only, controls charging, unknown). Only `hardwareError` is described as a helper that keeps retrying; otherwise whether it restored defaults or is still trying is stated as unknown. A `hello` answered with a refusal does not stop the flow: `restoreDefaultsAndExit` is still sent (review of PR #66, 2026-10-10) | R30: nothing unconfirmed is claimed, including a recovery in progress that the reply does not establish, and a simulated or monitor-only helper never claims to have changed the Mac's charging. The engine serves restores without an introduction, so an incompatible or shutting-down helper can still confirm defaults |
+| D71 | The daemon serves its engine over NSXPC through `XPCFrontend`: `HelperXPCServer` serves an engine its host made (`init(serving:…)`), the host starts the engine before the listener, and the host's event sink passes every engine event to the server (`handle(_:)`). The daemon library depends on `CellKeeperHelperXPC` too, never on the app's modules | One engine per daemon, owned by the host that restores defaults with it before anything is served (R2) and handles its shutdown; an engine's sink is fixed when it is made, so the host has to pass revocations on rather than the server installing its own sink |
+| D72 | `HelperXPCServer`'s stop drains, by one absolute deadline: it admits nothing more, runs every admitted request and sends its reply, closes each connection after a closing send barrier and then invalidates its session, and invalidates the listener only at the end. It returns true only for what it can prove: every connection it waited for reports a complete drain outcome (every request it ever admitted answered, every reply's send confirmed by a barrier that ran while the connection was valid, not cut off, session invalidated), and the drain completed before the deadline, checked again at completion. Requests behind a revocation never run, and make the stop return false. A revocation's closing barrier is part of its connection's end. At the deadline it cuts off what remains, a pending closing barrier included, and returns false without waiting for the engine. `HelperFrontend.stop(by:)` takes the daemon's shutdown deadline less the finalisation reserve, on the daemon's clock, and a confirmation after it does not count. A request is admitted under its connection's lock together with being queued (review of PR #68) | The daemon may exit with 0 only after a confirmed stop (D59), and a `restoreDefaultsAndExit` must be answered before its session ends. A consumer task finishing proves nothing: it also finishes after a disconnect or a revocation discarded its queue, and before a revocation's barrier has run. Closing at once would drop admitted requests and replies; invalidating the listener first ended the connections still draining (observed); a stop timer that starts its own budget late, after a slow frontend start, would end after the daemon's deadline; a barrier that never runs must not keep a stop or a connection waiting forever |
+| D73 | The daemon builds its client requirement (CellKeeper, signed by this process's own team) before it creates the Mach-service listener; an ad-hoc or unsigned build refuses to start its frontend, restores defaults and exits with 0 | It must never listen without a requirement (D51, research note 04, §2.4), and a build that can never serve should not be restarted in a loop |

@@ -26,6 +26,31 @@ extension HelperDaemonClock {
     }
 }
 
+/// One absolute deadline on the daemon's clock, carried to whatever it
+/// bounds, so that every wait under it ends at the same instant however
+/// late it starts.
+public struct HelperDaemonDeadline: Sendable {
+    /// The instant, in seconds of the clock's ``HelperDaemonClock/uptime()``.
+    public let uptime: TimeInterval
+    private let clock: any HelperDaemonClock
+
+    public init(uptime: TimeInterval, on clock: any HelperDaemonClock) {
+        self.uptime = uptime
+        self.clock = clock
+    }
+
+    /// Whether the clock has reached the deadline.
+    public var hasPassed: Bool {
+        clock.uptime() >= uptime
+    }
+
+    /// Returns once the clock has reached the deadline (at once if it has),
+    /// or earlier if the calling task is cancelled.
+    public func wait() async {
+        await clock.sleep(until: uptime)
+    }
+}
+
 /// The system's clock: ``HelperEngine/continuousUptime`` (`CLOCK_MONOTONIC`)
 /// and `Task.sleep` on the continuous clock, which also counts sleep.
 public struct SystemDaemonClock: HelperDaemonClock {
