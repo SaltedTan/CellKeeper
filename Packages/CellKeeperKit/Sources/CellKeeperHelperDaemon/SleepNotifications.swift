@@ -67,7 +67,7 @@ public final class SystemSleepNotifications: SleepNotifications, @unchecked Send
 
     public func start(_ handler: @escaping @Sendable (SleepEvent) -> Void) throws {
         try lock.withLock {
-            guard registration == nil else { return }
+            guard self.registration == nil else { return }
             let registration = Registration(handler: handler)
             // Balanced in `stop()`; the callback finds the registration
             // through it.

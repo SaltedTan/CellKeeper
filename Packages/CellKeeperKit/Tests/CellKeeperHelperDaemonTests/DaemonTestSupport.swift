@@ -59,9 +59,9 @@ final class ManualClock: HelperDaemonClock, @unchecked Sendable {
     func advance(by seconds: TimeInterval) {
         let due = lock.withLock { () -> [Sleeper] in
             now += seconds
-            let due = sleepers.filter { $0.deadline <= now }.sorted { ($0.deadline, $0.id) < ($1.deadline, $1.id) }
+            let ready = sleepers.filter { $0.deadline <= now }.sorted { ($0.deadline, $0.id) < ($1.deadline, $1.id) }
             sleepers.removeAll { $0.deadline <= now }
-            return due
+            return ready
         }
         for sleeper in due {
             sleeper.continuation.resume()
@@ -240,7 +240,7 @@ final class InMemoryHistoryStore: ActivationHistoryStore, @unchecked Sendable {
     }
 
     func load(boot: BootIdentifier, now: TimeInterval) -> ActivationHistoryLoad {
-        guard let data = lock.withLock({ data }) else { return .missing }
+        guard let data = lock.withLock({ self.data }) else { return .missing }
         return ActivationHistoryFormat.decode(data, boot: boot, now: now)
     }
 
@@ -366,9 +366,9 @@ final class BlockingControl: HelperChargeControl, @unchecked Sendable {
 
     func readBack() throws -> Set<HelperControl> {
         let gate = lock.withLock { () -> DispatchSemaphore? in
-            guard let gate else { return nil }
+            guard let held = self.gate else { return nil }
             blockedReads += 1
-            return gate
+            return held
         }
         if let gate {
             _ = gate.wait(timeout: .now() + 10)

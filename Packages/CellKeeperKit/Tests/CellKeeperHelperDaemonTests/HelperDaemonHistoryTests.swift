@@ -128,17 +128,20 @@ struct HelperDaemonHistoryTests {
 
 @Suite("Helper daemon: audit log")
 struct HelperDaemonAuditTests {
-    @Test("Events are logged in the four categories at the Simulated helper's levels")
-    func placement() {
-        let session = HelperSessionID(rawValue: 1)
-        #expect(HelperEvent.sessionOpened(session).logPlacement == (.info, .xpc))
-        #expect(HelperEvent.requestRejected(session, .setControl, .noLease).logPlacement == (.notice, .xpc))
-        #expect(HelperEvent.leaseGranted(session, .chargingInhibited, seconds: 900).logPlacement == (.info, .control))
-        #expect(HelperEvent.activationRecorded(HelperActivationRecord(control: .chargingInhibited, uptime: 1)).logPlacement == (.info, .control))
-        #expect(HelperEvent.restored(.start).logPlacement == (.notice, .control))
-        #expect(HelperEvent.interlocksRaised(.sleepImminent).logPlacement == (.notice, .safety))
-        #expect(HelperEvent.restoreFailed(.terminate).logPlacement == (.fault, .safety))
-        #expect(HelperEvent.hardwareError(code: -1).logPlacement == (.fault, .safety))
-        #expect(HelperEvent.safeToExit.logPlacement == (.notice, .lifecycle))
+    @Test("Events are logged in the four categories at the Simulated helper's levels", arguments: [
+        (HelperEvent.sessionOpened(HelperSessionID(rawValue: 1)), HelperLogLevel.info, HelperLogCategory.xpc),
+        (.requestRejected(HelperSessionID(rawValue: 1), .setControl, .noLease), .notice, .xpc),
+        (.leaseGranted(HelperSessionID(rawValue: 1), .chargingInhibited, seconds: 900), .info, .control),
+        (.activationRecorded(HelperActivationRecord(control: .chargingInhibited, uptime: 1)), .info, .control),
+        (.restored(.start), .notice, .control),
+        (.interlocksRaised(.sleepImminent), .notice, .safety),
+        (.restoreFailed(.terminate), .fault, .safety),
+        (.hardwareError(code: -1), .fault, .safety),
+        (.safeToExit, .notice, .lifecycle),
+    ])
+    func placement(event: HelperEvent, level: HelperLogLevel, category: HelperLogCategory) {
+        let placement = event.logPlacement
+        #expect(placement.level == level)
+        #expect(placement.category == category)
     }
 }
