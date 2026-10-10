@@ -48,8 +48,11 @@ import Foundation
 ///   Limit), every mode but `.normal` is withheld while macOS's own Charge
 ///   Limit is on or its report cannot be read and recognised, so two limits
 ///   never compete (safety precondition 7). The availability is kept: the
-///   backend is fine, macOS is in the way. CellKeeper never turns macOS's
-///   limit off itself.
+///   backend is fine, macOS is in the way. Withholding new requests says
+///   nothing about a hold already in place; that ends only through a
+///   release, confirmed by a read like any other. Releasing never waits for
+///   a read of macOS's limit. CellKeeper never turns macOS's limit off
+///   itself.
 ///
 /// The controller serialises all calls into it.
 public actor HelperChargingBackend: ChargingBackend {
@@ -183,6 +186,20 @@ public actor HelperChargingBackend: ChargingBackend {
         guard let macOSChargeLimit else { return capabilities }
         let status = await macOSChargeLimit.status()
         if status.isLimiting {
+            capabilities = capabilities.withoutRestrictingModes
+        }
+        capabilities.macOSChargeLimit = status
+        return capabilities
+    }
+
+    /// The helper's capabilities without a new read of macOS's Charge Limit:
+    /// a release does not depend on it. The latest reading kept is attached;
+    /// without one, restricting modes are withheld all the same.
+    public func capabilitiesForRelease() async -> ControlCapabilities {
+        var capabilities = await helperCapabilities()
+        guard let macOSChargeLimit else { return capabilities }
+        let status = await macOSChargeLimit.lastStatus
+        if status?.isLimiting ?? true {
             capabilities = capabilities.withoutRestrictingModes
         }
         capabilities.macOSChargeLimit = status

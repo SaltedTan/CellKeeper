@@ -98,8 +98,8 @@ public struct ControlCapabilities: Sendable, Equatable {
     /// macOS's own Charge Limit, as last read by a backend that switches
     /// charging itself and checks it (safety precondition 7); nil for
     /// backends that do not check it. While it ``MacOSChargeLimitStatus/isLimiting``,
-    /// such a backend offers only `.normal`, keeps its availability, and the
-    /// policy restricts nothing.
+    /// such a backend offers only `.normal` and keeps its availability, and
+    /// the policy asks for normal charging and withholds every restriction.
     public var macOSChargeLimit: MacOSChargeLimitStatus?
 
     /// Capabilities of a backend that switches charging itself.
@@ -410,6 +410,12 @@ public protocol ChargingBackend: Sendable {
 
     func capabilities() async -> ControlCapabilities
 
+    /// What the backend can do, for restoring `.normal` (quitting, a backend
+    /// switch, a safety fallback): like ``capabilities()``, but without
+    /// reading anything a request for `.normal` does not depend on, so a
+    /// release never waits for it. Default: ``capabilities()``.
+    func capabilitiesForRelease() async -> ControlCapabilities
+
     /// The mode currently in effect, or nil if it cannot be determined.
     func currentMode() async throws -> ChargeControlMode?
 
@@ -449,6 +455,7 @@ public protocol ChargingBackend: Sendable {
 }
 
 extension ChargingBackend {
+    public func capabilitiesForRelease() async -> ControlCapabilities { await capabilities() }
     public func reportedModeOrigin() async -> ReportedModeOrigin? { nil }
     public func renewHold(_ mode: ChargeControlMode) async throws {}
     public func resetAfterFault() async throws {}

@@ -958,7 +958,9 @@ public actor ChargeController {
     /// confirmed to be in `.normal`, or cannot control anything and reports no
     /// other mode. Caller must hold the lock.
     private func restoreNormal(reason: String) async -> Bool {
-        let capabilities = await backend.capabilities()
+        // Never waits for anything `.normal` does not depend on, such as a
+        // read of macOS's Charge Limit.
+        let capabilities = await backend.capabilitiesForRelease()
         let ownerLimit = await backend.nativeLimitStatus()?.ownerLimit
         let isNative = capabilities.isEnforcedByMacOS
         guard capabilities.availability.acceptsRequests else {
