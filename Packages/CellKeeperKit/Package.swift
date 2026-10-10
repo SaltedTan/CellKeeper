@@ -22,6 +22,10 @@
 //   client side (`HelperXPCClient`), and the code-signing requirements both
 //   sides place on each other. Public Foundation and Security APIs only.
 //   Depends on CellKeeperHelperCore.
+// - CellKeeperHelperDaemon: the host of the helper daemon (start, ticks,
+//   SIGTERM, acknowledged sleep, its own read-only power reading, the
+//   activation history file, the audit log). Depends on CellKeeperHelperCore
+//   only, never on the app's modules.
 
 import PackageDescription
 
@@ -43,9 +47,15 @@ let package = Package(
         ),
         .target(name: "CellKeeperHelperCore"),
         .target(name: "CellKeeperHelperXPC", dependencies: ["CellKeeperHelperCore"]),
+        .target(
+            name: "CellKeeperHelperDaemon",
+            dependencies: ["CellKeeperHelperCore"],
+            linkerSettings: [.linkedFramework("IOKit")]
+        ),
         .testTarget(name: "CellKeeperCoreTests", dependencies: ["CellKeeperCore", "CellKeeperHelperCore"]),
         .testTarget(name: "CellKeeperKitTests", dependencies: ["CellKeeperKit", "CellKeeperHelperCore", "CellKeeperHelperXPC"]),
         .testTarget(name: "CellKeeperHelperCoreTests", dependencies: ["CellKeeperHelperCore"]),
         .testTarget(name: "CellKeeperHelperXPCTests", dependencies: ["CellKeeperHelperXPC", "CellKeeperHelperCore"]),
+        .testTarget(name: "CellKeeperHelperDaemonTests", dependencies: ["CellKeeperHelperDaemon", "CellKeeperHelperCore"]),
     ]
 )
