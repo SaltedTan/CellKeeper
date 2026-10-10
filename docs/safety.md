@@ -25,7 +25,9 @@ command-line tool. macOS, not CellKeeper, enforces that limit.
 
 There is no privileged helper, no SMC access, no `sudo`, no `pmset` setting
 change, and no private API on the write path. CellKeeper opens no
-IOUserClient itself.
+IOUserClient itself. The NSXPC transport for a future helper exists in code
+and is tested inside the test process only; nothing registers, starts or
+connects to a helper process.
 
 Your Mac's own protections — the battery pack's management system, firmware
 charge termination and thermal limits, and macOS battery health management —
@@ -147,6 +149,11 @@ list.
    restriction, read state, restore defaults, version) with code-signing
    requirements on both ends of XPC; no raw key/value access, no file access,
    no command execution (R28, R29).
+   *Implemented in the transport, not deployed*: the NSXPC interface has one
+   method per typed operation with only integer and boolean arguments, and
+   both ends carry a code-signing requirement (Apple-issued certificate,
+   signing identifier and team; see the helper backend below). Tested over
+   an anonymous listener; no helper is registered.
 5. **Behavioural verification.** After a write, confirm the expected effect in
    independent telemetry (for example charge current falls to about zero after
    an inhibit) and fall back to the safe state if it does not appear (R11).
@@ -182,6 +189,11 @@ list.
     restore-on-exit must live in the privileged component, with acknowledged
     sleep notifications and time-limited operations; the app's own will-sleep
     and quit handling cannot guarantee completion.
+    *In part*: the helper's logic implements the sleep, wake and exit rules,
+    and the app's XPC client bounds every call with a timeout and then
+    invalidates the connection, which makes the helper end the session.
+    The daemon, its acknowledged sleep notifications and time limits on its
+    calls into the hardware are still missing.
 
 ### How the macOS Charge Limit backend meets the applicable preconditions
 
@@ -215,7 +227,10 @@ hardware writes and a helper, and do not apply. For the rest:
 
 The helper backend (`HelperChargingBackend`) drives the helper's logic
 (`HelperEngine`), which runs only in the app's own process and only on a
-simulated control. Nothing is written to hardware, so none of these
+simulated control. The NSXPC transport that will connect the app to a
+helper daemon exists and is tested inside the test process, but no daemon
+exists, nothing is registered with launchd, and the app does not use the
+transport. Nothing is written to hardware, so none of these
 preconditions is met for a real backend yet. Because the Simulated helper
 lives and dies with the app, its leases, disconnect handling and restores
 are exercised by tests, not by a separate process that outlives a crashed
@@ -237,6 +252,25 @@ app. What is already in place, and tested against the simulated control:
   guarantee them, and a lease that lapses only ends the restriction. The
   helper's own power reading uses public, read-only interfaces in process;
   the daemon's is still to come.
+- **4, narrow, authenticated API (transport only):** the NSXPC interface
+  (`CellKeeperHelperXPC`) has one method per typed operation, with only
+  `Int`, `UInt64` and `Bool` arguments and replies, so neither side decodes
+  objects from the other. The helper's listener requires CellKeeper's
+  signing identifier, an Apple-issued certificate and its own team of
+  every client; the app requires the same of the helper, with the helper's
+  identifier. The team is read from the process's own signature, so an
+  ad-hoc build cannot build these requirements at all, and every
+  requirement is compiled before use. Process IDs are never trusted. Each
+  connection's requests reach the engine in arrival order, one at a time,
+  and a session revoked for flooding the helper loses its connection. A
+  client can make the helper do only bounded work: at most 32 requests may
+  wait on a connection (one more closes it), at most 8 clients are served,
+  and a closed connection runs nothing more while its session, and with it
+  any restriction it held, ends at once. Tests run both sides in the test
+  process over an anonymous listener, with the test binary's own code
+  signature required on both sides. The release-only requirement clauses
+  (Developer ID certificate, no debugger entitlement) wait for signed
+  builds (phase 4b).
 - **6, debounce and dwell:** the policy's debounce and minimum pause apply to
   the helper backend, as to any backend that switches charging itself.
 - **7, external-writer detection (in part):** the helper records why each
@@ -269,10 +303,15 @@ app. What is already in place, and tested against the simulated control:
   hardware error is counted as a failure.
 - **8, monotonic time:** one clock that counts sleep for the helper's leases,
   rate limits and power-state age.
+- **13, bounded operations (app side):** every call over the XPC transport
+  has a timeout (10 s by default). A timeout, an interruption or any other
+  transport failure invalidates the connection, so a late reply is never
+  used and the helper ends the session, clearing what it held; the backend
+  then connects again and reads the state afresh.
 
-Everything else, including the daemon, the authenticated XPC transport, a
-verified mechanism, behavioural verification, and acknowledged sleep
-handling, is still missing.
+Everything else, including the daemon and its registration, a verified
+mechanism, behavioural verification, acknowledged sleep handling and time
+limits on the helper's own calls into the hardware, is still missing.
 
 ### Deliberate deviations from research note 06
 
