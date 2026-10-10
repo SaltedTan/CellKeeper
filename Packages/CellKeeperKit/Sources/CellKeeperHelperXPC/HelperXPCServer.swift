@@ -162,6 +162,12 @@ public final class HelperXPCServer: @unchecked Sendable {
     var openConnectionCount: Int {
         registry.handlers.filter(\.isOpen).count
     }
+
+    /// For tests: runs on the connection's queue between the decision to
+    /// close a connection for overflow and the close itself.
+    func onOverflowDecided(_ hook: @escaping @Sendable () -> Void) {
+        registry.onOverflowDecided = hook
+    }
 }
 
 // MARK: - Connection events
@@ -350,6 +356,19 @@ final class ConnectionRegistry: @unchecked Sendable {
         lock.withLock { connections.count }
     }
 
+    /// For tests: runs on the connection's queue after a handler has decided
+    /// (and recorded) an overflow close, before it carries the close out.
+    var onOverflowDecided: (@Sendable () -> Void)? {
+        get { lock.withLock { overflowHook } }
+        set { lock.withLock { overflowHook = newValue } }
+    }
+
+    private var overflowHook: (@Sendable () -> Void)?
+
+    func overflowDecided() {
+        onOverflowDecided?()
+    }
+
     /// From the engine's event sink, before the revoking request returns.
     func sessionRevoked(_ session: HelperSessionID) {
         let handler = lock.withLock { bySession[session] }
@@ -404,17 +423,30 @@ final class HelperXPCConnectionHandler: @unchecked Sendable {
 
     /// Queues a request. Called on the connection's queue, in arrival order.
     /// One more than ``HelperXPCServer/maximumQueuedRequests`` waiting closes
-    /// the connection: the client broke the protocol.
+    /// the connection: the client broke the protocol. The overflow is
+    /// recorded as the close in the same lock that detects it, so the
+    /// consumer cannot start another request after the violation.
     func enqueue(_ request: @escaping Request) {
-        let accepted = lock.withLock {
-            guard closeReason == nil, queued < HelperXPCServer.maximumQueuedRequests else { return false }
-            queued += 1
-            return true
+        enum Admission {
+            case accepted, refused
+            case overflow(Closing)
         }
-        if accepted {
+        let admission: Admission = lock.withLock {
+            guard closeReason == nil else { return .refused }
+            guard queued < HelperXPCServer.maximumQueuedRequests else {
+                return .overflow(closeLocked(.requestQueueFull))
+            }
+            queued += 1
+            return .accepted
+        }
+        switch admission {
+        case .accepted:
             continuation.yield(request)
-        } else {
-            close(.requestQueueFull)
+        case .refused:
+            break
+        case .overflow(let closing):
+            registry.overflowDecided()
+            finishClosing(closing, afterSentReplies: false)
         }
     }
 
@@ -427,27 +459,31 @@ final class HelperXPCConnectionHandler: @unchecked Sendable {
     }
 
     /// The engine revoked the session. A request in progress (the one that
-    /// caused it) gets its reply first.
+    /// caused it) gets its reply first: the consumer closes the connection
+    /// when it ends. Otherwise the connection closes now.
     func noteRevocation() {
-        let closesNow = lock.withLock {
-            guard closeReason == nil else { return false }
+        let closing: Closing? = lock.withLock {
+            guard closeReason == nil else { return nil }
             if isRunning {
                 isRevocationPending = true
-                return false
+                return nil
             }
-            return true
+            return closeLocked(.revoked)
         }
-        if closesNow {
-            closeAfterSentReplies(.revoked)
+        if let closing {
+            finishClosing(closing, afterSentReplies: true)
         }
     }
 
     /// Closes the connection now. The request in progress finishes, nothing
     /// queued runs, and the session is invalidated at once.
     func close(_ reason: HelperXPCCloseReason) {
-        guard let (connection, session) = markClosed(reason) else { return }
-        connection?.invalidate()
-        invalidate(session)
+        let closing: Closing? = lock.withLock {
+            closeReason == nil ? closeLocked(reason) : nil
+        }
+        if let closing {
+            finishClosing(closing, afterSentReplies: false)
+        }
     }
 
     /// Waits until the consumer has ended and the session is invalidated.
@@ -456,45 +492,48 @@ final class HelperXPCConnectionHandler: @unchecked Sendable {
         await task?.value
     }
 
-    /// Marks the connection closed and ends the FIFO. Returns the connection
-    /// and the session the first time, nil afterwards.
-    private func markClosed(_ reason: HelperXPCCloseReason) -> (NSXPCConnection?, HelperSession?)? {
-        let taken: (NSXPCConnection?, HelperSession?)? = lock.withLock {
-            guard closeReason == nil else { return nil }
-            closeReason = reason
-            defer { connection = nil }
-            return (connection, session)
-        }
-        if taken != nil {
-            continuation.finish()
-        }
-        return taken
+    /// What closing still has to do outside the lock.
+    private struct Closing {
+        var connection: NSXPCConnection?
+        var session: HelperSession?
     }
 
-    /// Closes the connection after every reply already sent, so the request
-    /// that caused a revocation still gets its reply.
-    private func closeAfterSentReplies(_ reason: HelperXPCCloseReason) {
-        guard let (connection, session) = markClosed(reason) else { return }
-        if let connection {
-            // The barrier runs once the messages enqueued before it have been
-            // sent. `NSXPCConnection` is not Sendable; the block only
-            // invalidates it, which NSXPC allows from any thread.
-            nonisolated(unsafe) let closing = connection
-            connection.scheduleSendBarrierBlock {
-                closing.invalidate()
+    /// Ends admission: records why, which stops the consumer from starting
+    /// any further request, and takes the connection and the session to
+    /// close. Must be called with `lock` held, in the same critical section
+    /// that decided to close, and only while the connection is open.
+    private func closeLocked(_ reason: HelperXPCCloseReason) -> Closing {
+        closeReason = reason
+        defer { connection = nil }
+        return Closing(connection: connection, session: session)
+    }
+
+    /// The side effects of a close, outside the lock: ends the FIFO,
+    /// invalidates the connection (after the replies already sent, for a
+    /// revocation) and the session.
+    private func finishClosing(_ closing: Closing, afterSentReplies: Bool) {
+        continuation.finish()
+        if let connection = closing.connection {
+            if afterSentReplies {
+                // The barrier runs once the messages enqueued before it have
+                // been sent. `NSXPCConnection` is not Sendable; the block
+                // only invalidates it, which NSXPC allows from any thread.
+                nonisolated(unsafe) let closed = connection
+                connection.scheduleSendBarrierBlock {
+                    closed.invalidate()
+                }
+            } else {
+                connection.invalidate()
             }
         }
-        invalidate(session)
+        // Without waiting for the request in progress: the engine runs one
+        // call at a time anyway.
+        if let session = closing.session {
+            Task { await session.invalidate() }
+        }
     }
 
-    /// Invalidates the session now, without waiting for the request in
-    /// progress (the engine runs one call at a time anyway).
-    private func invalidate(_ session: HelperSession?) {
-        guard let session else { return }
-        Task { await session.invalidate() }
-    }
-
-    /// Takes the next request to run, or nil once the connection is closed.
+    /// Takes the next request to run; false once admission has ended.
     private func startRequest() -> Bool {
         lock.withLock {
             queued -= 1
@@ -504,11 +543,14 @@ final class HelperXPCConnectionHandler: @unchecked Sendable {
         }
     }
 
-    /// Ends the request; true if the session was revoked meanwhile.
-    private func finishRequest() -> Bool {
+    /// Ends the request. If the engine revoked the session meanwhile, the
+    /// close is recorded here, before the consumer can take another request,
+    /// and returned for the consumer to carry out.
+    private func finishRequest() -> Closing? {
         lock.withLock {
             isRunning = false
-            return isRevocationPending
+            guard isRevocationPending, closeReason == nil else { return nil }
+            return closeLocked(.revoked)
         }
     }
 
@@ -525,8 +567,8 @@ final class HelperXPCConnectionHandler: @unchecked Sendable {
                 // Nothing more runs once the connection is closed.
                 guard startRequest() else { break }
                 await request(session)
-                if finishRequest() {
-                    closeAfterSentReplies(.revoked)
+                if let closing = finishRequest() {
+                    finishClosing(closing, afterSentReplies: true)
                     break
                 }
             }
