@@ -16,7 +16,9 @@ battery telemetry through public, read-only interfaces and computes what it
 - The read-only backend performs no control at all.
 - The **Simulated helper** runs CellKeeper's own charge control, at any
   limit from 20 to 100%, through the logic of the future privileged helper
-  inside the app, on a simulated control. It too changes nothing.
+  inside the app, on a simulated control. It too changes nothing. While
+  macOS's own Charge Limit is on, it restricts nothing, as a real helper
+  backend will (precondition 7 below).
 
 **The one real control is opt-in:** the **macOS Charge Limit** backend. It
 changes a single, user-level macOS setting, the Charge Limit (80–100%), and
@@ -66,9 +68,9 @@ app (`AppModel`, `AppDelegate` and the views) are checked by hand.
 | Safety floor: at ≤ 10% charging is always allowed, overriding temperature protection and every other rule, until the charge recovers to 15% | R5 | `ChargingPolicy.nextFloorLatch` |
 | On battery power, CellKeeper's restrictions are cleared, so a later plug-in charges normally even if CellKeeper has stopped | R18 | `ChargingPolicy` (`onBattery`) |
 | Overrides always expire, on a monotonic clock that wall-clock changes cannot affect: a temporary full charge at 100%/fully charged, on unplug, or after 1–48 h (default 12 h); expiry and unplug are processed even when the charge reading is unusable | R22, R23 | `ChargeOverride`, `ChargingPolicy` |
-| Temperature protection with hysteresis. A pause starts on the first hot reading. Cooling alone ends it no sooner than 5 minutes after it began (monotonic clock); an unknown temperature or turning protection off ends it at once, so it can never hold charging off, and higher-priority rules (safety floor, battery power, fail-safe) still override it | R21 | `ChargingPolicy.nextTemperatureLatch` |
+| Temperature protection with hysteresis. A pause starts on the first hot reading. Cooling alone ends it no sooner than 5 minutes after it began (monotonic clock); an unknown temperature or turning protection off ends it at once, so it can never hold charging off, and higher-priority rules (safety floor, battery power, fail-safe, macOS's own Charge Limit being on) still override it | R21 | `ChargingPolicy.nextTemperatureLatch` |
 | Debounce: charging is paused at the limit only once two consecutive distinct readings (identified by the driver's own update time, or else the read time) reach it. Re-evaluating one reading does not count twice, a reading below the limit or an unusable one in between starts over, and meanwhile charging continues with a note saying so. The safety floor, the sleep precaution, temperature protection, and every change toward macOS defaults act on the first reading | R14 | `ChargingPolicy.nextLimitLatch` |
-| Discharge is a confirmed, one-shot session, never a setting. Its target (20–95%) is captured when confirmed; it never goes below that target or the current limit. It ends at the target, on unplug, before sleep, on temperature pause, on lost telemetry, on a backend fault, or if unsupported, and never restarts by itself | R6, R16, R20 | `ChargeOverride.dischargeToLimit`, `ChargingPolicy`, `SettingsView` |
+| Discharge is a confirmed, one-shot session, never a setting. Its target (20–95%) is captured when confirmed; it never goes below that target or the current limit. It ends at the target, on unplug, before sleep, on temperature pause, on lost telemetry, on a backend fault, while macOS's own Charge Limit is on or unreadable, or if unsupported, and never restarts by itself | R6, R16, R20 | `ChargeOverride.dischargeToLimit`, `ChargingPolicy`, `SettingsView` |
 | Before sleep, charging is held at or above the resume threshold so a software limit cannot overshoot while asleep; the precaution lasts until wake (bounded to 2 min of monotonic time if no wake notification arrives) | R16 | `ChargingPolicy` (`sleepPrecaution`), `ChargeController` |
 | Restricting changes rate-limited (≥ 60 s apart, ≤ 20 per hour, monotonic clock); relaxing changes toward normal never limited | R13 | `ChargingPolicy.rateLimitRetryTime` |
 | Every request read back; an error, unknown mode, or mismatch is a failure, and nothing unconfirmed is reported as applied | R11, R30 | `ChargeController.setAndConfirm` |
@@ -76,6 +78,7 @@ app (`AppModel`, `AppDelegate` and the views) are checked by hand.
 | Mode-read failures count as failures; 3 failures fault the backend (a successful request or a failure-free hour resets the count). While faulted, normal charging is actively requested until confirmed, nothing else is requested, and the fault persists until the user clears it | R11 | `ChargeController`, `ChargingPolicy.action` |
 | A backend that does not affect hardware can never report an action as applied to hardware | R30 | `ChargeController.request` |
 | A mode change CellKeeper did not make faults the backend at once and restores normal charging. With the native Charge Limit it is adopted as your own limit instead (see below and the deviations) | R27 | `ChargeController.observeBackendMode` |
+| While macOS's own Charge Limit is on, or its report (`pmset -g battlimit`, read-only) cannot be read and recognised, a backend that switches charging itself restricts nothing: it offers only normal charging, a hold in place is released at the next evaluation and logged as a safety event, a discharge session ends, and temperature protection and the limit do not apply. The menu and Settings › Control say so and how to turn macOS's limit off, with Check Again. CellKeeper never turns macOS's limit off itself. The limit is read at most every 30 s (see the deviations) | R25, R26 | `MacOSChargeLimitMonitor`, `HelperChargingBackend.capabilities`, `ChargingPolicy.macOSChargeLimitReason`, `ChargeController` |
 | Backend switch only after normal charging is confirmed on the old backend; otherwise the switch stays pending and normal charging keeps being requested until it is confirmed | R4 | `ChargeController.switchBackend` |
 | On quit the controller restores normal charging and then shuts down; commands still queued become no-ops (deadlock-free) | R19 | `ChargeController.shutdown`, `AppDelegate` |
 | All commands serialized under one FIFO lock; user commands applied in order | — | `ChargeController`, `AppModel` command queue |
@@ -170,6 +173,12 @@ list.
 7. **External-writer detection and coexistence.** Stop and restore if another
    tool changes the same state; detect macOS Charge Limit / Optimized Battery
    Charging and never fight them (R25–R27).
+   *Coexistence implemented* for backends that switch charging themselves:
+   while macOS's Charge Limit is on, or its report cannot be read and
+   recognised, such a backend restricts nothing and CellKeeper asks you to
+   turn macOS's limit off (see "Where the helper backend stands" and the
+   deviations). Optimized Battery Charging can be seen only through that
+   report.
 8. **Monotonic time for leases and expiries** (R22).
 9. **Uninstall that restores the safe state** before unregistering any helper
    (R4).
@@ -311,10 +320,38 @@ the simulated control:
   helper checks that record itself right before it clears
   (`clearControlIfUnchanged`), so a control that changed hands in between
   is left alone. CellKeeper never restores defaults by itself; only the
-  user clearing the fault restores defaults, once. Limits: the helper sees
+  user clearing the fault restores defaults, once. Limit: the helper sees
   an outside change only when it reads the control, so a change undone
-  between two reads goes unnoticed; and coexistence with macOS's Charge
-  Limit and Optimized Battery Charging is not done.
+  between two reads goes unnoticed.
+- **7, coexistence with macOS's Charge Limit and Optimized Battery
+  Charging:** the backend reads macOS's Charge Limit through the same
+  read-only `pmset -g battlimit` report and strict parser as the native
+  backend (`MacOSChargeLimitMonitor`, on a Mac that has the Charge Limit).
+  While the limit is below 100%, or the report cannot be read or
+  recognised, the backend offers only normal charging (its availability
+  stays Simulated) and the policy restricts nothing (state
+  `deferringToMacOS`): no limit, no temperature pause, no sleep precaution,
+  no discharge. A hold in place when this starts is released by the next
+  evaluation, through the ordinary release, and logged as a safety event;
+  a discharge session ends. The menu and Settings › Control name macOS's
+  limit and say to turn it off in System Settings › Battery (Charge Limit
+  at 100%). CellKeeper never turns it off itself. What remains or is
+  limited:
+  - CellKeeper sees Optimized Battery Charging, temporary states ("Set
+    Until Tomorrow", "Charge to Full Now") and battery health management
+    only if they appear in the `battlimit` report. An entry it does not
+    recognise withholds restrictions; a hold that leaves no entry there is
+    not seen (research note 08, I3 and open questions 2–4). "Charge to
+    Full Now" may appear as "no limit" (I2), and then CellKeeper's own
+    limit applies.
+  - Detection is periodic: the report is read at most every 30 s and
+    evaluations run every 60 s, so a change is normally seen within about
+    a minute, and at worst after about 90 s when an evaluation that an
+    event triggered reused a recent reading. Check Again reads it at once.
+  - A report that cannot be read even once releases a hold; it is taken
+    again, within the rate limits, once a read shows the limit off.
+  - The check is the app's. The helper does not read macOS's limit
+    itself, and the daemon will need to decide whether it should.
 - **Unconfirmed changes:** CellKeeper is responsible for a control from the
   moment it sends an activation until the helper's history shows what came
   of it, and for a hold until it sees it end. If the helper cannot be
@@ -379,7 +416,8 @@ limits on the helper's own calls into the hardware, is still missing.
   against cooling: cooling to the resume temperature ends a pause no sooner
   than 5 minutes after it began. An unknown temperature or turning
   protection off ends a pause at once, and higher-priority rules (safety
-  floor, battery power, fail-safe, management off) override it at once. The
+  floor, battery power, fail-safe, management off, macOS's own Charge Limit
+  being on) override it at once. The
   cleared state has no minimum: the next reading at or above the pause
   temperature pauses charging again at once, because pausing is a safety
   action and a wait before it could only delay protection. The minimum
@@ -400,6 +438,20 @@ limits on the helper's own calls into the hardware, is still missing.
   would trip on normal refresh jitter. After wake, a stale driver time puts the
   policy in fail-safe until the driver refreshes.
 - **Floor and resume.** The floor is fixed at 10% (R5 allows 5–20%).
+- **macOS's own limits (R25, R26).** R25 asks that, while macOS limits
+  charging, the more restrictive of the two limits apply and both be shown.
+  With a backend that switches charging itself, CellKeeper instead
+  restricts nothing at all while macOS's Charge Limit is on, or while its
+  report cannot be read and recognised (lead's decision, 2026-10-10,
+  following the owner's direction of 2026-10-06 and 2026-10-09 that you
+  turn macOS's limit off and CellKeeper controls charging). The lower limit
+  would win anyway, so CellKeeper's status would claim a limit it does not
+  enforce, and restricting on top of macOS would fight it (R26). This also
+  sets aside CellKeeper's temperature pause, sleep precaution and discharge
+  sessions while macOS's limit is on: macOS enforces its own limit and has
+  its own thermal limiting. Nothing is guessed: an unrecognised or failed
+  read counts as "macOS may be limiting". The native Charge Limit backend
+  is unaffected: it sets that limit.
 - **Telemetry loss with the native Charge Limit (R1, R9).** Missing or stale
   telemetry does not release a native limit: macOS enforces it from its own
   measurements, so CellKeeper's view of the battery cannot make it unsafe.

@@ -31,7 +31,7 @@ Limit** (80–100%) through a shortcut you create, and macOS enforces it.
 | Temporary charge to 100% | **Real** with macOS's Charge Limit; otherwise simulated |
 | Temperature protection | **Policy real**; cannot trigger without a temperature reading; not available with macOS's Charge Limit |
 | Discharge to limit while plugged in | **Policy real, control simulated**; a confirmed one-shot session, never automatic; not available with macOS's Charge Limit |
-| Limits at any level (including below 80%), with CellKeeper switching charging itself | **Simulated** — choose **Simulated helper** in Settings › Control to try CellKeeper's own charge control at 20–100%, run through its helper's logic inside the app; nothing on your Mac changes. **No hardware control yet**; the current priority — see [roadmap](docs/roadmap.md) milestone 4 and [issue #1](https://github.com/SaltedTan/CellKeeper/issues/1) |
+| Limits at any level (including below 80%), with CellKeeper switching charging itself | **Simulated** — choose **Simulated helper** in Settings › Control to try CellKeeper's own charge control at 20–100%, run through its helper's logic inside the app; nothing on your Mac changes. While macOS's own Charge Limit is on, it restricts nothing, so two limits never compete: set macOS's limit to 100% in System Settings › Battery to try it. **No hardware control yet**; the current priority — see [roadmap](docs/roadmap.md) milestone 4 and [issue #1](https://github.com/SaltedTan/CellKeeper/issues/1) |
 | Scheduling, calibration, notifications, Shortcuts actions for CellKeeper's own controls, launch at login | Planned |
 
 The menu bar always shows which kind of control is in effect: **Available**,
