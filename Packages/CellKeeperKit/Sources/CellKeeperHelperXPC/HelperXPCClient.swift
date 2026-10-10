@@ -5,8 +5,8 @@ import Foundation
 ///
 /// - **Peer.** The helper must satisfy `helperRequirement`
 ///   (`setCodeSigningRequirement`, macOS 13), set before the connection is
-///   resumed. A helper that does not satisfy it never gets a reply
-///   delivered to CellKeeper: the call throws ``HelperXPCError/requirementNotMet``.
+///   resumed. No reply from a helper that does not satisfy it is ever
+///   delivered: the call throws ``HelperXPCError/requirementNotMet``.
 ///   (The XPC runtime checks the peer when its first message arrives, so
 ///   CellKeeper's first request may already have reached it; CellKeeper's
 ///   requests carry nothing secret.)

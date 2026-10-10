@@ -1205,7 +1205,8 @@ process.
   `swift test` host it names the exact build by its cdhash), so NSXPC checks
   a real code signature on every connection. They cover every request
   round-tripping with the in-process transport's replies, requirements
-  that cannot match on either side, arrival order under a burst of 300
+  that cannot match on either side, a stand-in helper that replies with a
+  status this version does not know, arrival order under a burst of 300
   requests, revocation, disconnect, stop, a timeout against a stalled
   engine, and `HelperChargingBackend` reconnecting after the server drops
   its connection.

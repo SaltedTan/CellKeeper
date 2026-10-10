@@ -135,6 +135,43 @@ struct XPCHelperTransportTests {
         #expect(await eventually { rig.server.connectionCount == 0 })
     }
 
+    // MARK: - Replies
+
+    @Test("A reply with a status this version does not know is never read as a status: it fails the call and closes the client")
+    func unknownStatus() async throws {
+        let helper = try RawStatusHelper(status: 999)
+        let client = HelperXPCClient(destination: .endpoint(helper.listener.endpoint), helperRequirement: try ownRequirement())
+        await #expect(throws: HelperXPCError.malformedReply) {
+            try await client.setControl(control: 1, active: false)
+        }
+        #expect(client.transportFailure == .malformedReply)
+        await #expect(throws: HelperXPCError.invalidated) {
+            try await client.readState()
+        }
+
+        // Through the app's transport, every kind of reply.
+        let transport = XPCHelperTransport(destination: .endpoint(helper.listener.endpoint), helperRequirement: try ownRequirement())
+        let requests: [@Sendable (any HelperConnection) async throws -> Void] = [
+            { _ = try await $0.hello(clientProtocolVersion: HelperProtocolVersion.current) },
+            { _ = try await $0.readState() },
+            { _ = try await $0.acquireOrRenewLease(control: 1, seconds: 900) },
+            { _ = try await $0.restoreDefaults() },
+        ]
+        for request in requests {
+            let connection = try await transport.connect()
+            await #expect(throws: HelperTransportError.malformedReply) {
+                try await request(connection)
+            }
+        }
+
+        // The same stand-in with a known status is read as it is.
+        let refusing = try RawStatusHelper(status: HelperStatus.blockedByInterlock.rawValue)
+        let connection = try await XPCHelperTransport(destination: .endpoint(refusing.listener.endpoint), helperRequirement: try ownRequirement()).connect()
+        #expect(try await connection.setControl(control: 1, active: true) == .blockedByInterlock)
+        #expect(try await connection.acquireOrRenewLease(control: 1, seconds: 900) == HelperLeaseReply(status: .blockedByInterlock, grantedSeconds: 900))
+        await connection.invalidate()
+    }
+
     // MARK: - Order
 
     @Test("One connection's requests reach the engine strictly in arrival order, and are answered in that order")
@@ -152,15 +189,15 @@ struct XPCHelperTransportTests {
         let proxy = try #require(connection.remoteObjectProxy as? CellKeeperHelperXPCProtocol)
 
         let count = 300
-        let replies = Captured<[Int]>()
+        // Reply blocks run on NSXPC's queue; the test checks what they saw.
+        let replies = Captured<[HelperLeaseReply]>()
         replies.set([])
         let introduced = Captured<Int>()
         // Sent one after another without waiting for any reply.
         proxy.hello(clientProtocolVersion: HelperProtocolVersion.current) { status, _, _, _, _, _, _ in introduced.set(status) }
         for index in 0..<count {
             proxy.acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: 600 + index) { status, granted in
-                #expect(status == HelperStatus.ok.rawValue)
-                replies.mutate { $0.append(granted) }
+                replies.mutate { $0.append(HelperLeaseReply(status: HelperStatus(rawValue: status) ?? .hardwareError, grantedSeconds: granted)) }
             }
         }
         #expect(await eventually(within: 10) { replies.value?.count == count })
@@ -173,7 +210,7 @@ struct XPCHelperTransportTests {
             }
         }
         #expect(reached == Array(600..<(600 + count)))
-        #expect(replies.value == Array(600..<(600 + count)))
+        #expect(replies.value == (600..<(600 + count)).map { HelperLeaseReply(status: .ok, grantedSeconds: $0) })
     }
 
     // MARK: - Revocation

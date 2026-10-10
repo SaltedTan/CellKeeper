@@ -190,3 +190,65 @@ enum RecordedReply: Equatable {
     case lease(HelperLeaseReply)
     case status(HelperStatus)
 }
+
+/// A stand-in helper on an anonymous listener that answers every request
+/// with the same raw status, to see what the client makes of replies the
+/// real engine never sends.
+final class RawStatusHelper: NSObject, NSXPCListenerDelegate, CellKeeperHelperXPCProtocol, @unchecked Sendable {
+    // @unchecked Sendable: `listener` is only resumed in `init` and
+    // invalidated in `deinit`; `status` never changes.
+
+    let listener = NSXPCListener.anonymous()
+    private let status: Int
+
+    init(status: Int) throws {
+        self.status = status
+        super.init()
+        listener.setConnectionCodeSigningRequirement(try ownRequirement().text)
+        listener.delegate = self
+        listener.resume()
+    }
+
+    deinit {
+        listener.invalidate()
+    }
+
+    func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
+        connection.exportedInterface = HelperXPCInterface.make()
+        connection.exportedObject = self
+        connection.resume()
+        return true
+    }
+
+    func hello(clientProtocolVersion: Int, reply: @escaping HelperXPCHelloReplyBlock) {
+        reply(status, HelperProtocolVersion.current, 1, 3, true, 1, 1)
+    }
+
+    func readState(reply: @escaping HelperXPCStateReplyBlock) {
+        reply(status, 0, 0, 0, false, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    }
+
+    func acquireOrRenewLease(control: Int, seconds: Int, reply: @escaping HelperXPCLeaseReplyBlock) {
+        reply(status, seconds)
+    }
+
+    func releaseLease(control: Int, reply: @escaping HelperXPCStatusReplyBlock) {
+        reply(status)
+    }
+
+    func setControl(control: Int, active: Bool, reply: @escaping HelperXPCStatusReplyBlock) {
+        reply(status)
+    }
+
+    func clearControlIfUnchanged(control: Int, generation: UInt64, helperInstance: UInt64, reply: @escaping HelperXPCStatusReplyBlock) {
+        reply(status)
+    }
+
+    func restoreDefaults(reply: @escaping HelperXPCStatusReplyBlock) {
+        reply(status)
+    }
+
+    func restoreDefaultsAndExit(reply: @escaping HelperXPCStatusReplyBlock) {
+        reply(status)
+    }
+}
