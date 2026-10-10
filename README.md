@@ -173,6 +173,13 @@ CellKeeper.app (SwiftUI menu bar, settings)
 - Every failure path returns to **macOS default charging**. With macOS's
   Charge Limit, that means your own limit, exactly as recorded.
 
+The helper daemon, `CellKeeperHelper`, and its launchd property list
+(`Config/LaunchDaemons/io.github.saltedtan.CellKeeper.Helper.plist`) are
+built and tested, but in this phase they are not installed, not embedded in
+the app and not registered with launchd, and the daemon controls no
+hardware. `swift build --package-path Packages/CellKeeperKit --product
+CellKeeperHelper` builds it; do not install it.
+
 See [docs/architecture.md](docs/architecture.md) for the full design.
 
 ## Safety
