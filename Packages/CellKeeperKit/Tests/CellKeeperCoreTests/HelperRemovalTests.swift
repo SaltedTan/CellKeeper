@@ -442,6 +442,16 @@ struct HelperRemovalTests {
         }
     }
 
+    @Test("A bounded wait in these tests gives up even when its limit has passed before it starts waiting")
+    func boundedWaitGivesUp() async {
+        let log = CallLog()
+        let isLogged = await log.waitFor("never logged", within: .zero)
+        #expect(!isLogged)
+        log.append("logged")
+        let isLoggedNow = await log.waitFor("logged", within: .zero)
+        #expect(isLoggedNow)
+    }
+
     @Test("A forced removal says what it could not confirm, and what removing the helper gives up")
     func forcedRemovalWording() async {
         let rig = RemovalRig()

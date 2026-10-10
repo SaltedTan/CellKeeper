@@ -8,6 +8,7 @@ final class CallLog: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [String] = []
     private var waiters: [Int: (entry: String, occurrences: Int, continuation: CheckedContinuation<Bool, Never>)] = [:]
+    private var timeouts: [Int: Task<Void, Never>] = [:]
     private var nextWaiter = 0
 
     var all: [String] {
@@ -29,18 +30,18 @@ final class CallLog: @unchecked Sendable {
     /// Returns true once `entry` has been recorded `occurrences` times, or
     /// false after `limit`, so a test that goes wrong fails instead of
     /// hanging the run.
+    ///
+    /// The waiter is registered before its timeout starts, so the timeout
+    /// always finds it (or finds it already resumed); the limit counts from
+    /// the call, whenever the timeout task runs.
     @discardableResult
     func waitFor(_ entry: String, occurrences: Int = 1, within limit: Duration = testWaitLimit) async -> Bool {
+        let expiresAt = ContinuousClock.now.advanced(by: limit)
         let id = lock.withLock {
             nextWaiter += 1
             return nextWaiter
         }
-        let timeout = Task { [weak self] in
-            try? await Task.sleep(for: limit)
-            self?.giveUp(id)
-        }
-        defer { timeout.cancel() }
-        return await withCheckedContinuation { continuation in
+        let isLogged = await withCheckedContinuation { continuation in
             let isRecorded = lock.withLock {
                 if entries.filter({ $0 == entry }).count >= occurrences { return true }
                 waiters[id] = (entry, occurrences, continuation)
@@ -48,8 +49,23 @@ final class CallLog: @unchecked Sendable {
             }
             if isRecorded {
                 continuation.resume(returning: true)
+                return
+            }
+            let timeout = Task { [weak self] in
+                try? await Task.sleep(until: expiresAt, clock: .continuous)
+                self?.giveUp(id)
+            }
+            let isWaiting = lock.withLock {
+                guard waiters[id] != nil else { return false }
+                timeouts[id] = timeout
+                return true
+            }
+            if !isWaiting {
+                timeout.cancel()
             }
         }
+        lock.withLock { timeouts.removeValue(forKey: id) }?.cancel()
+        return isLogged
     }
 
     private func giveUp(_ id: Int) {
@@ -76,18 +92,18 @@ final class Gate: @unchecked Sendable {
     private let lock = NSLock()
     private var isOpen = false
     private var waiters: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var timeouts: [Int: Task<Void, Never>] = [:]
     private var nextWaiter = 0
 
+    /// Returns once the gate is open, or ``testWaitLimit`` after the call.
+    /// The waiter is registered before its timeout starts, so the timeout
+    /// always finds it (or finds it already released).
     func wait() async {
+        let expiresAt = ContinuousClock.now.advanced(by: testWaitLimit)
         let id = lock.withLock {
             nextWaiter += 1
             return nextWaiter
         }
-        let timeout = Task { [weak self] in
-            try? await Task.sleep(for: testWaitLimit)
-            self?.release(id)
-        }
-        defer { timeout.cancel() }
         await withCheckedContinuation { continuation in
             let passes = lock.withLock {
                 if isOpen { return true }
@@ -96,8 +112,22 @@ final class Gate: @unchecked Sendable {
             }
             if passes {
                 continuation.resume()
+                return
+            }
+            let timeout = Task { [weak self] in
+                try? await Task.sleep(until: expiresAt, clock: .continuous)
+                self?.release(id)
+            }
+            let isWaiting = lock.withLock {
+                guard waiters[id] != nil else { return false }
+                timeouts[id] = timeout
+                return true
+            }
+            if !isWaiting {
+                timeout.cancel()
             }
         }
+        lock.withLock { timeouts.removeValue(forKey: id) }?.cancel()
     }
 
     func open() {
