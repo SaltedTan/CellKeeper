@@ -52,11 +52,25 @@ public enum ControlStatement {
         return status.capabilities.macOSChargeLimit?.isLimiting == true
     }
 
-    /// Said next to CellKeeper's own limit while it does not apply because
-    /// CellKeeper defers to macOS's Charge Limit; nil otherwise.
+    /// Said next to CellKeeper's own limit while CellKeeper defers to
+    /// macOS's Charge Limit; nil otherwise. It states only what macOS's
+    /// report and CellKeeper's read-backs establish: whether macOS reports
+    /// its limit on or the report could not be read, that CellKeeper
+    /// applies no new restriction, and whether one of its own may remain.
     public static func limitNote(for status: ControllerStatus) -> String? {
         guard status.settings.isManagementEnabled, isDeferringToMacOS(status) else { return nil }
-        return "Not in effect while macOS's Charge Limit is on: CellKeeper defers to it, with no limit, temperature pause or discharge of its own."
+        let reason: String
+        if let macOSLimit = status.capabilities.macOSChargeLimit, macOSLimit.isLimiting {
+            reason = macOSLimit.reportedLimit.map { "While macOS reports its Charge Limit on at \($0)%" }
+                ?? "While macOS's Charge Limit report cannot be read"
+        } else {
+            reason = "While CellKeeper defers to macOS's Charge Limit"
+        }
+        var note = "\(reason), CellKeeper withholds new restrictions: its own limit, temperature pause and discharge are not applied."
+        if let caveat = MacOSChargeLimitWording.ownRestrictionCaveat(status.ownRestriction, isSimulated: status.isControlSimulated) {
+            note += " \(caveat)."
+        }
+        return note
     }
 
     /// Whether the policy's decision is carried out: false for a backend

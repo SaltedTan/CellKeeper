@@ -83,13 +83,16 @@ struct MacOSChargeLimitNotice: View {
     let status: ControllerStatus
     let recheck: () -> Void
     /// Shows the steps for turning macOS's limit off; nil shows no button
-    /// (Settings shows the steps below the notice).
+    /// (Settings shows the steps below the notice). With it, the notice is
+    /// the menu's short version; Settings has the full explanation.
     var showGuide: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             LabeledContent("macOS's Charge Limit", value: MacOSChargeLimitWording.summary(macOSLimit))
-            Text(MacOSChargeLimitWording.guidance(macOSLimit, ownRestriction: status.ownRestriction, isSimulated: status.isControlSimulated))
+            Text(showGuide == nil
+                 ? MacOSChargeLimitWording.guidance(macOSLimit, ownRestriction: status.ownRestriction, isSimulated: status.isControlSimulated)
+                 : MacOSChargeLimitWording.menuSummary(macOSLimit, ownRestriction: status.ownRestriction, isSimulated: status.isControlSimulated))
                 .font(.caption)
                 .foregroundStyle(macOSLimit.isLimiting ? Color.orange : Color.secondary)
                 .fixedSize(horizontal: false, vertical: true)

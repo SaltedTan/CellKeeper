@@ -46,11 +46,30 @@ struct ControlStatementTests {
         #expect(status.decision?.state == .deferringToMacOS)
         #expect(ControlStatement.text(for: status) == "Deferring to macOS's Charge Limit")
         #expect(ControlStatement.offersMacOSLimitGuide(status))
-        #expect(ControlStatement.limitNote(for: status) == "Not in effect while macOS's Charge Limit is on: CellKeeper defers to it, with no limit, temperature pause or discharge of its own.")
         #expect(ControlStatement.isPolicyApplied(status))
+        #expect(status.ownRestriction == .noneInEffect)
+        let withholding = "CellKeeper withholds new restrictions: its own limit, temperature pause and discharge are not applied."
+        if case .limit = reading {
+            #expect(ControlStatement.limitNote(for: status) == "While macOS reports its Charge Limit on at 80%, \(withholding)")
+        } else {
+            // An unreadable report does not establish that the limit is on.
+            #expect(ControlStatement.limitNote(for: status) == "While macOS's Charge Limit report cannot be read, \(withholding)")
+        }
         var off = status
         off.settings.isManagementEnabled = false
         #expect(ControlStatement.limitNote(for: off) == nil)
+    }
+
+    @Test("While a restriction of CellKeeper's may remain, the limit note keeps that warning instead of claiming none is in effect")
+    func limitNoteKeepsUnconfirmedRelease() async {
+        var status = await evaluated(simulatedHelper(.limit(80)))
+        // As after a release that no read-back has confirmed.
+        status.ownRestrictionMode = .inhibitCharging
+        status.currentMode = nil
+        #expect(status.ownRestriction == .unconfirmed(.inhibitCharging))
+        let note = ControlStatement.limitNote(for: status)
+        #expect(note == "While macOS reports its Charge Limit on at 80%, CellKeeper withholds new restrictions: its own limit, temperature pause and discharge are not applied. CellKeeper's own restriction (a charging pause, simulated) may remain until a read-back shows it ended.")
+        #expect(note?.contains("no limit") == false)
     }
 
     @Test("An unavailable backend says so and why; it is never said to defer, and its policy is not applied")

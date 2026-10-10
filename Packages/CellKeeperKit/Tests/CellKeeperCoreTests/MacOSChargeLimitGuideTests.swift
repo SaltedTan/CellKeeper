@@ -27,25 +27,79 @@ struct MacOSChargeLimitGuideTests {
         #expect(!notes.contains { $0.contains("simulat") })
     }
 
-    @Test("With simulated controls, the notes first say that nothing would limit charging with macOS's limit off")
+    @Test("With simulated controls, the notes first say that the Simulated helper provides no replacement limit, without promising a full charge")
     func simulatedNotes() {
         let notes = MacOSChargeLimitGuide.notes(isSimulated: true)
         #expect(notes.count == MacOSChargeLimitGuide.notes(isSimulated: false).count + 1)
-        #expect(notes[0].contains("changes nothing on your Mac"))
-        #expect(notes[0].contains("charges to 100%"))
-        #expect(notes[0].contains("Leave macOS's limit on unless you want to try"))
+        #expect(notes[0] == "The Simulated helper provides no replacement charge limit; your Mac may charge to 100%. Keep macOS's limit on unless you are trying the simulation.")
+        // macOS may still hold charging, so nothing promises a full charge.
+        #expect(notes.contains { $0.contains("battery health") })
+        #expect(!notes.contains { $0.contains("nothing limits") || $0.contains("charges to 100%") })
     }
 
-    @Test("The notice's guidance warns, with simulated controls, that nothing would limit charging; otherwise it does not mention simulation", arguments: [on, unreadable])
+    @Test("The notice's guidance cautions, with simulated controls, that the Simulated helper provides no replacement limit; otherwise it does not mention simulation", arguments: [on, unreadable])
     func guidanceCaution(status: MacOSChargeLimitStatus) {
         let simulated = MacOSChargeLimitWording.guidance(status, ownRestriction: .noneInEffect, isSimulated: true)
-        #expect(simulated.contains("Keep macOS's limit on unless you want to try CellKeeper's own control in simulation: with it off, nothing limits your Mac's charging."))
-        #expect(simulated.contains("To try it, "))
+        #expect(simulated.contains(MacOSChargeLimitWording.simulatedCaution))
+        #expect(simulated.contains("To try the simulation, "))
         #expect(!simulated.contains("To let CellKeeper manage charging"))
+        #expect(!simulated.contains("nothing limits"))
         #expect(simulated.contains("never changes it itself"))
         let real = MacOSChargeLimitWording.guidance(status, ownRestriction: .noneInEffect, isSimulated: false)
-        #expect(!real.contains("nothing limits your Mac's charging"))
+        #expect(!real.contains(MacOSChargeLimitWording.simulatedCaution))
         #expect(!real.contains("simulat"))
         #expect(real.contains("never changes it itself"))
+    }
+
+    /// The sentences in `text`, by full stops.
+    private func sentenceCount(_ text: String) -> Int {
+        text.split(separator: ".", omittingEmptySubsequences: true).filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }.count
+    }
+
+    @Test("The menu's notice is one sentence when nothing else applies: what macOS reports and that CellKeeper withholds its own restrictions")
+    func menuSummaryShort() {
+        let on = MacOSChargeLimitWording.menuSummary(Self.on, ownRestriction: .noneInEffect, isSimulated: false)
+        #expect(on == "macOS reports its Charge Limit on at 80%, so CellKeeper withholds its own restrictions.")
+        let unreadable = MacOSChargeLimitWording.menuSummary(Self.unreadable, ownRestriction: .noneInEffect, isSimulated: false)
+        #expect(unreadable == "macOS's Charge Limit report could not be read, so CellKeeper withholds its own restrictions.")
+        #expect(!unreadable.contains("on at"))
+    }
+
+    @Test("The menu's notice adds one sentence only for a restriction of CellKeeper's that may remain and the simulation's caution", arguments: [on, unreadable])
+    func menuSummaryCaveats(status: MacOSChargeLimitStatus) {
+        let failed = MacOSChargeLimitWording.menuSummary(status, ownRestriction: .unconfirmed(.inhibitCharging), isSimulated: true)
+        #expect(sentenceCount(failed) == 2)
+        #expect(failed.contains("CellKeeper's own restriction (a charging pause, simulated) may remain until a read-back shows it ended"))
+        #expect(failed.contains("the Simulated helper provides no replacement charge limit"))
+        let simulated = MacOSChargeLimitWording.menuSummary(status, ownRestriction: .noneInEffect, isSimulated: true)
+        #expect(sentenceCount(simulated) == 2)
+        #expect(simulated.contains("The Simulated helper provides no replacement charge limit, so keep macOS's limit on unless you are trying the simulation."))
+        let held = MacOSChargeLimitWording.menuSummary(status, ownRestriction: .inEffect(.forceDischarge, own: .forceDischarge), isSimulated: false)
+        #expect(sentenceCount(held) == 2)
+        #expect(held.contains("The last read-back still shows CellKeeper's own restriction (running from battery) in effect."))
+        // What is not CellKeeper's is left to Settings' full explanation.
+        let other = MacOSChargeLimitWording.menuSummary(status, ownRestriction: .notCellKeepers(.inhibitCharging), isSimulated: false)
+        #expect(sentenceCount(other) == 1)
+    }
+
+    @Test("What the menu, Settings and the diagnostics report say names restrictions in words, never by their identifiers", arguments: [
+        OwnRestrictionState.noneInEffect, .inEffect(.inhibitCharging, own: .inhibitCharging), .inEffect(.forceDischarge, own: .inhibitCharging),
+        .unconfirmed(.forceDischarge), .unknown, .noneKnown, .notCellKeepers(.inhibitCharging), .unexplained(.forceDischarge),
+    ])
+    func readableNames(own: OwnRestrictionState) {
+        for isSimulated in [false, true] {
+            let texts = [
+                MacOSChargeLimitWording.releaseState(own, isSimulated: isSimulated),
+                MacOSChargeLimitWording.guidance(Self.on, ownRestriction: own, isSimulated: isSimulated),
+                MacOSChargeLimitWording.menuSummary(Self.unreadable, ownRestriction: own, isSimulated: isSimulated),
+            ] + [MacOSChargeLimitWording.ownRestrictionCaveat(own, isSimulated: isSimulated)].compactMap { $0 }
+            for text in texts {
+                #expect(!text.contains("inhibitCharging"))
+                #expect(!text.contains("forceDischarge"))
+                #expect(!text.contains("nativeLimit"))
+            }
+        }
+        #expect(ChargeControlMode.inhibitCharging.restrictionDescription == "a charging pause")
+        #expect(ChargeControlMode.forceDischarge.restrictionDescription == "running from battery")
     }
 }

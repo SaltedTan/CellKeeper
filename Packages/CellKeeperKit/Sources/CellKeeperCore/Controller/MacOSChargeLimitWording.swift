@@ -86,9 +86,9 @@ extension ControllerStatus {
 public enum MacOSChargeLimitWording {
     /// Added wherever a restriction is named on simulated controls.
     static let simulatedNote = "These are the simulated helper's controls; your Mac's charging is not changed."
-    /// Said in the steps for turning macOS's limit off while the controls
-    /// are simulated: nothing would limit charging then.
-    public static let simulatedCaution = "The Simulated helper changes nothing on your Mac, so with macOS's limit off nothing limits charging and your Mac charges to 100%."
+    /// Said wherever turning macOS's limit off is suggested while the
+    /// controls are simulated: CellKeeper's limit would not take over.
+    public static let simulatedCaution = "The Simulated helper provides no replacement charge limit; your Mac may charge to 100%. Keep macOS's limit on unless you are trying the simulation."
 
     /// macOS's report in a few words.
     public static func summary(_ status: MacOSChargeLimitStatus) -> String {
@@ -104,21 +104,68 @@ public enum MacOSChargeLimitWording {
         case .noneInEffect:
             "The last read-back shows no restriction in effect."
         case .inEffect(let mode, let requested) where mode == requested:
-            "The last read-back still shows CellKeeper's \(mode). CellKeeper keeps asking for its release; it remains until a read-back shows it ended."
+            "The last read-back still shows CellKeeper's restriction (\(mode.restrictionDescription)) in effect. CellKeeper keeps asking for its release; it remains until a read-back shows it ended."
         case .inEffect(let mode, let requested):
-            "The last read-back shows \(mode) in effect, and CellKeeper cannot rule out that it is its own (it asked for \(requested)). CellKeeper keeps asking for normal charging until a read-back shows no restriction."
+            "The last read-back shows \(mode.restrictionDescription) in effect, and CellKeeper cannot rule out that it is its own (it asked for \(requested.restrictionDescription)). CellKeeper keeps asking for normal charging until a read-back shows no restriction."
         case .unconfirmed(let mode):
-            "No read-back has confirmed that CellKeeper's \(mode) ended, so it may remain. CellKeeper keeps asking for its release until a read-back shows it ended."
+            "No read-back has confirmed that CellKeeper's restriction (\(mode.restrictionDescription)) ended, so it may remain. CellKeeper keeps asking for its release until a read-back shows it ended."
         case .unknown:
             "CellKeeper could not read back the backend's state, so it cannot confirm that nothing it set remains. It keeps asking for normal charging."
         case .noneKnown:
             "The backend accepts no requests, and CellKeeper knows of no request of its own that could be in effect there."
         case .notCellKeepers(let mode):
-            "The backend's records show \(mode) in effect, set by something other than CellKeeper; CellKeeper does not override it."
+            "The backend's records show \(mode.restrictionDescription) in effect, set by something other than CellKeeper; CellKeeper does not override it."
         case .unexplained(let mode):
-            "The last read-back shows \(mode) in effect, and CellKeeper knows of no request of its own that set it; it does not override it."
+            "The last read-back shows \(mode.restrictionDescription) in effect, and CellKeeper knows of no request of its own that set it; it does not override it."
         }
         return isSimulated ? "\(text) \(simulatedNote)" : text
+    }
+
+    /// A clause (capitalised, without a full stop) for when a restriction of
+    /// CellKeeper's own may still be in effect as far as read-backs
+    /// establish; nil when none of CellKeeper's may be (a read shows normal
+    /// charging, or what is in effect is not CellKeeper's).
+    public static func ownRestrictionCaveat(_ own: OwnRestrictionState, isSimulated: Bool) -> String? {
+        let simulated = isSimulated ? ", simulated" : ""
+        switch own {
+        case .inEffect(let mode, let requested) where mode == requested:
+            return "The last read-back still shows CellKeeper's own restriction (\(mode.restrictionDescription)\(simulated)) in effect"
+        case .inEffect(_, let requested), .unconfirmed(let requested):
+            return "CellKeeper's own restriction (\(requested.restrictionDescription)\(simulated)) may remain until a read-back shows it ended"
+        case .unknown:
+            return "CellKeeper cannot confirm that nothing it set remains"
+        case .noneInEffect, .noneKnown, .notCellKeepers, .unexplained:
+            return nil
+        }
+    }
+
+    /// What the menu says about macOS's limit, in at most two sentences:
+    /// what macOS reports and that CellKeeper withholds its own
+    /// restrictions; then, only where they apply, that a restriction of its
+    /// own may remain and that the Simulated helper provides no
+    /// replacement limit. Settings › Control has the full explanation
+    /// (``guidance(_:ownRestriction:isSimulated:)``) and the steps.
+    public static func menuSummary(_ status: MacOSChargeLimitStatus, ownRestriction: OwnRestrictionState, isSimulated: Bool) -> String {
+        let report: String
+        if !status.isLimiting {
+            return status.isNoLimitReported
+                ? "macOS reports no active Charge Limit, so CellKeeper does not defer to it."
+                : "macOS reports a Charge Limit of 100%, so CellKeeper does not defer to it."
+        } else if let limit = status.reportedLimit {
+            report = "macOS reports its Charge Limit on at \(limit)%, so CellKeeper withholds its own restrictions."
+        } else {
+            report = "macOS's Charge Limit report could not be read, so CellKeeper withholds its own restrictions."
+        }
+        var clauses: [String] = []
+        if let caveat = ownRestrictionCaveat(ownRestriction, isSimulated: isSimulated) {
+            clauses.append(caveat)
+        }
+        if isSimulated {
+            clauses.append("the Simulated helper provides no replacement charge limit, so keep macOS's limit on unless you are trying the simulation")
+        }
+        guard !clauses.isEmpty else { return report }
+        let second = clauses.joined(separator: "; ")
+        return "\(report) \(second.prefix(1).uppercased())\(second.dropFirst())."
     }
 
     /// What CellKeeper does about macOS's limit and what the user can do.
@@ -131,17 +178,17 @@ public enum MacOSChargeLimitWording {
         }
         let withholding = "CellKeeper withholds new restrictions and asks for the release of any restriction of its own."
         let release = releaseState(ownRestriction, isSimulated: isSimulated)
-        // With simulated controls, nothing would limit charging with macOS's
-        // limit off; say so wherever turning it off is suggested.
-        let keepOn = "Keep macOS's limit on unless you want to try CellKeeper's own control in simulation: with it off, nothing limits your Mac's charging."
+        // With simulated controls, CellKeeper's limit would not take over
+        // with macOS's limit off; say so wherever turning it off is
+        // suggested.
         if let limit = status.reportedLimit {
             let turnOff = isSimulated
-                ? "\(keepOn) To try it, set the Charge Limit to 100% in System Settings › Battery (ⓘ next to Charging)."
+                ? "\(simulatedCaution) To try the simulation, set the Charge Limit to 100% in System Settings › Battery (ⓘ next to Charging)."
                 : "To let CellKeeper manage charging, open System Settings › Battery, click ⓘ next to Charging, and set the Charge Limit to 100%."
             return "macOS reports its Charge Limit on at \(limit)%. While it is, \(withholding) \(release) \(turnOff) CellKeeper never changes it itself."
         }
         let check = isSimulated
-            ? "\(keepOn) To try it, check that the Charge Limit in System Settings › Battery (ⓘ next to Charging) is 100%."
+            ? "\(simulatedCaution) To try the simulation, check that the Charge Limit in System Settings › Battery (ⓘ next to Charging) is 100%."
             : "Check that the Charge Limit in System Settings › Battery (ⓘ next to Charging) is 100%."
         return "CellKeeper could not read macOS's Charge Limit report (\(status.readProblem ?? "no report")), so macOS may be limiting charging. Until the report shows no active limit, \(withholding) \(release) \(check) CellKeeper never changes it itself."
     }
@@ -165,7 +212,7 @@ public enum MacOSChargeLimitGuide {
     ]
 
     /// What the steps do and do not change. `isSimulated` adds that the
-    /// Simulated helper changes nothing, so nothing would limit charging.
+    /// Simulated helper provides no replacement limit.
     public static func notes(isSimulated: Bool) -> [String] {
         var notes = [
             "CellKeeper never changes these settings itself.",
@@ -173,8 +220,21 @@ public enum MacOSChargeLimitGuide {
             "macOS may still hold charging whatever these settings say, for example for battery health or when the battery is warm, and does not say why.",
         ]
         if isSimulated {
-            notes.insert("\(MacOSChargeLimitWording.simulatedCaution) Leave macOS's limit on unless you want to try CellKeeper's own control in simulation.", at: 0)
+            notes.insert(MacOSChargeLimitWording.simulatedCaution, at: 0)
         }
         return notes
+    }
+}
+
+extension ChargeControlMode {
+    /// The mode in words, for what the menu, Settings and the diagnostics
+    /// report say about a restriction; logs keep the technical name.
+    public var restrictionDescription: String {
+        switch self {
+        case .normal: "normal charging"
+        case .inhibitCharging: "a charging pause"
+        case .forceDischarge: "running from battery"
+        case .nativeLimit(let percent): "a macOS Charge Limit of \(percent)%"
+        }
     }
 }

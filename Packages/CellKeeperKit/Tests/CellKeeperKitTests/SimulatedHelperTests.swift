@@ -264,6 +264,16 @@ struct SimulatedHelperCoexistenceTests {
         #expect(status.events.contains { $0.kind == .safety && $0.message.contains("A read-back now shows normal charging") && $0.message.contains("(simulated; your Mac's charging is not changed)") })
         let notice = MacOSChargeLimitWording.releaseState(failed.ownRestriction, isSimulated: failed.isControlSimulated)
         #expect(notice.contains("These are the simulated helper's controls; your Mac's charging is not changed."))
+        // The menu's notice and the limit note keep the warning that the
+        // restriction may remain, in words.
+        let failedLimit = try #require(failed.capabilities.macOSChargeLimit)
+        let menu = MacOSChargeLimitWording.menuSummary(failedLimit, ownRestriction: failed.ownRestriction, isSimulated: failed.isControlSimulated)
+        #expect(menu.hasPrefix("macOS reports its Charge Limit on at 80%, so CellKeeper withholds its own restrictions."))
+        #expect(menu.contains("CellKeeper's own restriction (a charging pause, simulated) may remain until a read-back shows it ended"))
+        #expect(!menu.contains("inhibitCharging"))
+        let note = try #require(ControlStatement.limitNote(for: failed))
+        #expect(note.contains("may remain until a read-back shows it ended"))
+        #expect(!note.contains("no limit"))
     }
 
     @Test("Only a Mac with macOS's Charge Limit gets a monitor, and making one reads nothing")

@@ -184,7 +184,7 @@ struct OwnRestrictionResponsibilityTests {
         #expect(event?.message.contains("No read-back has confirmed that this restriction ended, so it may remain") == true)
         let limit = gated.capabilities.macOSChargeLimit
         let guidance = limit.map { MacOSChargeLimitWording.guidance($0, ownRestriction: gated.ownRestriction, isSimulated: gated.isControlSimulated) } ?? ""
-        #expect(guidance.contains("The last read-back still shows CellKeeper's inhibitCharging"))
+        #expect(guidance.contains("The last read-back still shows CellKeeper's restriction (a charging pause) in effect."))
         #expect(!guidance.contains("set by something other than CellKeeper"))
         #expect(!guidance.contains("never compete"))
     }
