@@ -129,7 +129,9 @@ hardware.
   to phase 4b. Done: the daemon host (`CellKeeperHelperDaemon`) and
   executable, with restore at start, SIGTERM, acknowledged sleep, its own
   power reading, the activation history file and the property list (not
-  installed or embedded). Still open: wiring in the XPC listener.
+  installed or embedded). The daemon serves its engine over the
+  authenticated XPC transport, and refuses to listen when built without a
+  team identifier.
 - The `safety.md` preconditions that do not depend on the mechanism:
   debounce and dwell (6, done); coexistence with macOS's Charge Limit and
   Optimized Battery Charging (7: done for macOS's Charge Limit with
