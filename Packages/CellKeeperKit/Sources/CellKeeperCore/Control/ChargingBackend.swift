@@ -344,6 +344,28 @@ public enum HoldRelease: Sendable, Equatable, CustomStringConvertible {
 /// What a backend knows about how the mode it last reported came about,
 /// beyond what the controller can tell by comparing it with the mode
 /// CellKeeper last confirmed.
+/// One change as a backend's records identify it: for the helper, the helper
+/// process (its instance), the control and the change's generation. Used to
+/// tell a new outside change from the same one read again, whatever a
+/// message says.
+public struct RecordedChange: Hashable, Sendable, CustomStringConvertible {
+    /// The process or source that recorded it (the helper's instance).
+    public var source: UInt64
+    /// The control, by its raw value on the wire.
+    public var control: Int
+    public var generation: UInt64
+
+    public init(source: UInt64, control: Int, generation: UInt64) {
+        self.source = source
+        self.control = control
+        self.generation = generation
+    }
+
+    public var description: String {
+        "control \(control) generation \(generation) of \(source)"
+    }
+}
+
 public enum ReportedModeOrigin: Sendable, Equatable {
     /// CellKeeper set or restored it, even if it could not confirm it at the
     /// time.
@@ -439,6 +461,15 @@ public protocol ChargingBackend: Sendable {
     /// Default: nil.
     func isReportedModeOwn() async -> Bool?
 
+    /// The changes, by the backend's own records, behind the outside change
+    /// it last reported with a read (``ReportedModeOrigin/changedOutside(_:)``)
+    /// or threw (``BackendError/changedOutside(expected:found:)``): what
+    /// identifies it, so the same change read again is recognised and a new
+    /// one is never hidden behind the same message. Empty if the backend
+    /// keeps no such records. Returns what is already known, without new
+    /// I/O. Default: empty.
+    func outsideChangeEvidence() async -> Set<RecordedChange>
+
     /// How the mode last reported by ``currentMode()`` came about, when the
     /// backend knows; nil otherwise. After a ``currentMode()`` that threw,
     /// only a fault (``ReportedModeOrigin/changedOutside(_:)``,
@@ -475,6 +506,7 @@ public protocol ChargingBackend: Sendable {
 extension ChargingBackend {
     public func capabilitiesForRelease() async -> ControlCapabilities { await capabilities() }
     public func isReportedModeOwn() async -> Bool? { nil }
+    public func outsideChangeEvidence() async -> Set<RecordedChange> { [] }
     public func reportedModeOrigin() async -> ReportedModeOrigin? { nil }
     public func renewHold(_ mode: ChargeControlMode) async throws {}
     public func resetAfterFault() async throws {}

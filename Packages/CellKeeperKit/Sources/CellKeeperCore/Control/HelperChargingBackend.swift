@@ -131,6 +131,11 @@ public actor HelperChargingBackend: ChargingBackend {
     /// reports it or the user clears the fault (``resetAfterFault()``), so a
     /// release that succeeds cannot hide it.
     private var outsideLoss: String?
+    /// The recorded changes behind ``outsideLoss``.
+    private var outsideLossEvidence: Set<RecordedChange> = []
+    /// The recorded changes behind the outside change last reported or
+    /// thrown (``outsideChangeEvidence()``).
+    private var lastOutsideEvidence: Set<RecordedChange> = []
     /// An active control CellKeeper does not hold whose latest change the
     /// helper's history does not name as another client's or an outside
     /// change: one the helper's own restore after a failure, or its start or
@@ -279,6 +284,7 @@ public actor HelperChargingBackend: ChargingBackend {
         defer { updateActivity() }
         origin = nil
         isLastReportedOwn = nil
+        lastOutsideEvidence = []
         let state: HelperStateReply
         do {
             state = try await fetchState()
@@ -299,10 +305,13 @@ public actor HelperChargingBackend: ChargingBackend {
             // interlocks are not: a fault it reports is reported now. The
             // error thrown reports the hardware error.
             unreportedHardwareError = nil
+            let lossEvidence = outsideLossEvidence
             let loss = takeOutsideLoss()
             if state.interlocks.contains(.externalModification) {
+                lastOutsideEvidence = outsideEvidence(in: state).union(lossEvidence)
                 origin = .changedOutside(qualified(Self.externalModificationDetail(state)))
             } else if let loss {
+                lastOutsideEvidence = outsideEvidence(in: state).union(lossEvidence)
                 origin = .changedOutside(qualified(loss))
             } else if let unattributed = takeUnattributedLoss() {
                 origin = .needsAcknowledgement(qualified(unattributed))
@@ -316,9 +325,11 @@ public actor HelperChargingBackend: ChargingBackend {
         // Published only when this read returns normally.
         let ownership = ownership(in: state)
         // A fault reported here makes a hardware error moot.
+        let lossEvidence = outsideLossEvidence
         let loss = takeOutsideLoss()
         if let outside = currentOutsideChange ?? loss {
             unreportedHardwareError = nil
+            lastOutsideEvidence = outsideEvidence(in: state).union(lossEvidence)
             origin = .changedOutside(qualified(outside))
             isLastReportedOwn = ownership
             return Self.mode(for: active)
@@ -398,6 +409,35 @@ public actor HelperChargingBackend: ChargingBackend {
         isLastReportedOwn
     }
 
+    public func outsideChangeEvidence() async -> Set<RecordedChange> {
+        lastOutsideEvidence
+    }
+
+    /// The changes the helper recorded as made by someone else (another
+    /// client of the helper, or outside the helper), by this process's
+    /// history: each control whose latest change is one. What identifies an
+    /// outside change, so it is never confused with an earlier one.
+    private func outsideEvidence(in state: HelperStateReply) -> Set<RecordedChange> {
+        guard let instance = helperInstance else { return [] }
+        var evidence: Set<RecordedChange> = []
+        for control in HelperControl.allCases {
+            let change = state.change(for: control)
+            guard change.generation > 0 else { continue }
+            let isActive = state.status == .ok && state.activeControls.controls.contains(control)
+            if case .outside = attribution(of: change, control: control, isActive: isActive, interlocks: state.interlocks) {
+                evidence.insert(RecordedChange(source: instance, control: control.rawValue, generation: change.generation))
+            }
+        }
+        return evidence
+    }
+
+    /// The recorded change behind an outside change found in a control's
+    /// history.
+    private func recorded(_ control: HelperControl, in state: HelperStateReply) -> Set<RecordedChange> {
+        guard let instance = helperInstance else { return [] }
+        return [RecordedChange(source: instance, control: control.rawValue, generation: state.change(for: control).generation)]
+    }
+
     /// The controls CellKeeper may have set on the helper and has not seen
     /// end: those it holds, and those an activation it sent may have set.
     private var unresolvedControls: Set<HelperControl> {
@@ -406,7 +446,10 @@ public actor HelperChargingBackend: ChargingBackend {
 
     /// The outside change found earlier and not yet reported, now reported.
     private func takeOutsideLoss() -> String? {
-        defer { outsideLoss = nil }
+        defer {
+            outsideLoss = nil
+            outsideLossEvidence = []
+        }
         return outsideLoss
     }
 
@@ -420,7 +463,9 @@ public actor HelperChargingBackend: ChargingBackend {
     /// A fault found earlier and not yet reported, for a read that failed:
     /// an outside change first, then an unattributed change.
     private func takeLostFault() -> ReportedModeOrigin? {
+        let lossEvidence = outsideLossEvidence
         if let outside = takeOutsideLoss() {
+            lastOutsideEvidence = lossEvidence
             return .changedOutside(qualified(outside))
         }
         return takeUnattributedLoss().map { .needsAcknowledgement(qualified($0)) }
@@ -475,6 +520,7 @@ public actor HelperChargingBackend: ChargingBackend {
         clearNotices()
         // The user has acknowledged it.
         outsideLoss = nil
+        outsideLossEvidence = []
         unattributedLoss = nil
         let state: HelperStateReply
         do {
@@ -533,6 +579,7 @@ public actor HelperChargingBackend: ChargingBackend {
         observe(before)
         if currentOutsideChange != nil || outsideLoss != nil {
             // Never write over another tool's change (R26, R27).
+            lastOutsideEvidence = outsideEvidence(in: before).union(outsideLossEvidence)
             throw BackendError.changedOutside(expected: expected, found: Self.mode(for: before.activeControls.controls))
         }
         if let unattributed = currentUnattributed ?? unattributedLoss {
@@ -615,6 +662,7 @@ public actor HelperChargingBackend: ChargingBackend {
                     attribution(of: after.change(for: $0), control: $0, isActive: true, interlocks: after.interlocks)
                 }
                 if after.interlocks.contains(.externalModification) || attributions.contains(where: \.isOutside) {
+                    lastOutsideEvidence = outsideEvidence(in: after).union(outsideLossEvidence)
                     throw BackendError.changedOutside(expected: .normal, found: Self.mode(for: remaining))
                 }
                 throw BackendError.needsAcknowledgement(qualified(attributions.map(\.detail).joined(separator: "; ")))
@@ -680,6 +728,7 @@ public actor HelperChargingBackend: ChargingBackend {
             return .operationFailed("CellKeeper's helper refused to set \(Self.describe([control])) (\(status))")
         }
         if state.interlocks.contains(.externalModification) {
+            lastOutsideEvidence = outsideEvidence(in: state)
             return .changedOutside(expected: Self.mode(for: Set(holds.keys)) ?? .normal, found: Self.mode(for: state.activeControls.controls))
         }
         let blocking = state.interlocks.intersection(control.blockingInterlocks)
@@ -773,18 +822,20 @@ public actor HelperChargingBackend: ChargingBackend {
         let active = state.activeControls.controls
         noteHardwareErrors(state)
         settlePendingActivations(in: state)
-        var endings: [Ending] = []
+        var endings: [(HelperControl, Ending)] = []
         for (control, hold) in holds {
             guard let ending = ending(of: control, hold, in: state) else { continue }
             holds[control] = nil
-            endings.append(ending)
+            endings.append((control, ending))
         }
-        for ending in endings {
+        for (control, ending) in endings {
             switch ending {
             case .released(let release): lastRelease = lastRelease ?? release
             case .own: isOwnReleaseConfirmed = true
             case .failure: unreportedHardwareError = unreportedHardwareError ?? "CellKeeper's helper cleared CellKeeper's control after a hardware error (code \(state.lastHardwareError))"
-            case .outside(let detail): outsideLoss = outsideLoss ?? detail
+            case .outside(let detail):
+                outsideLoss = outsideLoss ?? detail
+                outsideLossEvidence.formUnion(recorded(control, in: state))
             case .unattributed(let detail): unattributedLoss = unattributedLoss ?? detail
             }
         }
@@ -834,6 +885,7 @@ public actor HelperChargingBackend: ChargingBackend {
             switch ending(by: change, of: control) {
             case .outside(let detail):
                 outsideLoss = outsideLoss ?? detail
+                outsideLossEvidence.formUnion(recorded(control, in: state))
             case .unattributed(let detail):
                 unattributedLoss = unattributedLoss ?? detail
             case .failure:

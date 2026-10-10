@@ -847,7 +847,10 @@ public actor ChargeController {
         } catch {
             let message = String(describing: error)
             lastExecution = ExecutionRecord(date: now(), action: action, result: .failed(message))
-            if !handleThrownFault(error, context: "Not applied") {
+            if error is FaultAlreadyHandled {
+                // The confirmation's read reported a fault, which faulted the
+                // backend and counted it already.
+            } else if await !handleThrownFault(error, context: "Not applied") {
                 registerFailure("Backend failed to apply \(target): \(message)")
             }
             if mode != .normal {
@@ -946,10 +949,14 @@ public actor ChargeController {
     /// reporting faults. Afterwards ``didLastReadReportFault`` says whether
     /// the last read reported one.
     private func handleReportedFault() async {
-        let fault: BackendFault? = switch await backend.reportedModeOrigin() {
-        case .changedOutside(let detail)?: .outside(detail)
-        case .needsAcknowledgement(let detail)?: .acknowledgement(detail)
-        default: nil
+        let fault: BackendFault?
+        switch await backend.reportedModeOrigin() {
+        case .changedOutside(let detail)?:
+            fault = .outside(detail, evidence: await backend.outsideChangeEvidence())
+        case .needsAcknowledgement(let detail)?:
+            fault = .acknowledgement(detail)
+        default:
+            fault = nil
         }
         guard let fault else {
             didLastReadReportFault = false
@@ -959,7 +966,7 @@ public actor ChargeController {
         didLastReadReportFault = true
         note(fault, isThrown: false) { fault in
             switch fault {
-            case .outside(let detail):
+            case .outside(let detail, _):
                 "Charging control changed outside CellKeeper: \(detail). Backend faulted; CellKeeper releases its own restrictions and does not override the change."
             case .acknowledgement(let detail):
                 "\(detail). Backend faulted: clear the fault to acknowledge it; until then only normal charging is requested."
@@ -971,28 +978,51 @@ public actor ChargeController {
     /// a problem it waits for someone to acknowledge (its own failure, or a
     /// restriction it cannot attribute).
     private enum BackendFault: Equatable {
-        case outside(String)
+        /// An outside change, with the backend's records of the changes
+        /// behind it (``ChargingBackend/outsideChangeEvidence()``).
+        case outside(String, evidence: Set<RecordedChange>)
         case acknowledgement(String)
     }
 
     /// The faults handled since the backend's reads last reported none.
     private struct HandledFaults {
+        /// What identifies an outside change: the backend's record of it, or
+        /// for a backend without records, its message.
+        enum OutsideKey: Hashable {
+            case recorded(RecordedChange)
+            case message(String)
+        }
+
         var acknowledgement = false
-        var outsideDetails: Set<String> = []
+        var outsideKeys: Set<OutsideKey> = []
 
-        var isEmpty: Bool { !acknowledgement && outsideDetails.isEmpty }
+        var isEmpty: Bool { !acknowledgement && outsideKeys.isEmpty }
 
-        /// Whether `fault` is news: the first of its kind, or an outside
-        /// change not reported yet. Notes it either way.
+        /// Whether `fault` is news: the first problem needing
+        /// acknowledgement, or an outside change with a recorded change not
+        /// seen yet (the same change read again is not news; a new one, a
+        /// new generation or another helper process, is). Notes it either
+        /// way.
         mutating func note(_ fault: BackendFault) -> Bool {
             switch fault {
             case .acknowledgement:
                 defer { acknowledgement = true }
                 return !acknowledgement
-            case .outside(let detail):
-                return outsideDetails.insert(detail).inserted
+            case .outside(let detail, let evidence):
+                let keys: Set<OutsideKey> = evidence.isEmpty ? [.message(detail)] : Set(evidence.map(OutsideKey.recorded))
+                let isNew = !keys.isSubset(of: outsideKeys)
+                outsideKeys.formUnion(keys)
+                return isNew
             }
         }
+    }
+
+    /// A request whose confirmation read reported a fault: the fault faulted
+    /// the backend and was counted when the read reported it, so the
+    /// request's failure is not counted again.
+    private struct FaultAlreadyHandled: Error, CustomStringConvertible {
+        let failure: BackendError
+        var description: String { String(describing: failure) }
     }
 
     /// Faults the backend at once for `fault`, from a read or a request,
@@ -1022,11 +1052,11 @@ public actor ChargeController {
     /// or ``BackendError/needsAcknowledgement(_:)``): faults the backend at
     /// once through ``note(_:isThrown:message:)`` and returns true. Any other
     /// error is left to the caller.
-    private func handleThrownFault(_ error: any Error, context: String) -> Bool {
+    private func handleThrownFault(_ error: any Error, context: String) async -> Bool {
         let fault: BackendFault
         switch error {
         case BackendError.changedOutside:
-            fault = .outside(String(describing: error))
+            fault = .outside(String(describing: error), evidence: await backend.outsideChangeEvidence())
         case BackendError.needsAcknowledgement(let detail):
             fault = .acknowledgement(detail)
         default:
@@ -1034,7 +1064,7 @@ public actor ChargeController {
         }
         note(fault, isThrown: true) { fault in
             switch fault {
-            case .outside(let detail):
+            case .outside(let detail, _):
                 "\(context): \(detail). It may have been changed in System Settings or by another tool. Backend faulted; CellKeeper does not override the change and only normal charging is requested."
             case .acknowledgement(let detail):
                 "\(context): \(detail). Backend faulted: clear the fault to acknowledge it; until then only normal charging is requested."
@@ -1067,7 +1097,10 @@ public actor ChargeController {
                 readBack = try await readBackendMode()
             } catch {
                 unconfirmedRequests.insert(mode)
-                throw BackendError.verificationFailed(expected: mode, actual: nil)
+                let failure = BackendError.verificationFailed(expected: mode, actual: nil)
+                // A fault the backend reported with this read has faulted it
+                // and been counted; the caller must not count it again.
+                throw didLastReadReportFault ? FaultAlreadyHandled(failure: failure) : failure
             }
             nativeLimit = await backend.nativeLimitStatus()
             if adoptionCount > adoptionsBefore {
@@ -1077,7 +1110,8 @@ public actor ChargeController {
             }
             guard readBack == mode else {
                 unconfirmedRequests.insert(mode)
-                throw BackendError.verificationFailed(expected: mode, actual: readBack)
+                let failure = BackendError.verificationFailed(expected: mode, actual: readBack)
+                throw didLastReadReportFault ? FaultAlreadyHandled(failure: failure) : failure
             }
             currentMode = mode
             ownedMode = mode
@@ -1159,7 +1193,9 @@ public actor ChargeController {
         } catch {
             if isNative, let ownerLimit {
                 registerFailure("Could not restore your own macOS Charge Limit of \(ownerLimit)% (\(reason)): \(error). CellKeeper will retry; you can also set it in System Settings › Battery › Charging", level: .fault)
-            } else if !handleThrownFault(error, context: "Could not restore normal charging (\(reason))") {
+            } else if error is FaultAlreadyHandled {
+                // The confirmation's read reported a fault, handled already.
+            } else if await !handleThrownFault(error, context: "Could not restore normal charging (\(reason))") {
                 registerFailure("Could not restore normal charging (\(reason)): \(error)", level: .fault)
             }
             return false
