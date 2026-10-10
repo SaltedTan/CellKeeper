@@ -167,7 +167,6 @@ private final class ListenerDelegate: NSObject, NSXPCListenerDelegate, Sendable 
         connection.invalidationHandler = { [weak handler] in handler?.close() }
         // Not expected on an accepted connection; treated as its end.
         connection.interruptionHandler = { [weak handler] in handler?.close() }
-        handler.begin()
         connection.resume()
         return true
     }
@@ -206,11 +205,14 @@ final class ConnectionRegistry: @unchecked Sendable {
         }
     }
 
-    /// Adds a new connection; false once the server is stopped.
+    /// Adds a new connection and starts its consumer; false once the server
+    /// is stopped. Both happen under the lock, so every connection that
+    /// ``stop()`` returns has a consumer to wait for.
     func add(_ handler: HelperXPCConnectionHandler) -> Bool {
         lock.withLock {
             guard state != .stopped else { return false }
             connections[ObjectIdentifier(handler)] = handler
+            handler.begin()
             return true
         }
     }
