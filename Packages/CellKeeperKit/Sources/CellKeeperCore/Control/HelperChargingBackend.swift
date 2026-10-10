@@ -120,13 +120,26 @@ public actor HelperChargingBackend: ChargingBackend {
     /// ``helperInstance``.
     private var lastHardwareErrorCount: Int?
     /// An outside change the helper still shows: its `externalModification`
-    /// interlock, or a control CellKeeper did not set.
+    /// interlock, or an active control CellKeeper does not hold whose latest
+    /// change the helper's history names as another client's or as made
+    /// outside the helper.
     private var currentOutsideChange: String?
     /// An outside change found in the history of a control CellKeeper held.
     /// Kept, whatever CellKeeper asks for meanwhile, until ``currentMode()``
     /// reports it or the user clears the fault (``resetAfterFault()``), so a
     /// release that succeeds cannot hide it.
     private var outsideLoss: String?
+    /// An active control CellKeeper does not hold whose latest change the
+    /// helper's history does not name as another client's or an outside
+    /// change: one the helper's own restore after a failure, or its start or
+    /// shutdown, left active, or one with no recorded change. Reported as
+    /// ``ReportedModeOrigin/needsAcknowledgement(_:)`` for as long as the
+    /// helper shows it, never as an outside change: the backend does not
+    /// infer a writer the history does not name.
+    private var currentUnattributed: String?
+    /// The same, found in the history of a control CellKeeper held or an
+    /// activation it sent. Kept like ``outsideLoss``.
+    private var unattributedLoss: String?
     /// How the helper last ended CellKeeper's hold, kept until the next
     /// request.
     private var lastRelease: HoldRelease?
@@ -268,14 +281,14 @@ public actor HelperChargingBackend: ChargingBackend {
         do {
             state = try await fetchState()
         } catch BackendError.unavailable(let reason) {
-            origin = takeOutsideLoss().map(ReportedModeOrigin.changedOutside)
+            origin = takeLostFault()
             let unresolved = unresolvedControls
             guard unresolved.isEmpty else {
                 throw BackendError.operationFailed("\(reason) CellKeeper may still have \(Self.describe(unresolved)) set there, so it keeps asking for normal charging until the helper confirms the release.")
             }
             return nil
         } catch {
-            origin = takeOutsideLoss().map(ReportedModeOrigin.changedOutside)
+            origin = takeLostFault()
             throw error
         }
         noteHardwareErrors(state)
@@ -286,11 +299,13 @@ public actor HelperChargingBackend: ChargingBackend {
             unreportedHardwareError = nil
             let loss = takeOutsideLoss()
             if state.interlocks.contains(.externalModification) {
-                origin = .changedOutside(Self.externalModificationDetail(state, isSimulated: isSimulated))
+                origin = .changedOutside(qualified(Self.externalModificationDetail(state)))
             } else if let loss {
-                origin = .changedOutside(loss)
+                origin = .changedOutside(qualified(loss))
+            } else if let unattributed = takeUnattributedLoss() {
+                origin = .needsAcknowledgement(qualified(unattributed))
             } else if let waiting = Self.acknowledgementNeeded(state) {
-                origin = .needsAcknowledgement(waiting)
+                origin = .needsAcknowledgement(qualified(waiting))
             }
             throw BackendError.operationFailed("CellKeeper's helper could not read back its controls (hardware error \(state.lastHardwareError))")
         }
@@ -302,13 +317,17 @@ public actor HelperChargingBackend: ChargingBackend {
         let loss = takeOutsideLoss()
         if let outside = currentOutsideChange ?? loss {
             unreportedHardwareError = nil
-            origin = .changedOutside(outside)
+            origin = .changedOutside(qualified(outside))
             isLastReportedOwn = ownership
             return Self.mode(for: active)
         }
-        if let waiting = Self.acknowledgementNeeded(state) {
+        // What the history cannot attribute, and what the helper waits for,
+        // is a fault too, stated without naming a writer.
+        let unattributed = currentUnattributed ?? takeUnattributedLoss()
+        let waiting = Self.acknowledgementNeeded(state)
+        if unattributed != nil || waiting != nil {
             unreportedHardwareError = nil
-            origin = .needsAcknowledgement(waiting)
+            origin = .needsAcknowledgement(qualified([unattributed, waiting].compactMap { $0 }.joined(separator: "; ")))
             isLastReportedOwn = ownership
             return Self.mode(for: active)
         }
@@ -335,8 +354,9 @@ public actor HelperChargingBackend: ChargingBackend {
     ///   have set, is active, or the latest change of an active control is an
     ///   activation by one of CellKeeper's sessions.
     /// - false, only on positive evidence: nothing is active, or every active
-    ///   control's latest change is another client's activation or a change
-    ///   made outside the helper, on this helper process, with no write or
+    ///   control's latest change is another client's activation, or a change
+    ///   made outside the helper while the helper reports an outside change
+    ///   (`externalModification`), on this helper process, with no write or
     ///   restore of the helper's in doubt.
     /// - nil otherwise. Missing bookkeeping proves nothing: a control a
     ///   failed or wrong write or restore of the helper's may have made
@@ -354,7 +374,9 @@ public actor HelperChargingBackend: ChargingBackend {
             switch change.cause {
             case .setByClient? where ownSessions.contains(change.session):
                 return true
-            case .setByClient?, .changedOutside?:
+            case .setByClient?:
+                continue
+            case .changedOutside? where state.interlocks.contains(.externalModification):
                 continue
             default:
                 isEveryActiveForeign = false
@@ -384,6 +406,27 @@ public actor HelperChargingBackend: ChargingBackend {
     private func takeOutsideLoss() -> String? {
         defer { outsideLoss = nil }
         return outsideLoss
+    }
+
+    /// The unattributed change found earlier and not yet reported, now
+    /// reported.
+    private func takeUnattributedLoss() -> String? {
+        defer { unattributedLoss = nil }
+        return unattributedLoss
+    }
+
+    /// A fault found earlier and not yet reported, for a read that failed:
+    /// an outside change first, then an unattributed change.
+    private func takeLostFault() -> ReportedModeOrigin? {
+        if let outside = takeOutsideLoss() {
+            return .changedOutside(qualified(outside))
+        }
+        return takeUnattributedLoss().map { .needsAcknowledgement(qualified($0)) }
+    }
+
+    /// `detail`, marked as concerning simulated controls when they are.
+    private func qualified(_ detail: String) -> String {
+        isSimulated ? "\(detail) (simulated controls; your Mac's charging is not changed)" : detail
     }
 
     public func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome {
@@ -430,6 +473,7 @@ public actor HelperChargingBackend: ChargingBackend {
         clearNotices()
         // The user has acknowledged it.
         outsideLoss = nil
+        unattributedLoss = nil
         let state: HelperStateReply
         do {
             state = try await fetchState()
@@ -463,6 +507,7 @@ public actor HelperChargingBackend: ChargingBackend {
         pendingActivations = [:]
         leaseDeadlines = [:]
         currentOutsideChange = nil
+        currentUnattributed = nil
     }
 
     // MARK: - Requests
@@ -487,6 +532,10 @@ public actor HelperChargingBackend: ChargingBackend {
         if currentOutsideChange != nil || outsideLoss != nil {
             // Never write over another tool's change (R26, R27).
             throw BackendError.changedOutside(expected: expected, found: Self.mode(for: before.activeControls.controls))
+        }
+        if let unattributed = currentUnattributed ?? unattributedLoss {
+            // Nor over a control nobody can be named for.
+            throw BackendError.needsAcknowledgement(qualified(unattributed))
         }
         let wasInEffect = before.activeControls.controls == [target] && holds[target] != nil
         do {
@@ -522,7 +571,8 @@ public actor HelperChargingBackend: ChargingBackend {
             let after = try await readState()
             observe(after)
             let active = after.activeControls.controls
-            guard active == [target], holds[target] != nil, currentOutsideChange == nil, outsideLoss == nil else {
+            guard active == [target], holds[target] != nil, currentOutsideChange == nil, outsideLoss == nil,
+                  currentUnattributed == nil, unattributedLoss == nil else {
                 throw BackendError.verificationFailed(expected: mode, actual: Self.mode(for: active))
             }
         } catch {
@@ -558,7 +608,14 @@ public actor HelperChargingBackend: ChargingBackend {
         let remaining = after.activeControls.controls
         guard remaining.isEmpty else {
             if remaining.isDisjoint(with: holds.keys) {
-                throw BackendError.changedOutside(expected: .normal, found: Self.mode(for: remaining))
+                // Someone else's only if the helper's history names them.
+                let attributions = remaining.sorted { $0.rawValue < $1.rawValue }.map {
+                    attribution(of: after.change(for: $0), control: $0, isActive: true, interlocks: after.interlocks)
+                }
+                if after.interlocks.contains(.externalModification) || attributions.contains(where: \.isOutside) {
+                    throw BackendError.changedOutside(expected: .normal, found: Self.mode(for: remaining))
+                }
+                throw BackendError.needsAcknowledgement(qualified(attributions.map(\.detail).joined(separator: "; ")))
             }
             throw BackendError.verificationFailed(expected: .normal, actual: Self.mode(for: remaining))
         }
@@ -667,8 +724,33 @@ public actor HelperChargingBackend: ChargingBackend {
         case own
         /// The helper cleared it because of a hardware problem: a failure.
         case failure
-        /// Someone else changed it.
+        /// Someone else changed it, by the helper's history.
         case outside(String)
+        /// It changed, and the helper's history does not name who changed it
+        /// (or names one of the helper's own restores after a failure): a
+        /// fault that needs acknowledging.
+        case unattributed(String)
+    }
+
+    /// What the helper's history says about the latest change of a control
+    /// CellKeeper does not hold: someone else's, or not attributable.
+    private enum Attribution {
+        /// Another client of the helper, or a change made outside the helper.
+        case outside(String)
+        /// One of the helper's own restores after a failure, its start or
+        /// shutdown, or nothing the history records, left the control so.
+        case unattributed(String)
+
+        var isOutside: Bool {
+            if case .outside = self { return true }
+            return false
+        }
+
+        var detail: String {
+            switch self {
+            case .outside(let detail), .unattributed(let detail): detail
+            }
+        }
     }
 
     /// Notes a hardware error the helper had not reported before, until
@@ -701,16 +783,28 @@ public actor HelperChargingBackend: ChargingBackend {
             case .own: isOwnReleaseConfirmed = true
             case .failure: unreportedHardwareError = unreportedHardwareError ?? "CellKeeper's helper cleared CellKeeper's control after a hardware error (code \(state.lastHardwareError))"
             case .outside(let detail): outsideLoss = outsideLoss ?? detail
+            case .unattributed(let detail): unattributedLoss = unattributedLoss ?? detail
             }
         }
-        let foreign = active.subtracting(holds.keys)
+        // An active control CellKeeper does not hold is someone else's only
+        // if the helper's history names them; otherwise it is reported as
+        // what it is, a restriction CellKeeper cannot attribute.
+        var outside: [String] = []
+        var unattributed: [String] = []
+        for control in active.subtracting(holds.keys).sorted(by: { $0.rawValue < $1.rawValue }) {
+            switch attribution(of: state.change(for: control), control: control, isActive: true, interlocks: state.interlocks) {
+            case .outside(let detail): outside.append(detail)
+            case .unattributed(let detail): unattributed.append(detail)
+            }
+        }
         if state.interlocks.contains(.externalModification) {
-            currentOutsideChange = Self.externalModificationDetail(state, isSimulated: isSimulated)
-        } else if !foreign.isEmpty {
-            currentOutsideChange = "CellKeeper's helper reports \(Self.describe(foreign)), which CellKeeper did not set or no longer holds"
+            currentOutsideChange = Self.externalModificationDetail(state)
+        } else if !outside.isEmpty {
+            currentOutsideChange = outside.joined(separator: "; ")
         } else {
             currentOutsideChange = nil
         }
+        currentUnattributed = unattributed.isEmpty ? nil : unattributed.joined(separator: "; ")
     }
 
     /// Settles each activation CellKeeper sent, by the helper's history. If
@@ -738,6 +832,8 @@ public actor HelperChargingBackend: ChargingBackend {
             switch ending(by: change, of: control) {
             case .outside(let detail):
                 outsideLoss = outsideLoss ?? detail
+            case .unattributed(let detail):
+                unattributedLoss = unattributedLoss ?? detail
             case .failure:
                 unreportedHardwareError = unreportedHardwareError ?? "CellKeeper's helper cleared \(Self.describe([control])) after a hardware error (code \(state.lastHardwareError))"
             case .released, .own:
@@ -751,20 +847,85 @@ public actor HelperChargingBackend: ChargingBackend {
         let name = Self.describe([control])
         let isActive = state.activeControls.controls.contains(control)
         guard hold.instance == helperInstance else {
-            // An earlier helper process is gone; its successor restored
-            // defaults at start (R2).
-            return isActive
-                ? .outside("\(name) is active after the helper restarted, so CellKeeper cannot tell whose it is")
-                : .released(.backendStopped)
+            // An earlier helper process is gone. Its successor's start should
+            // have restored defaults (R2); if the control is still active, the
+            // successor's history says what it knows, which is not who set it.
+            guard isActive else { return .released(.backendStopped) }
+            let attribution = attribution(of: state.change(for: control), control: control, isActive: true, interlocks: state.interlocks)
+            return Self.ending(attribution, context: "\(name) is active after the helper restarted: ")
         }
         let change = state.change(for: control)
         if change.generation == hold.generation {
             return nil
         }
         guard change.generation == hold.generation + 1, !isActive else {
-            return .outside("\(name) changed \(change.generation &- hold.generation) times since CellKeeper set it, and is \(isActive ? "active again, set by someone else" : "off")")
+            // Changes in between are unknown; only the latest is recorded.
+            let attribution = attribution(of: change, control: control, isActive: isActive, interlocks: state.interlocks)
+            return Self.ending(attribution, context: "\(name) changed since CellKeeper set it (\(change.generation &- hold.generation) changes) and is \(isActive ? "active" : "off"); the helper's history records only the latest: ")
         }
         return ending(by: change, of: control)
+    }
+
+    /// The end of a hold, from what the history says about its latest change.
+    private static func ending(_ attribution: Attribution, context: String) -> Ending {
+        switch attribution {
+        case .outside(let detail): .outside(context + detail)
+        case .unattributed(let detail): .unattributed(context + detail)
+        }
+    }
+
+    /// What the helper's history says about `change`, the latest change of
+    /// `control`, for a control CellKeeper does not hold (or no longer
+    /// holds): someone else's only if the history names another client or an
+    /// outside change. One of the helper's own restores after a failure, its
+    /// start or shutdown, a cause that does not fit the control's state, or
+    /// no recorded change is not attributable to anyone.
+    private func attribution(of change: HelperControlChange, control: HelperControl, isActive: Bool, interlocks: HelperInterlocks) -> Attribution {
+        let name = Self.describe([control])
+        let state = isActive ? "active" : "off"
+        let isOtherSession = change.session != 0 && !ownSessions.contains(change.session)
+        guard let cause = change.cause else {
+            if isActive, interlocks.contains(.hardwareFault) {
+                return .unattributed("CellKeeper's helper reports \(name) active with no change recorded since it started, and its restore of macOS's defaults has not read back clean")
+            }
+            return .unattributed("CellKeeper's helper reports \(name) \(state) with no recorded change that says who set it")
+        }
+        switch cause {
+        case .changedOutside, .restoredAfterOutsideChange:
+            // An active control counts as someone else's only while the
+            // helper itself reports an outside change: a restarted helper
+            // whose start restore failed also records the control it found
+            // active as changed outside, and only says it owes a restore.
+            if !isActive || interlocks.contains(.externalModification) {
+                return .outside("\(name) was changed outside the helper")
+            }
+            if interlocks.contains(.hardwareFault) {
+                return .unattributed("CellKeeper's helper reports \(name) active and records it as changed outside, but reports no outside change, only that its restore of macOS's defaults has not read back clean, so it cannot say who set it")
+            }
+            return .unattributed("CellKeeper's helper reports \(name) active and records it as changed outside, but reports no outside change, so it cannot say who set it")
+        case .setByClient:
+            return isOtherSession
+                ? .outside("another client of the helper set \(name)")
+                : .unattributed("\(name) was last set by a session of CellKeeper's that no longer tracks it")
+        case .clearedByClient, .clearedByRestore, .activationLimited, .sessionEnded, .sessionRevoked:
+            if !isActive, isOtherSession {
+                return .outside(cause == .clearedByRestore
+                    ? "another client of the helper restored macOS's defaults, which cleared \(name)"
+                    : "another client of the helper cleared \(name)")
+            }
+            return .unattributed("CellKeeper's helper reports \(name) \(state) after \(cause), which does not say who set it")
+        case .interlock:
+            if change.interlocks.contains(.externalModification) {
+                return .outside("CellKeeper's helper changed \(name) after its controls were changed outside it")
+            }
+            return .unattributed("CellKeeper's helper reports \(name) \(state) after an interlock (\(Self.describe(change.interlocks)))")
+        case .restoredAfterWriteFailure, .restoredAfterReadBackFailure, .restoreRetried:
+            return .unattributed("CellKeeper's helper's own restore after a failure (\(cause)) left \(name) \(state)")
+        case .start, .shutdown:
+            return .unattributed("CellKeeper's helper's restore at \(cause) left \(name) \(state)")
+        case .leaseExpired:
+            return .unattributed("CellKeeper's helper reports \(name) \(state) after a lease expired, which does not say who set it")
+        }
     }
 
     /// What `change`, the helper's latest change of `control`, says about how
@@ -800,7 +961,7 @@ public actor HelperChargingBackend: ChargingBackend {
         case .changedOutside?, .restoredAfterOutsideChange?:
             return .outside("\(name) was changed outside CellKeeper")
         case .setByClient?, nil:
-            return .outside("\(name) changed in a way CellKeeper cannot account for")
+            return .unattributed("\(name) changed in a way the helper's history does not explain")
         }
     }
 
@@ -934,16 +1095,17 @@ public actor HelperChargingBackend: ChargingBackend {
     ]
 
     /// What the helper's `externalModification` interlock means, and what
-    /// came of the restore that follows it: confirmed, or owed because it
-    /// failed or did not read back clean (`hardwareFault`). Never claims more
-    /// than the helper reports.
-    static func externalModificationDetail(_ state: HelperStateReply, isSimulated: Bool) -> String {
+    /// came of the restore that follows it: confirmed, or not read back clean
+    /// (`hardwareFault`). Never claims more than the helper reports: it
+    /// retries a restore only while a control it set itself may still be
+    /// active, and otherwise writes nothing until a client restores (D28),
+    /// which clearing the fault asks it to do.
+    static func externalModificationDetail(_ state: HelperStateReply) -> String {
         let found = "CellKeeper's helper found its controls changed by something other than CellKeeper (another tool may be controlling charging)"
         let restore = state.interlocks.contains(.hardwareFault)
-            ? "it tried to restore macOS's defaults, but that restore has not read back clean, so it is owed and retried, and a control may still be active"
-            : "it restored macOS's defaults and read them back with nothing active, then writes nothing more on its own until the fault is cleared"
-        let simulated = isSimulated ? " (simulated controls; your Mac's charging is not changed)" : ""
-        return "\(found); \(restore)\(simulated)"
+            ? "it tried to restore macOS's defaults, but that restore has not read back clean, so a control may still be active. It retries only while a control it set itself may still be active; otherwise it writes nothing more until you clear the fault, which asks it to restore"
+            : "it restored macOS's defaults and read them back with nothing active, then writes nothing more on its own until you clear the fault"
+        return "\(found); \(restore)"
     }
 
     static func mode(for control: HelperControl) -> ChargeControlMode {

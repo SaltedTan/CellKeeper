@@ -513,7 +513,8 @@ struct HelperChargingBackendTests {
             Issue.record("expected an outside change")
             return
         }
-        #expect(detail.contains("did not set"))
+        // The helper's history names the writer: another client.
+        #expect(detail.contains("another client of the helper set charging inhibited"))
         await #expect(throws: BackendError.changedOutside(expected: .normal, found: .inhibitCharging)) {
             try await rig.backend.setMode(.normal)
         }

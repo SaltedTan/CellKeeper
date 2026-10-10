@@ -304,6 +304,21 @@ struct HelperOwnershipEvidenceTests {
             #expect(status.ownRestriction.mayBeInEffect)
         }
         #expect(gated.events.contains { $0.kind == .safety && $0.message.contains("macOS's Charge Limit was turned on (80%) while CellKeeper held inhibitCharging") })
+        // The helper's own restore made the restriction; no outside writer
+        // took part, and none is named. The backend still faults.
+        #expect(gated.isBackendFaulted)
+        assertNamesHelperFailure(gated, "CellKeeper's helper's own restore after a failure (restoredAfterWriteFailure) left the adapter disabled active")
+    }
+
+    /// The activity log and the diagnostics report name the helper's own
+    /// failure, never an outside writer.
+    private func assertNamesHelperFailure(_ status: ControllerStatus, _ expected: String) {
+        #expect(status.events.contains { $0.kind == .safety && $0.message.contains(expected) && $0.message.contains("Backend faulted") })
+        #expect(!status.events.contains { $0.message.localizedCaseInsensitiveContains("changed outside CellKeeper") })
+        #expect(!status.events.contains { $0.message.contains("another tool") || $0.message.contains("System Settings or by another") })
+        let report = DiagnosticsReport.text(status: status, environment: DiagnosticsEnvironment(appVersion: "1", systemVersion: "27", modelIdentifier: nil), generatedAt: referenceDate)
+        #expect(report.contains(expected))
+        #expect(!report.localizedCaseInsensitiveContains("changed outside CellKeeper"))
     }
 
     @Test("A restarted helper whose start restore keeps failing establishes nothing: CellKeeper's hold stays its responsibility")
@@ -328,6 +343,39 @@ struct HelperOwnershipEvidenceTests {
         }
         #expect(status.ownRestriction.mayBeInEffect)
         #expect(status.events.contains { $0.kind == .safety && $0.message.contains("macOS's Charge Limit was turned on (80%) while CellKeeper held inhibitCharging") })
+        // The new helper records the control it found active as changed
+        // outside, but reports no outside change, only an owed restore: no
+        // writer is named, and the backend still faults.
+        #expect(status.isBackendFaulted)
+        assertNamesHelperFailure(status, "reports no outside change, only that its restore of macOS's defaults has not read back clean, so it cannot say who set it")
+    }
+
+    @Test("A tool that re-sets its control during the helper's restore leaves the helper quiet, and the message does not promise retries")
+    func competingWriterDuringRestore() async {
+        let rig = HelperRig()
+        let (controller, _) = rig.controller(percent: 85)
+        #expect(await rig.confirmedEvaluation(controller).currentMode == .inhibitCharging)
+        // Another tool sets the adapter-disable, and sets it again while the
+        // helper's restore after that outside change runs.
+        rig.control.simulateCompetingWriterDuringNextRestores(1, setting: .adapterDisabled)
+        rig.control.simulateOutsideChange(.adapterDisabled, active: true)
+        rig.clock.advance(by: 5)
+        let status = await controller.evaluate(.periodic)
+        #expect(status.isBackendFaulted)
+        #expect(rig.control.activeControls == [.adapterDisabled])
+        let state = await rig.observedState()
+        #expect(state.interlocks.contains(.externalModification))
+        #expect(state.interlocks.contains(.hardwareFault))
+        // The engine owns no active control, so it stays quiet (D28).
+        let writes = rig.control.writeCount
+        for _ in 0..<5 {
+            rig.clock.advance(by: 5)
+            await rig.engine.tick()
+        }
+        #expect(rig.control.writeCount == writes)
+        let fault = status.events.last { $0.kind == .safety && $0.message.contains("changed by something other than CellKeeper") }
+        #expect(fault?.message.contains("It retries only while a control it set itself may still be active; otherwise it writes nothing more until you clear the fault, which asks it to restore") == true)
+        #expect(!status.events.contains { $0.message.contains("owed and retried") })
     }
 
     @Test("An outside change whose restore fails is not reported as restored")

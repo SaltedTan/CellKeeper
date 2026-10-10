@@ -213,6 +213,12 @@ public enum BackendError: Error, Sendable, Equatable, CustomStringConvertible {
     /// set: someone else changed it. Native-limit backends adopt such a
     /// change instead (``ControlOutcome/adoptedOutsideChange``).
     case changedOutside(expected: ChargeControlMode, found: ChargeControlMode?)
+    /// The backend found a problem it cannot attribute to anyone, or one of
+    /// its own (a restriction its records do not explain, a failure), and
+    /// changes nothing until someone acknowledges it. Like
+    /// ``changedOutside(expected:found:)`` it faults the controller at once,
+    /// but names no outside writer.
+    case needsAcknowledgement(String)
 
     public var description: String {
         switch self {
@@ -226,6 +232,8 @@ public enum BackendError: Error, Sendable, Equatable, CustomStringConvertible {
             "Read-back mismatch: expected \(expected), got \(actual.map(String.init(describing:)) ?? "unknown")"
         case .changedOutside(let expected, let found):
             "Changed outside CellKeeper: expected \(expected), found \(found.map(String.init(describing:)) ?? "unknown")"
+        case .needsAcknowledgement(let detail):
+            detail
         }
     }
 }

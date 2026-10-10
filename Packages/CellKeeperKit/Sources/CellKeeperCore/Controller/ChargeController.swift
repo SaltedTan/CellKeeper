@@ -844,6 +844,12 @@ public actor ChargeController {
                 consecutiveFailures = max(consecutiveFailures + 1, Self.maximumConsecutiveFailures)
                 lastFailureUptime = uptime()
                 record(.safety, "Not applied: \(message). It may have been changed in System Settings or by another tool. Backend faulted; restoring \(describeTarget(.normal)).", level: .fault)
+            } else if case BackendError.needsAcknowledgement = error {
+                // A fault at once, like an outside change, without naming a
+                // writer the backend could not name.
+                consecutiveFailures = max(consecutiveFailures + 1, Self.maximumConsecutiveFailures)
+                lastFailureUptime = uptime()
+                record(.safety, "Not applied: \(message). Backend faulted: clear the fault to acknowledge it; until then only normal charging is requested.", level: .fault)
             } else {
                 registerFailure("Backend failed to apply \(target): \(message)")
             }
