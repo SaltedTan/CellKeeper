@@ -5,6 +5,8 @@ import Foundation
 /// A daemon clock the test moves by hand. Every uptime reading is a
 /// microsecond later than the one before, like a real clock; waits end only
 /// when the test advances the clock past them (or their task is cancelled).
+/// A test can also run something as the next wait starts, for example to
+/// let time pass as if that wait's task had been scheduled late.
 final class ManualClock: HelperDaemonClock, @unchecked Sendable {
     private struct Sleeper {
         let id: Int
@@ -18,6 +20,12 @@ final class ManualClock: HelperDaemonClock, @unchecked Sendable {
     private var nextID = 0
     /// Waits cancelled before they were registered.
     private var cancelled: Set<Int> = []
+    private var beforeSleep: (@Sendable () -> Void)?
+
+    /// Runs `hook` at the start of the next wait, before it is registered.
+    func beforeNextSleep(_ hook: @escaping @Sendable () -> Void) {
+        lock.withLock { beforeSleep = hook }
+    }
 
     func uptime() -> TimeInterval {
         lock.withLock {
@@ -26,7 +34,28 @@ final class ManualClock: HelperDaemonClock, @unchecked Sendable {
         }
     }
 
+    func sleep(until deadline: TimeInterval) async {
+        runHook()
+        await register(deadline)
+    }
+
+    /// Runs the hook first, as if this task had started late, and only then
+    /// computes the deadline: a caller that captured a duration earlier
+    /// loses nothing to the delay and ends late.
     func sleep(for seconds: TimeInterval) async {
+        runHook()
+        await register(uptime() + seconds)
+    }
+
+    private func runHook() {
+        let hook = lock.withLock { () -> (@Sendable () -> Void)? in
+            defer { beforeSleep = nil }
+            return beforeSleep
+        }
+        hook?()
+    }
+
+    private func register(_ deadline: TimeInterval) async {
         let id = lock.withLock {
             nextID += 1
             return nextID
@@ -34,8 +63,8 @@ final class ManualClock: HelperDaemonClock, @unchecked Sendable {
         await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 let resumeNow = lock.withLock {
-                    if cancelled.remove(id) != nil || seconds <= 0 { return true }
-                    sleepers.append(Sleeper(id: id, deadline: now + seconds, continuation: continuation))
+                    if cancelled.remove(id) != nil || deadline <= now { return true }
+                    sleepers.append(Sleeper(id: id, deadline: deadline, continuation: continuation))
                     return false
                 }
                 if resumeNow {
@@ -152,7 +181,7 @@ final class FakeFrontend: HelperFrontend, @unchecked Sendable {
         lock.withLock { recorded }
     }
 
-    func start(serving engine: HelperEngine) throws {
+    func start(serving engine: HelperEngine, log: any HelperDaemonLog) throws {
         let check = lock.withLock {
             recorded.append(.start)
             return startCheck
@@ -327,6 +356,8 @@ final class RecordingLog: HelperDaemonLog, @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: [Line] = []
     private var gate: DispatchSemaphore?
+    /// Only a write containing this waits at the gate; nil: the next write.
+    private var gatedFragment: String?
     private var waitingAtGate = false
 
     var lines: [Line] {
@@ -339,7 +370,19 @@ final class RecordingLog: HelperDaemonLog, @unchecked Sendable {
 
     /// Makes the next write wait until ``release()``.
     func block() {
-        lock.withLock { gate = DispatchSemaphore(value: 0) }
+        lock.withLock {
+            gate = DispatchSemaphore(value: 0)
+            gatedFragment = nil
+        }
+    }
+
+    /// Makes the first write that contains `fragment` wait until
+    /// ``release()``; the writes before it go through.
+    func block(whenMessageContains fragment: String) {
+        lock.withLock {
+            gate = DispatchSemaphore(value: 0)
+            gatedFragment = fragment
+        }
     }
 
     /// True while a write waits for ``release()``.
@@ -356,9 +399,10 @@ final class RecordingLog: HelperDaemonLog, @unchecked Sendable {
     }
 
     func write(_ level: HelperLogLevel, _ category: HelperLogCategory, _ message: String) {
-        let gate = lock.withLock {
-            waitingAtGate = self.gate != nil
-            return self.gate
+        let gate = lock.withLock { () -> DispatchSemaphore? in
+            guard let held = self.gate, gatedFragment.map({ message.contains($0) }) ?? true else { return nil }
+            waitingAtGate = true
+            return held
         }
         _ = gate?.wait(timeout: .now() + 10)
         lock.withLock {
@@ -448,6 +492,7 @@ extension BootIdentifier {
 struct DaemonHarness {
     let clock: ManualClock
     let control: any HelperChargeControl
+    /// The frontend the daemon uses, unless another one is given.
     let frontend = FakeFrontend()
     let sleep = FakeSleepNotifications()
     let signals: FakeTerminationSignals
@@ -461,7 +506,8 @@ struct DaemonHarness {
         store: InMemoryHistoryStore = InMemoryHistoryStore(),
         boot: BootIdentifier? = .testBoot,
         clock: ManualClock = ManualClock(),
-        signals: FakeTerminationSignals = FakeTerminationSignals()
+        signals: FakeTerminationSignals = FakeTerminationSignals(),
+        frontend customFrontend: (any HelperFrontend)? = nil
     ) {
         self.clock = clock
         self.control = control
@@ -473,7 +519,7 @@ struct DaemonHarness {
             power: StubPower(clock: clock),
             clock: clock,
             build: 7,
-            frontend: frontend,
+            frontend: customFrontend ?? frontend,
             sleepNotifications: sleep,
             terminationSignals: signals,
             historyStore: store,
@@ -501,6 +547,15 @@ struct DaemonHarness {
         let session = await daemon.engine.openSession()
         _ = await session.hello(clientProtocolVersion: HelperProtocolVersion.current)
         return session
+    }
+
+    /// After a failed expectation, moves the clock on a second at a time
+    /// until the daemon has exited, so that the test ends instead of hanging.
+    func runClockUntilExit() async {
+        for _ in 0..<60 where exits.statuses.isEmpty {
+            clock.advance(by: 1)
+            try? await Task.sleep(for: .milliseconds(20))
+        }
     }
 
     /// Sends SIGTERM and returns the status the daemon exits with, when the

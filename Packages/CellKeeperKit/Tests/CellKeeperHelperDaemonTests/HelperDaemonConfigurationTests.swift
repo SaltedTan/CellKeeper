@@ -52,7 +52,7 @@ struct HelperDaemonSystemTests {
     @Test("Without a listener, the daemon says it serves nobody")
     func noFrontend() throws {
         let log = RecordingLog()
-        try NoFrontend(log: log).start(serving: HelperEngine(control: UnknownHardwareChargeControl(), power: DaemonPowerReading(), build: 1, uptime: HelperEngine.continuousUptime, events: { _ in }))
+        try NoFrontend().start(serving: HelperEngine(control: UnknownHardwareChargeControl(), power: DaemonPowerReading(), build: 1, uptime: HelperEngine.continuousUptime, events: { _ in }), log: log)
         #expect(log.lines == [RecordingLog.Line(level: .notice, category: .xpc, message: "No client listener is available in this build: serving nobody.")])
     }
 

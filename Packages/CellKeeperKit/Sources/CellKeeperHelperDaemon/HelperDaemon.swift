@@ -57,8 +57,9 @@ public struct HelperDaemonEnvironment: Sendable {
 /// 1. Starts the engine, which restores defaults and reads them back
 ///    before anything else is served (R2).
 /// 2. Registers for sleep and wake (R16, R17, `safety.md` precondition 13).
-/// 3. Starts the frontend, once the log has caught up with the start, and
-///    never once shutdown has begun.
+/// 3. Waits up to ``logFlushTimeout`` for the log, so that the start's
+///    restore is usually written before anyone is served (this is not
+///    guaranteed), then starts the frontend, never once shutdown has begun.
 /// 4. Ticks the engine every ``tickInterval``.
 ///
 /// Shutdown (R4, D31, D56) begins on SIGTERM, when the engine shuts down at
@@ -85,6 +86,13 @@ public struct HelperDaemonEnvironment: Sendable {
 /// The deadline holds even if the engine is stuck in a call to the control
 /// or the log cannot be written. The daemon exits only from its own tasks,
 /// never from inside the engine's event sink.
+///
+/// The daemon's actor coordinates and must stay responsive, so nothing that
+/// can block runs on it: log lines are only enqueued (``DaemonEventQueue``),
+/// and the frontend, the sleep notifications and the signal source are
+/// called from tasks of their own. Every wait is bounded by an absolute
+/// deadline, recomputed when the wait actually starts, so a late start
+/// shortens a wait instead of postponing its end.
 ///
 /// Sleep: on will-sleep the engine runs its sleep checks and only then is
 /// sleep acknowledged, or after ``sleepAcknowledgementTimeout`` at the
@@ -135,6 +143,9 @@ public actor HelperDaemon {
     private var exitWaiters: [CheckedContinuation<Int32, Never>] = []
     private var ticker: Task<Void, Never>?
     private var sleepEvents: AsyncStream<SleepCheck>.Continuation?
+    private var isRegisteredForSleep = false
+    /// The frontend's start, which its stop waits for.
+    private var frontendStart: Task<Void, any Error>?
 
     /// Handles SIGTERM from here on (one that arrives before ``run()`` is
     /// held until then), then builds the engine with the activation history
@@ -188,25 +199,33 @@ public actor HelperDaemon {
         }
         guard !isShuttingDown else { return await waitForExit() }
 
-        do {
-            try startSleepHandling()
-        } catch {
+        if case .failure(let error) = await registerForSleep() {
             queue.log(.fault, .safety, "Sleep notifications could not be registered (\(error)). Without them the daemon cannot hold sleep until its checks have run, so it serves nobody and exits.")
             await shutDown(reason: "Sleep notifications unavailable")
             return await waitForExit()
         }
-        // The start's restore is in the log before anyone is served.
+        guard !isShuttingDown else { return await waitForExit() }
+
+        // Wait up to logFlushTimeout for the log, so that the start's restore
+        // is usually written before anyone is served; this does not
+        // guarantee it.
         let clock = environment.clock
         let queue = queue
         _ = await withDeadline(Self.logFlushTimeout, on: clock) { await queue.flush() }
         guard !isShuttingDown else { return await waitForExit() }
-        do {
-            try environment.frontend.start(serving: engine)
-        } catch {
+
+        // Off the actor; a shutdown that begins meanwhile stops the frontend
+        // once this has returned.
+        let frontend = environment.frontend
+        let engine = engine
+        let start = Task.detached { try frontend.start(serving: engine, log: queue) }
+        frontendStart = start
+        if case .failure(let error) = await start.result {
             queue.log(.fault, .xpc, "The frontend could not start (\(error)); exiting without serving anyone.")
             await shutDown(reason: "Frontend unavailable")
             return await waitForExit()
         }
+        guard !isShuttingDown else { return await waitForExit() }
         startTicking()
         return await waitForExit()
     }
@@ -279,17 +298,19 @@ public actor HelperDaemon {
         }
     }
 
-    private func startSleepHandling() throws {
+    /// Registers for sleep and wake from a task of its own, so that the
+    /// actor stays responsive meanwhile.
+    private func registerForSleep() async -> Result<Void, any Error> {
         let (checks, continuation) = AsyncStream.makeStream(of: SleepCheck.self)
         let clock = environment.clock
         let queue = queue
-        try environment.sleepNotifications.start { event in
+        let handler: @Sendable (SleepEvent) -> Void = { event in
             switch event {
             case .willSleep(let acknowledge):
-                // The deadline runs from the announcement, whatever the
-                // engine is busy with.
+                // The deadline is fixed at the announcement, whatever the
+                // engine is busy with and however late the timer starts.
                 let acknowledgement = SleepAcknowledgement(acknowledge)
-                acknowledgement.acknowledge(after: Self.sleepAcknowledgementTimeout, on: clock) {
+                acknowledgement.acknowledge(by: clock.uptime() + Self.sleepAcknowledgementTimeout, on: clock) {
                     queue.log(.fault, .safety, "The engine had not finished its sleep checks \(Int(Self.sleepAcknowledgementTimeout)) s after the sleep announcement: sleep acknowledged anyway. Its leases count sleep.")
                 }
                 continuation.yield(.willSleep(acknowledgement))
@@ -297,11 +318,25 @@ public actor HelperDaemon {
                 continuation.yield(.didWake)
             }
         }
+        let notifications = environment.sleepNotifications
+        let result = await Task.detached { Result { try notifications.start(handler) } }.value
+        guard case .success = result else {
+            continuation.finish()
+            return result
+        }
+        if exitStatus != nil {
+            // The exit was committed meanwhile, without this registration.
+            continuation.finish()
+            await Task.detached { notifications.stop() }.value
+            return result
+        }
+        isRegisteredForSleep = true
         sleepEvents = continuation
         let engine = engine
         Task {
             await Self.handleSleepChecks(checks, engine: engine, log: queue)
         }
+        return result
     }
 
     private static func handleSleepChecks(_ checks: AsyncStream<SleepCheck>, engine: HelperEngine, log: DaemonEventQueue) async {
@@ -364,13 +399,15 @@ public actor HelperDaemon {
         let queue = queue
         queue.log(.notice, .lifecycle, "\(reason): stopping the frontend and restoring defaults; exiting within \(Int(Self.terminationDeadline)) s.")
 
-        // 1. Stop the frontend; its confirmation may come later.
-        let stop = FrontendStop(environment.frontend)
+        // 1. Stop the frontend (once a start in progress has returned); its
+        // confirmation may come later.
+        let stop = FrontendStop(environment.frontend, after: frontendStart)
 
         // 2. Restore and retry until the frontend has confirmed and the
         // engine is safe to exit, keeping the reserve.
+        let stopWaitEnd = clock.uptime() + Self.frontendStopTimeout
         let settled = await withDeadline(at: deadline - Self.finalisationReserve, on: clock) {
-            _ = await withDeadline(Self.frontendStopTimeout, on: clock) { await stop.wait() }
+            _ = await withDeadline(at: stopWaitEnd, on: clock) { await stop.wait() }
             await engine.terminate()
             while true {
                 switch stop.outcome {
@@ -419,9 +456,9 @@ public actor HelperDaemon {
     private func commitExit(status: Int32, deadline: TimeInterval) async {
         exitStatus = status
         ticker?.cancel()
-        environment.sleepNotifications.stop()
         sleepEvents?.finish()
-        environment.terminationSignals.stop()
+        let isRegisteredForSleep = isRegisteredForSleep
+        self.isRegisteredForSleep = false
         if status == 0 {
             queue.log(.notice, .lifecycle, "The frontend stopped and defaults are confirmed: exiting with status 0.")
         } else {
@@ -429,6 +466,16 @@ public actor HelperDaemon {
         }
         let clock = environment.clock
         let queue = queue
+        // Off the actor and within the deadline: stop delivering sleep and
+        // signals (SIGTERM stays ignored), then wait for the log.
+        let notifications = environment.sleepNotifications
+        let signals = environment.terminationSignals
+        _ = await withDeadline(at: deadline, on: clock) {
+            if isRegisteredForSleep {
+                notifications.stop()
+            }
+            signals.stop()
+        }
         _ = await withDeadline(at: min(clock.uptime() + Self.logFlushTimeout, deadline), on: clock) { await queue.flush() }
         queue.finish()
         environment.exit(status)
@@ -505,8 +552,10 @@ final class FrontendStop: @unchecked Sendable {
     private var current = Outcome.pending
     private var task: Task<Void, Never>?
 
-    init(_ frontend: any HelperFrontend) {
-        let task = Task { [self] in
+    /// Stops `frontend` once `start`, if any, has returned.
+    init(_ frontend: any HelperFrontend, after start: Task<Void, any Error>?) {
+        let task = Task.detached { [self] in
+            _ = await start?.result
             let confirmed = await frontend.stop()
             lock.withLock { current = confirmed ? .confirmed : .refused }
         }
@@ -557,11 +606,12 @@ final class SleepAcknowledgement: @unchecked Sendable {
         return acknowledge != nil
     }
 
-    /// Acknowledges after `seconds` on `clock` unless that has been done,
-    /// and then calls `onTimeout`.
-    func acknowledge(after seconds: TimeInterval, on clock: any HelperDaemonClock, onTimeout: @escaping @Sendable () -> Void) {
+    /// Acknowledges when `clock`'s uptime reaches `deadline`, unless that
+    /// has been done, and then calls `onTimeout`. The timer waits for what
+    /// is left when it starts, so a late start does not postpone it.
+    func acknowledge(by deadline: TimeInterval, on clock: any HelperDaemonClock, onTimeout: @escaping @Sendable () -> Void) {
         let timer = Task {
-            await clock.sleep(for: seconds)
+            await clock.sleep(until: deadline)
             guard !Task.isCancelled else { return }
             if self.acknowledge() {
                 onTimeout()

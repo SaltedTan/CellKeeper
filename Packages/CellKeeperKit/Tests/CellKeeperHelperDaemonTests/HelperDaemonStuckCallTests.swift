@@ -9,6 +9,78 @@ import Testing
 /// pool (CI machines have three cores) never runs out of threads.
 @Suite("Helper daemon: calls that do not return in time", .serialized)
 struct HelperDaemonStuckCallTests {
+    @Test("A startup notice the log cannot write does not keep SIGTERM from shutting the daemon down (NoFrontend)")
+    func heldStartupNotice() async {
+        let h = DaemonHarness(frontend: NoFrontend())
+        h.log.block(whenMessageContains: "No client listener")
+        let daemon = h.daemon
+        let running = Task { await daemon.run() }
+        // NoFrontend has started and its notice is held; the daemon serves.
+        let serving = await eventually {
+            h.log.isWaiting && h.clock.waits.contains(HelperDaemon.tickInterval - 0.001...HelperDaemon.tickInterval)
+        }
+        #expect(serving)
+
+        h.signals.sendSIGTERM()
+        // Shutdown runs with the notice still held: the log is waited for
+        // twice, each time for at most logFlushTimeout.
+        for _ in 0..<2 {
+            let flushing = await eventually { h.clock.waits.contains(HelperDaemon.logFlushTimeout - 0.001...HelperDaemon.logFlushTimeout) }
+            #expect(flushing)
+            h.clock.advance(by: HelperDaemon.logFlushTimeout)
+        }
+        let exited = await eventually { !h.exits.statuses.isEmpty }
+        #expect(exited)
+        #expect(h.log.isWaiting)
+        h.log.release()
+        if !exited {
+            await h.runClockUntilExit()
+        }
+        #expect(await running.value == 0)
+        let written = await eventually { h.log.contains(.notice, .xpc, "No client listener is available in this build") }
+        #expect(written)
+    }
+
+    @Test("A sleep acknowledgement whose timer starts late still comes 5 s after the announcement")
+    func lateAcknowledgementTimer() async {
+        let control = BlockingControl()
+        let h = DaemonHarness(control: control)
+        let running = await h.run()
+        control.holdNextReadBack()
+        let acknowledgements = Acknowledgements()
+        // The acknowledgement's timer starts 3 s after the announcement.
+        h.clock.beforeNextSleep { h.clock.advance(by: 3) }
+        h.sleep.announceSleep { acknowledgements.record(activeAtAcknowledgement: []) }
+
+        // The engine is stuck in its sleep checks. 2 s are left for the
+        // acknowledgement, not 5 (the next tick is 2 s away too).
+        let waiting = await eventually {
+            control.isHolding && h.clock.waits.count == 2 && h.clock.waits.allSatisfy { $0 <= 2 }
+        }
+        #expect(waiting)
+        #expect(acknowledgements.count == 0)
+        h.clock.advance(by: 2)
+        let acknowledged = await eventually { acknowledgements.count == 1 }
+        #expect(acknowledged)
+        control.release()
+        #expect(await h.terminate(running) == 0)
+    }
+
+    @Test("A result that arrives after its deadline is not used")
+    func lateResult() async {
+        let clock = ManualClock()
+        let deadline = clock.uptime() + 1
+        // Hold the timer back, so that only the operation can end the wait.
+        let timerStart = DispatchSemaphore(value: 0)
+        clock.beforeNextSleep { _ = timerStart.wait(timeout: .now() + 10) }
+        let value = await withDeadline(at: deadline, on: clock) { () -> Int in
+            clock.advance(by: 2)
+            return 1
+        }
+        #expect(value == nil)
+        timerStart.signal()
+    }
+
     @Test("SIGTERM while the engine is still starting: the frontend never starts")
     func sigtermDuringStart() async {
         let control = BlockingControl()

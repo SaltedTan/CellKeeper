@@ -8,7 +8,6 @@
 import CellKeeperHelperDaemon
 import Foundation
 
-let log = UnifiedHelperLog()
-let daemon = HelperDaemon(environment: .system(frontend: NoFrontend(log: log), log: log))
+let daemon = HelperDaemon(environment: .system(frontend: NoFrontend()))
 let status = await daemon.run()
 exit(status)
