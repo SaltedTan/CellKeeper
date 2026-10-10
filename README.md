@@ -192,6 +192,17 @@ which macOS enforces. Your Mac's built-in battery
 protections always remain in effect. Read [docs/safety.md](docs/safety.md)
 before contributing anything that could change charging behaviour.
 
+### If charging does not resume
+
+Turn off **Manage charging** or quit CellKeeper first. If you used macOS's
+Charge Limit through CellKeeper, follow
+[Getting your own Charge Limit back](docs/safety.md#getting-your-own-charge-limit-back).
+For CellKeeper's own charge control and its helper, follow
+[Recovery if charging does not resume](docs/safety.md#recovery-if-charging-does-not-resume-cellkeepers-own-charge-control):
+remove the helper, turn off its background item, stop it from Terminal,
+restart, and check macOS's own charging settings. In this version no
+helper is installed, so that procedure is not needed yet.
+
 **Disclaimer:** CellKeeper is experimental software provided under the
 Apache License 2.0, without warranty of any kind. Future control features may
 depend on undocumented interfaces that Apple can change at any time. Use at
