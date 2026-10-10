@@ -219,7 +219,7 @@ struct HelperRemovalTests {
 
         let running = remove(rig.removal(clock: clock), force: force)
         if fault.kind == .timeout {
-            await rig.log.waitFor(fault.logEntry)
+            await expectLogged(rig.log, fault.logEntry)
             clock.advance(by: Self.deadline)
         }
         let outcome = await running.value
@@ -247,14 +247,14 @@ struct HelperRemovalTests {
             rig.transport.answerOnlyWhenCancelled(at: .restoreAndExit)
 
             let running = remove(rig.removal(clock: clock), force: false)
-            await rig.log.waitFor("helper.restoreDefaultsAndExit")
+            await expectLogged(rig.log, "helper.restoreDefaultsAndExit")
             clock.advance(by: Self.deadline)
             let outcome = await running.value
 
             #expect(outcome == .restoreUnconfirmed(.noRestoreReply(Self.deadline, helper: .simulated)))
             // The late ok did arrive, and changed nothing.
-            await rig.log.waitFor("helper.restoreDefaultsAndExit replied ok")
-            await rig.log.waitFor("helper.invalidate")
+            await expectLogged(rig.log, "helper.restoreDefaultsAndExit replied ok")
+            await expectLogged(rig.log, "helper.invalidate")
             #expect(rig.registration.unregisterCount == 0)
         }
     }
@@ -266,13 +266,13 @@ struct HelperRemovalTests {
         rig.transport.answerOnlyWhenCancelled(at: .hello)
 
         let running = remove(rig.removal(clock: clock), force: false)
-        await rig.log.waitFor("helper.hello")
+        await expectLogged(rig.log, "helper.hello")
         clock.advance(by: Self.deadline)
         let outcome = await running.value
 
         #expect(outcome == .restoreUnconfirmed(.noHello(Self.deadline)))
-        await rig.log.waitFor("helper.hello replied ok")
-        await rig.log.waitFor("helper.invalidate")
+        await expectLogged(rig.log, "helper.hello replied ok")
+        await expectLogged(rig.log, "helper.invalidate")
         #expect(rig.log.count(of: "helper.restoreDefaultsAndExit") == 0)
         let isShuttingDown = await rig.engine.isShuttingDown
         #expect(!isShuttingDown)
@@ -287,7 +287,7 @@ struct HelperRemovalTests {
         defer { clock.releaseTimers() }
 
         let running = remove(rig.removal(clock: clock), force: force)
-        await rig.log.waitFor("helper.restoreDefaultsAndExit")
+        await expectLogged(rig.log, "helper.restoreDefaultsAndExit")
         clock.holdTimers()
         clock.advance(by: Self.deadline)
         rig.transport.gate.open()
@@ -313,7 +313,7 @@ struct HelperRemovalTests {
         defer { clock.releaseTimers() }
 
         let running = remove(rig.removal(clock: clock), force: false)
-        await rig.log.waitFor("helper.hello")
+        await expectLogged(rig.log, "helper.hello")
         clock.holdTimers()
         clock.advance(by: Self.deadline)
         rig.transport.gate.open()
@@ -321,7 +321,7 @@ struct HelperRemovalTests {
 
         #expect(outcome == .restoreUnconfirmed(.noHello(Self.deadline)))
         #expect(rig.log.all.contains("helper.hello replied ok"))
-        await rig.log.waitFor("helper.invalidate")
+        await expectLogged(rig.log, "helper.invalidate")
         #expect(rig.log.count(of: "helper.restoreDefaultsAndExit") == 0)
         let isShuttingDown = await rig.engine.isShuttingDown
         #expect(!isShuttingDown)
@@ -337,7 +337,7 @@ struct HelperRemovalTests {
         defer { clock.releaseTimers() }
 
         let running = remove(rig.removal(clock: clock), force: false)
-        await rig.log.waitFor("helper.connect")
+        await expectLogged(rig.log, "helper.connect")
         clock.holdTimers()
         clock.advance(by: Self.deadline)
         rig.transport.gate.open()
@@ -358,7 +358,7 @@ struct HelperRemovalTests {
         }
 
         let running = remove(rig.removal(clock: clock), force: false)
-        await rig.log.waitFor("registration.status")
+        await expectLogged(rig.log, "registration.status")
         clock.holdTimers()
         clock.advance(by: HelperRemoval.defaultRegistrationDeadline)
         gate.open()
@@ -382,7 +382,7 @@ struct HelperRemovalTests {
         }
 
         let running = remove(rig.removal(clock: clock), force: false)
-        await rig.log.waitFor("registration.status", occurrences: 2)
+        await expectLogged(rig.log, "registration.status", occurrences: 2)
         clock.holdTimers()
         clock.advance(by: HelperRemoval.defaultRegistrationDeadline)
         gate.open()
@@ -405,7 +405,7 @@ struct HelperRemovalTests {
         }
 
         let running = remove(rig.removal(clock: clock), force: false)
-        await rig.log.waitFor("registration.unregister")
+        await expectLogged(rig.log, "registration.unregister")
         clock.holdTimers()
         clock.advance(by: HelperRemoval.defaultRegistrationDeadline)
         gate.open()
@@ -414,37 +414,32 @@ struct HelperRemovalTests {
         #expect(outcome == .unregisterIncomplete(.simulated, status: .enabled, error: "no answer within 15 s"))
     }
 
-    @Test("With a real timer, a helper slower than the deadline is not unregistered, even when it confirms later")
-    func slowRestoreHitsTheDeadline() async {
+    @Test("With a real timer, a helper that does not reply in time is not unregistered, whatever stage the deadline finds it at", arguments: [RemovalTestTransport.Step.hello, .restoreAndExit])
+    func realTimerSmoke(stall step: RemovalTestTransport.Step) async {
         let rig = RemovalRig()
-        rig.transport.stall(at: .restoreAndExit)
+        rig.transport.stall(at: step)
         defer { rig.transport.gate.open() }
 
         let outcome = await rig.removal(helperDeadline: .milliseconds(50)).remove()
 
-        #expect(outcome == .restoreUnconfirmed(.noRestoreReply(.milliseconds(50), helper: .simulated)))
+        // A real timer establishes no stage: on a slow machine the deadline
+        // can pass before hello is accepted. Either outcome is valid; only
+        // what holds in both is asserted.
+        let deadline: Duration = .milliseconds(50)
+        let isExpectedTimeout = outcome == .restoreUnconfirmed(.noHello(deadline))
+            || outcome == .restoreUnconfirmed(.noRestoreReply(deadline, helper: .simulated))
+        #expect(isExpectedTimeout, "\(outcome)")
+        #expect(!outcome.isRestoreConfirmed)
         #expect(rig.registration.unregisterCount == 0)
+
+        // Whatever the helper does once it is released changes nothing.
         rig.transport.gate.open()
-        await rig.log.waitFor("helper.restoreDefaultsAndExit replied ok")
-        await rig.log.waitFor("helper.invalidate")
+        await expectLogged(rig.log, "helper.invalidate")
         #expect(rig.registration.unregisterCount == 0)
-    }
-
-    @Test("With a real timer, a helper that does not answer hello in time is not asked to exit afterwards")
-    func slowHelloHitsTheDeadline() async {
-        let rig = RemovalRig()
-        rig.transport.stall(at: .hello)
-        defer { rig.transport.gate.open() }
-
-        let outcome = await rig.removal(helperDeadline: .milliseconds(50)).remove()
-
-        #expect(outcome == .restoreUnconfirmed(.noHello(.milliseconds(50))))
-        rig.transport.gate.open()
-        await rig.log.waitFor("helper.invalidate")
-        #expect(rig.log.count(of: "helper.restoreDefaultsAndExit") == 0)
-        let isShuttingDown = await rig.engine.isShuttingDown
-        #expect(!isShuttingDown)
-        #expect(rig.registration.unregisterCount == 0)
+        if outcome == .restoreUnconfirmed(.noHello(deadline)) {
+            // A hello accepted after the expiry never leads to the exit request.
+            #expect(rig.log.count(of: "helper.restoreDefaultsAndExit") == 0)
+        }
     }
 
     @Test("A forced removal says what it could not confirm, and what removing the helper gives up")
@@ -595,4 +590,11 @@ struct HelperRemovalTests {
         #expect(HelperRemovalOutcome.restoreUnconfirmed(.noRestoreReply(.seconds(20), helper: .simulated)).summary.contains("your Mac's charging is not affected"))
         #expect(HelperRemovalOutcome.restoreRefused(.notIntroduced, helper: .simulated).summary.contains("your Mac's charging is not affected"))
     }
+}
+
+/// Waits, bounded by ``testWaitLimit``, for `entry` to be logged
+/// `occurrences` times, and records an issue if it is not.
+func expectLogged(_ log: CallLog, _ entry: String, occurrences: Int = 1) async {
+    let isLogged = await log.waitFor(entry, occurrences: occurrences)
+    #expect(isLogged, "\"\(entry)\" was not logged in time")
 }

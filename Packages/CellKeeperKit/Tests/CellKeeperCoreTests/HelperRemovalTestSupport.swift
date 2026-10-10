@@ -7,40 +7,53 @@ import Foundation
 final class CallLog: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [String] = []
-    private var waiters: [(entry: String, occurrences: Int, continuation: CheckedContinuation<Void, Never>)] = []
+    private var waiters: [Int: (entry: String, occurrences: Int, continuation: CheckedContinuation<Bool, Never>)] = [:]
+    private var nextWaiter = 0
 
     var all: [String] {
         lock.withLock { entries }
     }
 
     func append(_ entry: String) {
-        let ready: [CheckedContinuation<Void, Never>] = lock.withLock {
+        let ready: [CheckedContinuation<Bool, Never>] = lock.withLock {
             entries.append(entry)
             let recorded = entries.filter { $0 == entry }.count
-            let isReady = { (waiter: (entry: String, occurrences: Int, continuation: CheckedContinuation<Void, Never>)) in
-                waiter.entry == entry && waiter.occurrences <= recorded
-            }
-            let matching = waiters.filter(isReady).map(\.continuation)
-            waiters.removeAll(where: isReady)
-            return matching
+            let ids = waiters.filter { $0.value.entry == entry && $0.value.occurrences <= recorded }.map(\.key)
+            return ids.compactMap { waiters.removeValue(forKey: $0)?.continuation }
         }
         for continuation in ready {
-            continuation.resume()
+            continuation.resume(returning: true)
         }
     }
 
-    /// Returns once `entry` has been recorded `occurrences` times.
-    func waitFor(_ entry: String, occurrences: Int = 1) async {
-        await withCheckedContinuation { continuation in
+    /// Returns true once `entry` has been recorded `occurrences` times, or
+    /// false after `limit`, so a test that goes wrong fails instead of
+    /// hanging the run.
+    @discardableResult
+    func waitFor(_ entry: String, occurrences: Int = 1, within limit: Duration = testWaitLimit) async -> Bool {
+        let id = lock.withLock {
+            nextWaiter += 1
+            return nextWaiter
+        }
+        let timeout = Task { [weak self] in
+            try? await Task.sleep(for: limit)
+            self?.giveUp(id)
+        }
+        defer { timeout.cancel() }
+        return await withCheckedContinuation { continuation in
             let isRecorded = lock.withLock {
                 if entries.filter({ $0 == entry }).count >= occurrences { return true }
-                waiters.append((entry, occurrences, continuation))
+                waiters[id] = (entry, occurrences, continuation)
                 return false
             }
             if isRecorded {
-                continuation.resume()
+                continuation.resume(returning: true)
             }
         }
+    }
+
+    private func giveUp(_ id: Int) {
+        lock.withLock { waiters.removeValue(forKey: id) }?.continuation.resume(returning: false)
     }
 
     /// The recorded entries that are among `wanted`, in order.
@@ -53,17 +66,32 @@ final class CallLog: @unchecked Sendable {
     }
 }
 
-/// Holds whoever waits until the test opens it.
+/// The longest any wait in these tests lasts: a test that goes wrong fails
+/// or moves on instead of hanging the run.
+let testWaitLimit: Duration = .seconds(10)
+
+/// Holds whoever waits until the test opens it, or until ``testWaitLimit``
+/// has passed, so a stall never outlives a failing test for long.
 final class Gate: @unchecked Sendable {
     private let lock = NSLock()
     private var isOpen = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var waiters: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var nextWaiter = 0
 
     func wait() async {
+        let id = lock.withLock {
+            nextWaiter += 1
+            return nextWaiter
+        }
+        let timeout = Task { [weak self] in
+            try? await Task.sleep(for: testWaitLimit)
+            self?.release(id)
+        }
+        defer { timeout.cancel() }
         await withCheckedContinuation { continuation in
             let passes = lock.withLock {
                 if isOpen { return true }
-                waiters.append(continuation)
+                waiters[id] = continuation
                 return false
             }
             if passes {
@@ -75,12 +103,16 @@ final class Gate: @unchecked Sendable {
     func open() {
         let released: [CheckedContinuation<Void, Never>] = lock.withLock {
             isOpen = true
-            defer { waiters = [] }
-            return waiters
+            defer { waiters = [:] }
+            return Array(waiters.values)
         }
         for continuation in released {
             continuation.resume()
         }
+    }
+
+    private func release(_ id: Int) {
+        lock.withLock { waiters.removeValue(forKey: id) }?.resume()
     }
 }
 
