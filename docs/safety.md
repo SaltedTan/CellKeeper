@@ -223,8 +223,8 @@ list.
     invalidates the connection, which makes the helper end the session; and
     the daemon (not installed) acknowledges sleep after the engine's sleep
     checks, or 5 s after the announcement at the latest, and finishes every
-    shutdown within one 8 s deadline, its frontend's stop (at most 5 s)
-    included. Time
+    shutdown within one 8 s deadline, its frontend's stop (by 7 s into
+    it, on the same clock) included. Time
     limits on the helper's own calls into the hardware wait for a real
     control.
 
@@ -302,8 +302,9 @@ the simulated control:
   `ExitTimeOut` of 10 s. It exits with 0 only if, after its frontend has
   confirmed that every accepted request is answered and every session
   invalidated, and after its log is written, a final check finds defaults
-  confirmed; otherwise it exits non-zero, so launchd starts it again and
-  the next start restores first.
+  confirmed; otherwise it exits non-zero, so launchd starts it again
+  while the job is loaded and approved, and that start restores first.
+  After a removal, a bootout or a revoked approval no start follows.
 - **4, narrow, authenticated API (transport only):** the NSXPC interface
   (`CellKeeperHelperXPC`) has one method per typed operation, with only
   `Int`, `UInt64` and `Bool` arguments and replies, so neither side decodes
@@ -327,8 +328,12 @@ the simulated control:
   team before any listener exists, so a build without a team never
   listens. Its stop admits nothing more, runs every admitted request and
   sends its reply (a send barrier confirms the send, not receipt) before
-  each connection and session ends, and the daemon exits with 0 only after
-  such a stop.
+  each connection and session ends. It confirms only what it can prove,
+  and only by its deadline (the daemon's, less a 1 s reserve): every
+  request a connection admitted answered, every send confirmed, every
+  connection and session ended. Requests discarded behind a revocation,
+  or cut off at the deadline, make it report failure. The daemon exits
+  with 0 only after a confirmed stop.
 - **6, debounce and dwell:** the policy's debounce and minimum pause apply to
   the helper backend, as to any backend that switches charging itself.
 - **7, external-writer detection (in part):** the helper records why each
