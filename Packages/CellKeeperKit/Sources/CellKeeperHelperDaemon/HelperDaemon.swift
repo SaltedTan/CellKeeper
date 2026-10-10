@@ -62,7 +62,7 @@ public struct HelperDaemonEnvironment: Sendable {
 ///    guaranteed), then starts the frontend, never once shutdown has begun.
 /// 4. Ticks the engine every ``tickInterval``.
 ///
-/// Shutdown (R4, D31, D56) begins on SIGTERM, when the engine shuts down at
+/// Shutdown (R4, D31, D59) begins on SIGTERM, when the engine shuts down at
 /// a client's request (`restoreDefaultsAndExit`), or when a seam cannot
 /// start. Whatever began it, one absolute deadline,
 /// ``terminationDeadline`` after it began, bounds all of it, logging and
@@ -373,7 +373,7 @@ public actor HelperDaemon {
     }
 
     /// Shuts the daemon down within one absolute deadline (see the type's
-    /// documentation, R4, D31, D56).
+    /// documentation, R4, D31, D59).
     private func shutDown(reason: String) async {
         guard !isShuttingDown, exitStatus == nil else {
             queue.log(.notice, .lifecycle, "\(reason) while already shutting down: ignored.")
