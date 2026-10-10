@@ -1,8 +1,8 @@
 import CellKeeperHelperCore
 import Foundation
 
-/// What serves the daemon's clients: the NSXPC listener on the Mach service
-/// ``HelperServiceName/machService`` in a later phase, ``NoFrontend`` today.
+/// What serves the daemon's clients: ``XPCFrontend``, the NSXPC listener on
+/// the Mach service ``HelperServiceName/machService``, or ``NoFrontend``.
 ///
 /// A frontend that accepts connections from other processes must check
 /// every connection against a code-signing requirement for CellKeeper's app
@@ -29,15 +29,23 @@ public protocol HelperFrontend: Sendable {
     /// safely. `log` is the daemon's audit log: writing to it never blocks.
     func start(serving engine: HelperEngine, log: any HelperDaemonLog) throws
 
+    /// An event of the engine, passed on by the daemon's event sink, so the
+    /// frontend can close the connection of a session the engine revokes.
+    /// Called synchronously, on the engine's executor: it must return at
+    /// once and never call into the engine. The default does nothing.
+    func handle(_ event: HelperEvent)
+
     /// Stops serving, and confirms that it has.
     ///
-    /// A request is *accepted* once the frontend has received it from a
-    /// connection. Its reply is *sent* once the transport has confirmed
-    /// that the send completed: for NSXPC, a send barrier
-    /// (`NSXPCConnection.scheduleSendBarrierBlock(_:)`) scheduled after the
-    /// reply has run. That confirms the send, not that the client received
-    /// it; receipt would need an acknowledgement, which the protocol does
-    /// not have. In this order, `stop()`:
+    /// A request is *accepted* once the frontend has admitted it to be
+    /// served (for ``XPCFrontend``: put it on its connection's queue). A
+    /// request that arrives after the stop began is not admitted and gets no
+    /// reply; its client sees the connection end. A reply is *sent* once the
+    /// transport has confirmed that the send completed: for NSXPC, a send
+    /// barrier (`NSXPCConnection.scheduleSendBarrierBlock(_:)`) scheduled
+    /// after the reply has run. That confirms the send, not that the client
+    /// received it; receipt would need an acknowledgement, which the
+    /// protocol does not have. In this order, `stop()`:
     /// 1. Stops accepting connections and requests.
     /// 2. Waits until every accepted request has been answered by the engine
     ///    and its reply sent. The reply to a `restoreDefaultsAndExit` is sent
@@ -45,15 +53,16 @@ public protocol HelperFrontend: Sendable {
     /// 3. Invalidates every session it opened (``HelperSession/invalidate()``)
     ///    and closes every connection.
     ///
-    /// It returns true only once all of that is done, so that nothing it
-    /// accepted can change the engine's state afterwards. Otherwise it
-    /// returns false: in particular, an implementation that discards
-    /// queued requests, or invalidates connections before their replies are
-    /// sent, returns false unless every accepted request still got its reply
-    /// sent. (As of PR #64, `HelperXPCServer.stop()` invalidates connections
-    /// before draining replies and discards queued requests; a frontend
-    /// built on it must change that before its `stop()` may return true.)
-    /// A frontend that never started has nothing to stop and returns true.
+    /// A connection that ends on its own meanwhile (its client goes away,
+    /// the engine revokes its session) ends as it always does; whatever of it
+    /// had not run never runs.
+    ///
+    /// It returns true only once all of that is done and the stop itself cut
+    /// nothing off, so that nothing it accepted can change the engine's state
+    /// afterwards. Otherwise it returns false, never true: an implementation
+    /// that discards accepted requests, or invalidates a connection before
+    /// its replies are sent (at a deadline, for example), returns false. A
+    /// frontend that never started has nothing to stop and returns true.
     ///
     /// The daemon calls it once, when shutdown begins (SIGTERM, a client's
     /// `restoreDefaultsAndExit`, or a seam that could not start), after any
@@ -61,6 +70,10 @@ public protocol HelperFrontend: Sendable {
     /// only within its shutdown budget: it exits with 0 only after a stop
     /// that returned true, followed by a check that defaults are confirmed.
     func stop() async -> Bool
+}
+
+extension HelperFrontend {
+    public func handle(_ event: HelperEvent) {}
 }
 
 /// The frontend of a build without a client listener: it serves nobody and

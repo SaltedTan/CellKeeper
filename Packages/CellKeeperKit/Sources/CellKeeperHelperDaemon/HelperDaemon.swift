@@ -169,8 +169,10 @@ public actor HelperDaemon {
             build: environment.build,
             uptime: { clock.uptime() },
             activationHistory: Self.loadHistory(environment, log: queue),
-            events: { event in
+            events: { [frontend = environment.frontend] event in
                 queue.event(event)
+                // The frontend closes the connection of a revoked session.
+                frontend.handle(event)
                 // Seen here rather than when the log reaches it, so a slow
                 // log cannot delay the shutdown. The daemon reacts on a
                 // task of its own.
@@ -388,7 +390,7 @@ public actor HelperDaemon {
 
         // 1. Stop the frontend (once a start in progress has returned); its
         // confirmation may come later.
-        let stop = FrontendStop(environment.frontend, after: frontendStart)
+        let stop = FrontendStop(environment.frontend, after: frontendStart, log: queue)
 
         // 2. Restore and retry until the frontend has confirmed and the
         // engine is safe to exit, keeping the reserve.
@@ -541,12 +543,18 @@ final class FrontendStop: @unchecked Sendable {
     private var current = Outcome.pending
     private var task: Task<Void, Never>?
 
-    /// Stops `frontend` once `start`, if any, has returned.
-    init(_ frontend: any HelperFrontend, after start: Task<Void, any Error>?) {
+    /// Stops `frontend` once `start`, if any, has returned, and logs when
+    /// its stop returns.
+    init(_ frontend: any HelperFrontend, after start: Task<Void, any Error>?, log: DaemonEventQueue) {
         let task = Task.detached { [self] in
             _ = await start?.result
             let confirmed = await frontend.stop()
             lock.withLock { current = confirmed ? .confirmed : .refused }
+            if confirmed {
+                log.log(.info, .xpc, "The frontend stopped and confirmed that everything it accepted was answered.")
+            } else {
+                log.log(.fault, .xpc, "The frontend stopped without confirming that everything it accepted was answered.")
+            }
         }
         lock.withLock { self.task = task }
     }

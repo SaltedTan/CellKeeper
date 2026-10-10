@@ -153,6 +153,16 @@ final class FakeFrontend: HelperFrontend, @unchecked Sendable {
     private var isHoldingStop = false
     private var heldStops: [CheckedContinuation<Bool, Never>] = []
     private var stopResult = true
+    private var handled: [HelperEvent] = []
+
+    /// The engine's events the daemon passed on.
+    var handledEvents: [HelperEvent] {
+        lock.withLock { handled }
+    }
+
+    func handle(_ event: HelperEvent) {
+        lock.withLock { handled.append(event) }
+    }
 
     /// Makes `stop()` wait until ``confirmStop(_:)``, as a frontend still
     /// draining its requests would.

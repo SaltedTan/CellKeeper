@@ -53,6 +53,17 @@ struct HelperDaemonStartTests {
         #expect(await h.terminate(running) == 0)
     }
 
+    @Test("The engine's events reach the frontend, so it can close a revoked session's connection")
+    func eventsReachFrontend() async {
+        let h = DaemonHarness()
+        let running = await h.run()
+        let session = await h.introducedSession()
+        let forwarded = await eventually { h.frontend.handledEvents.contains(.sessionOpened(session.id)) }
+        #expect(forwarded)
+        #expect(h.frontend.handledEvents.contains { if case .started = $0 { true } else { false } })
+        #expect(await h.terminate(running) == 0)
+    }
+
     @Test("Start logs what the daemon is and that the engine confirmed defaults")
     func startLog() async {
         let h = DaemonHarness()
