@@ -25,21 +25,28 @@ import Foundation
 ///   (``HelperEvent/sessionRevoked(_:)``), the server closes its connection
 ///   once the reply to the request that caused it has been sent; requests
 ///   behind it never run.
-/// - **Lifecycle.** ``start()`` starts the engine, which restores defaults
-///   before anything is served (R2), and then the listener. ``stop()``
-///   invalidates the listener and every connection, which invalidates their
-///   sessions. Starting and stopping the listener and accepting each
+/// - **Lifecycle.** The host starts the engine, which restores defaults
+///   before anything is served (R2), and only then the listener
+///   (``startListening()``; ``start()`` does both). ``stop()`` drains and
+///   confirms (below). Starting and stopping the listener and accepting each
 ///   connection are serialised with each other, so a stop can never be
 ///   undone by a start or an acceptance in progress; each connection's close
-///   is recorded atomically with the decision to close it. Ticks,
-///   sleep and wake, and termination (SIGTERM) are the host's: call them on
+///   is recorded atomically with the decision to close it. Ticks, sleep and
+///   wake, and termination (SIGTERM) are the host's: call them on
 ///   ``engine``.
+/// - **Stop.** ``stop(drainingUntil:)`` admits no new connection and no new
+///   request; lets every request already admitted run, in order, and sends
+///   its reply; then, once a send barrier has confirmed that those replies
+///   were sent, invalidates each connection and its session. It returns
+///   true only if it cut nothing off (see there).
 /// - **Audit.** Connection events (``HelperXPCConnectionEvent``) go to the
 ///   host asynchronously, in order, on a queue of their own, so the host's
 ///   logging never delays a request.
 ///
-/// The server builds the engine itself, as `InProcessHelperTransport` does,
-/// so that it sees the sessions the engine revokes.
+/// The server serves an engine the host made (the daemon's), or builds one
+/// itself (``init(listener:clientRequirement:control:power:build:uptime:activationHistory:events:connectionEvents:)``,
+/// for tests). Either way it must see the sessions the engine revokes: the
+/// host's event sink passes every event to ``handle(_:)``.
 public final class HelperXPCServer: @unchecked Sendable {
     // @unchecked Sendable: `listener` is not Sendable; it is resumed and
     // invalidated only by `registry`, under its lock. Every other stored
@@ -59,21 +66,45 @@ public final class HelperXPCServer: @unchecked Sendable {
     private let delegate: ListenerDelegate
     private let registry: ConnectionRegistry
 
+    /// Serves `engine`, which the host made, started and keeps: the daemon's.
+    /// The host's event sink must pass every event to ``handle(_:)``, so the
+    /// server closes the connections of the sessions the engine revokes.
+    ///
     /// - Parameters:
     ///   - listener: a Mach-service listener in the daemon, an anonymous one
     ///     in tests. The server becomes its delegate; do not resume it.
     ///   - clientRequirement: the requirement every client must meet:
     ///     ``HelperCodeSigningRequirement/forClientApp(identifier:)`` in the
     ///     daemon.
+    ///   - connectionEvents: receives every connection event, asynchronously
+    ///     and in order, for the host's log.
+    public convenience init(
+        serving engine: HelperEngine,
+        listener: NSXPCListener,
+        clientRequirement: HelperCodeSigningRequirement,
+        connectionEvents: @escaping @Sendable (HelperXPCConnectionEvent) -> Void = { _ in }
+    ) {
+        self.init(
+            engine: engine,
+            registry: ConnectionRegistry(audit: AuditChannel(sink: connectionEvents)),
+            listener: listener,
+            clientRequirement: clientRequirement
+        )
+    }
+
+    /// Builds the engine as well, so that it sees the sessions the engine
+    /// revokes without help from a host (tests).
+    ///
+    /// - Parameters:
+    ///   - listener, clientRequirement, connectionEvents: as for
+    ///     ``init(serving:listener:clientRequirement:connectionEvents:)``.
     ///   - control, power, build, uptime, activationHistory: the engine's;
     ///     see ``HelperEngine``.
     ///   - events: receives every event of the engine, as
     ///     ``HelperEngine``'s sink does, after the server has noted
     ///     revocations. It must not block (the daemon logs and persists
     ///     asynchronously).
-    ///   - connectionEvents: receives every connection event, asynchronously
-    ///     and in order, for the host's log.
-    public init(
+    public convenience init(
         listener: NSXPCListener,
         clientRequirement: HelperCodeSigningRequirement,
         control: any HelperChargeControl,
@@ -92,12 +123,19 @@ public final class HelperXPCServer: @unchecked Sendable {
             uptime: uptime,
             activationHistory: activationHistory,
             events: { event in
-                if case .sessionRevoked(let id) = event {
-                    registry.sessionRevoked(id)
-                }
+                registry.handle(event)
                 events(event)
             }
         )
+        self.init(engine: engine, registry: registry, listener: listener, clientRequirement: clientRequirement)
+    }
+
+    private init(
+        engine: HelperEngine,
+        registry: ConnectionRegistry,
+        listener: NSXPCListener,
+        clientRequirement: HelperCodeSigningRequirement
+    ) {
         self.engine = engine
         self.registry = registry
         self.listener = listener
@@ -107,6 +145,14 @@ public final class HelperXPCServer: @unchecked Sendable {
         // cannot hit NSXPC's fatal error for a malformed one.
         listener.setConnectionCodeSigningRequirement(clientRequirement.text)
         listener.delegate = delegate
+    }
+
+    /// An event of the engine, from the host's event sink: the server closes
+    /// the connection of a session the engine revokes, once the reply to the
+    /// request that caused it has been sent. Returns at once; it never calls
+    /// into the engine.
+    public func handle(_ event: HelperEvent) {
+        registry.handle(event)
     }
 
     deinit {
@@ -121,20 +167,66 @@ public final class HelperXPCServer: @unchecked Sendable {
     @discardableResult
     public func start() async -> HelperStatus {
         let status = await engine.start()
-        registry.startListening(listener)
+        startListening()
         return status
     }
 
-    /// Stops serving: invalidates the listener and every connection, and
-    /// returns once each connection's request in progress has ended and its
-    /// session is invalidated (which clears what it held). Queued requests
-    /// never run. A connection that arrives meanwhile is refused. The engine
-    /// itself keeps running for the host (for example to restore defaults at
-    /// exit).
-    public func stop() async {
-        for handler in registry.stop(listener, reason: .serverStopped) {
-            await handler.finished()
+    /// Accepts connections, unless the server was stopped meanwhile. The host
+    /// calls it only once the engine has started (R2). Later calls do
+    /// nothing.
+    public func startListening() {
+        registry.startListening(listener)
+    }
+
+    /// How long ``stop()`` lets the requests already admitted finish.
+    public static let defaultStopTimeout: Duration = .seconds(5)
+
+    /// ``stop(drainingUntil:)``, cut off after `timeout`.
+    @discardableResult
+    public func stop(timeout: Duration = HelperXPCServer.defaultStopTimeout) async -> Bool {
+        await stop(drainingUntil: { try? await Task.sleep(for: timeout) })
+    }
+
+    /// Stops serving, and says whether it could do so without cutting
+    /// anything off. In order:
+    /// 1. Admits nothing more: a connection that arrives is refused, and no
+    ///    connection admits another request. The listener itself is
+    ///    invalidated only at the end, because invalidating it would also end
+    ///    the connections still draining.
+    /// 2. Lets every request already admitted run, in arrival order, and
+    ///    sends its reply, a `restoreDefaultsAndExit`'s included.
+    /// 3. On each connection, once a send barrier has confirmed that every
+    ///    reply sent before it was sent, invalidates the connection, then its
+    ///    session (which clears what it held).
+    ///
+    /// A request is *admitted* once it is on its connection's queue; one that
+    /// arrives after the stop began is not, gets no reply, and its client
+    /// sees the connection end. A *sent* reply is one the transport confirmed
+    /// sending; that the client received it is not confirmed, because the
+    /// protocol has no acknowledgement. A connection that ends on its own
+    /// meanwhile (its client goes away, the engine revokes its session)
+    /// ends as it always does.
+    ///
+    /// Returns true once all of that is done for every connection, every
+    /// session is invalidated, and the stop cut nothing off. If `deadline`
+    /// returns first, it closes what remains at once, so admitted requests
+    /// may never run and a reply may be cut off, and returns false without
+    /// waiting for a request still in the engine. The engine keeps running
+    /// for the host (for example to restore defaults at exit).
+    public func stop(drainingUntil deadline: @escaping @Sendable () async -> Void) async -> Bool {
+        let handlers = registry.beginDrain(listener)
+        let drained = await StopRace.run(deadline: deadline) {
+            for handler in handlers {
+                await handler.finished()
+            }
         }
+        if !drained {
+            for handler in handlers {
+                handler.close(.serverStopped)
+            }
+        }
+        registry.invalidateListener(listener)
+        return drained
     }
 
     /// The number of client connections being served (accepted, and not yet
@@ -156,6 +248,11 @@ public final class HelperXPCServer: @unchecked Sendable {
     /// For tests.
     var queuedRequestCount: Int {
         registry.handlers.reduce(0) { $0 + $1.queuedCount }
+    }
+
+    /// True once a stop has begun: nothing more is admitted. For tests.
+    var hasStopped: Bool {
+        registry.isStopped
     }
 
     /// Connections not yet closed (a closed one may still finish its request
@@ -257,6 +354,7 @@ final class ConnectionRegistry: @unchecked Sendable {
     let audit: AuditChannel
     private let lock = NSLock()
     private var state = State.idle
+    private var isListenerInvalidated = false
     private var connections: [ObjectIdentifier: HelperXPCConnectionHandler] = [:]
     private var bySession: [HelperSessionID: HelperXPCConnectionHandler] = [:]
 
@@ -273,8 +371,9 @@ final class ConnectionRegistry: @unchecked Sendable {
         }
     }
 
-    /// Stops for good: invalidates the listener and closes every connection.
-    /// Returns them, so the caller can wait for their sessions to end.
+    /// Stops for good: invalidates the listener and closes every connection
+    /// at once (queued requests never run). Returns them, so the caller can
+    /// wait for their sessions to end.
     ///
     /// A listener that was never resumed is resumed first, with the state
     /// already stopped, so it refuses every client and then ends: invalidated
@@ -287,12 +386,14 @@ final class ConnectionRegistry: @unchecked Sendable {
             case .idle:
                 state = .stopped
                 listener.resume()
-                listener.invalidate()
             case .listening:
                 state = .stopped
-                listener.invalidate()
             case .stopped:
                 break
+            }
+            if !isListenerInvalidated {
+                isListenerInvalidated = true
+                listener.invalidate()
             }
             return closeAllLocked(reason: reason)
         }
@@ -301,6 +402,42 @@ final class ConnectionRegistry: @unchecked Sendable {
     /// Closes every connection; the listener keeps accepting.
     func closeAll(reason: HelperXPCCloseReason) -> [HelperXPCConnectionHandler] {
         lock.withLock { closeAllLocked(reason: reason) }
+    }
+
+    /// Stops for good, draining: from now on every connection that arrives
+    /// is refused (a listener never resumed is resumed for that, as in
+    /// ``stop(_:reason:)``), and every connection admits nothing more while
+    /// it finishes the requests it has. The listener stays valid, because
+    /// invalidating it would end those connections too; the caller
+    /// invalidates it once they have drained (``invalidateListener(_:)``).
+    /// Under the lock, so a connection accepted meanwhile is either among
+    /// those returned or refused.
+    func beginDrain(_ listener: NSXPCListener) -> [HelperXPCConnectionHandler] {
+        lock.withLock {
+            switch state {
+            case .idle:
+                state = .stopped
+                listener.resume()
+            case .listening:
+                state = .stopped
+            case .stopped:
+                break
+            }
+            let handlers = Array(connections.values)
+            for handler in handlers {
+                handler.beginDrain()
+            }
+            return handlers
+        }
+    }
+
+    /// Invalidates the listener of a stopped server, once.
+    func invalidateListener(_ listener: NSXPCListener) {
+        lock.withLock {
+            guard state == .stopped, !isListenerInvalidated else { return }
+            isListenerInvalidated = true
+            listener.invalidate()
+        }
     }
 
     private func closeAllLocked(reason: HelperXPCCloseReason) -> [HelperXPCConnectionHandler] {
@@ -360,6 +497,10 @@ final class ConnectionRegistry: @unchecked Sendable {
         lock.withLock { connections.count }
     }
 
+    var isStopped: Bool {
+        lock.withLock { state == .stopped }
+    }
+
     /// For tests: runs on the connection's queue after a handler has decided
     /// (and recorded) an overflow close, before it carries the close out.
     var onOverflowDecided: (@Sendable () -> Void)? {
@@ -373,8 +514,10 @@ final class ConnectionRegistry: @unchecked Sendable {
         onOverflowDecided?()
     }
 
-    /// From the engine's event sink, before the revoking request returns.
-    func sessionRevoked(_ session: HelperSessionID) {
+    /// From the engine's event sink, before the call that caused the event
+    /// returns.
+    func handle(_ event: HelperEvent) {
+        guard case .sessionRevoked(let session) = event else { return }
         let handler = lock.withLock { bySession[session] }
         handler?.noteRevocation()
     }
@@ -408,6 +551,8 @@ final class HelperXPCConnectionHandler: @unchecked Sendable {
     private var isRunning = false
     /// The engine revoked the session while a request was running.
     private var isRevocationPending = false
+    /// A stop is draining: no request is admitted, the queued ones run.
+    private var isDraining = false
     private var consumer: Task<Void, Never>?
 
     init(connection: NSXPCConnection, engine: HelperEngine, registry: ConnectionRegistry) {
@@ -429,24 +574,26 @@ final class HelperXPCConnectionHandler: @unchecked Sendable {
     /// One more than ``HelperXPCServer/maximumQueuedRequests`` waiting closes
     /// the connection: the client broke the protocol. The overflow is
     /// recorded as the close in the same lock that detects it, so the
-    /// consumer cannot start another request after the violation.
+    /// consumer cannot start another request after the violation. While a
+    /// stop drains, nothing is admitted. An admitted request is put on the
+    /// queue under the same lock, so a drain that begins meanwhile either
+    /// finds it on the queue or refuses it.
     func enqueue(_ request: @escaping Request) {
         enum Admission {
             case accepted, refused
             case overflow(Closing)
         }
         let admission: Admission = lock.withLock {
-            guard closeReason == nil else { return .refused }
+            guard closeReason == nil, !isDraining else { return .refused }
             guard queued < HelperXPCServer.maximumQueuedRequests else {
                 return .overflow(closeLocked(.requestQueueFull))
             }
             queued += 1
+            continuation.yield(request)
             return .accepted
         }
         switch admission {
-        case .accepted:
-            continuation.yield(request)
-        case .refused:
+        case .accepted, .refused:
             break
         case .overflow(let closing):
             registry.overflowDecided()
@@ -476,6 +623,16 @@ final class HelperXPCConnectionHandler: @unchecked Sendable {
         }
         if let closing {
             finishClosing(closing, afterSentReplies: true)
+        }
+    }
+
+    /// A stop begins: nothing more is admitted, and the consumer ends once it
+    /// has run every request already queued.
+    func beginDrain() {
+        lock.withLock {
+            guard closeReason == nil, !isDraining else { return }
+            isDraining = true
+            continuation.finish()
         }
     }
 
@@ -558,6 +715,33 @@ final class HelperXPCConnectionHandler: @unchecked Sendable {
         }
     }
 
+    /// After a drain has run every queued request: records the close, so
+    /// nothing else can close the connection meanwhile, and returns the
+    /// connection to invalidate once its replies are sent. Nil if the
+    /// connection was closed otherwise.
+    private func finishDrain() -> NSXPCConnection? {
+        lock.withLock {
+            guard isDraining, closeReason == nil else { return nil }
+            closeReason = .serverStopped
+            defer { connection = nil }
+            return connection
+        }
+    }
+
+    /// Invalidates `connection` once a send barrier has confirmed that the
+    /// replies sent before it were sent, and returns then.
+    private static func invalidateAfterSentReplies(_ connection: NSXPCConnection) async {
+        // `NSXPCConnection` is not Sendable; the block only invalidates it,
+        // which NSXPC allows from any thread.
+        nonisolated(unsafe) let closed = connection
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            closed.scheduleSendBarrierBlock {
+                closed.invalidate()
+                continuation.resume()
+            }
+        }
+    }
+
     private func run() async {
         let session = await engine.openSession()
         let isOpen = lock.withLock {
@@ -576,6 +760,11 @@ final class HelperXPCConnectionHandler: @unchecked Sendable {
                     break
                 }
             }
+        }
+        // A drain: every queued request has run and replied. The connection
+        // ends once those replies are sent, and the session after it.
+        if let connection = finishDrain() {
+            await Self.invalidateAfterSentReplies(connection)
         }
         // Already done by `close` if the session was open then; harmless
         // twice.
@@ -636,5 +825,70 @@ private final class HelperXPCExportedObject: NSObject, CellKeeperHelperXPCProtoc
 
     func restoreDefaultsAndExit(reply: @escaping HelperXPCStatusReplyBlock) {
         handler?.enqueue { HelperXPCWire.send(await $0.restoreDefaultsAndExit(), to: reply) }
+    }
+}
+
+// MARK: - Stop
+
+/// Races a stop's drain against its deadline.
+enum StopRace {
+    /// Runs `operation` and `deadline` in tasks of their own; true if
+    /// `operation` returned first. The loser is cancelled, but an operation
+    /// waiting for the engine may keep running.
+    static func run(
+        deadline: @escaping @Sendable () async -> Void,
+        _ operation: @escaping @Sendable () async -> Void
+    ) async -> Bool {
+        let race = Race()
+        return await withCheckedContinuation { continuation in
+            race.begin(continuation)
+            let work = Task {
+                await operation()
+                race.finish(true)
+            }
+            let timer = Task {
+                await deadline()
+                race.finish(false)
+            }
+            race.adopt([work, timer])
+        }
+    }
+
+    /// The first side to finish resumes the caller; both tasks are then
+    /// cancelled.
+    private final class Race: @unchecked Sendable {
+        private let lock = NSLock()
+        private var continuation: CheckedContinuation<Bool, Never>?
+        private var isFinished = false
+        private var tasks: [Task<Void, Never>] = []
+
+        func begin(_ continuation: CheckedContinuation<Bool, Never>) {
+            lock.withLock { self.continuation = continuation }
+        }
+
+        func adopt(_ tasks: [Task<Void, Never>]) {
+            let cancelNow = lock.withLock {
+                self.tasks = tasks
+                return isFinished
+            }
+            if cancelNow {
+                for task in tasks {
+                    task.cancel()
+                }
+            }
+        }
+
+        func finish(_ outcome: Bool) {
+            let (continuation, tasks) = lock.withLock { () -> (CheckedContinuation<Bool, Never>?, [Task<Void, Never>]) in
+                guard !isFinished else { return (nil, []) }
+                isFinished = true
+                defer { self.continuation = nil }
+                return (self.continuation, self.tasks)
+            }
+            continuation?.resume(returning: outcome)
+            for task in tasks {
+                task.cancel()
+            }
+        }
     }
 }

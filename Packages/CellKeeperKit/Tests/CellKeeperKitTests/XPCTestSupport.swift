@@ -93,15 +93,65 @@ final class XPCEventLog: @unchecked Sendable {
 
 /// Collects the server's connection events.
 final class ConnectionEventLog: @unchecked Sendable {
+    private struct Waiter {
+        let id: Int
+        let matches: @Sendable (HelperXPCConnectionEvent) -> Bool
+        let continuation: CheckedContinuation<Bool, Never>
+    }
+
     private let lock = NSLock()
     private var recorded: [HelperXPCConnectionEvent] = []
+    private var waiters: [Waiter] = []
+    private var nextWaiter = 0
 
     var events: [HelperXPCConnectionEvent] {
         lock.withLock { recorded }
     }
 
     func record(_ event: HelperXPCConnectionEvent) {
-        lock.withLock { recorded.append(event) }
+        let matched = lock.withLock { () -> [Waiter] in
+            recorded.append(event)
+            let matched = waiters.filter { $0.matches(event) }
+            waiters.removeAll { $0.matches(event) }
+            return matched
+        }
+        for waiter in matched {
+            waiter.continuation.resume(returning: true)
+        }
+    }
+
+    /// Waits until an event that `matches` has been recorded, woken by its
+    /// arrival, for at most `seconds`. Connection events reach the host
+    /// asynchronously, so a test waits for them rather than expecting them
+    /// when a call returns.
+    func waitFor(within seconds: Double = 10, _ matches: @escaping @Sendable (HelperXPCConnectionEvent) -> Bool) async -> Bool {
+        let id = lock.withLock {
+            nextWaiter += 1
+            return nextWaiter
+        }
+        let timeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(seconds))
+            self?.expire(id)
+        }
+        defer { timeout.cancel() }
+        return await withCheckedContinuation { continuation in
+            let found = lock.withLock { () -> Bool in
+                if recorded.contains(where: matches) { return true }
+                waiters.append(Waiter(id: id, matches: matches, continuation: continuation))
+                return false
+            }
+            if found {
+                continuation.resume(returning: true)
+            }
+        }
+    }
+
+    private func expire(_ id: Int) {
+        let waiter = lock.withLock { () -> Waiter? in
+            guard let index = waiters.firstIndex(where: { $0.id == id }) else { return nil }
+            return waiters.remove(at: index)
+        }
+        waiter?.continuation.resume(returning: false)
     }
 
     func closeReason(of session: HelperSessionID) -> HelperXPCCloseReason? {
@@ -491,5 +541,48 @@ final class RawStatusHelper: NSObject, NSXPCListenerDelegate, CellKeeperHelperXP
 
     func restoreDefaultsAndExit(reply: @escaping HelperXPCStatusReplyBlock) {
         reply(status)
+    }
+}
+
+/// Opened by the test; until then, `wait()` suspends (never blocks a thread).
+final class XPCGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let openNow = lock.withLock { () -> Bool in
+                if isOpen { return true }
+                waiters.append(continuation)
+                return false
+            }
+            if openNow {
+                continuation.resume()
+            }
+        }
+    }
+
+    func open() {
+        let waiting = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            isOpen = true
+            defer { waiters = [] }
+            return waiters
+        }
+        for waiter in waiting {
+            waiter.resume()
+        }
+    }
+}
+
+/// Lets an engine's event sink reach a server made after the engine, as a
+/// host's sink does.
+final class ServerBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var held: HelperXPCServer?
+
+    var server: HelperXPCServer? {
+        get { lock.withLock { held } }
+        set { lock.withLock { held = newValue } }
     }
 }

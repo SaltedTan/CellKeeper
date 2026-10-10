@@ -179,6 +179,40 @@ struct XPCHelperServerTests {
 
     // MARK: - Lifecycle
 
+    @Test("A server that serves the host's engine closes a revoked session's connection when the host's sink passes the engine's events on")
+    func servingHostEngine() async throws {
+        let box = ServerBox()
+        let clock = XPCTestClock()
+        let engine = HelperEngine(
+            control: SimulatedChargeControl(),
+            power: SafePower(clock: clock),
+            build: 42,
+            uptime: { clock.uptime },
+            events: { box.server?.handle($0) }
+        )
+        let listener = NSXPCListener.anonymous()
+        let connections = ConnectionEventLog()
+        let server = HelperXPCServer(serving: engine, listener: listener, clientRequirement: try ownRequirement(), connectionEvents: { connections.record($0) })
+        box.server = server
+        #expect(await engine.start() == .ok)
+        server.startListening()
+
+        let client = HelperXPCClient(destination: .endpoint(listener.endpoint), helperRequirement: try ownRequirement(), timeout: setupTimeout)
+        let hello = try await client.hello(clientProtocolVersion: HelperProtocolVersion.current)
+        #expect(hello.status == .ok)
+        let session = HelperSessionID(rawValue: Int(hello.sessionID))
+        // The clock stands still: 10 requests within the budget, and the
+        // 21st in a row beyond it (the 31st request) revokes the session.
+        for _ in 2...30 {
+            _ = try await client.readState()
+        }
+        #expect(try await client.readState().status == .rateLimited)
+        let revoked = await connections.waitFor { $0 == .closed(session, reason: .revoked) }
+        #expect(revoked, "connection events: \(connections.events)")
+        #expect(connectionFailures.contains(await clientFailure { _ = try await client.readState() }))
+        _ = await server.stop()
+    }
+
     @Test("Stopping the server ends every session and refuses new connections")
     func stop() async throws {
         let control = SimulatedChargeControl()
@@ -188,12 +222,17 @@ struct XPCHelperServerTests {
         #expect(try await client.acquireOrRenewLease(control: 1, seconds: 900).status == .ok)
         #expect(try await client.setControl(control: 1, active: true) == .ok)
 
-        await rig.server.stop()
+        let stopped = await rig.server.stop()
+        #expect(stopped)
         #expect(control.activeControls.isEmpty)
         #expect(rig.server.connectionCount == 0)
         #expect(await eventually { client.transportFailure != nil })
         let session = HelperSessionID(rawValue: Int(hello.sessionID))
-        #expect(await eventually { rig.connections.closeReason(of: session) == .serverStopped })
+        // The close is reported to the host asynchronously, not as part of
+        // the stop: wait for the event itself, and show every event if it
+        // never comes.
+        let closed = await rig.connections.waitFor { $0 == .closed(session, reason: .serverStopped) }
+        #expect(closed, "connection events: \(rig.connections.events)")
 
         let late = try rig.client()
         let failure = await clientFailure { _ = try await late.hello(clientProtocolVersion: HelperProtocolVersion.current) }
@@ -207,7 +246,7 @@ struct XPCHelperServerTests {
             let rig = try await XPCRig(start: false)
             let server = rig.server
             async let started = server.start()
-            async let stopped: Void = server.stop()
+            async let stopped = server.stop()
             _ = await (started, stopped)
             // Whichever came first, a stopped server serves nothing more.
             await server.start()
@@ -295,6 +334,77 @@ struct XPCHelperServerTests {
 /// their timing simple.
 @Suite("Helper NSXPC server with a stalled engine", .serialized)
 struct XPCStalledEngineTests {
+    @Test("A stop drains: the request in progress and the one queued behind it run and are answered before the connection and the session end; a request sent once the stop began is not admitted; the stop returns true")
+    func stopDrains() async throws {
+        let control = StallingChargeControl()
+        defer { control.release() }
+        let rig = try await XPCRig(control: control)
+        let client = try rig.client()
+        let hello = try await client.hello(clientProtocolVersion: HelperProtocolVersion.current)
+        let session = HelperSessionID(rawValue: Int(hello.sessionID))
+        #expect(try await client.acquireOrRenewLease(control: 1, seconds: 900).status == .ok)
+
+        control.stallNextReadBack()
+        let inProgress = Task { try? await client.readState().status }
+        try #require(await eventually { control.isStalled })
+        let queued = Task { try? await client.acquireOrRenewLease(control: 1, seconds: 600).status }
+        try #require(await eventually { rig.server.queuedRequestCount == 1 })
+
+        let never = XPCGate()
+        let server = rig.server
+        let stopping = Task { await server.stop(drainingUntil: { await never.wait() }) }
+        try #require(await eventually { server.hasStopped })
+        // Sent once the stop began: not admitted, never run.
+        let late = Task { await clientFailure { _ = try await client.acquireOrRenewLease(control: 1, seconds: 700) } }
+        #expect(control.isStalled)
+
+        control.release()
+        let drained = await stopping.value
+        #expect(drained)
+        #expect(await inProgress.value == .ok)
+        #expect(await queued.value == .ok)
+        #expect(rig.events.contains(.leaseRenewed(session, .chargingInhibited, seconds: 600)))
+        #expect(rig.events.contains(.sessionInvalidated(session)))
+        #expect(connectionFailures.contains(await late.value))
+        #expect(!rig.events.contains(.leaseRenewed(session, .chargingInhibited, seconds: 700)))
+        let closed = await rig.connections.waitFor { $0 == .closed(session, reason: .serverStopped) }
+        #expect(closed, "connection events: \(rig.connections.events)")
+        never.open()
+    }
+
+    @Test("A stop that cannot drain by its deadline cuts the connection off, runs nothing queued, and returns false")
+    func stopCutOff() async throws {
+        let control = StallingChargeControl()
+        defer { control.release() }
+        let rig = try await XPCRig(control: control)
+        let client = try rig.client()
+        let hello = try await client.hello(clientProtocolVersion: HelperProtocolVersion.current)
+        let session = HelperSessionID(rawValue: Int(hello.sessionID))
+        #expect(try await client.acquireOrRenewLease(control: 1, seconds: 900).status == .ok)
+
+        control.stallNextReadBack()
+        let inProgress = Task { await clientFailure { _ = try await client.readState() } }
+        try #require(await eventually { control.isStalled })
+        let queued = Task { await clientFailure { _ = try await client.acquireOrRenewLease(control: 1, seconds: 600) } }
+        try #require(await eventually { rig.server.queuedRequestCount == 1 })
+
+        let deadline = XPCGate()
+        let server = rig.server
+        let stopping = Task { await server.stop(drainingUntil: { await deadline.wait() }) }
+        try #require(await eventually { server.hasStopped })
+        deadline.open()
+        // It returns without waiting for the request still in the engine.
+        let drained = await stopping.value
+        #expect(!drained)
+        #expect(control.isStalled)
+
+        control.release()
+        #expect(connectionFailures.contains(await inProgress.value))
+        #expect(connectionFailures.contains(await queued.value))
+        #expect(await eventually { rig.events.contains(.sessionInvalidated(session)) })
+        #expect(!rig.events.contains(.leaseRenewed(session, .chargingInhibited, seconds: 600)))
+    }
+
     @Test("A client that disconnects while a request is blocked: that request finishes, nothing queued behind it runs, and the session ends right after")
     func disconnectWhileBlocked() async throws {
         let control = StallingChargeControl()
