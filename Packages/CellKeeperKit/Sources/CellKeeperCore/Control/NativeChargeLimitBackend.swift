@@ -386,7 +386,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
 
     /// Forgets the cached result of the shortcut check, so the next
     /// capability check looks again (for example after the user created it).
-    public func recheckAvailability() {
+    public func recheckAvailability() async {
         shortcutConfirmedAtUptime = nil
     }
 

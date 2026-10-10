@@ -44,11 +44,19 @@ import Foundation
 /// - While CellKeeper holds a control through a live session, a
 ///   ``LeaseActivity`` keeps the app from being napped, so evaluations renew
 ///   the lease on time.
+/// - With a ``MacOSChargeLimitMonitor`` (on a Mac that has macOS's Charge
+///   Limit), every mode but `.normal` is withheld while macOS's own Charge
+///   Limit is on or its report cannot be read and recognised, so two limits
+///   never compete (safety precondition 7). The availability is kept: the
+///   backend is fine, macOS is in the way. CellKeeper never turns macOS's
+///   limit off itself.
 ///
 /// The controller serialises all calls into it.
 public actor HelperChargingBackend: ChargingBackend {
     public nonisolated let descriptor: BackendDescriptor
     public nonisolated let transport: any HelperTransport
+    /// Watches macOS's own Charge Limit; nil on a Mac without it.
+    public nonisolated let macOSChargeLimit: MacOSChargeLimitMonitor?
 
     private let uptime: @Sendable () -> TimeInterval
     private let pause: @Sendable (TimeInterval) async -> Void
@@ -133,15 +141,19 @@ public actor HelperChargingBackend: ChargingBackend {
     ///     helper's request budget.
     ///   - activity: told when CellKeeper starts and stops holding a control
     ///     through a live session.
+    ///   - macOSChargeLimit: watches macOS's own Charge Limit; nil where the
+    ///     Mac has none, so nothing is withheld for it.
     public init(
         descriptor: BackendDescriptor,
         transport: any HelperTransport,
         uptime: @escaping @Sendable () -> TimeInterval = HelperEngine.continuousUptime,
         pause: @escaping @Sendable (TimeInterval) async -> Void = { try? await Task.sleep(for: .seconds($0)) },
-        activity: any LeaseActivity = ProcessLeaseActivity()
+        activity: any LeaseActivity = ProcessLeaseActivity(),
+        macOSChargeLimit: MacOSChargeLimitMonitor? = nil
     ) {
         self.descriptor = descriptor
         self.transport = transport
+        self.macOSChargeLimit = macOSChargeLimit
         self.uptime = uptime
         self.pause = pause
         self.activity = activity
@@ -160,7 +172,29 @@ public actor HelperChargingBackend: ChargingBackend {
 
     // MARK: - ChargingBackend
 
+    /// The helper's capabilities, with macOS's own Charge Limit attached
+    /// when a monitor watches it. While that limit may be limiting charging
+    /// (it is on, or its report cannot be read and recognised), every mode
+    /// but `.normal` is withheld, as for the helper's own interlocks, and
+    /// the availability is kept. The monitor reuses a recent reading, so the
+    /// several checks of one evaluation read macOS's limit at most once.
     public func capabilities() async -> ControlCapabilities {
+        var capabilities = await helperCapabilities()
+        guard let macOSChargeLimit else { return capabilities }
+        let status = await macOSChargeLimit.status()
+        if status.isLimiting {
+            capabilities = capabilities.withoutRestrictingModes
+        }
+        capabilities.macOSChargeLimit = status
+        return capabilities
+    }
+
+    /// Reads macOS's Charge Limit again, at the user's request.
+    public func recheckAvailability() async {
+        await macOSChargeLimit?.refresh()
+    }
+
+    private func helperCapabilities() async -> ControlCapabilities {
         defer { updateActivity() }
         let introduction: HelperHelloReply
         let state: HelperStateReply
@@ -366,6 +400,11 @@ public actor HelperChargingBackend: ChargingBackend {
     /// active, set by CellKeeper.
     private func hold(_ target: HelperControl, as mode: ChargeControlMode) async throws -> ControlOutcome {
         clearNotices()
+        // Withheld by the capabilities already; checked again on the latest
+        // reading, so nothing is ever set while macOS's limit may be on.
+        if let macOSChargeLimit, await macOSChargeLimit.status().isLimiting {
+            throw BackendError.unsupportedMode(mode)
+        }
         let introduction = try await introduced()
         guard introduction.capabilities.contains(target.requiredCapability) else {
             throw BackendError.unsupportedMode(mode)

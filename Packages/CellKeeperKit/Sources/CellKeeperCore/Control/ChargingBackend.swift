@@ -95,6 +95,12 @@ public struct ControlCapabilities: Sendable, Equatable {
     /// Modes the backend can apply. `.normal` is always included when the
     /// backend accepts requests, so that the fail-safe mode is reachable.
     public private(set) var supportedModes: Set<ChargeControlMode>
+    /// macOS's own Charge Limit, as last read by a backend that switches
+    /// charging itself and checks it (safety precondition 7); nil for
+    /// backends that do not check it. While it ``MacOSChargeLimitStatus/isLimiting``,
+    /// such a backend offers only `.normal`, keeps its availability, and the
+    /// policy restricts nothing.
+    public var macOSChargeLimit: MacOSChargeLimitStatus?
 
     /// Capabilities of a backend that switches charging itself.
     public init(availability: ControlAvailability, supportedModes: Set<ChargeControlMode>) {
@@ -128,6 +134,15 @@ public struct ControlCapabilities: Sendable, Equatable {
 
     public func supports(_ mode: ChargeControlMode) -> Bool {
         availability.acceptsRequests && supportedModes.contains(mode)
+    }
+
+    /// The same capabilities without any mode other than `.normal`: what a
+    /// backend that switches charging itself offers while macOS's own
+    /// Charge Limit may be limiting charging. The availability is kept.
+    public var withoutRestrictingModes: ControlCapabilities {
+        var capabilities = self
+        capabilities.supportedModes = supportedModes.intersection([.normal])
+        return capabilities
     }
 
     /// The limits a native-limit backend can set, ascending; empty otherwise.
@@ -418,6 +433,12 @@ public protocol ChargingBackend: Sendable {
     /// macOS's defaults now. Default: nothing.
     func resetAfterFault() async throws
 
+    /// The user asked CellKeeper to check again (for example after creating
+    /// the shortcut, or turning macOS's Charge Limit off): the next
+    /// ``capabilities()`` must not rely on what the backend cached about
+    /// what it depends on. Default: nothing.
+    func recheckAvailability() async
+
     /// State of macOS's Charge Limit for native-limit backends; nil for
     /// others. Returns what is already known, without new I/O.
     func nativeLimitStatus() async -> NativeLimitStatus?
@@ -431,6 +452,7 @@ extension ChargingBackend {
     public func reportedModeOrigin() async -> ReportedModeOrigin? { nil }
     public func renewHold(_ mode: ChargeControlMode) async throws {}
     public func resetAfterFault() async throws {}
+    public func recheckAvailability() async {}
     public func nativeLimitStatus() async -> NativeLimitStatus? { nil }
     public func takeAdoptedLimitChange() async -> AdoptedLimitChange? { nil }
 }

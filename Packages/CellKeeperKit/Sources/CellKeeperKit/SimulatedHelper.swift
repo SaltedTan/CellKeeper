@@ -79,17 +79,25 @@ extension HelperChargingBackend {
     /// ``InProcessHelperTransport``. While CellKeeper holds a control,
     /// `activity` keeps the app from being napped.
     ///
+    /// On a Mac that has macOS's own Charge Limit, the backend restricts
+    /// nothing while that limit is on or cannot be read (safety
+    /// precondition 7), as the real helper backend will.
+    ///
     /// - Parameters:
     ///   - power: the helper's power reading; the system's by default. It
     ///     must stamp its readings with `uptime`.
     ///   - uptime: one monotonic clock for the engine, the power reading and
     ///     the backend.
+    ///   - macOSChargeLimit: watches macOS's own Charge Limit; by default
+    ///     through `pmset -g battlimit` (read-only) on a Mac that has the
+    ///     Charge Limit, and nil on one that does not.
     public static func simulatedHelper(
         power: (any HelperPowerReading)? = nil,
         tickInterval: Duration = .seconds(5),
         uptime: @escaping @Sendable () -> TimeInterval = HelperEngine.continuousUptime,
         pause: @escaping @Sendable (TimeInterval) async -> Void = { try? await Task.sleep(for: .seconds($0)) },
-        activity: any LeaseActivity = ProcessLeaseActivity()
+        activity: any LeaseActivity = ProcessLeaseActivity(),
+        macOSChargeLimit: MacOSChargeLimitMonitor? = MacOSChargeLimitMonitor.system()
     ) -> HelperChargingBackend {
         HelperChargingBackend(
             descriptor: BackendDescriptor(
@@ -107,7 +115,8 @@ extension HelperChargingBackend {
             ),
             uptime: uptime,
             pause: pause,
-            activity: activity
+            activity: activity,
+            macOSChargeLimit: macOSChargeLimit
         )
     }
 

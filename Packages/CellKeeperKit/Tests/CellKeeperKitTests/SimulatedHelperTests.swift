@@ -114,7 +114,8 @@ struct SimulatedHelperTests {
         return HelperChargingBackend.simulatedHelper(
             power: CountingPower(uptime: uptime),
             uptime: uptime,
-            pause: { clock.advance(by: $0) }
+            pause: { clock.advance(by: $0) },
+            macOSChargeLimit: nil
         )
     }
 
@@ -134,7 +135,7 @@ struct SimulatedHelperTests {
     @Test("The engine is ticked while the backend lives, and released with it")
     func noLeakedTicking() async throws {
         let power = CountingPower(uptime: HelperEngine.continuousUptime)
-        var backend: HelperChargingBackend? = HelperChargingBackend.simulatedHelper(power: power, tickInterval: .milliseconds(5))
+        var backend: HelperChargingBackend? = HelperChargingBackend.simulatedHelper(power: power, tickInterval: .milliseconds(5), macOSChargeLimit: nil)
         let engine = WeakReference((backend?.transport as? InProcessHelperTransport)?.engine)
         #expect(engine.object != nil)
         _ = try await backend?.setMode(.inhibitCharging)
@@ -167,5 +168,56 @@ struct SimulatedHelperTests {
         #expect(await backend.capabilities().supportedModes == [.normal, .inhibitCharging])
         await transport.systemDidWake()
         #expect(await backend.capabilities().supportedModes == ChargeControlMode.chargingModes)
+    }
+}
+
+/// macOS's Charge Limit report, set by the test; never runs pmset.
+final class StubChargeLimitReader: ChargeLimitReading, @unchecked Sendable {
+    private let lock = NSLock()
+    private var reading: NativeChargeLimitReading
+
+    init(_ reading: NativeChargeLimitReading) {
+        self.reading = reading
+    }
+
+    func readChargeLimit() async throws -> NativeChargeLimitReading {
+        lock.withLock { reading }
+    }
+}
+
+@Suite("Simulated helper and macOS's Charge Limit")
+struct SimulatedHelperCoexistenceTests {
+    @Test("Only a Mac with macOS's Charge Limit gets a monitor, and making one reads nothing")
+    func monitorOnlyWithTheFeature() async {
+        #expect(MacOSChargeLimitMonitor.system(featureIssue: "macOS's Charge Limit needs a Mac with Apple silicon.") == nil)
+        let monitor = MacOSChargeLimitMonitor.system(featureIssue: nil)
+        #expect(monitor != nil)
+        let lastStatus = await monitor?.lastStatus
+        #expect(lastStatus == nil)
+    }
+
+    @Test("While macOS's Charge Limit is on, the Simulated helper stays Simulated but offers only normal charging")
+    func withheldWhileOn() async throws {
+        let monitor = MacOSChargeLimitMonitor(reader: StubChargeLimitReader(.limit(80)))
+        let backend = HelperChargingBackend.simulatedHelper(power: CountingPower(uptime: HelperEngine.continuousUptime), macOSChargeLimit: monitor)
+        let capabilities = await backend.capabilities()
+        #expect(capabilities.availability == .simulated)
+        #expect(capabilities.supportedModes == [.normal])
+        #expect(capabilities.macOSChargeLimit?.reportedLimit == 80)
+        #expect(capabilities.macOSChargeLimit?.isLimiting == true)
+        await #expect(throws: BackendError.unsupportedMode(.inhibitCharging)) {
+            try await backend.setMode(.inhibitCharging)
+        }
+    }
+
+    @Test("With macOS's Charge Limit off, the Simulated helper offers both charging modes")
+    func offeredWhileOff() async throws {
+        let monitor = MacOSChargeLimitMonitor(reader: StubChargeLimitReader(.noLimit))
+        let backend = HelperChargingBackend.simulatedHelper(power: CountingPower(uptime: HelperEngine.continuousUptime), macOSChargeLimit: monitor)
+        let capabilities = await backend.capabilities()
+        #expect(capabilities.supportedModes == ChargeControlMode.chargingModes)
+        #expect(capabilities.macOSChargeLimit?.isLimiting == false)
+        #expect(try await backend.setMode(.inhibitCharging) == .simulated)
+        #expect(try await backend.setMode(.normal) == .simulated)
     }
 }

@@ -314,11 +314,13 @@ public actor ChargeController {
         }
     }
 
-    /// Native-limit backends: looks for the shortcut again, then evaluates.
+    /// Asks the backend to check again what it depends on (the native
+    /// backend's shortcut; macOS's own Charge Limit for the helper backend,
+    /// read again at once), then evaluates.
     @discardableResult
     public func recheckBackendAvailability() async -> ControllerStatus {
         await exclusively {
-            await (backend as? NativeChargeLimitBackend)?.recheckAvailability()
+            await backend.recheckAvailability()
             await performEvaluation(.manual)
         }
     }
