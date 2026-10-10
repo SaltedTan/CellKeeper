@@ -79,10 +79,12 @@ public struct HelperDaemonEnvironment: Sendable {
 ///    if the frontend has confirmed, because only then can nothing else
 ///    change the state.
 /// 5. Only then is the exit status committed: 0 if that check passed,
-///    ``restoreNotConfirmedExitStatus`` otherwise (launchd's
-///    `KeepAlive.SuccessfulExit = false` then starts the daemon again, and
-///    the next start restores defaults first). Ticks and SIGTERM handling
-///    stay live until this point.
+///    ``restoreNotConfirmedExitStatus`` otherwise. While the job is loaded
+///    and approved, launchd's `KeepAlive.SuccessfulExit = false` starts the
+///    daemon again after a non-zero exit, and that start restores defaults
+///    first; after a removal, a bootout or a revoked approval no start
+///    follows (see the recovery procedure in `safety.md`). Ticks and
+///    SIGTERM handling stay live until this point.
 ///
 /// The deadline holds even if the engine is stuck in a call to the control
 /// or the log cannot be written. The daemon exits only from its own tasks,
@@ -121,7 +123,8 @@ public actor HelperDaemon {
     /// writing the log stops this long before the deadline.
     public static let finalCheckReserve: TimeInterval = 0.5
     /// The exit status when defaults could not be confirmed (`EX_TEMPFAIL`).
-    /// Being non-zero, it makes launchd start the daemon again.
+    /// Being non-zero, it makes launchd start the daemon again, but only
+    /// while the job is still loaded and approved.
     public static let restoreNotConfirmedExitStatus: Int32 = 75
     /// How often the engine runs its periodic checks.
     public static let tickInterval: TimeInterval = 5
@@ -458,7 +461,7 @@ public actor HelperDaemon {
         if status == 0 {
             queue.log(.notice, .lifecycle, "The frontend stopped and defaults are confirmed: exiting with status 0.")
         } else {
-            queue.log(.fault, .safety, "Defaults or the frontend's stop not confirmed: exiting with status \(status). The next start restores defaults before anything else.")
+            queue.log(.fault, .safety, "Defaults or the frontend's stop not confirmed: exiting with status \(status). If launchd starts the helper again, it restores defaults before anything else; after a removal, bootout or revoked approval, no start follows (see the recovery procedure in docs/safety.md).")
         }
         let clock = environment.clock
         let queue = queue

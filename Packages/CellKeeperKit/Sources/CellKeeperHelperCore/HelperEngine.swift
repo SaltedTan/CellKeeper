@@ -341,8 +341,9 @@ public actor HelperEngine {
     ///
     /// Host policy: after SIGTERM, call it, then keep retrying (with this
     /// or ``tick()``) about once a second until ``isSafeToExit`` or until
-    /// launchd's `ExitTimeOut` is nearly used up, then exit anyway. The next
-    /// start restores defaults before anything else (R2).
+    /// launchd's `ExitTimeOut` is nearly used up, then exit anyway. If the
+    /// helper is started again, that start restores defaults before anything
+    /// else (R2); nothing guarantees that it is.
     @discardableResult
     public func terminate() -> HelperStatus {
         defer { finishOperation() }
