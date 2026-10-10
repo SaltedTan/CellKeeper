@@ -126,7 +126,10 @@ hardware.
   hardware control: it reports that it controls nothing, writes nothing, and
   never reports hardware defaults as restored. Its logic is tested without
   registering a privileged service; installing and distributing it belong
-  to phase 4b.
+  to phase 4b. Done: the daemon host (`CellKeeperHelperDaemon`) and
+  executable, with restore at start, SIGTERM, acknowledged sleep, its own
+  power reading, the activation history file and the property list (not
+  installed or embedded). Still open: wiring in the XPC listener.
 - The `safety.md` preconditions that do not depend on the mechanism:
   debounce and dwell (6); coexistence with macOS's Charge Limit and
   Optimized Battery Charging (7); an uninstall flow that restores defaults

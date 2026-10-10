@@ -1,6 +1,6 @@
 # CellKeeper architecture
 
-Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper), and the helper's NSXPC transport, tested over an anonymous listener but not used by the app yet. Last reviewed 2026-10-10.
+Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper), the helper's NSXPC transport, tested over an anonymous listener but not used by the app yet, and the helper daemon's executable, which controls no hardware, does not serve that transport yet, and is neither installed nor embedded. Last reviewed 2026-10-10.
 
 This document describes how CellKeeper is put together and why. Research that
 informed these decisions is in [`docs/research/`](research/README.md); safety
@@ -27,7 +27,7 @@ rules are in [`docs/safety.md`](safety.md).
    actions as refused, and what macOS reports is shown separately from what
    CellKeeper wants.
 5. **Minimal machinery.** No third-party dependencies, no dependency
-   injection framework, four modules plus the app.
+   injection framework, six package modules plus the app.
 
 ## Modules
 
@@ -72,6 +72,7 @@ rules are in [`docs/safety.md`](safety.md).
 │            restore at start, exit and disconnect, read-back), HelperSession, HelperEvent       │
 │  Seams:    HelperChargeControl (SimulatedChargeControl, UnknownHardwareChargeControl),         │
 │            HelperPowerReading (the helper's own power state)                                   │
+│  Names:    HelperServiceName (launchd label and Mach service)                                  │
 └───────────────▲────────────────────────────────────────────────────────────────────────────────┘
                 │ depends on (used by Kit, and later by the daemon)
 ┌───────────────┴ CellKeeperHelperXPC (NSXPC + Security, public APIs; shared by app and daemon) ─┐
@@ -80,11 +81,22 @@ rules are in [`docs/safety.md`](safety.md).
 │  HelperXPCClient (client side: requirement, timeouts, unusable after any failure)              │
 │  HelperCodeSigningRequirement (requirements both sides place on each other)                    │
 └────────────────────────────────────────────────────────────────────────────────────────────────┘
+                  (the daemon depends on CellKeeperHelperCore only; its XPC frontend comes later)
+┌─ CellKeeperHelperDaemon (IOKit, os; never the app's modules) ──────────────────────────────────┐
+│  HelperDaemon (actor: start, ticks, SIGTERM, acknowledged sleep, exit), HelperFrontend         │
+│  (NoFrontend), DaemonPowerReading, SystemSleepNotifications, SystemTerminationSignals,         │
+│  FileActivationHistoryStore (boot session UUID), UnifiedHelperLog                              │
+│  CellKeeperHelper (executable): main.swift assembles HelperDaemonEnvironment.system and runs   │
+│  the daemon. Not embedded in the app, not registered with launchd                              │
+└────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - `Packages/CellKeeperKit` is a local Swift package (tools version 6.0, Swift
-  6 language mode, macOS 14+) with four library products and four test
-  targets. `swift test` runs every non-UI test without opening Xcode.
+  6 language mode, macOS 14+) with four library products, the helper
+  daemon's library target and executable product (`CellKeeperHelper`), and
+  five test targets. `swift test` runs every non-UI test without opening
+  Xcode. The app links only `CellKeeperKit`; the daemon is built by
+  `swift build --product CellKeeperHelper`.
 - `CellKeeper.xcodeproj` contains only the app target. It uses a
   file-system-synchronized group for `CellKeeper/`, so adding a Swift file
   needs no project edits. The project file format is pinned to
@@ -100,6 +112,11 @@ rules are in [`docs/safety.md`](safety.md).
   everything the app and the daemon both need to talk over NSXPC (see
   "Helper transport" below); `CellKeeperKit` adapts its client to the app's
   `HelperTransport`. The app does not use it yet.
+- `CellKeeperHelperDaemon` depends on `CellKeeperHelperCore` only, never on
+  `CellKeeperCore` or `CellKeeperKit`, so the root process carries none of
+  the app (D27, D58). See "Helper daemon" below. It does not use
+  `CellKeeperHelperXPC` yet: the change that wires the transport in adds
+  that dependency.
 
 Requirement → location:
 
@@ -114,7 +131,7 @@ Requirement → location:
 | Scheduler | — | Future: will feed overrides into `PolicyInput` |
 | Notifications | — | Future: driven from `ControlEvent`s |
 | Shortcuts/automation | — | Future: App Intents calling `AppModel` intents |
-| Privileged operations | `HelperEngine` (HelperCore), `HelperChargingBackend` (Core), `HelperXPCServer` / `HelperXPCClient` (HelperXPC), `XPCHelperTransport` (Kit) | Helper logic and the app's backend implemented, with a simulated control only, in process (the Simulated helper); no hardware control. The NSXPC transport with code-signing requirements on both sides is implemented and tested over an anonymous listener; the daemon and its registration are future work |
+| Privileged operations | `HelperEngine` (HelperCore), `HelperChargingBackend` (Core), `HelperXPCServer` / `HelperXPCClient` (HelperXPC), `XPCHelperTransport` (Kit), `HelperDaemon` (HelperDaemon), `CellKeeperHelper` | Helper logic and the app's backend implemented, with a simulated control only, in process (the Simulated helper); no hardware control. The NSXPC transport with code-signing requirements on both sides is implemented and tested over an anonymous listener. The daemon executable and its launchd property list exist, control nothing, and do not serve the transport yet; wiring the transport into the daemon, embedding and registration are future work |
 
 ## Data flow
 
@@ -832,8 +849,10 @@ candidates, in the order we intend to evaluate them:
 The helper's logic exists as `CellKeeperHelperCore` (below), with a
 simulated control only, and the app runs it in process as the Simulated
 helper. Its NSXPC transport exists as `CellKeeperHelperXPC` (below), tested
-inside the test process only. There is no daemon, nothing is registered
-with launchd, and there is no hardware control. Real control
+inside the test process only. The daemon executable (`CellKeeperHelper`,
+below) runs the same engine with no hardware control, but does not serve
+the transport yet. Nothing is registered with launchd, and there is no
+hardware control. Real control
 will not be enabled without the
 hardware verification protocol in research note 02 §7 and the rules in
 `safety.md`.
@@ -845,8 +864,9 @@ touch the system. It is pure Swift on Foundation: no IOKit, XPC, processes,
 files or network. The layers, from the client down:
 
 1. **Transport.** In process for the Simulated helper
-   (`InProcessHelperTransport`), and over NSXPC (`HelperXPCServer`, for the
-   daemon; see "Helper transport" below). It opens one `HelperSession` per
+   (`InProcessHelperTransport`), and over NSXPC (`HelperXPCServer`, which
+   the daemon will serve as its `HelperFrontend`; see "Helper transport"
+   and "Helper daemon" below). It opens one `HelperSession` per
    connection, forwards each request with its raw wire values, and
    invalidates the session when the connection ends. It delivers one
    connection's requests in order, one at a time; the engine itself is an
@@ -860,7 +880,7 @@ files or network. The layers, from the client down:
    only from a compiled-in, reviewed allowlist. `SimulatedChargeControl`
    (tests, contributor builds) changes nothing and says so.
    `UnknownHardwareChargeControl` has no capabilities and writes nothing; the
-   daemon will ship with it until a mechanism is verified (R12a).
+   daemon ships with it until a mechanism is verified (R12a).
 4. **`HelperPowerReading`**: the charge, external power, physical adapter
    presence (distinct from external power, because a disabled adapter makes
    the Mac report battery power) and thermal pressure, read by the helper
@@ -996,10 +1016,10 @@ Other rules:
   asynchronously; the history can be handed to the next engine
   (`HelperEngine(…, activationHistory:)`), so a relaunch, including one the
   client asks for with `restoreDefaultsAndExit`, cannot reset the limits.
-  The daemon must persist it and discard it when the boot changes. The
-  engine keeps only the latest 20 valid records it is given, found in one
-  pass, which is enough for both limits; the daemon's reader must bound
-  what it reads too.
+  The daemon persists it and discards it when the boot changes (see
+  "Helper daemon"). The engine keeps only the latest 20 valid records it is
+  given, found in one pass, which is enough for both limits; the daemon's
+  reader bounds what it reads too.
 - **Request budget.** 10 at once and 2 per second per session. Requests
   that only move toward safety are not refused by it, except the request
   that makes the session revoked, which gets `rateLimited`. A session that
@@ -1091,6 +1111,12 @@ Other rules:
   macOS. That origin is observed (it matched `kern.boottime` to the
   millisecond on macOS 27, and exceeded sleep-excluding uptime by the time
   slept), not documented, so persisted values are kept only within a boot.
+- **Its own thread (D62).** The engine runs on a serial dispatch queue of
+  its own (a custom actor executor), not on Swift's cooperative thread
+  pool. Its calls into the control are synchronous; a call that blocks
+  holds that queue's thread, never one of the pool's few threads (as many
+  as there are cores), which every other task needs, the host's shutdown
+  and sleep handling and other clients' transport included.
 
 Deliberate deviations from research note 06:
 
@@ -1114,25 +1140,28 @@ Remaining limitations:
   look exactly like a restore that set the wrong control, so the control
   counts as the engine's and the restore is retried once per tick,
   although the engine never set it.
-- Calls into the control are not bounded in time by the engine; the real
-  control and the daemon must bound them.
+- Calls into the control are not bounded in time by the engine. The real
+  control must bound them; the daemon stops waiting for a hung call where
+  it must (the sleep acknowledgement, the shutdown deadline) but cannot
+  interrupt it.
 - The engine relies on read-back alone; behavioural verification (R11, for
   example charge current after an inhibit), debounce (R14) and temperature
   dwell (R21) are not implemented.
 - A power reading that is not refreshed after a wake clears every control
   at each wake.
-- Persisting the activation history and exiting are the host's jobs.
-  Closing revoked connections and keeping each connection's requests in
-  order are the transport's (`HelperXPCServer` does both).
+- Persisting the activation history and exiting are the host's jobs (the
+  daemon does both). Closing revoked connections and keeping each
+  connection's requests in order are the transport's (`HelperXPCServer`
+  does both).
 - A blocking event sink delays the reply of the call that caused the
   events, the host's acknowledgement of sleep, and every later operation,
   for every client.
 
-Not there yet: the daemon (SMAppService, launchd, SIGTERM) and its
-registration, the daemon's own power reading and acknowledged sleep
-notifications, and any real control. The NSXPC transport and its
-code-signing requirements exist (below), but nothing serves or uses them
-outside the tests.
+Not there yet: the daemon serving the NSXPC transport, the daemon's
+registration (SMAppService) and embedding, and any real control. The NSXPC
+transport and its code-signing requirements exist (below), and so does the
+daemon with SIGTERM, acknowledged sleep and its own power reading (further
+below), but nothing serves or uses the transport outside the tests.
 
 ### Helper transport (`CellKeeperHelperXPC`)
 
@@ -1271,9 +1300,228 @@ Limitations:
   signing requirement", subsystem `com.apple.xpc`, category `connection`).
 - Calls into the control are not bounded in time on the helper's side: a
   stalled control stalls the engine for every client, whose calls then
-  time out, and, being synchronous, holds one of Swift's cooperative
-  threads while it lasts. The daemon must bound them. (The tests that
-  stall the engine on purpose run one at a time for this reason.)
+  time out. Being synchronous, it blocks the engine's own dispatch queue
+  while it lasts, not a thread of Swift's cooperative pool (D62). The
+  daemon stops waiting for such a call where it must (see "Helper
+  daemon"), but cannot interrupt it; a real control must bound its calls.
+  (The tests that stall the engine on purpose run one at a time, to keep
+  their timing simple.)
+
+### Helper daemon (`CellKeeperHelperDaemon`, `CellKeeperHelper`)
+
+`CellKeeperHelper` is the executable launchd will run as root once it is
+installed (phase 4b). Its `main.swift` only assembles
+`HelperDaemonEnvironment.system(frontend:)` with a `NoFrontend` and runs a
+`HelperDaemon`; everything else is in the `CellKeeperHelperDaemon` library,
+which depends on `CellKeeperHelperCore` only and links IOKit (D27, D58). In
+this phase it controls no hardware, serves no clients, and is neither
+embedded in the app nor registered.
+
+**Seams.** Every system dependency is a protocol with a system
+implementation and a test fake. The tests run the real engine through the
+daemon on a simulated control and a clock they move by hand, in
+`swift test`, without root, launchd or a Mach service.
+
+| Seam | System implementation | Role |
+|---|---|---|
+| `HelperChargeControl` | `UnknownHardwareChargeControl` | No capabilities, nothing written, so `hello` reports no capabilities and clients stay monitor-only (R12a). `HelperDaemonEnvironment.system` is the only public way to build the daemon's environment, and it always uses this control |
+| `HelperPowerReading` | `DaemonPowerReading` | The daemon's own read-only power state (below) |
+| `HelperDaemonClock` | `SystemDaemonClock` | `CLOCK_MONOTONIC` (`HelperEngine.continuousUptime`) for the engine and the power reading; waits until absolute deadlines on that clock (`Task.sleep` on the continuous clock) for ticks, polls and deadlines |
+| `HelperFrontend` | `NoFrontend` | Serves clients. `NoFrontend` logs, through the daemon's asynchronous log, that this build has no listener, and serves nobody |
+| `SleepNotifications` | `SystemSleepNotifications` | `IORegisterForSystemPower`, delivered on a dispatch queue |
+| `TerminationSignals` | `SystemTerminationSignals` | SIGTERM through a dispatch signal source, its default action ignored |
+| `ActivationHistoryStore` | `FileActivationHistoryStore` | The activation history file (below) |
+| `HelperDaemonLog` | `UnifiedHelperLog` | `os.Logger`, subsystem `io.github.saltedtan.CellKeeper.Helper`, categories `lifecycle`, `xpc`, `control` and `safety`; every value `.public` (nothing logged is sensitive) |
+
+**Start (R2).** `HelperDaemon.init` first handles SIGTERM (a signal that
+arrives before `run()` is held, and `run()` then shuts down before serving
+anyone), then loads the activation history saved earlier in this boot and
+builds the engine with it, so a slow disk cannot leave SIGTERM unhandled.
+`run()` then, in order: calls `engine.start()`, which restores defaults
+and reads them back before anything else is served; registers for sleep
+and wake; waits up to 0.5 s for the log, so that the start's restore is
+usually written before anyone is served, without guaranteeing it; starts
+the frontend, unless shutdown has begun meanwhile; and ticks the engine
+every 5 s. If sleep notifications cannot be registered or the frontend
+refuses to start, the daemon serves nobody and shuts down as below.
+
+**A responsive coordinator.** The daemon's actor only coordinates, and
+nothing that can block runs on it: every log line, the frontend's
+included, is only enqueued for the log writer (`DaemonEventQueue`, which
+the frontend receives as its log); the activation history is saved by the
+same writer; and the frontend's `start` and `stop`, the sleep registration
+and its removal, and the signal source's removal run off the actor. Nor
+does anything that can block run on Swift's cooperative thread pool, which
+the coordination needs (D62): the log writer (`DaemonEventWriter`) runs on
+a dispatch queue of its own, the blocking seam calls on another
+(`HelperDaemon.blocking`), and the engine on its own. So a log, a disk, a
+frontend or a control that blocks cannot keep SIGTERM from beginning the
+shutdown. Every wait carries an absolute deadline on the daemon's
+clock and works out what is left when it actually starts: a timer that
+starts late shortens its wait instead of postponing the deadline, a
+deadline already passed is not waited for, and a result that arrives
+after its deadline is not used.
+
+**Frontend.** `HelperFrontend` (`start(serving:log:)`, `stop()`) is the seam for
+the NSXPC listener: `HelperXPCServer` ("Helper transport" above) exists,
+and a follow-up wires it into `main.swift` as the daemon's frontend. Its
+contract, in the protocol's documentation: it is started
+once, only after `engine.start()` has returned, and never during shutdown;
+it checks every connection against a code-signing requirement for
+CellKeeper's app before it opens a session, and throws rather than start
+without one, in every build; it opens one session per connection, delivers
+each connection's requests in order, invalidates the session when the
+connection ends and closes the connection of a revoked session. A request
+is *accepted* once the frontend has received it from a connection, and its
+reply is *sent* once the transport has confirmed that the send completed:
+for NSXPC, a send barrier (`scheduleSendBarrierBlock`) scheduled after the
+reply has run. That confirms the send, not receipt by the client, which
+would need an acknowledgement the protocol does not have. `stop()` stops
+accepting connections and requests, waits until every accepted request has
+been answered and its reply sent (the reply to a `restoreDefaultsAndExit`
+before that client's session is invalidated), invalidates every session
+and closes every connection, and returns true only once all of that is
+done. That return is the frontend's confirmation that nothing it accepted
+can still change the engine's state. An implementation that discards queued
+requests, or invalidates connections before their replies are sent,
+returns false unless every accepted request still got its reply sent.
+`HelperXPCServer` as merged with #64 builds its own engine, and its
+`stop()` invalidates connections before draining replies and discards
+queued requests; the change that wires it in must make it serve the
+daemon's engine and drain its replies before its `stop()` may return
+true.
+
+**Shutdown (R4, D31, D59).** It begins on SIGTERM, when the engine shuts
+down at a client's request (`restoreDefaultsAndExit`; the engine's
+`shuttingDown` event is noticed as the sink receives it, so a slow log
+cannot delay it, and handled on the daemon's own task), or when a seam
+cannot start. Whatever began it, one absolute deadline, 8 s after it began
+(`ExitTimeOut`, 10 s, less a 2 s margin), bounds all of it, logging and the
+final decision included. Every wait is bounded by what is left, and a step
+with no time left is skipped. In order:
+
+1. The frontend is told to stop. The daemon waits up to 1 s for its
+   confirmation before it restores, and keeps watching for it afterwards.
+2. `terminate()`, then about once a second again, until the frontend has
+   confirmed and the engine is safe to exit, or until 1 s before the
+   deadline (a frontend that reports it could not stop cleanly ends this
+   at once).
+3. The log is written, until 0.5 s before the deadline at the latest.
+4. The final check of `isSafeToExit`, bounded by the deadline, made only if
+   the frontend has confirmed: until then a request it accepted could still
+   make a restore owed, so nothing is safe.
+5. Only now is the exit status committed: 0 if that check passed, and
+   otherwise 75 (`EX_TEMPFAIL`). launchd restarts a job that exits non-zero
+   (`KeepAlive.SuccessfulExit = false`), and the next start restores
+   defaults first. Ticks keep retrying an owed restore, and SIGTERM stays
+   handled (a second one is ignored), until this point. The decision is
+   logged, and the log waited for within what is left of the deadline.
+
+The deadline holds with a stuck engine, a log that cannot be written, or
+a timer that starts late: the daemon stops waiting and exits, though it
+cannot interrupt a call to the control. After a seam that cannot start, a
+clean exit (0) means launchd starts the daemon again only on demand, not
+in a loop.
+
+**Sleep and wake (R16, R17, precondition 13, D60).**
+`kIOMessageCanSystemSleep` is allowed at once; the daemon never vetoes
+sleep. On `kIOMessageSystemWillSleep` the daemon calls
+`engine.systemWillSleep()` and acknowledges (`IOAllowPowerChange`) only
+once it has returned, or 5 s after the announcement at the latest, with a
+fault in the log. The deadline runs from the announcement, whatever the
+engine is busy with. An unacknowledged sleep notification only delays sleep,
+by up to 30 s, and the engine's leases count sleep, so holding sleep for a
+stuck engine would buy nothing. `kIOMessageSystemHasPoweredOn` calls
+`engine.systemDidWake()`. Sleep and wake reach the engine in the order they
+happened. `IORegisterForSystemPower` does not report shutdown or restart;
+SIGTERM covers those.
+
+**Power reading (R9, R17, D45, D58).** `DaemonPowerReading` reads only
+public, read-only IOPowerSources data: the charge from the internal
+battery's `kIOPSCurrentCapacityKey` over `kIOPSMaxCapacityKey` (unknown if
+`kIOPSIsPresentKey` says the battery is absent); external power from
+`IOPSGetProvidingPowerSourceType` (AC power is external, battery power is
+not, anything else is unknown); adapter presence from
+`IOPSCopyExternalPowerAdapterDetails` by D45's rules; thermal pressure from
+`ProcessInfo.thermalState` serious or critical. Each reading is stamped
+with the uptime taken just before it. Only those three battery keys, and
+whether adapter details exist, are kept, so no identifiers are read. The
+reading repeats `SystemHelperPowerReading`'s rules on purpose, because the
+daemon must not depend on the app's modules; the one difference is that the
+app's reading consults the battery's own power source state before the
+providing source.
+
+**Activation history (D35, D61).** On every `activationRecorded`, the
+daemon's event task saves a snapshot of `engine.activationHistory` with the
+boot identifier: the boot session UUID, which the kernel generates once
+per boot (`kern.bootsessionuuid`, read with `sysctlbyname`; read-only, not
+declared in the SDK's headers, observed on macOS 27), and which must parse
+as a UUID. Nothing derived from the wall clock identifies the boot:
+`kern.boottime` moves when the calendar time is set (XNU's
+`osfmk/kern/clock.c`), so a clock step followed by a relaunch would have
+discarded valid records and reset the limits within one boot. At start, the
+saved records go to the engine only if they were saved in this boot
+session. The file is
+`/Library/Application Support/CellKeeper/Helper/activation-history.json`:
+versioned JSON (version 2) with at most the latest 20 records, written to a
+temporary file in the same directory and renamed over the old one. The
+reader opens it without following a symbolic link and without blocking,
+refuses anything but a regular file at once (a FIFO with no writer would
+otherwise hold the daemon before its start-up restore), refuses a file over
+64 KiB, and discards the whole history on any decoding problem, another
+boot, or a record whose time is negative or later than now; it keeps the
+latest 20.
+Loading never prevents start: anything unusable is logged and the engine
+starts with an empty history. A save that fails, for example when the
+daemon is run as an ordinary user who cannot write under `/Library`, is
+logged once until a save succeeds again, and the daemon carries on. Without
+a boot identifier nothing is loaded or saved; there is no fallback.
+
+**Audit log.** The engine's sink only enqueues. One task writes the
+engine's events and the daemon's own lines to unified logging, in order,
+and saves the history, so the sink returns at once (the engine waits for
+its sink before it replies, and before `systemWillSleep()` returns). The
+levels follow the Simulated helper's log: routine events (sessions opened
+and ended, lease grants and renewals, writes, activation records) at info,
+everything else at notice, and failed restores and hardware errors at
+fault. During shutdown the daemon waits for the log within the deadline
+(above). Read it with
+`/usr/bin/log show --info --predicate 'subsystem == "io.github.saltedtan.CellKeeper.Helper"'`.
+
+**launchd property list.**
+`Config/LaunchDaemons/io.github.saltedtan.CellKeeper.Helper.plist`: `Label`
+and its one `MachServices` entry are `io.github.saltedtan.CellKeeper.Helper`
+(`HelperServiceName.label` and `.machService`, in `CellKeeperHelperCore` so
+the app can share them); `BundleProgram` `Contents/MacOS/CellKeeperHelper`;
+`KeepAlive` {`SuccessfulExit`: false, `Crashed`: true}, which restarts the
+daemon after a crash or a non-zero exit and implies a run at load (research
+note 04, §1.2); `ProcessType` `Adaptive`; `ExitTimeOut` 10
+(`HelperDaemon.exitTimeout`); `AssociatedBundleIdentifiers`
+[`io.github.saltedtan.CellKeeper`]. A test reads the file and checks it
+against those constants. `HelperBuild.number`, which `hello` reports,
+equals the app's `CURRENT_PROJECT_VERSION`; a test checks that too.
+
+**Not there yet:** serving the NSXPC transport (`HelperXPCServer` as the
+daemon's frontend, with the changes above) and its wiring into
+`main.swift`;
+embedding the executable and the property list in the app bundle; signing,
+`SpawnConstraint` (it needs a team identifier) and `SMAppService`
+registration (phase 4b, issue #57); idle exit and a check that the app
+bundle still exists (research note 04, §3.5). Nothing in this repository
+registers a launchd job, installs the property list, or creates a Mach
+service.
+
+Limitations:
+
+- A SIGTERM in the first instants of the process, before the daemon's
+  initialiser handles signals, ends it at once; nothing has been done yet,
+  and the next start restores defaults.
+- A hung control call cannot be interrupted. The daemon stops waiting for
+  it to acknowledge sleep and to exit at the shutdown deadline, but
+  requests and ticks wait behind it.
+- A log that cannot be written also holds back saving the activation
+  history, which shares its task; a relaunch in the same boot would then
+  not know the latest activations.
 
 ## Known limitations
 
@@ -1335,9 +1583,11 @@ closed before a backend that changes hardware *itself* is enabled:
   handling (`IORegisterForSystemPower` with acknowledgement), per-control
   leases that lapse to `.normal`, and bounded operations (XPC timeouts with
   connection invalidation). `HelperEngine` implements the leases and the
-  sleep, wake and exit rules, and the XPC client bounds every call with a
-  timeout and invalidates the connection after one; the daemon still has to
-  deliver those events and bound its calls into the control.
+  sleep, wake and exit rules; the XPC client bounds every call with a
+  timeout and invalidates the connection after one; and the daemon delivers
+  acknowledged sleep and SIGTERM to the engine with bounded waits. The
+  daemon does not serve the transport yet, and a real control still has to
+  bound its own calls.
 
 ## Telemetry
 
@@ -1368,6 +1618,9 @@ corrupt data falls back to defaults with Manage charging off (failing toward
 macOS defaults), with a visible notice. A first launch with nothing stored
 uses the defaults as they are. Invalid settings are never saved. The selected backend is stored separately.
 
+The helper daemon keeps one file, its activation history, under
+`/Library/Application Support/CellKeeper/Helper/` (see "Helper daemon").
+
 ## Logging
 
 `CellKeeperLog` defines `os.Logger` categories (`app`, `telemetry`, `policy`,
@@ -1376,6 +1629,10 @@ changes log at info level (memory only); decisions, requests, results,
 settings changes, and safety fallbacks log at notice level or above so they
 persist. Logged content is limited to battery state, settings values, and
 decisions.
+
+The helper daemon logs under its own subsystem,
+`io.github.saltedtan.CellKeeper.Helper`, in the categories `lifecycle`,
+`xpc`, `control` and `safety` (research note 04, §3.7).
 
 ## Distribution and security posture
 
@@ -1457,3 +1714,8 @@ decisions.
 | D55 | A client can make the helper do only bounded work: at most 32 requests wait behind the one in progress on a connection, and one more closes the connection as a protocol violation; at most 8 connections are served. A closed connection runs nothing more and its session is invalidated at once (after review, 2026-10-10) | The engine's request budget is judged only when a request runs, so it cannot bound what waits; a flooding client could otherwise pile up work that delays the end of its own session, and with it the release of its restriction. A silent drop would leave a client waiting for a reply that never comes |
 | D56 | The server's registry lock serialises the listener's lifecycle (resume, invalidate) and the acceptance of each connection (configure, resume, publish), each together with the decision to make it; a server stopped before it ever listened resumes its listener, already stopped, and then invalidates it. Each connection's close is recorded under that connection's own lock, in the same critical section that decides it, which ends admission before its consumer can start another request; ending its queue and invalidating the connection and the session follow outside the lock | Releasing a lock between deciding and acting let a stop be undone by a start or an acceptance in progress, and let a consumer start a queued request after an overflow had been decided. A listener invalidated while still suspended left connecting clients waiting with no answer (seen in the start/stop race test) |
 | D57 | The server reports accepted connections (session, process ID, effective user ID), refusals and closes to the host asynchronously, for its log only | Research note 04 §3.7 asks for every accept and reject to be logged; process IDs are reused, so they never decide anything (§2.3). Clients that fail the requirement never reach the server; the XPC runtime logs them |
+| D58 | The daemon's library depends on `CellKeeperHelperCore` only and repeats the app's read-only power reading instead of sharing it; the only public way to build the daemon's environment uses `UnknownHardwareChargeControl` | D27: the root process carries none of the app, and a second copy of a few dozen lines costs less than linking the app's modules into it. With no public interface that accepts another control, a real control needs a reviewed change to `HelperDaemonEnvironment.system` |
+| D59 | Every shutdown (SIGTERM, a client's `restoreDefaultsAndExit`, a seam that cannot start) runs one procedure within one absolute deadline 8 s after it began: stop the frontend and have it confirm that everything it accepted is answered and every session invalidated; terminate and retry; write the log; then the final bounded `isSafeToExit` check, made only after that confirmation; only then commit the exit status, 0 if the check passed and 75 (`EX_TEMPFAIL`) otherwise. Retries and SIGTERM handling stay live until the commit. The daemon's actor only coordinates: nothing that can block (log writes, history saves, frontend calls, sleep and signal registration) runs on it, and every wait carries an absolute deadline that it recomputes when it starts (reviews of PR #65) | The exit status must come from the last safety check, after everything that could still change safety: a request the frontend accepted can still make a restore owed, so an unconfirmed stop establishes nothing, and a check before the log is written can be outdated by then. launchd restarts a job that exits non-zero (`KeepAlive.SuccessfulExit = false`), and the next start restores defaults first (R2, D31); one deadline that includes logging keeps the exit ahead of SIGKILL at `ExitTimeOut` even with a stuck engine or log; a coordinator blocked by a log write cannot even begin the shutdown, and a timer that restarts its duration when it starts late postpones the deadline into launchd's margin; a clean exit after a failed start is restarted only on demand, not in a loop |
+| D60 | Sleep is acknowledged when the engine's sleep checks return or 5 s after the announcement, whichever comes first, with a fault logged at the deadline | Safety precondition 13 asks for acknowledged sleep handling in the privileged component; an unacknowledged notification only delays sleep (by up to 30 s) and the engine's leases count sleep, so holding sleep for a stuck engine would buy nothing |
+| D61 | The activation history file is keyed by the boot session UUID (`kern.bootsessionuuid`), with no fallback; it is bounded (64 KiB, 20 records), replaced by rename, opened without blocking and refused at once unless it is a regular file, discarded whole on anything unexpected, and loaded only after SIGTERM is handled (review of PR #65) | The engine's clock starts again at every boot (D35), and only a value the kernel sets once per boot identifies one: `kern.boottime` moves when the calendar time is set, which would discard valid records within a boot. A corrupt, foreign or special file must be neither trusted nor allowed to stop or delay the restore at start, and losing the history only loosens the limits for at most an hour |
+| D62 | Nothing that may block runs on Swift's cooperative thread pool: the helper engine runs on a serial dispatch queue of its own (a custom actor executor), and the daemon writes its log, saves its history and calls its blocking seams on dispatch queues of their own. Tests that stall on purpose stall on those queues (review of PR #65, after #64) | The pool has as many threads as cores (three on CI's macOS 15 image). A synchronous control call, a log write or a file write that blocks there takes one of them, and a few at once take every thread: nothing else runs, neither the daemon's shutdown and sleep handling nor, in tests, other suites in the same process, until the stalls end. A dispatch queue's thread blocks alone. `.serialized` only orders tests within one suite, so it could not prevent that |

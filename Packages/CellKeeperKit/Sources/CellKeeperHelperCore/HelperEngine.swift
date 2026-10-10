@@ -62,7 +62,18 @@ import Foundation
 /// system events never interleave hardware access. Events are delivered
 /// only when the operation that caused them has ended, so no callback
 /// runs between a check and a write.
+///
+/// The engine runs on a serial dispatch queue of its own, not on Swift's
+/// cooperative thread pool: its calls into the control are synchronous and
+/// may block, and a blocked engine must not take a thread that every other
+/// task needs, the host's shutdown and sleep handling included.
 public actor HelperEngine {
+    private let executor = DispatchSerialQueue(label: "io.github.saltedtan.CellKeeper.HelperEngine")
+
+    public nonisolated var unownedExecutor: UnownedSerialExecutor {
+        executor.asUnownedSerialExecutor()
+    }
+
     /// Each control is activated at most once per this interval (R13).
     public static let minimumActivationInterval: TimeInterval = 60
     /// Activations of all controls per rolling hour (R13).

@@ -37,6 +37,10 @@ Read [docs/safety.md](docs/safety.md). In particular:
 - The helper's logic (`CellKeeperHelperCore`) imports Foundation only: no
   IOKit, XPC, processes, files or network. Hardware access will live only
   behind `HelperChargeControl`.
+- The helper daemon (`CellKeeperHelperDaemon`, `CellKeeperHelper`) depends on
+  `CellKeeperHelperCore` only, never on the app's modules, and ships with
+  `UnknownHardwareChargeControl`. Never install it, register it with
+  launchd, or run it as root.
 - Every failure path must return to macOS default charging.
 - New policy behaviour needs deterministic tests.
 
@@ -67,8 +71,10 @@ provisioning profiles, or other credentials.
 | `Packages/CellKeeperKit/Sources/CellKeeperCore/` | Pure domain logic: policy, controller, settings, backend protocol and backends (simulated, read-only, native Charge Limit, helper), and the in-process helper transport |
 | `Packages/CellKeeperKit/Sources/CellKeeperKit/` | macOS adapters (read-only telemetry, notifications, the `shortcuts` and `pmset` runners, the Charge Limit record file, the helper's read-only power reading and the Simulated helper) |
 | `Packages/CellKeeperKit/Sources/CellKeeperHelperCore/` | Logic of the future privileged helper: wire vocabulary, the helper engine (leases, rate limits, interlocks), simulated and monitor-only controls. Foundation only, no hardware access; the app runs it in process for the Simulated helper |
+| `Packages/CellKeeperKit/Sources/CellKeeperHelperDaemon/` | The helper daemon's host: start, ticks, SIGTERM, acknowledged sleep, its own read-only power reading, the activation history file and the audit log, each behind a protocol with a test fake. Depends on `CellKeeperHelperCore` only |
+| `Packages/CellKeeperKit/Sources/CellKeeperHelper/` | The daemon executable (`main.swift`). No hardware control; not installed or embedded in this phase |
 | `Packages/CellKeeperKit/Tests/` | Swift Testing tests |
-| `Config/` | xcconfig files and entitlements |
+| `Config/` | xcconfig files, entitlements, and the helper daemon's launchd property list (`LaunchDaemons/`, not installed) |
 | `docs/` | Architecture, safety, roadmap, research |
 
 New Swift files in `CellKeeper/` are picked up automatically (synchronized

@@ -26,8 +26,10 @@ command-line tool. macOS, not CellKeeper, enforces that limit.
 There is no privileged helper, no SMC access, no `sudo`, no `pmset` setting
 change, and no private API on the write path. CellKeeper opens no
 IOUserClient itself. The NSXPC transport for a future helper exists in code
-and is tested inside the test process only; nothing registers, starts or
-connects to a helper process.
+and is tested inside the test process only, and the helper daemon's
+executable (`CellKeeperHelper`) is built and tested but never installed: it
+controls no hardware and does not serve that transport yet. Nothing
+registers, starts or connects to a helper process.
 
 Your Mac's own protections — the battery pack's management system, firmware
 charge termination and thermal limits, and macOS battery health management —
@@ -153,7 +155,8 @@ list.
    method per typed operation with only integer and boolean arguments, and
    both ends carry a code-signing requirement (Apple-issued certificate,
    signing identifier and team; see the helper backend below). Tested over
-   an anonymous listener; no helper is registered.
+   an anonymous listener; no helper is registered, and the daemon does not
+   serve the transport yet.
 5. **Behavioural verification.** After a write, confirm the expected effect in
    independent telemetry (for example charge current falls to about zero after
    an inhibit) and fall back to the safe state if it does not appear (R11).
@@ -189,11 +192,14 @@ list.
     restore-on-exit must live in the privileged component, with acknowledged
     sleep notifications and time-limited operations; the app's own will-sleep
     and quit handling cannot guarantee completion.
-    *In part*: the helper's logic implements the sleep, wake and exit rules,
-    and the app's XPC client bounds every call with a timeout and then
-    invalidates the connection, which makes the helper end the session.
-    The daemon, its acknowledged sleep notifications and time limits on its
-    calls into the hardware are still missing.
+    *In part*: the helper's logic implements the sleep, wake and exit rules;
+    the app's XPC client bounds every call with a timeout and then
+    invalidates the connection, which makes the helper end the session; and
+    the daemon (not installed, not yet serving the transport) acknowledges
+    sleep after the engine's sleep checks, or 5 s after the announcement at
+    the latest, and finishes every shutdown within one 8 s deadline. Time
+    limits on the helper's own calls into the hardware wait for a real
+    control.
 
 ### How the macOS Charge Limit backend meets the applicable preconditions
 
@@ -228,13 +234,24 @@ hardware writes and a helper, and do not apply. For the rest:
 The helper backend (`HelperChargingBackend`) drives the helper's logic
 (`HelperEngine`), which runs only in the app's own process and only on a
 simulated control. The NSXPC transport that will connect the app to a
-helper daemon exists and is tested inside the test process, but no daemon
-exists, nothing is registered with launchd, and the app does not use the
+helper daemon exists and is tested inside the test process, and so does
+the daemon (below), but the daemon does not serve the transport yet,
+nothing is registered with launchd, and the app does not use the
 transport. Nothing is written to hardware, so none of these
 preconditions is met for a real backend yet. Because the Simulated helper
 lives and dies with the app, its leases, disconnect handling and restores
 are exercised by tests, not by a separate process that outlives a crashed
-app. What is already in place, and tested against the simulated control:
+app.
+
+The helper daemon (`CellKeeperHelper`, hosted by `HelperDaemon`) runs the
+same engine with `UnknownHardwareChargeControl`: it reports no
+capabilities, so clients stay monitor-only (R12a), writes nothing, and
+never reports hardware defaults as restored by it (its restores write
+nothing and read back nothing active). The only public way to assemble it
+uses that control. It serves no clients yet and is neither embedded in the
+app nor registered with launchd; its host logic is tested in `swift test`
+without registering anything. What is already in place, and tested against
+the simulated control:
 
 - **3, lease / dead-man switch (logic only):** per-control leases with their
   own deadlines (15 min for the charging inhibit, 2 min for the
@@ -250,8 +267,15 @@ app. What is already in place, and tested against the simulated control:
   control through a live session, the app asks macOS not to nap it
   (`LeaseActivity`); that makes late renewals less likely but does not
   guarantee them, and a lease that lapses only ends the restriction. The
-  helper's own power reading uses public, read-only interfaces in process;
-  the daemon's is still to come.
+  helper's own power reading uses public, read-only interfaces, in process
+  for the Simulated helper and in the daemon (`DaemonPowerReading`, the same
+  rules). The daemon restores defaults at start before it serves anyone,
+  and on SIGTERM restores them and exits within 8 s, inside launchd's
+  `ExitTimeOut` of 10 s. It exits with 0 only if, after its frontend has
+  confirmed that every accepted request is answered and every session
+  invalidated, and after its log is written, a final check finds defaults
+  confirmed; otherwise it exits non-zero, so launchd starts it again and
+  the next start restores first.
 - **4, narrow, authenticated API (transport only):** the NSXPC interface
   (`CellKeeperHelperXPC`) has one method per typed operation, with only
   `Int`, `UInt64` and `Bool` arguments and replies, so neither side decodes
@@ -270,7 +294,10 @@ app. What is already in place, and tested against the simulated control:
   process over an anonymous listener, with the test binary's own code
   signature required on both sides. The release-only requirement clauses
   (Developer ID certificate, no debugger entitlement) wait for signed
-  builds (phase 4b).
+  builds (phase 4b). The daemon does not serve this transport yet; its
+  frontend contract requires a code-signing requirement on every
+  connection, and a stop that drains every accepted request before the
+  daemon may exit cleanly.
 - **6, debounce and dwell:** the policy's debounce and minimum pause apply to
   the helper backend, as to any backend that switches charging itself.
 - **7, external-writer detection (in part):** the helper records why each
@@ -302,15 +329,36 @@ app. What is already in place, and tested against the simulated control:
   at once, also while the helper cannot read its controls back, and a new
   hardware error is counted as a failure.
 - **8, monotonic time:** one clock that counts sleep for the helper's leases,
-  rate limits and power-state age.
-- **13, bounded operations (app side):** every call over the XPC transport
-  has a timeout (10 s by default). A timeout, an interruption or any other
-  transport failure invalidates the connection, so a late reply is never
-  used and the helper ends the session, clearing what it held; the backend
-  then connects again and reads the state afresh.
+  rate limits and power-state age. The daemon keeps the activation history
+  across relaunches within a boot, in a file keyed by the boot session UUID
+  that the kernel sets once per boot (never by wall-clock time), and
+  discards it at a new boot, when that clock starts again.
+- **9, uninstall that restores the safe state (the daemon's part):** a
+  client's `restoreDefaultsAndExit` (once the daemon serves the transport)
+  and SIGTERM, which launchd sends when it stops the job, both run the same
+  bounded shutdown: the reply to `restoreDefaultsAndExit` is sent, with
+  send completion confirmed, before that client's session ends (receipt
+  by the client is not confirmed), and the daemon exits with 0 only once
+  defaults are confirmed as above. The app's uninstall flow is not done.
+- **13, sleep interlock and bounded operations:** on the app's side, every
+  call over the XPC transport has a timeout (10 s by default). A timeout,
+  an interruption or any other transport failure invalidates the
+  connection, so a late reply is never used and the helper ends the
+  session, clearing what it held; the backend then connects again and
+  reads the state afresh. On the daemon's side, the daemon registers with
+  `IORegisterForSystemPower` and acknowledges sleep only once the engine
+  has run its sleep checks (the adapter-disable cleared, an expired lease
+  ended), or 5 s after the announcement at the latest; it never vetoes
+  sleep. Restore on exit lives in the daemon, with one 8 s deadline for the
+  whole shutdown, logging and the final decision included, that holds even
+  if a control call hangs, the log cannot be written or a timer starts late
+  (every wait carries its absolute deadline). Nothing that can block runs
+  on the daemon's coordinating actor, so a stuck log or frontend cannot
+  keep SIGTERM from beginning the shutdown. Still missing: a real control
+  that bounds its own calls.
 
-Everything else, including the daemon and its registration, a verified
-mechanism, behavioural verification, acknowledged sleep handling and time
+Everything else, including the daemon serving the transport, its
+registration, a verified mechanism, behavioural verification and time
 limits on the helper's own calls into the hardware, is still missing.
 
 ### Deliberate deviations from research note 06

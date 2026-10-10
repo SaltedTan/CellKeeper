@@ -22,6 +22,13 @@
 //   client side (`HelperXPCClient`), and the code-signing requirements both
 //   sides place on each other. Public Foundation and Security APIs only.
 //   Depends on CellKeeperHelperCore.
+// - CellKeeperHelperDaemon: the host of the helper daemon (start, ticks,
+//   SIGTERM, acknowledged sleep, its own read-only power reading, the
+//   activation history file, the audit log). Depends on CellKeeperHelperCore
+//   only, never on the app's modules.
+// - CellKeeperHelper: the daemon executable. It controls no hardware
+//   (`UnknownHardwareChargeControl`), serves no clients yet, and is neither
+//   installed nor embedded in the app in this phase.
 
 import PackageDescription
 
@@ -33,6 +40,7 @@ let package = Package(
         .library(name: "CellKeeperKit", targets: ["CellKeeperKit"]),
         .library(name: "CellKeeperHelperCore", targets: ["CellKeeperHelperCore"]),
         .library(name: "CellKeeperHelperXPC", targets: ["CellKeeperHelperXPC"]),
+        .executable(name: "CellKeeperHelper", targets: ["CellKeeperHelper"]),
     ],
     targets: [
         .target(name: "CellKeeperCore", dependencies: ["CellKeeperHelperCore"]),
@@ -43,9 +51,16 @@ let package = Package(
         ),
         .target(name: "CellKeeperHelperCore"),
         .target(name: "CellKeeperHelperXPC", dependencies: ["CellKeeperHelperCore"]),
+        .target(
+            name: "CellKeeperHelperDaemon",
+            dependencies: ["CellKeeperHelperCore"],
+            linkerSettings: [.linkedFramework("IOKit")]
+        ),
+        .executableTarget(name: "CellKeeperHelper", dependencies: ["CellKeeperHelperDaemon"]),
         .testTarget(name: "CellKeeperCoreTests", dependencies: ["CellKeeperCore", "CellKeeperHelperCore"]),
         .testTarget(name: "CellKeeperKitTests", dependencies: ["CellKeeperKit", "CellKeeperHelperCore", "CellKeeperHelperXPC"]),
         .testTarget(name: "CellKeeperHelperCoreTests", dependencies: ["CellKeeperHelperCore"]),
         .testTarget(name: "CellKeeperHelperXPCTests", dependencies: ["CellKeeperHelperXPC", "CellKeeperHelperCore"]),
+        .testTarget(name: "CellKeeperHelperDaemonTests", dependencies: ["CellKeeperHelperDaemon", "CellKeeperHelperCore"]),
     ]
 )
