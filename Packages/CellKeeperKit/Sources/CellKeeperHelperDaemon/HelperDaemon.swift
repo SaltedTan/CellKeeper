@@ -25,8 +25,8 @@ public struct HelperDaemonEnvironment: Sendable {
     /// (``UnknownHardwareChargeControl``: no capabilities, nothing written,
     /// so clients are monitor-only), the daemon's own read-only power
     /// reading, `IORegisterForSystemPower`, SIGTERM, the activation history
-    /// file at ``FileActivationHistoryStore/defaultURL``, `kern.boottime`,
-    /// and unified logging.
+    /// file at ``FileActivationHistoryStore/defaultURL``, the boot session
+    /// UUID, and unified logging.
     public static func system(frontend: any HelperFrontend, log: any HelperDaemonLog = UnifiedHelperLog()) -> HelperDaemonEnvironment {
         let clock = SystemDaemonClock()
         return HelperDaemonEnvironment(
@@ -50,31 +50,41 @@ public struct HelperDaemonEnvironment: Sendable {
 /// (start, time, sleep and wake, SIGTERM) and does what the engine cannot:
 /// log, persist, and exit.
 ///
-/// ``run()``, in order:
-/// 1. Starts handling SIGTERM.
-/// 2. Starts the engine, which restores defaults and reads them back
-///    before anything else is served (R2). The engine was built with the
-///    activation history saved earlier in this boot, if any (D35).
-/// 3. Registers for sleep and wake (R16, R17, `safety.md` precondition 13).
-/// 4. Starts the frontend, only now, and never once shutdown has begun,
-///    once the log has caught up with the start.
-/// 5. Ticks the engine every ``tickInterval``.
+/// The initialiser handles SIGTERM first (a signal that arrives before
+/// ``run()`` is held until then), then loads the activation history saved
+/// earlier in this boot (D35) and builds the engine with it. ``run()``, in
+/// order:
+/// 1. Starts the engine, which restores defaults and reads them back
+///    before anything else is served (R2).
+/// 2. Registers for sleep and wake (R16, R17, `safety.md` precondition 13).
+/// 3. Starts the frontend, once the log has caught up with the start, and
+///    never once shutdown has begun.
+/// 4. Ticks the engine every ``tickInterval``.
 ///
-/// Then it runs until one of these ends it, and it exits only from its own
-/// tasks, never from inside the engine's event sink:
-/// - **SIGTERM (R4, D31).** Stops the frontend, calls `terminate()`, and
-///   retries about once a second until the engine says it is safe to exit
-///   or ``terminationDeadline`` has passed since the signal; then exits with
-///   0 if defaults are confirmed, else with ``restoreNotConfirmedExitStatus``
-///   (launchd's `KeepAlive.SuccessfulExit = false` then starts it again,
-///   and the next start restores defaults first). The deadline holds even
-///   if the engine is stuck in a call to the control.
-/// - **A client's `restoreDefaultsAndExit`.** On the engine's `safeToExit`
-///   event, stops the frontend, checks ``HelperEngine/isSafeToExit`` once
-///   more, and exits with 0; if a restore is owed again, it waits for the
-///   next `safeToExit`.
-/// - **A seam that cannot start** (sleep notifications, the frontend): the
-///   same as SIGTERM, without serving anyone.
+/// Shutdown (R4, D31, D56) begins on SIGTERM, when the engine shuts down at
+/// a client's request (`restoreDefaultsAndExit`), or when a seam cannot
+/// start. Whatever began it, one absolute deadline,
+/// ``terminationDeadline`` after it began, bounds all of it, logging and
+/// the final decision included, and every wait is bounded by what is left:
+/// 1. The frontend is told to stop; it confirms once everything it
+///    accepted is answered and every session invalidated (see
+///    ``HelperFrontend/stop()``).
+/// 2. `terminate()`, retried about once a second until the frontend has
+///    confirmed and the engine is safe to exit, or until
+///    ``finalisationReserve`` before the deadline.
+/// 3. The log is written, keeping ``finalCheckReserve`` for:
+/// 4. the final, bounded check of ``HelperEngine/isSafeToExit``, made only
+///    if the frontend has confirmed, because only then can nothing else
+///    change the state.
+/// 5. Only then is the exit status committed: 0 if that check passed,
+///    ``restoreNotConfirmedExitStatus`` otherwise (launchd's
+///    `KeepAlive.SuccessfulExit = false` then starts the daemon again, and
+///    the next start restores defaults first). Ticks and SIGTERM handling
+///    stay live until this point.
+///
+/// The deadline holds even if the engine is stuck in a call to the control
+/// or the log cannot be written. The daemon exits only from its own tasks,
+/// never from inside the engine's event sink.
 ///
 /// Sleep: on will-sleep the engine runs its sleep checks and only then is
 /// sleep acknowledged, or after ``sleepAcknowledgementTimeout`` at the
@@ -89,43 +99,54 @@ public actor HelperDaemon {
     /// launchd's grace between SIGTERM and SIGKILL; must equal `ExitTimeOut`
     /// in the property list (a test checks).
     public static let exitTimeout: TimeInterval = 10
-    /// After SIGTERM, the daemon exits by this time whatever happens,
-    /// leaving launchd's grace a margin.
+    /// The daemon exits within this time after shutdown begins, whatever
+    /// happens, leaving launchd's grace a margin.
     public static let terminationDeadline: TimeInterval = exitTimeout - 2
+    /// Of the shutdown budget, what is kept for writing the log and for the
+    /// final safety check: retries stop this long before the deadline.
+    public static let finalisationReserve: TimeInterval = 1
+    /// Of the shutdown budget, what is kept for the final safety check:
+    /// writing the log stops this long before the deadline.
+    public static let finalCheckReserve: TimeInterval = 0.5
     /// The exit status when defaults could not be confirmed (`EX_TEMPFAIL`).
     /// Being non-zero, it makes launchd start the daemon again.
     public static let restoreNotConfirmedExitStatus: Int32 = 75
     /// How often the engine runs its periodic checks.
     public static let tickInterval: TimeInterval = 5
-    /// How often an owed restore is retried after SIGTERM.
+    /// How often an owed restore is retried during shutdown.
     public static let exitPollInterval: TimeInterval = 1
     /// The longest the daemon holds back the acknowledgement of a sleep.
     public static let sleepAcknowledgementTimeout: TimeInterval = 5
-    /// The longest the daemon waits for the frontend to stop.
+    /// How long shutdown waits for the frontend's confirmation before it
+    /// restores defaults; it keeps waiting for it while it retries.
     public static let frontendStopTimeout: TimeInterval = 1
-    /// The longest the daemon waits for its log to be written before it
-    /// exits.
-    public static let logFlushTimeout: TimeInterval = 1
+    /// The longest the daemon waits for its log to be written, each time.
+    public static let logFlushTimeout: TimeInterval = 0.5
 
     /// The engine this daemon runs.
     public nonisolated let engine: HelperEngine
     private let environment: HelperDaemonEnvironment
     private let queue: DaemonEventQueue
+    private let relay: DaemonRelay
 
     private var hasRun = false
-    private var isTerminating = false
-    private var isExitingAtClientRequest = false
+    private var isShuttingDown = false
     private var exitStatus: Int32?
     private var exitWaiters: [CheckedContinuation<Int32, Never>] = []
     private var ticker: Task<Void, Never>?
     private var sleepEvents: AsyncStream<SleepCheck>.Continuation?
 
-    /// Builds the engine with the activation history saved earlier in this
-    /// boot. Loading never fails: anything unusable is logged and discarded.
+    /// Handles SIGTERM from here on (one that arrives before ``run()`` is
+    /// held until then), then builds the engine with the activation history
+    /// saved earlier in this boot. Loading never fails: anything unusable
+    /// is logged and discarded.
     public init(environment: HelperDaemonEnvironment) {
         let queue = DaemonEventQueue()
+        let relay = DaemonRelay()
         self.queue = queue
+        self.relay = relay
         self.environment = environment
+        environment.terminationSignals.start { relay.terminationRequested() }
         queue.log(.notice, .lifecycle, "CellKeeperHelper build \(environment.build) starting (pid \(getpid()), uid \(geteuid())).")
         let clock = environment.clock
         engine = HelperEngine(
@@ -134,7 +155,15 @@ public actor HelperDaemon {
             build: environment.build,
             uptime: { clock.uptime() },
             activationHistory: Self.loadHistory(environment, log: queue),
-            events: { queue.event($0) }
+            events: { event in
+                queue.event(event)
+                // Seen here rather than when the log reaches it, so a slow
+                // log cannot delay the shutdown. The daemon reacts on a
+                // task of its own.
+                if case .shuttingDown = event {
+                    relay.engineShutDown()
+                }
+            }
         )
     }
 
@@ -145,9 +174,10 @@ public actor HelperDaemon {
         guard !hasRun else { return await waitForExit() }
         hasRun = true
         startEventPump()
-        environment.terminationSignals.start { [weak self] in
-            guard let self else { return }
-            Task { await self.terminate(reason: "SIGTERM") }
+        if relay.attach(self) {
+            // SIGTERM arrived during start-up: shut down before serving.
+            await shutDown(reason: "SIGTERM (received while starting)")
+            return await waitForExit()
         }
 
         let started = await engine.start()
@@ -156,23 +186,25 @@ public actor HelperDaemon {
         } else {
             queue.log(.fault, .lifecycle, "Engine started, but defaults are not confirmed (\(started)); it keeps retrying the restore and refuses activations.")
         }
-        guard !isTerminating else { return await waitForExit() }
+        guard !isShuttingDown else { return await waitForExit() }
 
         do {
             try startSleepHandling()
         } catch {
             queue.log(.fault, .safety, "Sleep notifications could not be registered (\(error)). Without them the daemon cannot hold sleep until its checks have run, so it serves nobody and exits.")
-            await terminate(reason: "Sleep notifications unavailable")
+            await shutDown(reason: "Sleep notifications unavailable")
             return await waitForExit()
         }
         // The start's restore is in the log before anyone is served.
-        await flushLog()
-        guard !isTerminating else { return await waitForExit() }
+        let clock = environment.clock
+        let queue = queue
+        _ = await withDeadline(Self.logFlushTimeout, on: clock) { await queue.flush() }
+        guard !isShuttingDown else { return await waitForExit() }
         do {
             try environment.frontend.start(serving: engine)
         } catch {
             queue.log(.fault, .xpc, "The frontend could not start (\(error)); exiting without serving anyone.")
-            await terminate(reason: "Frontend unavailable")
+            await shutDown(reason: "Frontend unavailable")
             return await waitForExit()
         }
         startTicking()
@@ -183,7 +215,7 @@ public actor HelperDaemon {
 
     private static func loadHistory(_ environment: HelperDaemonEnvironment, log: DaemonEventQueue) -> [HelperActivationRecord] {
         guard let boot = environment.bootIdentifier else {
-            log.log(.fault, .safety, "The boot identifier (kern.boottime) cannot be read: the activation history is neither loaded nor saved, so a relaunch resets the activation limits.")
+            log.log(.fault, .safety, "The boot session UUID cannot be read: the activation history is neither loaded nor saved, so a relaunch resets the activation limits.")
             return []
         }
         switch environment.historyStore.load(boot: boot, now: environment.clock.uptime()) {
@@ -200,20 +232,15 @@ public actor HelperDaemon {
     }
 
     /// Logs the engine's events and saves the activation history, in
-    /// order, on a task of its own; tells the daemon when the engine says
-    /// it is safe to exit.
+    /// order, on a task of its own.
     private func startEventPump() {
-        let notifySafeToExit: @Sendable () -> Void = { [weak self] in
-            guard let self else { return }
-            Task { await self.engineAnnouncedSafeToExit() }
-        }
         let items = queue.items
         let log = environment.log
         let engine = engine
         let store = environment.historyStore
         let boot = environment.bootIdentifier
         Task {
-            await Self.pumpEvents(items, log: log, engine: engine, store: store, boot: boot, notifySafeToExit: notifySafeToExit)
+            await Self.pumpEvents(items, log: log, engine: engine, store: store, boot: boot)
         }
     }
 
@@ -222,8 +249,7 @@ public actor HelperDaemon {
         log: any HelperDaemonLog,
         engine: HelperEngine,
         store: any ActivationHistoryStore,
-        boot: BootIdentifier?,
-        notifySafeToExit: @Sendable () -> Void
+        boot: BootIdentifier?
     ) async {
         var isFailingToSave = false
         for await item in items {
@@ -235,26 +261,19 @@ public actor HelperDaemon {
             case .event(let event):
                 let placement = event.logPlacement
                 log.write(placement.level, placement.category, "engine: \(event)")
-                switch event {
-                case .activationRecorded:
-                    guard let boot else { break }
-                    let records = await engine.activationHistory
-                    do {
-                        try store.save(records, boot: boot)
-                        if isFailingToSave {
-                            isFailingToSave = false
-                            log.write(.notice, .safety, "The activation history is being saved again.")
-                        }
-                    } catch {
-                        if !isFailingToSave {
-                            isFailingToSave = true
-                            log.write(.fault, .safety, "Cannot save the activation history (\(error)); carrying on without it, so a relaunch in this boot would not know these activations.")
-                        }
+                guard case .activationRecorded = event, let boot else { continue }
+                let records = await engine.activationHistory
+                do {
+                    try store.save(records, boot: boot)
+                    if isFailingToSave {
+                        isFailingToSave = false
+                        log.write(.notice, .safety, "The activation history is being saved again.")
                     }
-                case .safeToExit:
-                    notifySafeToExit()
-                default:
-                    break
+                } catch {
+                    if !isFailingToSave {
+                        isFailingToSave = true
+                        log.write(.fault, .safety, "Cannot save the activation history (\(error)); carrying on without it, so a relaunch in this boot would not know these activations.")
+                    }
                 }
             }
         }
@@ -320,71 +339,97 @@ public actor HelperDaemon {
 
     // MARK: - Shutdown
 
-    /// SIGTERM, or a seam that could not start (R4, D31).
-    private func terminate(reason: String) async {
-        guard exitStatus == nil else { return }
-        guard !isTerminating else {
+    fileprivate func terminationRequested() async {
+        await shutDown(reason: "SIGTERM")
+    }
+
+    /// The engine shut down. Unless the daemon began that itself, a client
+    /// asked for it with `restoreDefaultsAndExit`.
+    fileprivate func engineShutDown() async {
+        guard !isShuttingDown, exitStatus == nil else { return }
+        await shutDown(reason: "Exit requested by a client")
+    }
+
+    /// Shuts the daemon down within one absolute deadline (see the type's
+    /// documentation, R4, D31, D56).
+    private func shutDown(reason: String) async {
+        guard !isShuttingDown, exitStatus == nil else {
             queue.log(.notice, .lifecycle, "\(reason) while already shutting down: ignored.")
             return
         }
-        isTerminating = true
-        queue.log(.notice, .lifecycle, "\(reason): stopping the frontend and restoring defaults; exiting within \(Int(Self.terminationDeadline)) s.")
-        let engine = engine
-        let frontend = environment.frontend
+        isShuttingDown = true
         let clock = environment.clock
+        let deadline = clock.uptime() + Self.terminationDeadline
+        let engine = engine
         let queue = queue
-        let isSafe = await withDeadline(Self.terminationDeadline, on: clock) {
-            await Self.stop(frontend, on: clock, log: queue)
+        queue.log(.notice, .lifecycle, "\(reason): stopping the frontend and restoring defaults; exiting within \(Int(Self.terminationDeadline)) s.")
+
+        // 1. Stop the frontend; its confirmation may come later.
+        let stop = FrontendStop(environment.frontend)
+
+        // 2. Restore and retry until the frontend has confirmed and the
+        // engine is safe to exit, keeping the reserve.
+        let settled = await withDeadline(at: deadline - Self.finalisationReserve, on: clock) {
+            _ = await withDeadline(Self.frontendStopTimeout, on: clock) { await stop.wait() }
             await engine.terminate()
-            while !(await engine.isSafeToExit) {
+            while true {
+                switch stop.outcome {
+                case .refused:
+                    return false
+                case .confirmed:
+                    if await engine.isSafeToExit { return true }
+                case .pending:
+                    break
+                }
                 await clock.sleep(for: Self.exitPollInterval)
                 guard !Task.isCancelled else { return false }
                 await engine.terminate()
             }
-            return true
         } ?? false
-        if isSafe {
-            queue.log(.notice, .lifecycle, "Defaults confirmed: exiting with status 0.")
-            await finish(status: 0)
-        } else {
-            queue.log(.fault, .safety, "Defaults not confirmed within \(Int(Self.terminationDeadline)) s: exiting with status \(Self.restoreNotConfirmedExitStatus). The next start restores defaults before anything else.")
-            await finish(status: Self.restoreNotConfirmedExitStatus)
+        if !settled {
+            switch stop.outcome {
+            case .confirmed:
+                queue.log(.fault, .safety, "Defaults not confirmed within the shutdown's retries.")
+            case .pending:
+                queue.log(.fault, .xpc, "The frontend has not confirmed that it stopped serving, so a request it accepted could still change the state.")
+            case .refused:
+                queue.log(.fault, .xpc, "The frontend could not confirm that it stopped serving, so a request it accepted could still change the state.")
+            }
         }
+
+        // 3. Write the log, keeping time for the final check.
+        let flushEnd = min(clock.uptime() + Self.logFlushTimeout, deadline - Self.finalCheckReserve)
+        _ = await withDeadline(at: flushEnd, on: clock) { await queue.flush() }
+
+        // 4. The final check, after everything that could still change the
+        // state: only a frontend that has confirmed it stopped can no longer
+        // change it, so without that confirmation nothing is safe.
+        var isSafe = false
+        if stop.outcome == .confirmed {
+            isSafe = await withDeadline(at: deadline, on: clock) { await engine.isSafeToExit } ?? false
+        }
+
+        // 5. Commit.
+        await commitExit(status: isSafe ? 0 : Self.restoreNotConfirmedExitStatus, deadline: deadline)
     }
 
-    /// The engine shut down at a client's request (`restoreDefaultsAndExit`)
-    /// and confirmed defaults.
-    private func engineAnnouncedSafeToExit() async {
-        guard exitStatus == nil, !isTerminating, !isExitingAtClientRequest else { return }
-        isExitingAtClientRequest = true
-        defer { isExitingAtClientRequest = false }
-        queue.log(.notice, .lifecycle, "The engine shut down at a client's request with defaults confirmed: stopping the frontend and exiting.")
-        await Self.stop(environment.frontend, on: environment.clock, log: queue)
-        guard exitStatus == nil, !isTerminating else { return }
-        guard await engine.isSafeToExit else {
-            queue.log(.notice, .safety, "A restore is owed again: waiting until the engine confirms defaults.")
-            return
-        }
-        guard exitStatus == nil, !isTerminating else { return }
-        await finish(status: 0)
-    }
-
-    private static func stop(_ frontend: any HelperFrontend, on clock: any HelperDaemonClock, log: DaemonEventQueue) async {
-        if await withDeadline(frontendStopTimeout, on: clock, { await frontend.stop() }) == nil {
-            log.log(.fault, .xpc, "The frontend did not stop within \(Int(frontendStopTimeout)) s; carrying on with the shutdown.")
-        }
-    }
-
-    /// Ends the daemon's work, writes the log, and exits with `status`.
-    private func finish(status: Int32) async {
-        guard exitStatus == nil else { return }
+    /// Commits the exit status decided by the final check, ends the
+    /// daemon's work, writes the log within what is left of the deadline,
+    /// and exits.
+    private func commitExit(status: Int32, deadline: TimeInterval) async {
         exitStatus = status
         ticker?.cancel()
         environment.sleepNotifications.stop()
         sleepEvents?.finish()
         environment.terminationSignals.stop()
-        queue.log(.notice, .lifecycle, "Exiting with status \(status).")
-        await flushLog()
+        if status == 0 {
+            queue.log(.notice, .lifecycle, "The frontend stopped and defaults are confirmed: exiting with status 0.")
+        } else {
+            queue.log(.fault, .safety, "Defaults or the frontend's stop not confirmed: exiting with status \(status). The next start restores defaults before anything else.")
+        }
+        let clock = environment.clock
+        let queue = queue
+        _ = await withDeadline(at: min(clock.uptime() + Self.logFlushTimeout, deadline), on: clock) { await queue.flush() }
         queue.finish()
         environment.exit(status)
         let waiters = exitWaiters
@@ -394,17 +439,88 @@ public actor HelperDaemon {
         }
     }
 
-    /// Waits until the log has caught up, for at most ``logFlushTimeout``.
-    private func flushLog() async {
-        let queue = queue
-        _ = await withDeadline(Self.logFlushTimeout, on: environment.clock) { await queue.flush() }
-    }
-
     private func waitForExit() async -> Int32 {
         if let exitStatus {
             return exitStatus
         }
         return await withCheckedContinuation { exitWaiters.append($0) }
+    }
+}
+
+/// Brings SIGTERM and the engine's shutdown to the daemon. Signals are
+/// handled from the start of the daemon's initialiser, before it loads the
+/// activation history; one that arrives before ``HelperDaemon/run()`` is
+/// held until then.
+final class DaemonRelay: @unchecked Sendable {
+    private let lock = NSLock()
+    private weak var daemon: HelperDaemon?
+    private var isTerminationPending = false
+    private var isEngineShutdownPending = false
+
+    /// From now on, delivers to `daemon`. Returns true if a SIGTERM arrived
+    /// before, for the daemon to handle at once.
+    func attach(_ daemon: HelperDaemon) -> Bool {
+        let (termination, engineShutdown) = lock.withLock { () -> (Bool, Bool) in
+            self.daemon = daemon
+            defer {
+                isTerminationPending = false
+                isEngineShutdownPending = false
+            }
+            return (isTerminationPending, isEngineShutdownPending)
+        }
+        if engineShutdown, !termination {
+            Task { await daemon.engineShutDown() }
+        }
+        return termination
+    }
+
+    func terminationRequested() {
+        guard let daemon = lock.withLock({ () -> HelperDaemon? in
+            if self.daemon == nil { isTerminationPending = true }
+            return self.daemon
+        }) else { return }
+        Task { await daemon.terminationRequested() }
+    }
+
+    func engineShutDown() {
+        guard let daemon = lock.withLock({ () -> HelperDaemon? in
+            if self.daemon == nil { isEngineShutdownPending = true }
+            return self.daemon
+        }) else { return }
+        Task { await daemon.engineShutDown() }
+    }
+}
+
+/// The frontend's stop, on a task of its own. The daemon waits for it only
+/// within its budget, and counts it as confirmed only once `stop()` has
+/// returned true.
+final class FrontendStop: @unchecked Sendable {
+    enum Outcome: Equatable {
+        case pending
+        case confirmed
+        case refused
+    }
+
+    private let lock = NSLock()
+    private var current = Outcome.pending
+    private var task: Task<Void, Never>?
+
+    init(_ frontend: any HelperFrontend) {
+        let task = Task { [self] in
+            let confirmed = await frontend.stop()
+            lock.withLock { current = confirmed ? .confirmed : .refused }
+        }
+        lock.withLock { self.task = task }
+    }
+
+    var outcome: Outcome {
+        lock.withLock { current }
+    }
+
+    /// Returns when `stop()` has returned.
+    func wait() async {
+        let task = lock.withLock { self.task }
+        await task?.value
     }
 }
 

@@ -58,9 +58,12 @@ struct ActivationHistoryStoreTests {
     @Test("A corrupt or unexpected file is ignored", arguments: [
         "not json",
         "{}",
-        #"{"version":2,"boot":{"seconds":1790000000,"microseconds":123456},"records":[]}"#,
-        #"{"version":1,"boot":{"seconds":1790000000,"microseconds":123456},"records":[{"control":9,"uptime":10}]}"#,
-        #"{"version":1,"boot":{"seconds":1790000000,"microseconds":123456},"records":[{"control":1}]}"#,
+        // Version 1 keyed the history by kern.boottime.
+        #"{"version":1,"boot":{"seconds":1790000000,"microseconds":123456},"records":[]}"#,
+        #"{"version":3,"boot":{"sessionUUID":"6F2B1C3E-0A4D-4E5F-9A8B-1C2D3E4F5A6B"},"records":[]}"#,
+        #"{"version":2,"boot":{"sessionUUID":"not a UUID"},"records":[]}"#,
+        #"{"version":2,"boot":{"sessionUUID":"6F2B1C3E-0A4D-4E5F-9A8B-1C2D3E4F5A6B"},"records":[{"control":9,"uptime":10}]}"#,
+        #"{"version":2,"boot":{"sessionUUID":"6F2B1C3E-0A4D-4E5F-9A8B-1C2D3E4F5A6B"},"records":[{"control":1}]}"#,
     ])
     func corrupt(contents: String) throws {
         try withStore { store, url in
@@ -87,7 +90,7 @@ struct ActivationHistoryStoreTests {
 
             // A file with more records than the daemon writes still yields
             // the latest 20.
-            let snapshot = ActivationHistoryFormat.Snapshot(version: 1, boot: .testBoot, records: many)
+            let snapshot = ActivationHistoryFormat.Snapshot(version: ActivationHistoryFormat.version, boot: .testBoot, records: many)
             try JSONEncoder().encode(snapshot).write(to: url)
             #expect(store.load(boot: .testBoot, now: 5_000) == .loaded(Array(many.suffix(20))))
         }
@@ -109,6 +112,31 @@ struct ActivationHistoryStoreTests {
         }
     }
 
+    @Test("A FIFO is refused at once, without waiting for a writer")
+    func fifo() throws {
+        try withStore { store, url in
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            #expect(mkfifo(url.path, 0o600) == 0)
+            // On a thread of its own, so that a load stuck in open(2) shows
+            // as a failure instead of hanging the tests.
+            let result = LoadResult()
+            let done = DispatchSemaphore(value: 0)
+            Thread.detachNewThread {
+                result.set(store.load(boot: .testBoot, now: 5_000))
+                done.signal()
+            }
+            let finished = done.wait(timeout: .now() + 5) == .success
+            if !finished {
+                // Give the stuck reader a writer, so its thread can end.
+                let writer = open(url.path, O_WRONLY | O_NONBLOCK)
+                if writer >= 0 { close(writer) }
+                _ = done.wait(timeout: .now() + 5)
+            }
+            #expect(finished)
+            #expect(result.value == .discarded(.notARegularFile))
+        }
+    }
+
     @Test("Saving where the daemon may not write throws, and loads nothing", .enabled(if: geteuid() != 0, "root may write anywhere"))
     func unwritable() throws {
         try withStore { _, url in
@@ -121,19 +149,62 @@ struct ActivationHistoryStoreTests {
         }
     }
 
-    @Test("The file is JSON with the boot and the records")
+    @Test("The file is JSON with the boot session and the records; no wall-clock time")
     func format() throws {
         let data = try ActivationHistoryFormat.encode([HelperActivationRecord(control: .chargingInhibited, uptime: 12.5)], boot: .testBoot)
         let text = String(decoding: data, as: UTF8.self)
-        #expect(text == #"{"boot":{"microseconds":123456,"seconds":1790000000},"records":[{"control":1,"uptime":12.5}],"version":1}"#)
+        #expect(text == #"{"boot":{"sessionUUID":"6F2B1C3E-0A4D-4E5F-9A8B-1C2D3E4F5A6B"},"records":[{"control":1,"uptime":12.5}],"version":2}"#)
     }
 
-    @Test("This boot's identifier comes from kern.boottime and is stable")
+    @Test("A history saved in this boot is kept whatever the wall clock says")
+    func keptDespiteWallClock() throws {
+        try withStore { store, url in
+            let saved = records(2)
+            try store.save(saved, boot: .testBoot)
+            // Neither the file's dates nor the time of day take part.
+            for date in [Date(timeIntervalSince1970: 0), Date(timeIntervalSinceNow: 10 * 365 * 86_400)] {
+                try FileManager.default.setAttributes([.modificationDate: date, .creationDate: date], ofItemAtPath: url.path)
+                #expect(store.load(boot: .testBoot, now: 5_000) == .loaded(saved))
+            }
+            // Another boot session is another boot.
+            #expect(store.load(boot: .otherBoot, now: 5_000) == .discarded(.otherBoot))
+        }
+    }
+
+    @Test("This boot's identifier is kern.bootsessionuuid, a UUID, and stable")
     func bootIdentifier() throws {
         let boot = try #require(BootIdentifier.current())
         #expect(BootIdentifier.current() == boot)
-        #expect(boot.seconds > 0)
-        #expect(Double(boot.seconds) <= Date().timeIntervalSince1970)
-        #expect((0..<1_000_000).contains(boot.microseconds))
+        // The same value the sysctl tool reports (read-only).
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/sysctl")
+        process.arguments = ["-n", "kern.bootsessionuuid"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardInput = FileHandle.nullDevice
+        try process.run()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let reported = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        #expect(BootIdentifier(sysctlValue: reported) == boot)
+    }
+
+    @Test("Only a UUID is a boot identifier", arguments: ["", "not a UUID", "1791289092", "{ sec = 1791289092, usec = 905426 }"])
+    func notAUUID(text: String) {
+        #expect(BootIdentifier(sysctlValue: text) == nil)
+    }
+}
+
+/// The result of a load made on another thread.
+final class LoadResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: ActivationHistoryLoad?
+
+    var value: ActivationHistoryLoad? {
+        lock.withLock { result }
+    }
+
+    func set(_ value: ActivationHistoryLoad) {
+        lock.withLock { result = value }
     }
 }

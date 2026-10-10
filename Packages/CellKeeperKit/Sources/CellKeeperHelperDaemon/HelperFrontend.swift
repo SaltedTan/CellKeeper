@@ -21,16 +21,29 @@ import Foundation
 public protocol HelperFrontend: Sendable {
     /// Starts serving clients on `engine`. The daemon calls it once, only
     /// after `engine.start()` has returned (defaults restored and read back,
-    /// R2), and never during shutdown. Throws if it cannot serve safely.
+    /// R2), and never once shutdown has begun. Throws if it cannot serve
+    /// safely.
     func start(serving engine: HelperEngine) throws
 
-    /// Stops accepting connections and ends the existing ones, so that each
-    /// ends its session; replies already being sent may complete. The
-    /// daemon calls it when shutdown begins (SIGTERM, or a client's
-    /// `restoreDefaultsAndExit`), possibly more than once, also without a
-    /// prior ``start(serving:)``. It must return promptly: the daemon waits
-    /// at most ``HelperDaemon/frontendStopTimeout`` before it carries on.
-    func stop() async
+    /// Stops serving, and confirms that it has. In this order:
+    /// 1. Stops accepting connections, and refuses every request that
+    ///    arrives from now on, on any connection.
+    /// 2. Waits until every request it has already accepted has been
+    ///    answered by the engine and the reply delivered to its client. The
+    ///    reply to a `restoreDefaultsAndExit` is delivered before that
+    ///    client's session is invalidated.
+    /// 3. Invalidates every session it opened (``HelperSession/invalidate()``)
+    ///    and closes every connection.
+    ///
+    /// It returns true only once all of that is done, so that nothing it
+    /// accepted can change the engine's state afterwards; false if it could
+    /// not do all of it. A frontend that never started has nothing to stop
+    /// and returns true. The daemon calls it once, when shutdown begins
+    /// (SIGTERM, a client's `restoreDefaultsAndExit`, or a seam that could
+    /// not start), and waits for it only within its shutdown budget: it
+    /// exits with 0 only after a stop that returned true, followed by a
+    /// check that defaults are confirmed.
+    func stop() async -> Bool
 }
 
 /// The frontend of a build without a client listener: it serves nobody and
@@ -47,5 +60,8 @@ public struct NoFrontend: HelperFrontend {
         log.write(.notice, .xpc, "No client listener is available in this build: serving nobody.")
     }
 
-    public func stop() async {}
+    /// Nothing was accepted, so there is nothing to wait for.
+    public func stop() async -> Bool {
+        true
+    }
 }

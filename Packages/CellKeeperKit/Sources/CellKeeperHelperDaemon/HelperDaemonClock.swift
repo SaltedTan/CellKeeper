@@ -48,6 +48,19 @@ func withDeadline<Value: Sendable>(
     }
 }
 
+/// Runs `operation` as ``withDeadline(_:on:_:)`` does, until `deadline` on
+/// `clock`'s uptime. With no time left, it does not start it and returns
+/// nil.
+func withDeadline<Value: Sendable>(
+    at deadline: TimeInterval,
+    on clock: any HelperDaemonClock,
+    _ operation: @escaping @Sendable () async -> Value
+) async -> Value? {
+    let remaining = deadline - clock.uptime()
+    guard remaining > 0 else { return nil }
+    return await withDeadline(remaining, on: clock, operation)
+}
+
 /// The two sides of ``withDeadline(_:on:_:)``: the first to finish resumes
 /// the caller, and both tasks are then cancelled.
 private final class DeadlineRace<Value: Sendable>: @unchecked Sendable {

@@ -90,7 +90,7 @@ struct HelperDaemonHistoryTests {
         _ = await session.acquireOrRenewLease(control: HelperControl.adapterDisabled.rawValue, seconds: 120)
         #expect(await session.setControl(control: HelperControl.adapterDisabled.rawValue, active: true) == .ok)
         let logged = await eventually {
-            h.log.contains(.fault, .safety, "The boot identifier (kern.boottime) cannot be read")
+            h.log.contains(.fault, .safety, "The boot session UUID cannot be read")
                 && h.log.contains(.info, .control, "engine: activationRecorded")
         }
         #expect(logged)

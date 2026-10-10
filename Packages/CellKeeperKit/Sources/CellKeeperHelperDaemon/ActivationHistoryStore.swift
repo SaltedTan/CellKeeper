@@ -1,34 +1,40 @@
 import CellKeeperHelperCore
 import Foundation
 
-/// Identifies one boot of the Mac: `kern.boottime` (seconds and
-/// microseconds), read with `sysctlbyname`, a public, read-only sysctl.
+/// Identifies one boot of the Mac: the boot session UUID, which the kernel
+/// generates once at boot (`kern.bootsessionuuid`, read with
+/// `sysctlbyname`; read-only, though not declared in the SDK's headers).
 ///
 /// The engine's clock (`CLOCK_MONOTONIC`) starts again at every boot, so
-/// activation records are only comparable within one boot (D35). A boot
-/// time that differs means another boot.
+/// activation records are only comparable within one boot (D35). Nothing
+/// derived from the wall clock is used: `kern.boottime`, for one, moves
+/// when the calendar time is set, which would make one boot look like two.
 public struct BootIdentifier: Sendable, Equatable, Codable, CustomStringConvertible {
-    public var seconds: Int64
-    public var microseconds: Int32
+    public var sessionUUID: UUID
 
-    public init(seconds: Int64, microseconds: Int32) {
-        self.seconds = seconds
-        self.microseconds = microseconds
+    public init(sessionUUID: UUID) {
+        self.sessionUUID = sessionUUID
     }
 
-    /// This boot's identifier, or nil if `kern.boottime` cannot be read.
+    /// The identifier in the sysctl's text, or nil if it is not a UUID.
+    init?(sysctlValue: String) {
+        guard let uuid = UUID(uuidString: sysctlValue) else { return nil }
+        self.init(sessionUUID: uuid)
+    }
+
+    /// This boot's identifier, or nil if `kern.bootsessionuuid` cannot be
+    /// read or is not a UUID. There is no fallback.
     public static func current() -> BootIdentifier? {
-        var boottime = timeval()
-        var size = MemoryLayout<timeval>.size
-        guard sysctlbyname("kern.boottime", &boottime, &size, nil, 0) == 0,
-              size == MemoryLayout<timeval>.size,
-              boottime.tv_sec > 0
-        else { return nil }
-        return BootIdentifier(seconds: Int64(boottime.tv_sec), microseconds: Int32(boottime.tv_usec))
+        var size = 0
+        guard sysctlbyname("kern.bootsessionuuid", nil, &size, nil, 0) == 0, (1...64).contains(size) else { return nil }
+        var buffer = [UInt8](repeating: 0, count: size)
+        guard sysctlbyname("kern.bootsessionuuid", &buffer, &size, nil, 0) == 0, size <= buffer.count else { return nil }
+        let text = String(decoding: buffer.prefix(size).prefix { $0 != 0 }, as: UTF8.self)
+        return BootIdentifier(sysctlValue: text)
     }
 
     public var description: String {
-        "boot at \(seconds).\(String(format: "%06d", microseconds))"
+        "boot session \(sessionUUID.uuidString)"
     }
 }
 
@@ -83,13 +89,13 @@ public protocol ActivationHistoryStore: Sendable {
 }
 
 /// The saved form of the activation history: versioned JSON with the boot
-/// it belongs to.
+/// it belongs to. Version 1 (never released) keyed it by `kern.boottime`.
 ///
 /// ```json
-/// {"boot":{"microseconds":123456,"seconds":1791234567},"records":[{"control":1,"uptime":5021.5}],"version":1}
+/// {"boot":{"sessionUUID":"23C96BB3-5CF9-4843-B0ED-4348B69A3B48"},"records":[{"control":1,"uptime":5021.5}],"version":2}
 /// ```
 public enum ActivationHistoryFormat {
-    public static let version = 1
+    public static let version = 2
     /// The engine keeps only this many records; so does the file.
     public static let maximumRecords = HelperEngine.maximumActivationsPerHour
     /// A file larger than this is refused unread. A full history is about
@@ -139,10 +145,12 @@ public enum ActivationHistoryFormat {
 ///   over the old one, so a reader sees the old history or the new one,
 ///   never a partial file. The directory is created if needed (mode 0755;
 ///   the file is 0644: it holds no secrets).
-/// - Loading reads at most ``ActivationHistoryFormat/maximumSize`` bytes
-///   plus one, refuses a larger file, a symbolic link or anything but a
-///   regular file, and discards anything ``ActivationHistoryFormat/decode(_:boot:now:)``
-///   does not accept.
+/// - Loading opens the file without following a symbolic link and without
+///   blocking (a FIFO with no writer would otherwise hold the daemon before
+///   its start-up restore), refuses anything but a regular file at once,
+///   reads at most ``ActivationHistoryFormat/maximumSize`` bytes plus one,
+///   refuses a larger file, and discards anything
+///   ``ActivationHistoryFormat/decode(_:boot:now:)`` does not accept.
 public struct FileActivationHistoryStore: ActivationHistoryStore {
     public static let defaultURL = URL(fileURLWithPath: "/Library/Application Support/CellKeeper/Helper/activation-history.json")
 
@@ -153,7 +161,7 @@ public struct FileActivationHistoryStore: ActivationHistoryStore {
     }
 
     public func load(boot: BootIdentifier, now: TimeInterval) -> ActivationHistoryLoad {
-        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
         guard descriptor >= 0 else {
             let error = errno
             switch error {
@@ -166,6 +174,7 @@ public struct FileActivationHistoryStore: ActivationHistoryStore {
         var status = stat()
         guard fstat(descriptor, &status) == 0 else { return .discarded(.unreadable(errno: errno)) }
         guard status.st_mode & S_IFMT == S_IFREG else { return .discarded(.notARegularFile) }
+        // A regular file never blocks, with or without O_NONBLOCK.
         // One byte more than allowed tells a file that is too large.
         let limit = ActivationHistoryFormat.maximumSize + 1
         var data = Data()

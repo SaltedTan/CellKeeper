@@ -29,8 +29,8 @@ struct HelperDaemonStuckCallTests {
         #expect(!h.sleep.isStarted)
     }
 
-    @Test("The deadline holds even while the engine is stuck in a call to the control")
-    func deadlineWithStuckEngine() async {
+    @Test("The deadline holds even while the engine is stuck in a call to the control, also with a log that cannot be written", arguments: [false, true])
+    func deadlineWithStuckEngine(logBlocked: Bool) async {
         let control = BlockingControl()
         let h = DaemonHarness(control: control)
         let running = await h.run()
@@ -38,16 +38,144 @@ struct HelperDaemonStuckCallTests {
         h.clock.advance(by: HelperDaemon.tickInterval)
         let stuck = await eventually { control.isHolding }
         #expect(stuck)
+        if logBlocked {
+            h.log.block()
+        }
 
         h.signals.sendSIGTERM()
-        let waiting = await eventually { h.clock.waits.contains(HelperDaemon.terminationDeadline - 0.001...HelperDaemon.terminationDeadline) }
+        // The retries end before the deadline, keeping the reserve ...
+        let retrying = HelperDaemon.terminationDeadline - HelperDaemon.finalisationReserve
+        let waiting = await eventually { h.clock.waits.contains(retrying - 0.001...retrying) }
         #expect(waiting)
-        h.clock.advance(by: HelperDaemon.terminationDeadline)
+        h.clock.advance(by: retrying)
+        // ... then the log is written (or waited for, until the time kept
+        // for the final check), and the final check waits for the stuck
+        // engine only until the deadline. Nothing is left for the last log.
+        let steps = logBlocked
+            ? [HelperDaemon.finalisationReserve - HelperDaemon.finalCheckReserve, HelperDaemon.finalCheckReserve]
+            : [HelperDaemon.finalisationReserve]
+        for step in steps {
+            let next = await eventually { h.clock.waits.contains(step - 0.001...step) }
+            #expect(next)
+            #expect(h.exits.statuses.isEmpty)
+            h.clock.advance(by: step)
+        }
         let exited = await eventually { !h.exits.statuses.isEmpty }
         #expect(exited)
         #expect(h.exits.statuses == [HelperDaemon.restoreNotConfirmedExitStatus])
+        h.log.release()
         control.release()
         #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+    }
+
+    @Test("With a restore that never succeeds and a log that cannot be written, the daemon still exits by the deadline", arguments: ShutdownPath.allCases)
+    func deadlineWithBlockedLog(path: ShutdownPath) async {
+        let control = SimulatedChargeControl()
+        let h = DaemonHarness(control: control)
+        let running = await h.run()
+        let session = await h.introducedSession()
+        #expect(await h.activate(.adapterDisabled, on: session) == .ok)
+        control.failNextRestores(1_000)
+        let restoresBefore = control.restoreCount
+        h.log.block()
+
+        await h.beginShutdown(path, on: session)
+        var elapsed: TimeInterval = 0
+        let retries = Int(HelperDaemon.terminationDeadline - HelperDaemon.finalisationReserve)
+        for second in 0..<retries {
+            let polled = await eventually {
+                control.restoreCount >= restoresBefore + path.firstDaemonAttempt + second && h.clock.waits.count == 3
+            }
+            #expect(polled)
+            h.clock.advance(by: HelperDaemon.exitPollInterval)
+            elapsed += HelperDaemon.exitPollInterval
+        }
+        // The log cannot be written: the daemon waits for it until the time
+        // kept for the final check, then decides, then waits for it again
+        // only until the deadline.
+        for _ in 0..<2 {
+            let flushing = await eventually { h.clock.waits.contains(HelperDaemon.logFlushTimeout - 0.001...HelperDaemon.logFlushTimeout) }
+            #expect(flushing)
+            #expect(h.exits.statuses.isEmpty)
+            h.clock.advance(by: HelperDaemon.logFlushTimeout)
+            elapsed += HelperDaemon.logFlushTimeout
+        }
+        let exited = await eventually { !h.exits.statuses.isEmpty }
+        #expect(exited)
+        #expect(elapsed <= HelperDaemon.terminationDeadline)
+        #expect(h.exits.statuses == [HelperDaemon.restoreNotConfirmedExitStatus])
+        h.log.release()
+        #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+    }
+
+    @Test("A late restore that fails while the log is written is never followed by exit 0 (stop not confirmed)", arguments: ShutdownPath.allCases)
+    func lateFailureWithUnconfirmedStop(path: ShutdownPath) async {
+        let control = SimulatedChargeControl()
+        let h = DaemonHarness(control: control)
+        h.frontend.holdStop()
+        let running = await h.run()
+        let session = await h.introducedSession()
+        // Another client of the frontend, whose requests it has not drained.
+        let late = await h.introducedSession()
+        #expect(await h.activate(.chargingInhibited, on: session) == .ok)
+        h.log.block()
+
+        await h.beginShutdown(path, on: session)
+        let retries = Int(HelperDaemon.terminationDeadline - HelperDaemon.finalisationReserve)
+        for _ in 0..<retries {
+            let waiting = await eventually { h.clock.waits.count == 3 }
+            #expect(waiting)
+            h.clock.advance(by: 1)
+        }
+        // While the daemon waits for the log, the engine confirms defaults,
+        // then a late request makes a restore owed again.
+        let flushing = await eventually { h.clock.waits.contains(HelperDaemon.logFlushTimeout - 0.001...HelperDaemon.logFlushTimeout) }
+        #expect(flushing)
+        #expect(await h.daemon.engine.isSafeToExit)
+        control.simulateOutsideChange(.chargingInhibited, active: true)
+        control.failNextRestores(1)
+        #expect(await late.restoreDefaults() == .hardwareError)
+        let owed = await h.daemon.engine.isSafeToExit
+        #expect(!owed)
+
+        h.clock.advance(by: HelperDaemon.logFlushTimeout)
+        let finalFlush = await eventually { h.clock.waits.contains(HelperDaemon.logFlushTimeout - 0.001...HelperDaemon.logFlushTimeout) }
+        #expect(finalFlush)
+        h.clock.advance(by: HelperDaemon.logFlushTimeout)
+        #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+        #expect(h.exits.statuses == [HelperDaemon.restoreNotConfirmedExitStatus])
+        h.log.release()
+        h.frontend.confirmStop()
+    }
+
+    @Test("The final check comes after the log is written: a change while it is written decides the exit", arguments: ShutdownPath.allCases)
+    func finalCheckAfterLog(path: ShutdownPath) async {
+        let control = SimulatedChargeControl()
+        let h = DaemonHarness(control: control)
+        let running = await h.run()
+        let session = await h.introducedSession()
+        // A session the frontend does not know about, as if a frontend had
+        // confirmed its stop without draining it.
+        let rogue = await h.introducedSession()
+        #expect(await h.activate(.chargingInhibited, on: session) == .ok)
+        h.log.block()
+
+        await h.beginShutdown(path, on: session)
+        // The frontend confirmed and defaults are confirmed at once; the
+        // daemon now waits for the log.
+        let flushing = await eventually { h.clock.waits.contains(HelperDaemon.logFlushTimeout - 0.001...HelperDaemon.logFlushTimeout) }
+        #expect(flushing)
+        #expect(await h.daemon.engine.isSafeToExit)
+        control.simulateOutsideChange(.chargingInhibited, active: true)
+        control.failNextRestores(1)
+        #expect(await rogue.restoreDefaults() == .hardwareError)
+
+        h.clock.advance(by: HelperDaemon.logFlushTimeout)
+        let finalFlush = await eventually { h.clock.waits.contains(HelperDaemon.logFlushTimeout - 0.001...HelperDaemon.logFlushTimeout) }
+        #expect(finalFlush)
+        h.clock.advance(by: HelperDaemon.logFlushTimeout)
+        #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+        h.log.release()
     }
 
     @Test("If the engine does not return in time, sleep is acknowledged anyway, once, and a fault is logged")

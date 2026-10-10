@@ -99,7 +99,8 @@ final class StubPower: HelperPowerReading, @unchecked Sendable {
     }
 }
 
-/// Records what the daemon does to its frontend.
+/// Records what the daemon does to its frontend. Its stop confirms at once
+/// unless the test holds it back or makes it refuse.
 final class FakeFrontend: HelperFrontend, @unchecked Sendable {
     enum Call: Equatable {
         case start
@@ -109,6 +110,38 @@ final class FakeFrontend: HelperFrontend, @unchecked Sendable {
     private let lock = NSLock()
     private var recorded: [Call] = []
     private var startCheck: (@Sendable (HelperEngine) throws -> Void)?
+    private var isHoldingStop = false
+    private var heldStops: [CheckedContinuation<Bool, Never>] = []
+    private var stopResult = true
+
+    /// Makes `stop()` wait until ``confirmStop(_:)``, as a frontend still
+    /// draining its requests would.
+    func holdStop() {
+        lock.withLock { isHoldingStop = true }
+    }
+
+    /// Ends a held `stop()` with `confirmed`; later stops return it at once.
+    func confirmStop(_ confirmed: Bool = true) {
+        let held = lock.withLock { () -> [CheckedContinuation<Bool, Never>] in
+            isHoldingStop = false
+            stopResult = confirmed
+            defer { heldStops = [] }
+            return heldStops
+        }
+        for continuation in held {
+            continuation.resume(returning: confirmed)
+        }
+    }
+
+    /// Makes `stop()` report that it could not confirm.
+    func refuseStop() {
+        lock.withLock { stopResult = false }
+    }
+
+    /// True while a `stop()` is held.
+    var isStopHeld: Bool {
+        lock.withLock { !heldStops.isEmpty }
+    }
 
     /// Runs `check` inside `start(serving:)`; it may throw to refuse.
     func onStart(_ check: @escaping @Sendable (HelperEngine) throws -> Void) {
@@ -127,8 +160,24 @@ final class FakeFrontend: HelperFrontend, @unchecked Sendable {
         try check?(engine)
     }
 
-    func stop() async {
-        lock.withLock { recorded.append(.stop) }
+    func stop() async -> Bool {
+        let result = lock.withLock { () -> Bool? in
+            recorded.append(.stop)
+            return isHoldingStop ? nil : stopResult
+        }
+        if let result {
+            return result
+        }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let resumeNow = lock.withLock { () -> Bool? in
+                guard isHoldingStop else { return stopResult }
+                heldStops.append(continuation)
+                return nil
+            }
+            if let resumeNow {
+                continuation.resume(returning: resumeNow)
+            }
+        }
     }
 }
 
@@ -207,6 +256,12 @@ final class InMemoryHistoryStore: ActivationHistoryStore, @unchecked Sendable {
     private var saves = 0
     private var failingSaves = 0
     private var gate: DispatchSemaphore?
+    private var loadHook: (@Sendable () -> Void)?
+
+    /// Runs `hook` at the start of every load.
+    func onLoad(_ hook: @escaping @Sendable () -> Void) {
+        lock.withLock { loadHook = hook }
+    }
 
     var saveCount: Int {
         lock.withLock { saves }
@@ -240,6 +295,7 @@ final class InMemoryHistoryStore: ActivationHistoryStore, @unchecked Sendable {
     }
 
     func load(boot: BootIdentifier, now: TimeInterval) -> ActivationHistoryLoad {
+        lock.withLock { loadHook }?()
         guard let data = lock.withLock({ self.data }) else { return .missing }
         return ActivationHistoryFormat.decode(data, boot: boot, now: now)
     }
@@ -383,8 +439,8 @@ final class BlockingControl: HelperChargeControl, @unchecked Sendable {
 }
 
 extension BootIdentifier {
-    static let testBoot = BootIdentifier(seconds: 1_790_000_000, microseconds: 123_456)
-    static let otherBoot = BootIdentifier(seconds: 1_790_086_400, microseconds: 654_321)
+    static let testBoot = BootIdentifier(sessionUUID: UUID(uuidString: "6F2B1C3E-0A4D-4E5F-9A8B-1C2D3E4F5A6B")!)
+    static let otherBoot = BootIdentifier(sessionUUID: UUID(uuidString: "0D9E8F7A-6B5C-4D3E-8F1A-2B3C4D5E6F70")!)
 }
 
 /// A daemon on fakes: a simulated control, a stub power reading, a manual
@@ -394,7 +450,7 @@ struct DaemonHarness {
     let control: any HelperChargeControl
     let frontend = FakeFrontend()
     let sleep = FakeSleepNotifications()
-    let signals = FakeTerminationSignals()
+    let signals: FakeTerminationSignals
     let store: InMemoryHistoryStore
     let log = RecordingLog()
     let exits = ExitRecorder()
@@ -404,11 +460,13 @@ struct DaemonHarness {
         control: any HelperChargeControl = SimulatedChargeControl(),
         store: InMemoryHistoryStore = InMemoryHistoryStore(),
         boot: BootIdentifier? = .testBoot,
-        clock: ManualClock = ManualClock()
+        clock: ManualClock = ManualClock(),
+        signals: FakeTerminationSignals = FakeTerminationSignals()
     ) {
         self.clock = clock
         self.control = control
         self.store = store
+        self.signals = signals
         let exits = exits
         let environment = HelperDaemonEnvironment(
             control: control,
