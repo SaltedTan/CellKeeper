@@ -1,6 +1,6 @@
 # CellKeeper architecture
 
-Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper). Last reviewed 2026-10-09.
+Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper), and the helper's NSXPC transport, tested over an anonymous listener but not used by the app yet. Last reviewed 2026-10-10.
 
 This document describes how CellKeeper is put together and why. Research that
 informed these decisions is in [`docs/research/`](research/README.md); safety
@@ -27,7 +27,7 @@ rules are in [`docs/safety.md`](safety.md).
    actions as refused, and what macOS reports is shown separately from what
    CellKeeper wants.
 5. **Minimal machinery.** No third-party dependencies, no dependency
-   injection framework, three modules plus the app.
+   injection framework, four modules plus the app.
 
 ## Modules
 
@@ -50,6 +50,7 @@ rules are in [`docs/safety.md`](safety.md).
 │  FileOwnershipRecordStore  – durable record of the user's own Charge Limit    ││
 │  SystemHelperPowerReading  – the helper's own read-only power state;          ││
 │                              `HelperChargingBackend.simulatedHelper()`        ││
+│  XPCHelperTransport        – `HelperTransport` over NSXPC (not used yet)      ││
 └───────────────┬──────────────────────────────────────────────────────────────┘│
                 │ depends on                                                    │
 ┌───────────────▼──────────────── CellKeeperCore (pure Swift, no IOKit) ────────▼───────────────┐
@@ -71,11 +72,18 @@ rules are in [`docs/safety.md`](safety.md).
 │            restore at start, exit and disconnect, read-back), HelperSession, HelperEvent       │
 │  Seams:    HelperChargeControl (SimulatedChargeControl, UnknownHardwareChargeControl),         │
 │            HelperPowerReading (the helper's own power state)                                   │
+└───────────────▲────────────────────────────────────────────────────────────────────────────────┘
+                │ depends on (used by Kit, and later by the daemon)
+┌───────────────┴ CellKeeperHelperXPC (NSXPC + Security, public APIs; shared by app and daemon) ─┐
+│  CellKeeperHelperXPCProtocol (@objc, primitives only), HelperXPCWire (reply conversions)       │
+│  HelperXPCServer (listener side: one session per connection, per-connection FIFO)              │
+│  HelperXPCClient (client side: requirement, timeouts, unusable after any failure)              │
+│  HelperCodeSigningRequirement (requirements both sides place on each other)                    │
 └────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 - `Packages/CellKeeperKit` is a local Swift package (tools version 6.0, Swift
-  6 language mode, macOS 14+) with three library products and three test
+  6 language mode, macOS 14+) with four library products and four test
   targets. `swift test` runs every non-UI test without opening Xcode.
 - `CellKeeper.xcodeproj` contains only the app target. It uses a
   file-system-synchronized group for `CellKeeper/`, so adding a Swift file
@@ -88,6 +96,10 @@ rules are in [`docs/safety.md`](safety.md).
   (see "Helper engine" below). `CellKeeperCore` depends on it for that
   vocabulary, and the app runs its engine in process for the Simulated
   helper (see "Helper backend").
+- `CellKeeperHelperXPC` depends only on `CellKeeperHelperCore`. It holds
+  everything the app and the daemon both need to talk over NSXPC (see
+  "Helper transport" below); `CellKeeperKit` adapts its client to the app's
+  `HelperTransport`. The app does not use it yet.
 
 Requirement → location:
 
@@ -102,7 +114,7 @@ Requirement → location:
 | Scheduler | — | Future: will feed overrides into `PolicyInput` |
 | Notifications | — | Future: driven from `ControlEvent`s |
 | Shortcuts/automation | — | Future: App Intents calling `AppModel` intents |
-| Privileged operations | `HelperEngine` (HelperCore), `HelperChargingBackend` (Core) | Helper logic and the app's backend implemented, with a simulated control only, in process (the Simulated helper); no hardware control. The daemon and its XPC transport are future work |
+| Privileged operations | `HelperEngine` (HelperCore), `HelperChargingBackend` (Core), `HelperXPCServer` / `HelperXPCClient` (HelperXPC), `XPCHelperTransport` (Kit) | Helper logic and the app's backend implemented, with a simulated control only, in process (the Simulated helper); no hardware control. The NSXPC transport with code-signing requirements on both sides is implemented and tested over an anonymous listener; the daemon and its registration are future work |
 
 ## Data flow
 
@@ -594,8 +606,16 @@ connection, ticks it every 5 s while the transport exists (the ticking task
 holds the engine weakly and is cancelled with the transport), and forwards
 sleep and wake. When the engine revokes a session, the transport closes that
 connection: the request that caused it and every later one throw
-`HelperTransportError.sessionRevoked`. An NSXPC transport will be a drop-in
-whose connection throws on interruption or timeout.
+`HelperTransportError.sessionRevoked`. `XPCHelperTransport` (Kit) is the
+drop-in for the daemon: each connection is a `HelperXPCClient` that requires
+the helper's code signature, and it throws `interrupted`, `invalidated`,
+`requirementNotMet`, `timedOut` or `malformedReply` when the transport fails
+(see "Helper transport" below). Any of them leaves that connection
+unusable, and the backend connects again, as for any transport failure. A
+revoked session's connection is closed by the server after the reply to
+the request that caused it (`rateLimited`), so over NSXPC that request
+returns and the next one throws. The app does not use the XPC transport
+until the daemon can be registered (phase 4b).
 
 | Mode | Helper control | Lease |
 |---|---|---|
@@ -807,7 +827,9 @@ candidates, in the order we intend to evaluate them:
 
 The helper's logic exists as `CellKeeperHelperCore` (below), with a
 simulated control only, and the app runs it in process as the Simulated
-helper. There is no daemon, no XPC, and no hardware control. Real control
+helper. Its NSXPC transport exists as `CellKeeperHelperXPC` (below), tested
+inside the test process only. There is no daemon, nothing is registered
+with launchd, and there is no hardware control. Real control
 will not be enabled without the
 hardware verification protocol in research note 02 §7 and the rules in
 `safety.md`.
@@ -818,12 +840,13 @@ hardware verification protocol in research note 02 §7 and the rules in
 touch the system. It is pure Swift on Foundation: no IOKit, XPC, processes,
 files or network. The layers, from the client down:
 
-1. **Transport.** In process today (`InProcessHelperTransport`, for the
-   Simulated helper), an NSXPC listener in the daemon later. It opens one
-   `HelperSession` per connection,
-   forwards each request with its raw wire values, and invalidates the
-   session when the connection ends. It must deliver one connection's
-   requests in order; the engine itself is an actor. When the engine revokes
+1. **Transport.** In process for the Simulated helper
+   (`InProcessHelperTransport`), and over NSXPC (`HelperXPCServer`, for the
+   daemon; see "Helper transport" below). It opens one `HelperSession` per
+   connection, forwards each request with its raw wire values, and
+   invalidates the session when the connection ends. It delivers one
+   connection's requests in order, one at a time; the engine itself is an
+   actor, which would not order independent calls. When the engine revokes
    a session (`sessionRevoked`), the transport closes its connection.
 2. **Session and engine.** Validation, leases, rate limits, interlocks and
    read-back, below.
@@ -1094,15 +1117,118 @@ Remaining limitations:
   dwell (R21) are not implemented.
 - A power reading that is not refreshed after a wake clears every control
   at each wake.
-- Persisting the activation history, closing revoked connections, keeping
-  each connection's requests in order and exiting are the host's jobs.
+- Persisting the activation history and exiting are the host's jobs.
+  Closing revoked connections and keeping each connection's requests in
+  order are the transport's (`HelperXPCServer` does both).
 - A blocking event sink delays the reply of the call that caused the
   events, the host's acknowledgement of sleep, and every later operation,
   for every client.
 
-Not there yet: the daemon (SMAppService, launchd, SIGTERM), the NSXPC
-transport and code-signing requirements, the daemon's own power reading and
-acknowledged sleep notifications, and any real control.
+Not there yet: the daemon (SMAppService, launchd, SIGTERM) and its
+registration, the daemon's own power reading and acknowledged sleep
+notifications, and any real control. The NSXPC transport and its
+code-signing requirements exist (below), but nothing serves or uses them
+outside the tests.
+
+### Helper transport (`CellKeeperHelperXPC`)
+
+The NSXPC connection between CellKeeper and the helper daemon, on public
+Foundation (`NSXPCConnection`, `NSXPCListener`) and Security (`SecCode`,
+`SecRequirement`) APIs only. Nothing in it registers a launchd job or a
+Mach service; the tests use `NSXPCListener.anonymous()` inside the test
+process.
+
+- **Interface.** `CellKeeperHelperXPCProtocol` has one method per request
+  in the wire vocabulary table above, with the same raw `Int`, `UInt64` and
+  `Bool` arguments and a single reply block of the reply's fields (16 for
+  `readState`). No strings, collections or archived objects cross, so
+  neither side ever decodes an object from the other. `HelperXPCWire`
+  converts replies to and from their fields. The engine validates every
+  argument. The client accepts only statuses it knows: any other raw
+  status is `malformedReply`, never read as `ok`. Unknown capability,
+  interlock and control bits and unknown change causes are kept as they
+  came, as with the in-process transport.
+- **Server** (`HelperXPCServer`, the daemon's side). It builds the engine,
+  as `InProcessHelperTransport` does, so it sees the sessions the engine
+  revokes. It sets the client requirement on the listener
+  (`setConnectionCodeSigningRequirement`) before resuming it, and `start()`
+  starts the engine, which restores defaults first, before the listener
+  accepts anything. Each accepted connection gets its own session.
+  - *Order.* NSXPC calls the exported object on the connection's own
+    queue, which only appends the request to that connection's FIFO (an
+    `AsyncStream` with one consumer task). The consumer opens the session,
+    then runs the requests strictly in arrival order, one at a time, and
+    sends each reply after the engine has returned. Connections run
+    concurrently; the engine serialises them.
+  - *End of a connection.* When NSXPC invalidates a connection (the client
+    quit, crashed or invalidated it), the request in progress finishes,
+    requests not yet started are dropped, and the session is invalidated,
+    which clears what it held.
+  - *Revocation.* The engine's `sessionRevoked` event, delivered before the
+    revoking call returns, marks the session. After that request the server
+    invalidates the connection behind a send barrier, so the reply
+    (`rateLimited`) goes out first; requests after it never run.
+  - *Stop.* `stop()` invalidates the listener and every connection, and
+    returns when their sessions are invalidated. Ticks, sleep and wake,
+    SIGTERM and exit stay with the host, on `server.engine`.
+- **Client** (`HelperXPCClient`, the app's side). It connects to the
+  daemon's Mach service with `.privileged`, or to an endpoint in tests, and
+  sets the helper requirement (`setCodeSigningRequirement`) before
+  `resume()`. Each call waits at most its timeout (10 s by default), and
+  exactly one outcome is delivered per call: the reply, NSXPC's error, or
+  the timeout, whichever claims the call first. Any failure (interrupted,
+  invalidated, requirement not met, timed out, unreadable reply) makes the
+  client unusable before the caller resumes: it records the failure,
+  invalidates the connection and fails the calls in flight, and every later
+  call throws `invalidated`. Otherwise NSXPC would reconnect an interrupted
+  connection by itself on the next message, to a new session that has not
+  said hello; and an invalidated connection delivers no late reply after a
+  timeout. The backend then connects again with a new client.
+- **Requirements** (`HelperCodeSigningRequirement`). A value always holds a
+  requirement compiled by `SecRequirementCreateWithString`, because NSXPC
+  treats a malformed one as a fatal error. The server and the client take
+  one as a non-optional argument, so neither can be made without a
+  requirement. Production builds use research note 04, §2.4: the helper
+  requires `anchor apple generic and identifier "<CellKeeper's identifier>"
+  and certificate leaf[subject.OU] = "<team>"` of its client, and CellKeeper
+  requires the same of the helper, with the helper's identifier. The team
+  is the building process's own, read from its signature (`SecCodeCopySelf`,
+  `SecCodeCopySigningInformation`) and trusted only if the running code is
+  valid against an Apple-issued certificate of that team. Identifiers are
+  limited to the characters of bundle identifiers, so they cannot change
+  the requirement. An ad-hoc or unsigned build has no team and cannot build
+  either requirement; the daemon must then not listen (note 04, §2.4). The
+  peer's process ID is never used (note 04, §2.3).
+- **Tests.** The tests serve an engine on an anonymous listener in the test
+  process, with the test process's own designated requirement on both
+  sides (`SecCodeCopyDesignatedRequirement`; for the ad-hoc signed
+  `swift test` host it names the exact build by its cdhash), so NSXPC checks
+  a real code signature on every connection. They cover every request
+  round-tripping with the in-process transport's replies, requirements
+  that cannot match on either side, arrival order under a burst of 300
+  requests, revocation, disconnect, stop, a timeout against a stalled
+  engine, and `HelperChargingBackend` reconnecting after the server drops
+  its connection.
+
+Limitations:
+
+- The XPC runtime checks a peer when its first message arrives, so
+  CellKeeper's first request may reach a helper that fails CellKeeper's
+  requirement (note 04, §2.2). CellKeeper's requests carry nothing secret,
+  and no reply from such a helper is delivered. A client that fails the
+  helper's requirement never reaches the engine.
+- A request sent in the moment between the helper closing a connection and
+  the client noticing may reach the helper on a new connection, because
+  NSXPC reconnects by itself. That session has not said hello, so the
+  helper refuses everything but a restore, which only moves toward safety;
+  the client closes itself as soon as it notices.
+- A call is bounded by its timeout, but not cancelled with its task.
+- Connections the listener refuses are not reported to the host (NSXPC
+  drops them before the delegate sees them); accepted ones appear as
+  `sessionOpened`.
+- Calls into the control are not bounded in time on the helper's side: a
+  stalled control stalls the engine for every client, whose calls then
+  time out. The daemon must bound them.
 
 ## Known limitations
 
@@ -1164,8 +1290,9 @@ closed before a backend that changes hardware *itself* is enabled:
   handling (`IORegisterForSystemPower` with acknowledgement), per-control
   leases that lapse to `.normal`, and bounded operations (XPC timeouts with
   connection invalidation). `HelperEngine` implements the leases and the
-  sleep, wake and exit rules; the daemon still has to deliver those events
-  and bound its calls.
+  sleep, wake and exit rules, and the XPC client bounds every call with a
+  timeout and invalidates the connection after one; the daemon still has to
+  deliver those events and bound its calls into the control.
 
 ## Telemetry
 
@@ -1219,7 +1346,10 @@ decisions.
 - A privileged helper, if ever added, implies Developer ID distribution
   outside the Mac App Store, a non-sandboxed app, notarization, and
   code-signing-requirement-pinned XPC. See
-  [05](research/05-distribution-and-signing.md).
+  [05](research/05-distribution-and-signing.md). The XPC transport already
+  pins both sides (identifier, Apple-issued certificate and the team read
+  from the process's own signature); an ad-hoc contributor build cannot
+  build those requirements, so it can never talk to a release helper.
 
 ## Decision log
 
@@ -1274,3 +1404,8 @@ decisions.
 | D47 | A helper that waits for an acknowledgement because of its own failure (`writeFailed`, an owed restore, or an interlock this version does not know) faults the backend at once with that reason, also when the helper cannot read its controls back (the mode is then unknown); a hardware error the helper had not reported before is a failure of the next read, whatever else it shows | The user must learn of a broken control when it happens, not after a lease expiry, an hour of backoff or three failed reads, and only the fault reset offers the restore the helper waits for; a recovered error must still be counted |
 | D48 | The helper's wire API has a conditional deactivation, `clearControlIfUnchanged(control, generation, helperInstance)`, which the engine checks after its checks and right before clearing, and which writes nothing on a mismatch (`controlChanged`, raw value 12); `setControl(control, false)` and the restores stay unconditional (lead's decision, 2026-10-10) | A client that checks ownership and then clears in a second request can clear a control that changed hands in between; only the engine can compare and clear atomically. Deliberate clears and safety restores must not depend on what a client last saw |
 | D49 | An outside change a backend finds is kept until a read reports it, even if the request that found it succeeds, and the controller handles faults a backend reports after every read: request confirmations, fallbacks, recovery reads and reads that fail, not only an evaluation's | Otherwise a successful `.normal` could erase the only notice of another tool's change, and the next evaluation would set the restriction again without a fault (R27) |
+| D51 | Each helper connection's requests go through a FIFO with one consumer: strictly in arrival order, one at a time, each reply sent after the engine returns. A revoked session's connection is closed behind a send barrier after the reply to the revoking request, and requests after it never run | NSXPC delivers each connection's messages on its own queue, and the engine is an actor that does not order independent calls, so the order must be explicit (research note 04, §3.6). The revoking request's reply tells the client why |
+| D52 | Both sides of the helper connection always carry a code-signing requirement: the helper requires CellKeeper's identifier, CellKeeper the helper's, each with `anchor apple generic` and the team identifier read from the process's own signature. Requirements are compiled before NSXPC sees them, the server and the client cannot be made without one, and an ad-hoc build cannot build the production ones | Research note 04, §2.4: certificate clauses are false for ad-hoc code, and an identifier alone is chosen by whoever signs. Reading the team from the signature works for the project's and a contributor's own team without configuration. NSXPC treats a malformed requirement as a fatal error; PIDs are unsafe (§2.3) |
+| D53 | After any transport failure (interruption, invalidation, unmet requirement, timeout, unreadable reply) the XPC client is unusable: it invalidates its connection before the caller resumes, fails the calls in flight, and every later call throws; the backend connects again with a new client and reads afresh | NSXPC would otherwise reconnect an interrupted connection to a new session by itself, and a timed-out call's late reply must never be delivered. A fresh connection keeps the helper's state the only source of truth (D46) |
+| D54 | Every helper call times out, after 10 s by default. A timeout is a transport failure: the connection is invalidated, so the helper ends the session and clears what it held | A hung helper must not hang the app's controller (safety precondition 13). The engine answers in milliseconds, so 10 s only fires on a stuck helper, and ending the session moves toward the safe state |
+| D55 | A helper reply with a status this version does not know is an unreadable reply, a transport failure, and is never mapped to a status | A guess could read a refusal as `ok`. Failing the connection makes the backend read the state afresh, and a helper that keeps sending it is unavailable |
