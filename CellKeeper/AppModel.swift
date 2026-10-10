@@ -48,6 +48,14 @@ enum ControlBackendChoice: String, CaseIterable, Identifiable {
     }
 }
 
+/// The tabs of the Settings window, so the menu can open one.
+enum SettingsTab: Hashable {
+    case charging
+    case control
+    case activity
+    case about
+}
+
 /// Main-actor state for the UI. Owns the ``ChargeController`` and feeds it
 /// commands strictly in order through a single queue.
 @MainActor
@@ -65,6 +73,12 @@ final class AppModel {
     /// them.
     private(set) var thermalState = ProcessInfo.processInfo.thermalState
     private(set) var isLowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
+    /// The Settings tab shown; the menu opens Control for the macOS Charge
+    /// Limit steps.
+    var settingsTab: SettingsTab = .charging
+    /// Whether Settings › Control shows the steps for turning macOS's Charge
+    /// Limit off.
+    var isMacOSLimitGuideExpanded = false
 
     private enum Command: Sendable {
         case evaluate(EvaluationTrigger)
@@ -360,6 +374,22 @@ final class AppModel {
         send(.resetFault)
     }
 
+    /// Shows the steps for turning macOS's Charge Limit off in Settings ›
+    /// Control; the caller opens the Settings window.
+    func showMacOSLimitGuide() {
+        settingsTab = .control
+        isMacOSLimitGuideExpanded = true
+    }
+
+    /// Opens System Settings › Battery, or System Settings itself if the
+    /// Battery pane cannot be opened. CellKeeper changes nothing there.
+    func openBatterySettings() {
+        if !NSWorkspace.shared.open(BatterySettingsLink.batteryPane) {
+            CellKeeperLog.app.notice("Could not open the Battery pane of System Settings; opening System Settings")
+            NSWorkspace.shared.openApplication(at: BatterySettingsLink.systemSettingsApp, configuration: NSWorkspace.OpenConfiguration())
+        }
+    }
+
     /// Checks again what the backend depends on (the shortcut after the user
     /// created it, or macOS's Charge Limit after the user turned it off) and
     /// re-evaluates.
@@ -384,16 +414,21 @@ final class AppModel {
         return DiagnosticsReport.text(status: status, environment: .current(), generatedAt: Date())
     }
 
-    /// True when the selected backend sets macOS's own Charge Limit, so the
+    /// The charge limits the UI offers for the backend in charge: every
+    /// whole percentage from 20 to 100, or macOS's Charge Limit steps.
+    var chargeLimitChoices: ChargeLimitChoices {
+        ChargeLimitChoices.offered(capabilities: status?.capabilities, isNativeChosen: backendChoice == .nativeLimit)
+    }
+
+    /// True when the backend in charge sets macOS's own Charge Limit, so the
     /// UI should offer only what that limit can express.
     var usesNativeLimit: Bool {
-        status?.capabilities.isEnforcedByMacOS ?? (backendChoice == .nativeLimit)
+        chargeLimitChoices.isNativeSteps
     }
 
     /// The charge limits the UI should offer with the native backend.
     var nativeLimitSteps: [Int] {
-        let steps = status?.capabilities.nativeLimitSteps ?? []
-        return steps.isEmpty ? NativeChargeLimitBackend.supportedLimits : steps
+        chargeLimitChoices.isNativeSteps ? chargeLimitChoices.values : NativeChargeLimitBackend.supportedLimits
     }
 
     // MARK: - Command queue

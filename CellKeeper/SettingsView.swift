@@ -1,19 +1,24 @@
 import CellKeeperCore
+import CellKeeperKit
 import SwiftUI
 
 struct SettingsView: View {
     let model: AppModel
 
     var body: some View {
-        TabView {
+        TabView(selection: Binding(get: { model.settingsTab }, set: { model.settingsTab = $0 })) {
             ChargingSettingsTab(model: model)
                 .tabItem { Label("Charging", systemImage: "bolt.batteryblock") }
+                .tag(SettingsTab.charging)
             ControlSettingsTab(model: model)
                 .tabItem { Label("Control", systemImage: "wrench.and.screwdriver") }
+                .tag(SettingsTab.control)
             ActivityTab(model: model)
                 .tabItem { Label("Activity", systemImage: "list.bullet.rectangle") }
+                .tag(SettingsTab.activity)
             AboutTab()
                 .tabItem { Label("About", systemImage: "info.circle") }
+                .tag(SettingsTab.about)
         }
         .frame(width: 520, height: 460)
     }
@@ -68,6 +73,11 @@ private struct ChargingSettingsTab: View {
                     Text("After reaching the limit, charging stays paused until the battery falls to the resume threshold. The gap avoids switching charging on and off repeatedly.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if let status = model.status, let note = ControlStatement.limitNote(for: status) {
+                        Label(note, systemImage: "info.circle")
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                 }
                 if settings.chargeLimit < 50 {
                     Label("Limits below 50% leave little charge for unplugged use.", systemImage: "exclamationmark.triangle")
@@ -203,12 +213,17 @@ private struct ControlSettingsTab: View {
                             StatusBadge(title: status.capabilities.availability.badgeTitle, color: status.capabilities.availability.badgeColor)
                         }
                     }
-                    Text(status.capabilities.explanation)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    if let macOSLimit = status.capabilities.macOSChargeLimit, !status.capabilities.isEnforcedByMacOS {
+                    ControlStatementText(status: status)
+                    // Only for a backend that can act on it: one that controls
+                    // nothing has nothing to defer.
+                    if let macOSLimit = status.capabilities.macOSChargeLimit, !status.capabilities.isEnforcedByMacOS, status.capabilities.availability.acceptsRequests {
                         MacOSChargeLimitNotice(macOSLimit: macOSLimit, status: status, recheck: { model.recheckBackend() })
+                    }
+                    if ControlStatement.offersMacOSLimitGuide(status) {
+                        DisclosureGroup(MacOSChargeLimitGuide.title, isExpanded: Binding(get: { model.isMacOSLimitGuideExpanded }, set: { model.isMacOSLimitGuideExpanded = $0 })) {
+                            MacOSChargeLimitGuideView(isSimulated: status.isControlSimulated, openBatterySettings: { model.openBatterySettings() }, recheck: { model.recheckBackend() })
+                                .padding(.top, 4)
+                        }
                     }
                     if status.isBackendFaulted {
                         Label(faultExplanation(for: status),

@@ -264,6 +264,16 @@ struct SimulatedHelperCoexistenceTests {
         #expect(status.events.contains { $0.kind == .safety && $0.message.contains("A read-back now shows normal charging") && $0.message.contains("(simulated; your Mac's charging is not changed)") })
         let notice = MacOSChargeLimitWording.releaseState(failed.ownRestriction, isSimulated: failed.isControlSimulated)
         #expect(notice.contains("These are the simulated helper's controls; your Mac's charging is not changed."))
+        // The menu's notice and the limit note keep the warning that the
+        // restriction may remain, in words.
+        let failedLimit = try #require(failed.capabilities.macOSChargeLimit)
+        let menu = MacOSChargeLimitWording.menuSummary(failedLimit, ownRestriction: failed.ownRestriction, isSimulated: failed.isControlSimulated)
+        #expect(menu.hasPrefix("macOS reports its Charge Limit on at 80%, so CellKeeper withholds its own restrictions."))
+        #expect(menu.contains("CellKeeper's own restriction (a charging pause, simulated) may remain until a read-back shows it ended"))
+        #expect(!menu.contains("inhibitCharging"))
+        let note = try #require(ControlStatement.limitNote(for: failed))
+        #expect(note.contains("may remain until a read-back shows it ended"))
+        #expect(!note.contains("no limit"))
     }
 
     @Test("Only a Mac with macOS's Charge Limit gets a monitor, and making one reads nothing")
@@ -275,10 +285,23 @@ struct SimulatedHelperCoexistenceTests {
         #expect(lastStatus == nil)
     }
 
+    /// A Simulated helper on a stepped clock (see `SimulatedHelperTests`),
+    /// so its request budget never depends on how fast the machine runs.
+    private func steppedHelper(macOSChargeLimit monitor: MacOSChargeLimitMonitor) -> HelperChargingBackend {
+        let clock = XPCTestClock(step: 1e-6)
+        let uptime: @Sendable () -> TimeInterval = { clock.uptime }
+        return HelperChargingBackend.simulatedHelper(
+            power: CountingPower(uptime: uptime),
+            uptime: uptime,
+            pause: { clock.advance(by: $0) },
+            macOSChargeLimit: monitor
+        )
+    }
+
     @Test("While macOS's Charge Limit is on, the Simulated helper stays Simulated but offers only normal charging")
     func withheldWhileOn() async throws {
         let monitor = MacOSChargeLimitMonitor(reader: StubChargeLimitReader(.limit(80)))
-        let backend = HelperChargingBackend.simulatedHelper(power: CountingPower(uptime: HelperEngine.continuousUptime), macOSChargeLimit: monitor)
+        let backend = steppedHelper(macOSChargeLimit: monitor)
         let capabilities = await backend.capabilities()
         #expect(capabilities.availability == .simulated)
         #expect(capabilities.supportedModes == [.normal])
@@ -292,7 +315,7 @@ struct SimulatedHelperCoexistenceTests {
     @Test("With macOS's Charge Limit off, the Simulated helper offers both charging modes")
     func offeredWhileOff() async throws {
         let monitor = MacOSChargeLimitMonitor(reader: StubChargeLimitReader(.noLimit))
-        let backend = HelperChargingBackend.simulatedHelper(power: CountingPower(uptime: HelperEngine.continuousUptime), macOSChargeLimit: monitor)
+        let backend = steppedHelper(macOSChargeLimit: monitor)
         let capabilities = await backend.capabilities()
         #expect(capabilities.supportedModes == ChargeControlMode.chargingModes)
         #expect(capabilities.macOSChargeLimit?.isLimiting == false)

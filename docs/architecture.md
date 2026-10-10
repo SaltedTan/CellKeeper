@@ -395,7 +395,10 @@ public protocol ChargingBackend: Sendable {
   controller uses it to log each outside change once: the same change read
   again is not news, and a newer one (a new generation, or one a restarted
   helper recorded) is, whatever the message says. Empty for a backend
-  without such records; the controller then goes by the message.
+  without such records: it cannot tell its changes apart, and a read
+  reports a change in other words than a request throws it, so the
+  controller gives all its outside changes one identity until a read
+  reports no fault, and one change read and then thrown is logged once.
 - `recheckAvailability()` is the user's "check again": the next
   `capabilities()` must not rely on what the backend cached about what it
   depends on (the native backend's shortcut check; macOS's Charge Limit for
@@ -550,9 +553,10 @@ The controller adds, independent of the backend:
   failure (nor does the request whose confirming read it was). A problem
   needing acknowledgement is logged once for as long as the backend keeps
   reporting faults; an outside change once per change the backend recorded
-  (`outsideChangeEvidence()`), or per message for a backend without
-  records, so the same change read again is not logged twice and a newer
-  one is never hidden behind the same message;
+  (`outsideChangeEvidence()`), so the same change read again is not logged
+  twice and a newer one is never hidden behind the same message (a backend
+  without records has its outside changes logged once until a read reports
+  no fault);
 - renewal of the hold at the end of every evaluation in which CellKeeper
   holds a confirmed non-normal mode that the policy still wants, including
   evaluations whose action is "no change", and only if the backend accepts
@@ -601,7 +605,7 @@ Implementations today:
 | `MockChargingBackend` (default) | `simulated` | Records requests, tracks a simulated mode, supports failure injection for tests. Never touches hardware. |
 | `ReadOnlyChargingBackend` | `unavailable` | Accepts nothing; CellKeeper still computes and shows what it would do. |
 | `NativeChargeLimitBackend` (opt-in) | `experimental`, or `unavailable(reason)` | Sets macOS's Charge Limit by running the user's “CellKeeper Set Charge Limit” shortcut; reads it back with `pmset -g battlimit`. See below. |
-| `HelperChargingBackend` (Simulated helper) | `simulated`, or `unavailable(reason)` | CellKeeper's own charge control at any limit through the helper's logic, run in process on a simulated control: nothing on the Mac changes. Restricts nothing while macOS's own Charge Limit is on. See "Helper backend". |
+| `HelperChargingBackend` (Simulated helper) | `simulated`, or `unavailable(reason)` | CellKeeper's own charge control at any limit through the helper's logic, run in process on a simulated control: nothing on the Mac changes. While macOS's own Charge Limit is on, it withholds new restrictions and asks for the release of existing holds until a read-back confirms it. See "Helper backend". |
 
 ## Native Charge Limit backend
 
@@ -1967,6 +1971,58 @@ Limitations:
   history, which shares its task; a relaunch in the same boot would then
   not know the latest activations.
 
+## User interface
+
+The app's views (`CellKeeper/`) only present what Core and Kit compute;
+the wording that matters for safety lives in Core and Kit, where it is
+tested.
+
+- **What controls charging.** With a backend that switches charging
+  itself, the menu and Settings › Control say in one line what controls
+  charging (`ControlStatement`, Kit): "Simulated helper: CellKeeper's own
+  control, simulated; nothing on your Mac changes", "Deferring to macOS's
+  Charge Limit", or "Unavailable: <reason>". Unavailable comes first: a
+  backend that accepts no requests is never said to defer or to control
+  anything, and the menu shows its policy as "Policy (not applied)" and
+  "Would want", without the reasons and notes that speak of pausing
+  charging. macOS's Charge Limit keeps its own summary.
+- **Turning macOS's Charge Limit off.** While macOS's limit may be
+  limiting and the backend switches charging itself and accepts requests
+  (`ControlStatement.offersMacOSLimitGuide`), the menu's notice offers
+  "How to Turn It Off", which opens Settings › Control with the steps
+  expanded (`MacOSChargeLimitGuide`, Core): System Settings › Battery, the
+  ⓘ button next to Charging, the Charge Limit at 100% (macOS then reports
+  no active limit), Optimized Battery Charging off, then Check Again. The
+  steps follow Apple's support article 102338 and the labels observed on
+  macOS 27.0.1 ("Battery", "Charging"). They say that CellKeeper never
+  changes these settings itself, that macOS may still hold charging (for
+  battery health or when the battery is warm), and that CellKeeper
+  withholds its own restrictions meanwhile. With simulated controls they,
+  and the notices, first say that the Simulated helper provides no
+  replacement charge limit, that the Mac may charge to 100%, and to keep
+  macOS's limit on unless the user is trying the simulation (D74). The
+  menu's notice is short (`MacOSChargeLimitWording.menuSummary`): what
+  macOS reports and that CellKeeper withholds its own restrictions, then,
+  only where they apply, that a restriction of CellKeeper's may remain and
+  the simulation's caution; Settings › Control has the full explanation.
+  Restrictions are named in words ("a charging pause", "running from
+  battery"); logs keep the identifiers. "Open Battery Settings" opens
+  `x-apple.systempreferences:com.apple.Battery-Settings.extension`
+  (`BatterySettingsLink`; Apple does not document the pane identifier, and
+  it was observed to open System Settings › Battery on macOS 27.0.1), or
+  System Settings itself if that fails. Nothing else is opened, and no
+  entitlement is needed.
+- **Limits at any level.** With every backend but macOS's Charge Limit, the
+  menu slider and Settings offer every whole percentage from 20 to 100
+  (`ChargeLimitChoices`, Kit), with the below-50% warning; macOS's Charge
+  Limit offers its steps. While CellKeeper defers to macOS's limit, the
+  menu and Settings › Charging say that it withholds new restrictions (its
+  own limit, temperature pause and discharge are not applied), whether
+  macOS reports its limit on or its report could not be read. Settings
+  also keeps the warning that a restriction of its own may remain until a
+  read-back shows it ended (`ControlStatement.limitNote`); in the menu, the
+  macOS Charge Limit notice gives that warning.
+
 ## Known limitations
 
 ### Native Charge Limit backend
@@ -2174,3 +2230,4 @@ The helper daemon logs under its own subsystem,
 | D71 | The daemon serves its engine over NSXPC through `XPCFrontend`: `HelperXPCServer` serves an engine its host made (`init(serving:…)`), the host starts the engine before the listener, and the host's event sink passes every engine event to the server (`handle(_:)`). The daemon library depends on `CellKeeperHelperXPC` too, never on the app's modules | One engine per daemon, owned by the host that restores defaults with it before anything is served (R2) and handles its shutdown; an engine's sink is fixed when it is made, so the host has to pass revocations on rather than the server installing its own sink |
 | D72 | `HelperXPCServer`'s stop drains, by one absolute deadline: it admits nothing more, runs every admitted request and sends its reply, closes each connection after a closing send barrier and then invalidates its session, and invalidates the listener only at the end. It returns true only for what it can prove: every connection it waited for reports a complete drain outcome (every request it ever admitted answered, every reply's send confirmed by a barrier that ran while the connection was valid, not cut off, session invalidated), and the drain completed before the deadline, checked again at completion. Requests behind a revocation never run, and make the stop return false. A revocation's closing barrier is part of its connection's end. At the deadline it cuts off what remains, a pending closing barrier included, and returns false without waiting for the engine. `HelperFrontend.stop(by:)` takes the daemon's shutdown deadline less the finalisation reserve, on the daemon's clock, and a confirmation after it does not count. A request is admitted under its connection's lock together with being queued (review of PR #68) | The daemon may exit with 0 only after a confirmed stop (D59), and a `restoreDefaultsAndExit` must be answered before its session ends. A consumer task finishing proves nothing: it also finishes after a disconnect or a revocation discarded its queue, and before a revocation's barrier has run. Closing at once would drop admitted requests and replies; invalidating the listener first ended the connections still draining (observed); a stop timer that starts its own budget late, after a slow frontend start, would end after the daemon's deadline; a barrier that never runs must not keep a stop or a connection waiting forever |
 | D73 | The daemon builds its client requirement (CellKeeper, signed by this process's own team) before it creates the Mach-service listener; an ad-hoc or unsigned build refuses to start its frontend, restores defaults and exits with 0 | It must never listen without a requirement (D51, research note 04, §2.4), and a build that can never serve should not be restarted in a loop |
+| D74 | The steps for turning macOS's Charge Limit off are offered only while it may be limiting and the backend switches charging itself and accepts requests; with simulated controls they, and the notices, first say that the Simulated helper provides no replacement charge limit, that the Mac may charge to 100%, and to keep macOS's limit on unless the user is trying the simulation. CellKeeper only opens System Settings › Battery and never changes the setting | Advising to turn macOS's limit off is safe only where CellKeeper's own limit would take over; the Simulated helper's would not, and an unavailable backend controls nothing |

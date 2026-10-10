@@ -102,7 +102,8 @@ No public mechanism exists; every candidate is private and needs root
 owner's long-term direction (2026-10-06): CellKeeper controls charging
 itself, and the user turns macOS's own Charge Limit off. The app should then
 guide the user through turning it off, and detect it if it is turned back
-on, so two limits never compete.
+on: while it is on, CellKeeper withholds new restrictions and asks for the
+release of existing holds until a read-back confirms it.
 
 ### Phase 4a — Foundations without hardware writes (in progress)
 
@@ -149,10 +150,15 @@ hardware.
   the real unregistration (phase 4b).
 - UI: limits at any level with the helper backend, honest status
   (Simulated or Unavailable), and guidance for turning macOS's Charge Limit
-  off (a first version: the menu and Settings › Control say when macOS's
-  limit is on, how to turn it off, and offer Check Again). Still to come:
-  a way to remove the helper, after which the app switches to the
-  Simulated backend.
+  off. Done: the menu and Settings › Control say in one line what controls
+  charging (the Simulated helper, deferring to macOS's Charge Limit, or
+  Unavailable with the reason); step-by-step guidance for turning macOS's
+  Charge Limit and Optimized Battery Charging off, from the menu's notice
+  and in Settings › Control, with Open Battery Settings and Check Again;
+  and every whole percentage from 20 to 100 with CellKeeper's own control.
+  Still to come: a way to remove the helper, after which the app switches
+  to the Simulated backend; a backend choice for the real helper waits for
+  phase 4b.
 
 ### Phase 4b — Signed helper (needs an Apple Developer ID)
 

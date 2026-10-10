@@ -222,7 +222,7 @@ struct MacOSChargeLimitReleaseClaimsTests {
         let guidance = MacOSChargeLimitWording.guidance(failedLimit, ownRestriction: failed.ownRestriction, isSimulated: false)
         #expect(guidance.contains("may remain"))
         let report = DiagnosticsReport.text(status: failed, environment: DiagnosticsEnvironment(appVersion: "1", systemVersion: "27", modelIdentifier: nil), generatedAt: referenceDate)
-        #expect(report.contains("Own restriction: No read-back has confirmed that CellKeeper's inhibitCharging ended, so it may remain."))
+        #expect(report.contains("Own restriction: No read-back has confirmed that CellKeeper's restriction (a charging pause) ended, so it may remain."))
         #expect(!report.contains("Own restriction: The last read-back shows no restriction in effect."))
 
         // The release keeps failing: still nothing claimed.
@@ -330,10 +330,10 @@ struct MacOSChargeLimitWordingTests {
 
     @Test("While macOS's limit is on, the text says only what the read-back establishes", arguments: [
         (OwnRestrictionState.noneInEffect, "The last read-back shows no restriction in effect."),
-        (.inEffect(.inhibitCharging, own: .inhibitCharging), "The last read-back still shows CellKeeper's inhibitCharging"),
-        (.inEffect(.forceDischarge, own: .inhibitCharging), "cannot rule out that it is its own (it asked for inhibitCharging)"),
+        (.inEffect(.inhibitCharging, own: .inhibitCharging), "The last read-back still shows CellKeeper's restriction (a charging pause) in effect."),
+        (.inEffect(.forceDischarge, own: .inhibitCharging), "The last read-back shows running from battery in effect, and CellKeeper cannot rule out that it is its own (it asked for a charging pause)."),
         (.unexplained(.inhibitCharging), "knows of no request of its own that set it"),
-        (.unconfirmed(.forceDischarge), "No read-back has confirmed that CellKeeper's forceDischarge ended, so it may remain."),
+        (.unconfirmed(.forceDischarge), "No read-back has confirmed that CellKeeper's restriction (running from battery) ended, so it may remain."),
         (.unknown, "it cannot confirm that nothing it set remains"),
         (.noneKnown, "knows of no request of its own that could be in effect there"),
         (.notCellKeepers(.inhibitCharging), "set by something other than CellKeeper"),

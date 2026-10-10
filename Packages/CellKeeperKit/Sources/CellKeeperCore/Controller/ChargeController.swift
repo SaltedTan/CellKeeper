@@ -1021,7 +1021,7 @@ public actor ChargeController {
         note(fault, isThrown: false) { fault in
             switch fault {
             case .outside(let detail, _):
-                "Charging control changed outside CellKeeper: \(detail). Backend faulted; CellKeeper releases its own restrictions and does not override the change."
+                "Charging control changed outside CellKeeper: \(detail). Backend faulted; CellKeeper asks for the release of its own restrictions and does not override the change."
             case .acknowledgement(let detail):
                 "\(detail). Backend faulted: clear the fault to acknowledge it; until then only normal charging is requested."
             }
@@ -1040,11 +1040,14 @@ public actor ChargeController {
 
     /// The faults handled since the backend's reads last reported none.
     private struct HandledFaults {
-        /// What identifies an outside change: the backend's record of it, or
-        /// for a backend without records, its message.
+        /// What identifies an outside change: the backend's record of it.
+        /// A backend without records cannot tell its changes apart, and a
+        /// read reports one in other words than a request throws it, so all
+        /// its outside changes share one identity until a read reports no
+        /// fault: one change, read and then thrown, is logged once.
         enum OutsideKey: Hashable {
             case recorded(RecordedChange)
-            case message(String)
+            case unrecorded
         }
 
         var acknowledgement = false
@@ -1054,16 +1057,17 @@ public actor ChargeController {
 
         /// Whether `fault` is news: the first problem needing
         /// acknowledgement, or an outside change with a recorded change not
-        /// seen yet (the same change read again is not news; a new one, a
-        /// new generation or another helper process, is). Notes it either
-        /// way.
+        /// seen yet (the same change read again or thrown is not news; a new
+        /// one, a new generation or another helper process, is). For a
+        /// backend without records, only its first outside change is news.
+        /// Notes it either way.
         mutating func note(_ fault: BackendFault) -> Bool {
             switch fault {
             case .acknowledgement:
                 defer { acknowledgement = true }
                 return !acknowledgement
-            case .outside(let detail, let evidence):
-                let keys: Set<OutsideKey> = evidence.isEmpty ? [.message(detail)] : Set(evidence.map(OutsideKey.recorded))
+            case .outside(_, let evidence):
+                let keys: Set<OutsideKey> = evidence.isEmpty ? [.unrecorded] : Set(evidence.map(OutsideKey.recorded))
                 let isNew = !keys.isSubset(of: outsideKeys)
                 outsideKeys.formUnion(keys)
                 return isNew

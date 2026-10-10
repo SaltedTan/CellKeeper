@@ -3,8 +3,9 @@ import CellKeeperHelperCore
 import Foundation
 import Testing
 
-// Regressions from the fifth and sixth reviews of the macOS Charge Limit
-// coexistence work; the first three are the fifth review's reproductions.
+// Regressions from the fifth, sixth and seventh reviews of the macOS Charge
+// Limit coexistence work; the first three are the fifth review's
+// reproductions.
 
 /// A backend whose reads keep reporting an outside change, with recorded
 /// changes the test sets, and which refuses normal charging as an outside
@@ -12,6 +13,8 @@ import Testing
 actor ScriptedOutsideChangeBackend: ChargingBackend {
     nonisolated let descriptor = BackendDescriptor(identifier: "scripted-outside", displayName: "Scripted", summary: "")
     private var evidence: Set<RecordedChange> = []
+    /// Requests that threw the outside change.
+    private(set) var refusedRequests = 0
 
     func setEvidence(_ evidence: Set<RecordedChange>) {
         self.evidence = evidence
@@ -26,6 +29,7 @@ actor ScriptedOutsideChangeBackend: ChargingBackend {
     }
 
     func setMode(_ mode: ChargeControlMode) throws -> ControlOutcome {
+        refusedRequests += 1
         throw BackendError.changedOutside(expected: mode, found: .forceDischarge)
     }
 
@@ -199,6 +203,28 @@ struct HelperFaultReportingTests {
             #expect(outsideChangeEvents(again) == logged)
             #expect(again.consecutiveFailures == failures)
         }
+    }
+
+    @Test("A backend without records has one outside change read and then thrown logged once")
+    func unrecordedOutsideChangeReadThenThrown() async {
+        let clock = TestClock()
+        let backend = ScriptedOutsideChangeBackend()
+        let controller = ChargeController(telemetry: StubTelemetry(snapshot(percent: 85), clock: clock), backend: backend, settings: .default, now: { clock.now }, uptime: { clock.uptime })
+        // The read reports the change ("another tool disabled the adapter");
+        // the fallback's request for normal charging then throws it, in other
+        // words. Both are the same change.
+        let first = await controller.evaluate(.launch)
+        #expect(first.isBackendFaulted)
+        let refused = await backend.refusedRequests
+        #expect(refused >= 1)
+        #expect(outsideChangeEvents(first) == 1)
+        let failures = first.consecutiveFailures
+        clock.advance(by: 61)
+        let again = await controller.evaluate(.periodic)
+        let refusedAgain = await backend.refusedRequests
+        #expect(refusedAgain > refused)
+        #expect(outsideChangeEvents(again) == 1)
+        #expect(again.consecutiveFailures == failures)
     }
 
     @Test("An outside change is identified by the helper process, the control and the generation, not by its message")
