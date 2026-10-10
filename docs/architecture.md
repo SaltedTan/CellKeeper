@@ -1271,7 +1271,9 @@ Limitations:
   signing requirement", subsystem `com.apple.xpc`, category `connection`).
 - Calls into the control are not bounded in time on the helper's side: a
   stalled control stalls the engine for every client, whose calls then
-  time out. The daemon must bound them.
+  time out, and, being synchronous, holds one of Swift's cooperative
+  threads while it lasts. The daemon must bound them. (The tests that
+  stall the engine on purpose run one at a time for this reason.)
 
 ## Known limitations
 

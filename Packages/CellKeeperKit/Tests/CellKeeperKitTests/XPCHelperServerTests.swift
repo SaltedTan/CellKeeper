@@ -177,6 +177,124 @@ struct XPCHelperServerTests {
         }
     }
 
+    // MARK: - Lifecycle
+
+    @Test("Stopping the server ends every session and refuses new connections")
+    func stop() async throws {
+        let control = SimulatedChargeControl()
+        let rig = try await XPCRig(control: control)
+        let client = try rig.client()
+        let hello = try await client.hello(clientProtocolVersion: HelperProtocolVersion.current)
+        #expect(try await client.acquireOrRenewLease(control: 1, seconds: 900).status == .ok)
+        #expect(try await client.setControl(control: 1, active: true) == .ok)
+
+        await rig.server.stop()
+        #expect(control.activeControls.isEmpty)
+        #expect(rig.server.connectionCount == 0)
+        #expect(await eventually { client.transportFailure != nil })
+        let session = HelperSessionID(rawValue: Int(hello.sessionID))
+        #expect(await eventually { rig.connections.closeReason(of: session) == .serverStopped })
+
+        let late = try rig.client()
+        let failure = await clientFailure { _ = try await late.hello(clientProtocolVersion: HelperProtocolVersion.current) }
+        #expect(connectionFailures.contains(failure), "got \(String(describing: failure))")
+        #expect(rig.events.openedSessions.count == 1)
+    }
+
+    @Test("Start and stop racing each other always end stopped: no listener is resumed after it was invalidated, and nothing is served")
+    func startStopRace() async throws {
+        for _ in 0..<20 {
+            let rig = try await XPCRig(start: false)
+            let server = rig.server
+            async let started = server.start()
+            async let stopped: Void = server.stop()
+            _ = await (started, stopped)
+            // Whichever came first, a stopped server serves nothing more.
+            await server.start()
+            let client = try rig.client()
+            let failure = await clientFailure { _ = try await client.hello(clientProtocolVersion: HelperProtocolVersion.current) }
+            #expect(connectionFailures.contains(failure), "got \(String(describing: failure))")
+            #expect(server.connectionCount == 0)
+            #expect(rig.events.openedSessions.isEmpty)
+        }
+    }
+
+    @Test("Connections accepted while the server stops are either closed by the stop or refused; every session opened is ended when stop returns")
+    func acceptanceDuringStop() async throws {
+        for _ in 0..<10 {
+            let rig = try await XPCRig()
+            let clients = try (0..<6).map { _ in try rig.client() }
+            let calls = clients.map { client in
+                Task { () -> Result<HelperStatus, HelperXPCError> in
+                    do {
+                        return .success(try await client.hello(clientProtocolVersion: HelperProtocolVersion.current).status)
+                    } catch {
+                        return .failure(error as? HelperXPCError ?? .malformedReply)
+                    }
+                }
+            }
+            await rig.server.stop()
+            #expect(rig.server.connectionCount == 0)
+            #expect(Set(rig.events.openedSessions) == Set(rig.events.invalidatedSessions))
+            for call in calls {
+                switch await call.value {
+                case .success(let status):
+                    #expect(status == .ok)
+                case .failure(let error):
+                    #expect(connectionFailures.contains(error), "got \(error)")
+                }
+            }
+            #expect(Set(rig.events.openedSessions) == Set(rig.events.invalidatedSessions))
+        }
+    }
+
+    @Test("At most the maximum number of clients are served at once; one more is refused and logged")
+    func connectionLimit() async throws {
+        let rig = try await XPCRig()
+        var clients: [HelperXPCClient] = []
+        for _ in 0..<HelperXPCServer.maximumConnections {
+            let client = try rig.client()
+            #expect(try await client.hello(clientProtocolVersion: HelperProtocolVersion.current).status == .ok)
+            clients.append(client)
+        }
+        let extra = try rig.client()
+        let failure = await clientFailure { _ = try await extra.hello(clientProtocolVersion: HelperProtocolVersion.current) }
+        #expect(connectionFailures.contains(failure), "got \(String(describing: failure))")
+        #expect(await eventually { rig.connections.refusals == [.tooManyConnections] })
+        #expect(rig.events.openedSessions.count == HelperXPCServer.maximumConnections)
+
+        // Once one leaves, another is served.
+        clients[0].invalidate()
+        #expect(await eventually { rig.server.connectionCount == HelperXPCServer.maximumConnections - 1 })
+        let next = try rig.client()
+        #expect(try await next.hello(clientProtocolVersion: HelperProtocolVersion.current).status == .ok)
+    }
+
+    // MARK: - Audit
+
+    @Test("Each accepted connection is reported with its session, process and user, for the log only")
+    func audit() async throws {
+        let rig = try await XPCRig()
+        let client = try rig.client()
+        let hello = try await client.hello(clientProtocolVersion: HelperProtocolVersion.current)
+        let session = HelperSessionID(rawValue: Int(hello.sessionID))
+        client.invalidate()
+        #expect(await eventually { rig.connections.events.count == 2 })
+        #expect(rig.connections.events == [
+            .accepted(session, processID: getpid(), effectiveUserID: geteuid()),
+            .closed(session, reason: .clientDisconnected),
+        ])
+    }
+}
+
+/// Tests whose engine stalls inside the control's read-back. The control is
+/// synchronous, so each stall blocks a thread of Swift's cooperative pool
+/// until the test releases it. They run one at a time: on a runner with few
+/// cores (three on GitHub's macOS 15 image), several stalls at once could
+/// take every thread, and nothing would be left to run the code that
+/// releases them.
+@Suite("Helper NSXPC server with a stalled engine", .serialized)
+struct XPCStalledEngineTests {
     @Test("A client that disconnects while a request is blocked: that request finishes, nothing queued behind it runs, and the session ends right after")
     func disconnectWhileBlocked() async throws {
         let control = StallingChargeControl()
@@ -343,114 +461,5 @@ struct XPCHelperServerTests {
         #expect(await eventually { rig.events.contains(.sessionInvalidated(session)) })
         #expect(await eventually { rig.connections.closeReason(of: session) == .clientDisconnected })
         #expect(await eventually { rig.server.connectionCount == 0 })
-    }
-
-    // MARK: - Lifecycle
-
-    @Test("Stopping the server ends every session and refuses new connections")
-    func stop() async throws {
-        let control = SimulatedChargeControl()
-        let rig = try await XPCRig(control: control)
-        let client = try rig.client()
-        let hello = try await client.hello(clientProtocolVersion: HelperProtocolVersion.current)
-        #expect(try await client.acquireOrRenewLease(control: 1, seconds: 900).status == .ok)
-        #expect(try await client.setControl(control: 1, active: true) == .ok)
-
-        await rig.server.stop()
-        #expect(control.activeControls.isEmpty)
-        #expect(rig.server.connectionCount == 0)
-        #expect(await eventually { client.transportFailure != nil })
-        let session = HelperSessionID(rawValue: Int(hello.sessionID))
-        #expect(await eventually { rig.connections.closeReason(of: session) == .serverStopped })
-
-        let late = try rig.client()
-        let failure = await clientFailure { _ = try await late.hello(clientProtocolVersion: HelperProtocolVersion.current) }
-        #expect(connectionFailures.contains(failure), "got \(String(describing: failure))")
-        #expect(rig.events.openedSessions.count == 1)
-    }
-
-    @Test("Start and stop racing each other always end stopped: no listener is resumed after it was invalidated, and nothing is served")
-    func startStopRace() async throws {
-        for _ in 0..<20 {
-            let rig = try await XPCRig(start: false)
-            let server = rig.server
-            async let started = server.start()
-            async let stopped: Void = server.stop()
-            _ = await (started, stopped)
-            // Whichever came first, a stopped server serves nothing more.
-            await server.start()
-            let client = try rig.client()
-            let failure = await clientFailure { _ = try await client.hello(clientProtocolVersion: HelperProtocolVersion.current) }
-            #expect(connectionFailures.contains(failure), "got \(String(describing: failure))")
-            #expect(server.connectionCount == 0)
-            #expect(rig.events.openedSessions.isEmpty)
-        }
-    }
-
-    @Test("Connections accepted while the server stops are either closed by the stop or refused; every session opened is ended when stop returns")
-    func acceptanceDuringStop() async throws {
-        for _ in 0..<10 {
-            let rig = try await XPCRig()
-            let clients = try (0..<6).map { _ in try rig.client() }
-            let calls = clients.map { client in
-                Task { () -> Result<HelperStatus, HelperXPCError> in
-                    do {
-                        return .success(try await client.hello(clientProtocolVersion: HelperProtocolVersion.current).status)
-                    } catch {
-                        return .failure(error as? HelperXPCError ?? .malformedReply)
-                    }
-                }
-            }
-            await rig.server.stop()
-            #expect(rig.server.connectionCount == 0)
-            #expect(Set(rig.events.openedSessions) == Set(rig.events.invalidatedSessions))
-            for call in calls {
-                switch await call.value {
-                case .success(let status):
-                    #expect(status == .ok)
-                case .failure(let error):
-                    #expect(connectionFailures.contains(error), "got \(error)")
-                }
-            }
-            #expect(Set(rig.events.openedSessions) == Set(rig.events.invalidatedSessions))
-        }
-    }
-
-    @Test("At most the maximum number of clients are served at once; one more is refused and logged")
-    func connectionLimit() async throws {
-        let rig = try await XPCRig()
-        var clients: [HelperXPCClient] = []
-        for _ in 0..<HelperXPCServer.maximumConnections {
-            let client = try rig.client()
-            #expect(try await client.hello(clientProtocolVersion: HelperProtocolVersion.current).status == .ok)
-            clients.append(client)
-        }
-        let extra = try rig.client()
-        let failure = await clientFailure { _ = try await extra.hello(clientProtocolVersion: HelperProtocolVersion.current) }
-        #expect(connectionFailures.contains(failure), "got \(String(describing: failure))")
-        #expect(await eventually { rig.connections.refusals == [.tooManyConnections] })
-        #expect(rig.events.openedSessions.count == HelperXPCServer.maximumConnections)
-
-        // Once one leaves, another is served.
-        clients[0].invalidate()
-        #expect(await eventually { rig.server.connectionCount == HelperXPCServer.maximumConnections - 1 })
-        let next = try rig.client()
-        #expect(try await next.hello(clientProtocolVersion: HelperProtocolVersion.current).status == .ok)
-    }
-
-    // MARK: - Audit
-
-    @Test("Each accepted connection is reported with its session, process and user, for the log only")
-    func audit() async throws {
-        let rig = try await XPCRig()
-        let client = try rig.client()
-        let hello = try await client.hello(clientProtocolVersion: HelperProtocolVersion.current)
-        let session = HelperSessionID(rawValue: Int(hello.sessionID))
-        client.invalidate()
-        #expect(await eventually { rig.connections.events.count == 2 })
-        #expect(rig.connections.events == [
-            .accepted(session, processID: getpid(), effectiveUserID: geteuid()),
-            .closed(session, reason: .clientDisconnected),
-        ])
     }
 }
