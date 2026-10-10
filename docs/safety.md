@@ -87,6 +87,8 @@ app (`AppModel`, `AppDelegate` and the views) are checked by hand.
 | All commands serialized under one FIFO lock; user commands applied in order | — | `ChargeController`, `AppModel` command queue |
 | Slider changes applied on release (no request bursts) | R13 | `MenuBarView` |
 | Simulated actions never reported as hardware actions; UI shows available / experimental / simulated / unavailable | R30 | `ControlOutcome`, `ControlAvailability`, UI |
+| With a backend that switches charging itself, the menu and Settings › Control say in one line what controls charging: the Simulated helper's simulated control, deferring to macOS's Charge Limit, or Unavailable with the reason. An unavailable backend is never said to defer or to control anything, and its policy is shown as not applied | R30 | `ControlStatement`, `MenuBarView`, `ControlSettingsTab` |
+| Steps for turning macOS's Charge Limit off are offered only while it may be limiting and the backend accepts requests. They say that CellKeeper never changes these settings, that macOS may still hold charging, and that CellKeeper withholds its own restrictions meanwhile; with simulated controls they first say that nothing would then limit charging. CellKeeper only opens System Settings › Battery | R25, R26, R30 | `MacOSChargeLimitGuide`, `ControlStatement.offersMacOSLimitGuide`, `MacOSChargeLimitGuideView` |
 | Decisions, requests, results, and safety fallbacks logged (unified logging + in-app activity log); no device identifiers read or logged | R32 | `ChargeController.record`, allowlists in `BatteryTelemetryParser` |
 | An automatic retry of a failed restore waits 60 s; user actions retry at once | R13 | `ChargingPolicy.restoreRetryRefusal`, `ChargeController` |
 
@@ -398,6 +400,11 @@ the simulated control:
   reports and say to turn the limit off in System Settings › Battery
   (Charge Limit at 100%), also while an unfinished restore is what the
   policy reports first.
+  The menu's "How to Turn It Off" opens Settings › Control with the steps
+  (System Settings › Battery, ⓘ next to Charging, Charge Limit 100%,
+  Optimized Battery Charging off, Check Again) and an Open Battery Settings
+  button that only opens System Settings; on the Simulated helper they say
+  first that nothing would then limit charging (D74).
   CellKeeper never turns it off itself, and a release, quitting and a
   backend switch never wait for a read of it (only an evaluation or Check
   Again reads it, and a cancelled read is stopped at once). What remains or

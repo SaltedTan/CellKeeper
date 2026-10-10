@@ -1971,6 +1971,48 @@ Limitations:
   history, which shares its task; a relaunch in the same boot would then
   not know the latest activations.
 
+## User interface
+
+The app's views (`CellKeeper/`) only present what Core and Kit compute;
+the wording that matters for safety lives in Core and Kit, where it is
+tested.
+
+- **What controls charging.** With a backend that switches charging
+  itself, the menu and Settings › Control say in one line what controls
+  charging (`ControlStatement`, Kit): "Simulated helper: CellKeeper's own
+  control, simulated; nothing on your Mac changes", "Deferring to macOS's
+  Charge Limit", or "Unavailable: <reason>". Unavailable comes first: a
+  backend that accepts no requests is never said to defer or to control
+  anything, and the menu shows its policy as "Policy (not applied)" and
+  "Would want", without the reasons and notes that speak of pausing
+  charging. macOS's Charge Limit keeps its own summary.
+- **Turning macOS's Charge Limit off.** While macOS's limit may be
+  limiting and the backend switches charging itself and accepts requests
+  (`ControlStatement.offersMacOSLimitGuide`), the menu's notice offers
+  "How to Turn It Off", which opens Settings › Control with the steps
+  expanded (`MacOSChargeLimitGuide`, Core): System Settings › Battery, the
+  ⓘ button next to Charging, the Charge Limit at 100% (macOS then reports
+  no active limit), Optimized Battery Charging off, then Check Again. The
+  steps follow Apple's support article 102338 and the labels observed on
+  macOS 27.0.1 ("Battery", "Charging"). They say that CellKeeper never
+  changes these settings itself, that macOS may still hold charging (for
+  battery health or when the battery is warm), and that CellKeeper
+  withholds its own restrictions meanwhile. With simulated controls they
+  first say that nothing would then limit charging, and the notice says
+  to keep macOS's limit on unless the user wants to try the simulation
+  (D74). "Open Battery Settings" opens
+  `x-apple.systempreferences:com.apple.Battery-Settings.extension`
+  (`BatterySettingsLink`; Apple does not document the pane identifier, and
+  it was observed to open System Settings › Battery on macOS 27.0.1), or
+  System Settings itself if that fails. Nothing else is opened, and no
+  entitlement is needed.
+- **Limits at any level.** With every backend but macOS's Charge Limit, the
+  menu slider and Settings offer every whole percentage from 20 to 100
+  (`ChargeLimitChoices`, Kit), with the below-50% warning; macOS's Charge
+  Limit offers its steps. While CellKeeper defers to macOS's limit, the
+  menu and Settings › Charging say that CellKeeper's limit, temperature
+  pause and discharge are not in effect (`ControlStatement.limitNote`).
+
 ## Known limitations
 
 ### Native Charge Limit backend
@@ -2178,3 +2220,4 @@ The helper daemon logs under its own subsystem,
 | D71 | The daemon serves its engine over NSXPC through `XPCFrontend`: `HelperXPCServer` serves an engine its host made (`init(serving:…)`), the host starts the engine before the listener, and the host's event sink passes every engine event to the server (`handle(_:)`). The daemon library depends on `CellKeeperHelperXPC` too, never on the app's modules | One engine per daemon, owned by the host that restores defaults with it before anything is served (R2) and handles its shutdown; an engine's sink is fixed when it is made, so the host has to pass revocations on rather than the server installing its own sink |
 | D72 | `HelperXPCServer`'s stop drains, by one absolute deadline: it admits nothing more, runs every admitted request and sends its reply, closes each connection after a closing send barrier and then invalidates its session, and invalidates the listener only at the end. It returns true only for what it can prove: every connection it waited for reports a complete drain outcome (every request it ever admitted answered, every reply's send confirmed by a barrier that ran while the connection was valid, not cut off, session invalidated), and the drain completed before the deadline, checked again at completion. Requests behind a revocation never run, and make the stop return false. A revocation's closing barrier is part of its connection's end. At the deadline it cuts off what remains, a pending closing barrier included, and returns false without waiting for the engine. `HelperFrontend.stop(by:)` takes the daemon's shutdown deadline less the finalisation reserve, on the daemon's clock, and a confirmation after it does not count. A request is admitted under its connection's lock together with being queued (review of PR #68) | The daemon may exit with 0 only after a confirmed stop (D59), and a `restoreDefaultsAndExit` must be answered before its session ends. A consumer task finishing proves nothing: it also finishes after a disconnect or a revocation discarded its queue, and before a revocation's barrier has run. Closing at once would drop admitted requests and replies; invalidating the listener first ended the connections still draining (observed); a stop timer that starts its own budget late, after a slow frontend start, would end after the daemon's deadline; a barrier that never runs must not keep a stop or a connection waiting forever |
 | D73 | The daemon builds its client requirement (CellKeeper, signed by this process's own team) before it creates the Mach-service listener; an ad-hoc or unsigned build refuses to start its frontend, restores defaults and exits with 0 | It must never listen without a requirement (D51, research note 04, §2.4), and a build that can never serve should not be restarted in a loop |
+| D74 | The steps for turning macOS's Charge Limit off are offered only while it may be limiting and the backend switches charging itself and accepts requests; with simulated controls they, and the notice, first say that nothing would then limit charging and to keep macOS's limit on unless the user wants to try the simulation. CellKeeper only opens System Settings › Battery and never changes the setting | Advising to turn macOS's limit off is safe only where CellKeeper's own limit would take over; with the Simulated helper nothing would, and an unavailable backend controls nothing (provisional number, after #66's) |

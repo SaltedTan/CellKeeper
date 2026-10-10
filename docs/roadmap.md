@@ -150,10 +150,15 @@ hardware.
   the real unregistration (phase 4b).
 - UI: limits at any level with the helper backend, honest status
   (Simulated or Unavailable), and guidance for turning macOS's Charge Limit
-  off (a first version: the menu and Settings › Control say when macOS's
-  limit is on, how to turn it off, and offer Check Again). Still to come:
-  a way to remove the helper, after which the app switches to the
-  Simulated backend.
+  off. Done: the menu and Settings › Control say in one line what controls
+  charging (the Simulated helper, deferring to macOS's Charge Limit, or
+  Unavailable with the reason); step-by-step guidance for turning macOS's
+  Charge Limit and Optimized Battery Charging off, from the menu's notice
+  and in Settings › Control, with Open Battery Settings and Check Again;
+  and every whole percentage from 20 to 100 with CellKeeper's own control.
+  Still to come: a way to remove the helper, after which the app switches
+  to the Simulated backend; a backend choice for the real helper waits for
+  phase 4b.
 
 ### Phase 4b — Signed helper (needs an Apple Developer ID)
 
