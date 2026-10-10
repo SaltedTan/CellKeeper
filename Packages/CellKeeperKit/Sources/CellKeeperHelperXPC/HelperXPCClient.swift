@@ -45,8 +45,18 @@ public final class HelperXPCClient: @unchecked Sendable {
     /// How long a call waits for its reply by default.
     public static let defaultTimeout: Duration = .seconds(10)
 
+    /// Runs `action` once `delay` has passed: how a call's timeout is
+    /// scheduled. Tests inject their own, to fire it when they choose.
+    typealias TimeoutScheduler = @Sendable (_ delay: Duration, _ action: @escaping @Sendable () -> Void) -> Void
+
+    /// Schedules on a global dispatch queue.
+    static let dispatchScheduler: TimeoutScheduler = { delay, action in
+        DispatchQueue.global().asyncAfter(deadline: .now() + dispatchInterval(delay), execute: action)
+    }
+
     private let connection: NSXPCConnection
     private let timeout: Duration
+    private let scheduleTimeout: TimeoutScheduler
     private let lock = NSLock()
     private var failure: HelperXPCError?
     private var pending: [UInt64: any FailableCall] = [:]
@@ -59,9 +69,15 @@ public final class HelperXPCClient: @unchecked Sendable {
     ///   - helperRequirement: what the helper's code signature must satisfy:
     ///     ``HelperCodeSigningRequirement/forHelper(identifier:)`` in the app.
     ///   - timeout: how long each call waits for its reply; must be positive.
-    public init(destination: Destination, helperRequirement: HelperCodeSigningRequirement, timeout: Duration = defaultTimeout) {
+    public convenience init(destination: Destination, helperRequirement: HelperCodeSigningRequirement, timeout: Duration = defaultTimeout) {
+        self.init(destination: destination, helperRequirement: helperRequirement, timeout: timeout, scheduler: Self.dispatchScheduler)
+    }
+
+    /// As the public initialiser, with the timeouts scheduled by `scheduler`.
+    init(destination: Destination, helperRequirement: HelperCodeSigningRequirement, timeout: Duration, scheduler: @escaping TimeoutScheduler) {
         precondition(timeout > .zero, "a helper call needs a positive timeout")
         self.timeout = timeout
+        scheduleTimeout = scheduler
         switch destination {
         case .machService(let name):
             connection = NSXPCConnection(machServiceName: name, options: .privileged)
@@ -213,7 +229,7 @@ public final class HelperXPCClient: @unchecked Sendable {
                 continuation?.resume(returning: .failure(.invalidated))
                 return
             }
-            DispatchQueue.global().asyncAfter(deadline: .now() + Self.dispatchInterval(timeout)) { [weak self] in
+            scheduleTimeout(timeout) { [weak self] in
                 guard let continuation = call.take() else { return }
                 // The connection is invalidated before the caller resumes, so
                 // a late reply can never be delivered to anything.
@@ -259,7 +275,8 @@ public final class HelperXPCClient: @unchecked Sendable {
         _ = lock.withLock { pending.removeValue(forKey: id) }
     }
 
-    private static func dispatchInterval(_ duration: Duration) -> DispatchTimeInterval {
+    /// `duration` for Dispatch; `.never` if it does not fit.
+    static func dispatchInterval(_ duration: Duration) -> DispatchTimeInterval {
         let (seconds, attoseconds) = duration.components
         let nanoseconds = seconds.multipliedReportingOverflow(by: 1_000_000_000)
         guard !nanoseconds.overflow else { return .never }
