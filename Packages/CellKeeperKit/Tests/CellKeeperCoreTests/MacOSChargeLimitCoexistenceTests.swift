@@ -41,6 +41,18 @@ final class StubMacOSChargeLimit: ChargeLimitReading, @unchecked Sendable {
     }
 }
 
+/// The capabilities of a simulated helper backend that read macOS's Charge
+/// Limit as `limit` (nil: unreadable, with `problem`).
+func helperCapabilities(macOSLimit limit: Int?, problem: String? = nil) -> ControlCapabilities {
+    let status = MacOSChargeLimitStatus(reportedLimit: limit, readAt: referenceDate, readProblem: problem)
+    var capabilities = simulatedCapabilities
+    if status.isLimiting {
+        capabilities = capabilities.withoutRestrictingModes
+    }
+    capabilities.macOSChargeLimit = status
+    return capabilities
+}
+
 @Suite("macOS's Charge Limit monitor")
 struct MacOSChargeLimitMonitorTests {
     let clock = TestClock()
@@ -262,5 +274,124 @@ struct HelperMacOSChargeLimitBackendTests {
         let status = await controller.recheckBackendAvailability()
         #expect(system.listCalls == 2)
         #expect(status.capabilities.macOSChargeLimit == nil)
+    }
+}
+
+@Suite("Policy and macOS's Charge Limit")
+struct MacOSChargeLimitPolicyTests {
+    @Test("While macOS's Charge Limit is on, the policy restricts nothing and names the limit")
+    func defers() {
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 50), capabilities: helperCapabilities(macOSLimit: 80)))
+        #expect(decision.state == .deferringToMacOS)
+        #expect(decision.desiredMode == .normal)
+        #expect(decision.reason == .macOSChargeLimitActive(limit: 80))
+        #expect(decision.action == .noAction)
+    }
+
+    @Test("A hold in place is released")
+    func releasesHold() {
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85), capabilities: helperCapabilities(macOSLimit: 80), currentMode: .inhibitCharging))
+        #expect(decision.desiredMode == .normal)
+        #expect(decision.action == .enableCharging)
+    }
+
+    @Test("At the limit, nothing is held; the latch still follows the readings")
+    func atTheLimit() {
+        let memory = memoryAfterReading(85)
+        let gated = ChargingPolicy.evaluate(input(snapshot(percent: 85), capabilities: helperCapabilities(macOSLimit: 80), memory: memory))
+        #expect(gated.state == .deferringToMacOS)
+        #expect(gated.desiredMode == .normal)
+        #expect(gated.memory.limitReached)
+        // Once macOS's limit is off, the confirmed limit holds at once.
+        let off = ChargingPolicy.evaluate(input(snapshot(percent: 85, at: referenceDate.addingTimeInterval(60)), capabilities: helperCapabilities(macOSLimit: 100), memory: gated.memory, now: referenceDate.addingTimeInterval(60), uptime: 10_060))
+        #expect(off.state == .holding)
+        #expect(off.desiredMode == .inhibitCharging)
+    }
+
+    @Test("A hot battery is not paused by CellKeeper; macOS limits charging and has its own thermal limiting")
+    func hot() {
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 60, temperature: 45), capabilities: helperCapabilities(macOSLimit: 85)))
+        #expect(decision.state == .deferringToMacOS)
+        #expect(decision.desiredMode == .normal)
+        #expect(decision.memory.temperatureTripped)
+    }
+
+    @Test("Sleep and the safety floor change nothing: nothing is restricted either way")
+    func sleepAndFloor() {
+        let sleeping = ChargingPolicy.evaluate(input(snapshot(percent: 79), capabilities: helperCapabilities(macOSLimit: 80), sleepImminent: true))
+        #expect(sleeping.desiredMode == .normal)
+        #expect(sleeping.state == .deferringToMacOS)
+        let low = ChargingPolicy.evaluate(input(snapshot(percent: 8), capabilities: helperCapabilities(macOSLimit: 80)))
+        #expect(low.desiredMode == .normal)
+        #expect(low.memory.belowSafetyFloor)
+    }
+
+    @Test("An unreadable report defers too, with the problem in the reason")
+    func unreadable() {
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85), capabilities: helperCapabilities(macOSLimit: nil, problem: "unrecognised report (a limit with reason optimizedBatteryCharging)"), currentMode: .inhibitCharging))
+        #expect(decision.state == .deferringToMacOS)
+        #expect(decision.desiredMode == .normal)
+        #expect(decision.reason == .macOSChargeLimitUnknown(problem: "unrecognised report (a limit with reason optimizedBatteryCharging)"))
+        #expect(decision.reason.description.contains("optimizedBatteryCharging"))
+    }
+
+    @Test("A discharge session ends, with a note saying why")
+    func dischargeEnds() {
+        let session = ChargeOverride.dischargeToLimit(target: 80, at: referenceDate, uptime: 9_000)
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 90), override: session, capabilities: helperCapabilities(macOSLimit: 80), currentMode: .forceDischarge))
+        #expect(decision.overrideEnded == .interrupted)
+        #expect(decision.notes.contains(.dischargeEndedForMacOSChargeLimit))
+        #expect(!decision.notes.contains(.dischargeUnsupported))
+        #expect(decision.desiredMode == .normal)
+        #expect(decision.action == .enableCharging)
+    }
+
+    @Test("A temporary full charge is kept, and still completes when full")
+    func fullCharge() {
+        let full = ChargeOverride.fullCharge(at: referenceDate, uptime: 9_000)
+        let charging = ChargingPolicy.evaluate(input(snapshot(percent: 85), override: full, capabilities: helperCapabilities(macOSLimit: 80)))
+        #expect(charging.overrideEnded == nil)
+        #expect(charging.desiredMode == .normal)
+        let completed = ChargingPolicy.evaluate(input(snapshot(percent: 100), override: full, capabilities: helperCapabilities(macOSLimit: 80)))
+        #expect(completed.overrideEnded == .completed)
+    }
+
+    @Test("Settings, management off and unusable telemetry come first")
+    func precedence() {
+        var off = ChargingSettings.default
+        off.isManagementEnabled = false
+        let unmanaged = ChargingPolicy.evaluate(input(snapshot(percent: 85), settings: off, capabilities: helperCapabilities(macOSLimit: 80)))
+        #expect(unmanaged.state == .unmanaged)
+        let noTelemetry = ChargingPolicy.evaluate(input(nil, capabilities: helperCapabilities(macOSLimit: 80)))
+        #expect(noTelemetry.state == .failSafe)
+        #expect(noTelemetry.reason == .telemetryUnavailable)
+    }
+
+    @Test("With macOS's Charge Limit off, CellKeeper's own limit applies as usual")
+    func offAppliesLimit() {
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85), capabilities: helperCapabilities(macOSLimit: 100), memory: memoryAfterReading(85)))
+        #expect(decision.state == .holding)
+        #expect(decision.action == .disableCharging)
+    }
+
+    @Test("The native Charge Limit backend is never affected")
+    func nativeUnaffected() {
+        var capabilities = nativeCapabilities
+        capabilities.macOSChargeLimit = MacOSChargeLimitStatus(reportedLimit: 80, readAt: referenceDate)
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 85), capabilities: capabilities))
+        #expect(decision.state == .osEnforcedLimit)
+        #expect(decision.desiredMode == .nativeLimit(percent: 80))
+    }
+
+    @Test("The reasons name macOS's limit, say CellKeeper's is not enforced, and say where to turn it off")
+    func wording() {
+        let active = DecisionReason.macOSChargeLimitActive(limit: 85).description
+        #expect(active.contains("85%"))
+        #expect(active.contains("does not enforce its own limit"))
+        #expect(active.contains("System Settings › Battery › Charging"))
+        let unknown = DecisionReason.macOSChargeLimitUnknown(problem: "pmset -g battlimit failed: exit status 1").description
+        #expect(unknown.contains("pmset -g battlimit failed: exit status 1"))
+        #expect(unknown.contains("may be limiting"))
+        #expect(unknown.contains("System Settings › Battery › Charging"))
     }
 }

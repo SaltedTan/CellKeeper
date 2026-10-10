@@ -471,7 +471,7 @@ final class AppModel {
         case .failSafe: return "exclamationmark.triangle"
         case .temperaturePause: return "thermometer.high"
         case .discharging: return "minus.plus.batteryblock"
-        case .holding, .onBattery, .charging, .fullChargeOverride, .safetyFloor, .osEnforcedLimit:
+        case .holding, .onBattery, .charging, .fullChargeOverride, .safetyFloor, .osEnforcedLimit, .deferringToMacOS:
             // A state that allows charging does not mean the battery is
             // charging (unplugged at the safety floor, full at a 100% limit).
             return status.snapshot?.isCharging == true ? "bolt.batteryblock" : "batteryblock"

@@ -27,6 +27,12 @@ public enum PolicyState: String, Sendable, Equatable, Codable {
     /// macOS's own Charge Limit enforces the limit CellKeeper chose. Used only
     /// with a native-limit backend.
     case osEnforcedLimit
+    /// macOS's own Charge Limit is on, or its report cannot be read and
+    /// recognised, so a backend that switches charging itself restricts
+    /// nothing and CellKeeper's own limit is not enforced (safety
+    /// precondition 7). macOS, not CellKeeper, decides charging until the
+    /// user turns macOS's limit off. Never used with a native-limit backend.
+    case deferringToMacOS
 }
 
 /// The concrete request the policy makes of the backend for this evaluation.
@@ -130,6 +136,14 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
     case nativeFullCharge
     /// The charge limit cannot be expressed as macOS's Charge Limit.
     case nativeLimitUnsupported(limit: Int, steps: [Int])
+    /// macOS's own Charge Limit is on at `limit`% (below 100), so a backend
+    /// that switches charging itself restricts nothing until the user turns
+    /// it off.
+    case macOSChargeLimitActive(limit: Int)
+    /// macOS's Charge Limit report could not be read or recognised (the
+    /// detail says why), so macOS may be limiting charging, and a backend
+    /// that switches charging itself restricts nothing.
+    case macOSChargeLimitUnknown(problem: String)
 
     /// The reason, independent of the backend: what CellKeeper restores is
     /// called normal charging. ``description(restoring:)`` names it for the
@@ -198,6 +212,10 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
             "Temporary full charge: CellKeeper wants macOS's Charge Limit at 100% until the battery is full."
         case .nativeLimitUnsupported(let limit, let steps):
             "A \(limit)% limit cannot be set with macOS's Charge Limit (\(steps.map { "\($0)%" }.joined(separator: ", "))); your own macOS limit stays in effect."
+        case .macOSChargeLimitActive(let limit):
+            "macOS's own Charge Limit is on at \(limit)%. While it is on, CellKeeper does not enforce its own limit and restricts nothing, so the two limits never compete; macOS decides charging. To let CellKeeper manage charging, turn macOS's Charge Limit off in System Settings › Battery › Charging (set it to 100%)."
+        case .macOSChargeLimitUnknown(let problem):
+            "CellKeeper could not read macOS's Charge Limit report (\(problem)), so macOS may be limiting charging, for example with its Charge Limit or Optimized Battery Charging. Until the report shows the limit off, CellKeeper does not enforce its own limit and restricts nothing. Check that macOS's Charge Limit is off in System Settings › Battery › Charging (set to 100%)."
         }
     }
 }
@@ -217,6 +235,9 @@ public enum PolicyNote: Sendable, Equatable, CustomStringConvertible {
     /// One reading has reached the limit, and CellKeeper is waiting for the
     /// next distinct reading to confirm it before pausing charging.
     case confirmingLimit
+    /// A discharge session ended because macOS's own Charge Limit is on or
+    /// cannot be read, so CellKeeper restricts nothing.
+    case dischargeEndedForMacOSChargeLimit
 
     public var description: String {
         switch self {
@@ -230,6 +251,8 @@ public enum PolicyNote: Sendable, Equatable, CustomStringConvertible {
             "Battery telemetry is unavailable. macOS keeps enforcing its Charge Limit from its own measurements, so CellKeeper leaves it unchanged."
         case .confirmingLimit:
             "CellKeeper is confirming the limit with the next battery reading before it pauses charging, so a single wrong reading cannot pause it."
+        case .dischargeEndedForMacOSChargeLimit:
+            "The discharge session ended: CellKeeper does not run the Mac from its battery while macOS's Charge Limit is on or cannot be read."
         }
     }
 }
@@ -243,7 +266,8 @@ public enum OverrideEnd: String, Sendable, Equatable, CustomStringConvertible {
     /// External power was disconnected.
     case unplugged
     /// A safety rule ended it (sleep, temperature, lost telemetry, a faulted
-    /// or unsupported backend, or an invalid target).
+    /// or unsupported backend, macOS's own Charge Limit, or an invalid
+    /// target).
     case interrupted
 
     public var description: String {

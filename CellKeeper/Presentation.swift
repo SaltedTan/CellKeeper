@@ -68,6 +68,7 @@ extension PolicyState {
         case .holding: "Holding at limit"
         case .discharging: "Discharging to limit"
         case .osEnforcedLimit: "Limit enforced by macOS"
+        case .deferringToMacOS: "Deferring to macOS's Charge Limit"
         }
     }
 }
