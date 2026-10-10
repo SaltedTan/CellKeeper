@@ -73,6 +73,51 @@ extension PolicyState {
     }
 }
 
+extension MacOSChargeLimitStatus {
+    /// macOS's own Charge Limit in a few words.
+    var title: String {
+        guard let limit = reportedLimit else { return "Could not be read" }
+        return limit >= 100 ? "Off (100%)" : "On at \(limit)%"
+    }
+
+    /// What CellKeeper does about macOS's limit, and what the user can do.
+    var guidance: String {
+        guard isLimiting else {
+            return "CellKeeper enforces its own limit. If macOS's Charge Limit is turned on again, CellKeeper stops restricting charging until it is off, so two limits never compete."
+        }
+        if let limit = reportedLimit {
+            return "While macOS's Charge Limit is on (\(limit)%), CellKeeper restricts nothing and its own limit is not enforced, so two limits never compete. To let CellKeeper manage charging, open System Settings › Battery, click ⓘ next to Charging, and set the Charge Limit to 100%. CellKeeper never changes it itself."
+        }
+        return "CellKeeper could not read macOS's Charge Limit (\(readProblem ?? "no report")), so it restricts nothing in case macOS is limiting charging. Check that the Charge Limit in System Settings › Battery (ⓘ next to Charging) is 100%."
+    }
+}
+
+/// macOS's own Charge Limit as a backend that switches charging itself
+/// reads it: its state, what CellKeeper does about it, and a way to check
+/// again after changing it in System Settings.
+struct MacOSChargeLimitNotice: View {
+    let status: MacOSChargeLimitStatus
+    let recheck: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            LabeledContent("macOS's Charge Limit", value: status.title)
+            Text(status.guidance)
+                .font(.caption)
+                .foregroundStyle(status.isLimiting ? Color.orange : Color.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Text("Read at \(status.readAt.formatted(date: .omitted, time: .standard))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Check Again", action: recheck)
+                    .help("Reads macOS's Charge Limit again now. CellKeeper also reads it about once a minute.")
+            }
+        }
+    }
+}
+
 extension ChargeControlMode {
     /// What the mode means to the user. With a native-limit backend `.normal`
     /// is the user's own macOS limit rather than unrestricted charging.

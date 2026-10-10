@@ -10,7 +10,7 @@ struct MenuBarView: View {
             if let status = model.status {
                 BatteryHeader(snapshot: status.snapshot, telemetryError: status.telemetryError, nativeLimit: status.nativeLimit)
                 Divider()
-                ControlSummary(status: status, selectBackend: { model.selectBackend($0) })
+                ControlSummary(status: status, selectBackend: { model.selectBackend($0) }, recheck: { model.recheckBackend() })
                 Divider()
                 ChargeLimitControl(model: model)
                 FullChargeControl(model: model, status: status)
@@ -81,6 +81,8 @@ private struct ControlSummary: View {
     let status: ControllerStatus
     /// Selects a backend, to cancel a pending switch.
     let selectBackend: (ControlBackendChoice) -> Void
+    /// Checks again what the backend depends on, such as macOS's Charge Limit.
+    let recheck: () -> Void
 
     var body: some View {
         // When macOS's Charge Limit is settled, its summary says it all; the
@@ -111,8 +113,13 @@ private struct ControlSummary: View {
                 LabeledContent("Wants", value: decision.desiredMode.intentTitle(nativeLimit: status.capabilities.isEnforcedByMacOS))
                 Text(status.displayedReason ?? decision.reason.description)
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(decision.state == .deferringToMacOS ? Color.orange : Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                if decision.state == .deferringToMacOS {
+                    Button("Check Again", action: recheck)
+                        .controlSize(.small)
+                        .help("Reads macOS's Charge Limit again now, for example after you turned it off in System Settings. CellKeeper also reads it about once a minute.")
+                }
                 if let execution = status.lastExecution {
                     LabeledContent("Last action") {
                         Text(execution.result.title)

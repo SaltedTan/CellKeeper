@@ -360,8 +360,9 @@ final class AppModel {
         send(.resetFault)
     }
 
-    /// Looks for the shortcut again (for example after the user created it)
-    /// and re-evaluates.
+    /// Checks again what the backend depends on (the shortcut after the user
+    /// created it, or macOS's Charge Limit after the user turned it off) and
+    /// re-evaluates.
     func recheckBackend() {
         send(.recheckBackend)
     }
