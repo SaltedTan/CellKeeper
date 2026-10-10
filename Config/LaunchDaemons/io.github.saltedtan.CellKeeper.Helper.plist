@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd property list for CellKeeper's helper daemon (CellKeeperHelper).
+
+  Not installed, embedded or registered in this phase. Phase 4b copies it to
+  CellKeeper.app/Contents/Library/LaunchDaemons/ and registers it with
+  SMAppService.daemon(plistName:); see docs/architecture.md, "Helper daemon",
+  and research note 04, section 1.2.
+
+  The label, the Mach service and ExitTimeOut must match HelperServiceName
+  and HelperDaemon.exitTimeout; a test checks. KeepAlive restarts the daemon
+  after a crash or a non-zero exit (and implies a run at load, so every boot
+  starts with a restore of defaults); a clean exit is not restarted, and the
+  Mach service starts it again on demand. SpawnConstraint needs a team
+  identifier and is added with signing in phase 4b.
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>io.github.saltedtan.CellKeeper.Helper</string>
+	<key>BundleProgram</key>
+	<string>Contents/MacOS/CellKeeperHelper</string>
+	<key>MachServices</key>
+	<dict>
+		<key>io.github.saltedtan.CellKeeper.Helper</key>
+		<true/>
+	</dict>
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+		<key>Crashed</key>
+		<true/>
+	</dict>
+	<key>ProcessType</key>
+	<string>Adaptive</string>
+	<key>ExitTimeOut</key>
+	<integer>10</integer>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>io.github.saltedtan.CellKeeper</string>
+	</array>
+</dict>
+</plist>
