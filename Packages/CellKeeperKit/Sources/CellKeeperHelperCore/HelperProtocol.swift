@@ -299,6 +299,10 @@ public enum HelperChangeCause: Int, Sendable, Equatable, CaseIterable, CustomStr
     case restoreRetried = 14
     /// The restore that follows an activation the activation limits refused.
     case activationLimited = 15
+    /// Found active by the first read-back of this helper process, before it
+    /// wrote anything: an earlier helper process or another tool may have
+    /// set it, and the helper cannot tell which. Not an outside change.
+    case foundActiveAtStart = 16
 
     public var description: String {
         switch self {
@@ -317,6 +321,7 @@ public enum HelperChangeCause: Int, Sendable, Equatable, CaseIterable, CustomStr
         case .restoredAfterReadBackFailure: "restoredAfterReadBackFailure"
         case .restoreRetried: "restoreRetried"
         case .activationLimited: "activationLimited"
+        case .foundActiveAtStart: "foundActiveAtStart"
         }
     }
 }

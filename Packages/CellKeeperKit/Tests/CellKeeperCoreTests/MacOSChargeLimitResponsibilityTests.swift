@@ -347,7 +347,7 @@ struct HelperOwnershipEvidenceTests {
         // outside, but reports no outside change, only an owed restore: no
         // writer is named, and the backend still faults.
         #expect(status.isBackendFaulted)
-        assertNamesHelperFailure(status, "reports no outside change, only that its restore of macOS's defaults has not read back clean, so it cannot say who set it")
+        assertNamesHelperFailure(status, "CellKeeper's helper found charging inhibited active when it started, before writing anything, so it cannot say who set it, and its restore of macOS's defaults has not read back clean")
     }
 
     @Test("A tool that re-sets its control during the helper's restore leaves the helper quiet, and the message does not promise retries")

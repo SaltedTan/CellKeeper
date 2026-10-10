@@ -17,8 +17,10 @@ import Foundation
 ///   own only while that generation is current. Why a hold ended is looked
 ///   up, not inferred: the cause the helper recorded for the next change
 ///   decides whether it was one of the helper's own releases, CellKeeper's
-///   own, a failure, or an outside change. Any other generation is an
-///   outside change.
+///   own, a failure, or an outside change. After any other generation the
+///   control is no longer CellKeeper's, and its latest recorded change says
+///   what is known: an outside change only if the helper recorded one (or
+///   another client's change); otherwise a fault that names no writer.
 /// - An activation is recorded as pending before it is sent. Until a read
 ///   settles it, CellKeeper stays responsible for the control, but owns
 ///   nothing on its account.
@@ -354,16 +356,16 @@ public actor HelperChargingBackend: ChargingBackend {
     ///   have set, is active, or the latest change of an active control is an
     ///   activation by one of CellKeeper's sessions.
     /// - false, only on positive evidence: nothing is active, or every active
-    ///   control's latest change is another client's activation, or a change
-    ///   made outside the helper while the helper reports an outside change
-    ///   (`externalModification`), on this helper process, with no write or
-    ///   restore of the helper's in doubt.
+    ///   control's latest change is another client's activation or a change
+    ///   the helper recorded as made outside it, on this helper process, with
+    ///   no write or restore of the helper's in doubt.
     /// - nil otherwise. Missing bookkeeping proves nothing: a control a
     ///   failed or wrong write or restore of the helper's may have made
     ///   active (D37), one left active by a start whose restore failed, one
     ///   with no recorded change, or any control while a restore is owed
     ///   (`hardwareFault`) or a write failed (`writeFailed`), may still be
-    ///   CellKeeper's.
+    ///   CellKeeper's; so may one the helper found active when it started
+    ///   (`foundActiveAtStart`), which an earlier helper process may have set.
     private func ownership(in state: HelperStateReply) -> Bool? {
         let active = state.activeControls.controls
         guard !active.isEmpty else { return false }
@@ -374,11 +376,11 @@ public actor HelperChargingBackend: ChargingBackend {
             switch change.cause {
             case .setByClient? where ownSessions.contains(change.session):
                 return true
-            case .setByClient?:
-                continue
-            case .changedOutside? where state.interlocks.contains(.externalModification):
+            case .setByClient?, .changedOutside?:
                 continue
             default:
+                // Including `foundActiveAtStart`: an earlier helper process
+                // may have set it on CellKeeper's behalf.
                 isEveryActiveForeign = false
             }
         }
@@ -892,17 +894,14 @@ public actor HelperChargingBackend: ChargingBackend {
         }
         switch cause {
         case .changedOutside, .restoredAfterOutsideChange:
-            // An active control counts as someone else's only while the
-            // helper itself reports an outside change: a restarted helper
-            // whose start restore failed also records the control it found
-            // active as changed outside, and only says it owes a restore.
-            if !isActive || interlocks.contains(.externalModification) {
-                return .outside("\(name) was changed outside the helper")
-            }
-            if interlocks.contains(.hardwareFault) {
-                return .unattributed("CellKeeper's helper reports \(name) active and records it as changed outside, but reports no outside change, only that its restore of macOS's defaults has not read back clean, so it cannot say who set it")
-            }
-            return .unattributed("CellKeeper's helper reports \(name) active and records it as changed outside, but reports no outside change, so it cannot say who set it")
+            // The engine records a change made outside it, whatever its
+            // interlocks say now.
+            return .outside("\(name) was changed outside the helper")
+        case .foundActiveAtStart:
+            // An earlier helper process or another tool: the engine cannot
+            // tell, so nobody is named.
+            let restore = interlocks.contains(.hardwareFault) ? ", and its restore of macOS's defaults has not read back clean" : ""
+            return .unattributed("CellKeeper's helper found \(name) \(isActive ? "active" : "set") when it started, before writing anything, so it cannot say who set it\(restore)")
         case .setByClient:
             return isOtherSession
                 ? .outside("another client of the helper set \(name)")
@@ -958,6 +957,8 @@ public actor HelperChargingBackend: ChargingBackend {
                     : "another client of the helper cleared \(name)")
         case .restoredAfterWriteFailure?, .restoredAfterReadBackFailure?, .restoreRetried?:
             return .failure
+        case .foundActiveAtStart?:
+            return .unattributed("\(name) was found active when the helper started, which does not say who set it")
         case .changedOutside?, .restoredAfterOutsideChange?:
             return .outside("\(name) was changed outside CellKeeper")
         case .setByClient?, nil:

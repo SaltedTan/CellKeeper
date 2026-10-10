@@ -50,7 +50,7 @@ struct HelperProtocolTests {
             (.setByClient, 1), (.clearedByClient, 2), (.clearedByRestore, 3), (.leaseExpired, 4), (.interlock, 5),
             (.sessionEnded, 6), (.sessionRevoked, 7), (.shutdown, 8), (.start, 9), (.changedOutside, 10),
             (.restoredAfterOutsideChange, 11), (.restoredAfterWriteFailure, 12), (.restoredAfterReadBackFailure, 13),
-            (.restoreRetried, 14), (.activationLimited, 15),
+            (.restoreRetried, 14), (.activationLimited, 15), (.foundActiveAtStart, 16),
         ]
         #expect(causes.count == HelperChangeCause.allCases.count)
         for (cause, raw) in causes {
