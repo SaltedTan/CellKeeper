@@ -83,7 +83,7 @@ extension MacOSChargeLimitStatus {
     /// What CellKeeper does about macOS's limit, and what the user can do.
     var guidance: String {
         guard isLimiting else {
-            return "CellKeeper enforces its own limit. If macOS's Charge Limit is turned on again, CellKeeper stops restricting charging until it is off, so two limits never compete."
+            return "Off, so nothing competes with CellKeeper's own limit. If macOS's Charge Limit is turned on again, CellKeeper stops restricting charging until it is off."
         }
         if let limit = reportedLimit {
             return "While macOS's Charge Limit is on (\(limit)%), CellKeeper restricts nothing and its own limit is not enforced, so two limits never compete. To let CellKeeper manage charging, open System Settings › Battery, click ⓘ next to Charging, and set the Charge Limit to 100%. CellKeeper never changes it itself."
