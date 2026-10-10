@@ -86,6 +86,9 @@ extension ControllerStatus {
 public enum MacOSChargeLimitWording {
     /// Added wherever a restriction is named on simulated controls.
     static let simulatedNote = "These are the simulated helper's controls; your Mac's charging is not changed."
+    /// Said in the steps for turning macOS's limit off while the controls
+    /// are simulated: nothing would limit charging then.
+    public static let simulatedCaution = "The Simulated helper changes nothing on your Mac, so with macOS's limit off nothing limits charging and your Mac charges to 100%."
 
     /// macOS's report in a few words.
     public static func summary(_ status: MacOSChargeLimitStatus) -> String {
@@ -128,9 +131,50 @@ public enum MacOSChargeLimitWording {
         }
         let withholding = "CellKeeper withholds new restrictions and asks for the release of any restriction of its own."
         let release = releaseState(ownRestriction, isSimulated: isSimulated)
+        // With simulated controls, nothing would limit charging with macOS's
+        // limit off; say so wherever turning it off is suggested.
+        let keepOn = "Keep macOS's limit on unless you want to try CellKeeper's own control in simulation: with it off, nothing limits your Mac's charging."
         if let limit = status.reportedLimit {
-            return "macOS reports its Charge Limit on at \(limit)%. While it is, \(withholding) \(release) To let CellKeeper manage charging, open System Settings › Battery, click ⓘ next to Charging, and set the Charge Limit to 100%. CellKeeper never changes it itself."
+            let turnOff = isSimulated
+                ? "\(keepOn) To try it, set the Charge Limit to 100% in System Settings › Battery (ⓘ next to Charging)."
+                : "To let CellKeeper manage charging, open System Settings › Battery, click ⓘ next to Charging, and set the Charge Limit to 100%."
+            return "macOS reports its Charge Limit on at \(limit)%. While it is, \(withholding) \(release) \(turnOff) CellKeeper never changes it itself."
         }
-        return "CellKeeper could not read macOS's Charge Limit report (\(status.readProblem ?? "no report")), so macOS may be limiting charging. Until the report shows no active limit, \(withholding) \(release) Check that the Charge Limit in System Settings › Battery (ⓘ next to Charging) is 100%. CellKeeper never changes it itself."
+        let check = isSimulated
+            ? "\(keepOn) To try it, check that the Charge Limit in System Settings › Battery (ⓘ next to Charging) is 100%."
+            : "Check that the Charge Limit in System Settings › Battery (ⓘ next to Charging) is 100%."
+        return "CellKeeper could not read macOS's Charge Limit report (\(status.readProblem ?? "no report")), so macOS may be limiting charging. Until the report shows no active limit, \(withholding) \(release) \(check) CellKeeper never changes it itself."
+    }
+}
+
+/// Step-by-step guidance for turning macOS's Charge Limit off, for a backend
+/// that switches charging itself. The steps follow Apple's support article
+/// 102338 ("About Optimized Battery Charging and Charge Limit on Mac"):
+/// System Settings › Battery, the info button next to Charging, a Charge
+/// Limit from 80 to 100%, and Optimized Battery Charging in the same place.
+/// CellKeeper never changes either setting itself.
+public enum MacOSChargeLimitGuide {
+    public static let title = "How to turn off macOS's Charge Limit"
+
+    public static let steps: [String] = [
+        "Open System Settings and click Battery in the sidebar.",
+        "Click the ⓘ button next to Charging.",
+        "Set the Charge Limit to 100%. macOS then reports no active limit.",
+        "Turn off Optimized Battery Charging. If macOS asks, turn it off rather than only until tomorrow.",
+        "Click Done, then come back to CellKeeper and click Check Again.",
+    ]
+
+    /// What the steps do and do not change. `isSimulated` adds that the
+    /// Simulated helper changes nothing, so nothing would limit charging.
+    public static func notes(isSimulated: Bool) -> [String] {
+        var notes = [
+            "CellKeeper never changes these settings itself.",
+            "While macOS's Charge Limit is on, CellKeeper withholds its own restrictions and asks for the release of any it set.",
+            "macOS may still hold charging whatever these settings say, for example for battery health or when the battery is warm, and does not say why.",
+        ]
+        if isSimulated {
+            notes.insert("\(MacOSChargeLimitWording.simulatedCaution) Leave macOS's limit on unless you want to try CellKeeper's own control in simulation.", at: 0)
+        }
+        return notes
     }
 }
