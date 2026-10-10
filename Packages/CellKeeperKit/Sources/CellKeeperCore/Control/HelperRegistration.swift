@@ -71,6 +71,9 @@ public protocol HelperRegistration: Sendable {
     func status() async -> HelperRegistrationStatus
     /// Unregisters the helper. ``HelperRemoval`` calls it only after the
     /// helper confirmed that it restored defaults, or for a forced removal
-    /// of a helper that cannot be reached.
+    /// when nothing confirmed the restore because the transport failed or
+    /// no reply arrived in time, at any stage (connecting, `hello`, the
+    /// restore). An explicit reply other than `ok` is never overridden: the
+    /// helper is then not unregistered, forced or not.
     func unregister() async throws
 }

@@ -648,9 +648,10 @@ necessarily restored anything.
    item under Allow in the Background. This revokes the helper's approval,
    which is expected to stop it with the termination signal (SIGTERM). The
    helper (`CellKeeperHelper`) then attempts to restore defaults, retrying
-   about once a second until they read back clean or until its shutdown
-   deadline, 8 s after the signal; it exits with status 0 only if a final
-   check confirms defaults, and with status 75 otherwise (D31, D59).
+   about once a second until they read back clean or until about 7 s after
+   the signal, which keeps the rest of its 8 s shutdown deadline for its
+   log and a final check; it exits with status 0 only if that final check
+   confirms defaults, and with status 75 otherwise (D31, D59).
    *How to tell:* stopped, when CellKeeper (if it is running) reports the
    helper as unavailable and
    `sudo launchctl list io.github.saltedtan.CellKeeper.Helper` no longer

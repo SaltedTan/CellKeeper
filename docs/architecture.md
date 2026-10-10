@@ -1060,8 +1060,9 @@ macOS 26 is reported (unverified) to return instead, as already gone.
    example one that answers `hello` and then never replies to the restore.
    Force is an acknowledged loss of assurance: unregistering terminates a
    running daemon, whose SIGTERM path attempts the restore, retrying until
-   it is confirmed or the 8 s shutdown deadline (D31, D59), and exits with
-   status 75 if it is not confirmed; a missing reply does not
+   it is confirmed or about 7 s have passed (the rest of the 8 s shutdown
+   deadline is kept for the log and the final check; D31, D59), and exits
+   with status 75 if it is not confirmed; a missing reply does not
    show that the helper had stopped retrying; and an unregistered helper
    does not start at the next boot, so no start restore (R2) follows. What
    remains is a mechanism whose state outlives the helper, which is what
