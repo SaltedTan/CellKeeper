@@ -5,6 +5,12 @@ import CellKeeperHelperCore
 import Foundation
 import Testing
 
+/// How long a test lets a connection be set up and answered: far longer than
+/// any healthy call takes, also on a slow CI runner whose first connection
+/// checks the test binary's signature. Timeouts under test are driven by
+/// ``ManualTimeouts`` instead, never by this.
+let setupTimeout: Duration = .seconds(30)
+
 /// A monotonic clock the test moves by hand. Unless `step` is set, readings
 /// repeat until the test advances it, so two engines that do the same work
 /// read the same times.
@@ -63,20 +69,75 @@ final class XPCEventLog: @unchecked Sendable {
             return nil
         }
     }
+
+    var invalidatedSessions: [HelperSessionID] {
+        events.compactMap {
+            if case .sessionInvalidated(let id) = $0 { return id }
+            return nil
+        }
+    }
+
+    /// The events that name `session` as the one making a request: a lease,
+    /// an activation, a refusal. Anything a request of that session did.
+    func requestEvents(of session: HelperSessionID) -> [HelperEvent] {
+        events.filter {
+            switch $0 {
+            case .leaseGranted(let id, _, _), .leaseRenewed(let id, _, _), .activated(_, by: let id), .requestRejected(let id, _, _):
+                id == session
+            default:
+                false
+            }
+        }
+    }
+}
+
+/// Collects the server's connection events.
+final class ConnectionEventLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [HelperXPCConnectionEvent] = []
+
+    var events: [HelperXPCConnectionEvent] {
+        lock.withLock { recorded }
+    }
+
+    func record(_ event: HelperXPCConnectionEvent) {
+        lock.withLock { recorded.append(event) }
+    }
+
+    func closeReason(of session: HelperSessionID) -> HelperXPCCloseReason? {
+        for event in events {
+            if case .closed(session, let reason) = event { return reason }
+        }
+        return nil
+    }
+
+    var refusals: [HelperXPCRefusal] {
+        events.compactMap {
+            if case .refused(_, _, let reason) = $0 { return reason }
+            return nil
+        }
+    }
 }
 
 /// A charge control whose read-back can be made to hang until the test lets
-/// it go, to model a helper that does not answer.
+/// it go, to model a helper that does not answer. Tests release it in a
+/// `defer`, and the stall ends by itself after 10 s at the latest, so a
+/// failing test cannot hang the run.
 final class StallingChargeControl: HelperChargeControl, @unchecked Sendable {
     let inner = SimulatedChargeControl()
     private let lock = NSLock()
     private var stallsNextReadBack = false
+    private var stalled = false
     private let released = DispatchSemaphore(value: 0)
 
-    /// The next read-back blocks until ``release()`` (at most 10 s, so a
-    /// failing test cannot hang the run).
+    /// The next read-back blocks until ``release()``.
     func stallNextReadBack() {
         lock.withLock { stallsNextReadBack = true }
+    }
+
+    /// True while a read-back is blocked.
+    var isStalled: Bool {
+        lock.withLock { stalled }
     }
 
     func release() {
@@ -94,16 +155,42 @@ final class StallingChargeControl: HelperChargeControl, @unchecked Sendable {
     func readBack() throws -> Set<HelperControl> {
         let stalls = lock.withLock {
             defer { stallsNextReadBack = false }
+            stalled = stallsNextReadBack
             return stallsNextReadBack
         }
         if stalls {
             _ = released.wait(timeout: .now() + 10)
+            lock.withLock { stalled = false }
         }
         return try inner.readBack()
     }
 
     func restoreDefaults() throws {
         try inner.restoreDefaults()
+    }
+}
+
+/// Call timeouts that fire only when the test says so.
+final class ManualTimeouts: @unchecked Sendable {
+    private let lock = NSLock()
+    private var actions: [@Sendable () -> Void] = []
+
+    var scheduler: HelperXPCClient.TimeoutScheduler {
+        { [self] _, action in
+            lock.withLock { actions.append(action) }
+        }
+    }
+
+    /// Fires every timeout scheduled so far; those of calls that have
+    /// already ended do nothing.
+    func fireAll() {
+        let due = lock.withLock {
+            defer { actions.removeAll() }
+            return actions
+        }
+        for action in due {
+            action()
+        }
     }
 }
 
@@ -129,19 +216,50 @@ func unmatchableRequirement() throws -> HelperCodeSigningRequirement {
     try HelperCodeSigningRequirement(validating: #"identifier "io.github.saltedtan.cellkeeper.tests.nomatch""#)
 }
 
-/// A started ``HelperXPCServer`` on its own anonymous listener.
+/// The failures that show a connection was refused or ended. A timeout is
+/// not among them: it would also be what a test sees if nothing happened.
+let connectionFailures: [HelperXPCError?] = [.interrupted, .invalidated, .requirementNotMet]
+let appConnectionFailures: [HelperTransportError?] = [.interrupted, .invalidated, .requirementNotMet]
+
+/// The client failure `body` threw; nil if it returned or threw another
+/// error.
+func clientFailure(_ body: () async throws -> Void) async -> HelperXPCError? {
+    do {
+        try await body()
+        return nil
+    } catch {
+        return error as? HelperXPCError
+    }
+}
+
+/// The transport error `body` threw; nil if it returned or threw another
+/// error.
+func transportFailure(_ body: () async throws -> Void) async -> HelperTransportError? {
+    do {
+        try await body()
+        return nil
+    } catch {
+        return error as? HelperTransportError
+    }
+}
+
+/// A ``HelperXPCServer`` on its own anonymous listener, started unless the
+/// test says otherwise.
 struct XPCRig {
     let listener: NSXPCListener
     let server: HelperXPCServer
     let events: XPCEventLog
+    let connections: ConnectionEventLog
     let clock: XPCTestClock
 
     init(
         control: any HelperChargeControl = SimulatedChargeControl(),
         clock: XPCTestClock = XPCTestClock(),
-        clientRequirement: HelperCodeSigningRequirement? = nil
+        clientRequirement: HelperCodeSigningRequirement? = nil,
+        start: Bool = true
     ) async throws {
         let events = XPCEventLog()
+        let connections = ConnectionEventLog()
         let listener = NSXPCListener.anonymous()
         let server = HelperXPCServer(
             listener: listener,
@@ -150,12 +268,16 @@ struct XPCRig {
             power: SafePower(clock: clock),
             build: 42,
             uptime: { clock.uptime },
-            events: { events.record($0) }
+            events: { events.record($0) },
+            connectionEvents: { connections.record($0) }
         )
-        #expect(await server.start() == .ok)
+        if start {
+            #expect(await server.start() == .ok)
+        }
         self.listener = listener
         self.server = server
         self.events = events
+        self.connections = connections
         self.clock = clock
     }
 
@@ -163,18 +285,108 @@ struct XPCRig {
         .endpoint(listener.endpoint)
     }
 
-    func client(requirement: HelperCodeSigningRequirement? = nil, timeout: Duration = HelperXPCClient.defaultTimeout) throws -> HelperXPCClient {
-        HelperXPCClient(destination: destination, helperRequirement: try requirement ?? ownRequirement(), timeout: timeout)
+    /// A client with a generous timeout, or with timeouts the test fires.
+    func client(requirement: HelperCodeSigningRequirement? = nil, timeouts: ManualTimeouts? = nil) throws -> HelperXPCClient {
+        HelperXPCClient(
+            destination: destination,
+            helperRequirement: try requirement ?? ownRequirement(),
+            timeout: setupTimeout,
+            scheduler: timeouts?.scheduler ?? HelperXPCClient.dispatchScheduler
+        )
     }
 
     func transport() throws -> XPCHelperTransport {
-        XPCHelperTransport(destination: destination, helperRequirement: try ownRequirement())
+        XPCHelperTransport(destination: destination, helperRequirement: try ownRequirement(), timeout: setupTimeout)
+    }
+
+    func raw() throws -> RawHelperConnection {
+        try RawHelperConnection(endpoint: listener.endpoint)
+    }
+}
+
+/// A bare NSXPC connection to a server, with none of the client's logic: it
+/// neither closes itself after a failure nor guards against a second
+/// outcome, so tests see what NSXPC itself delivers, and can send without
+/// waiting. Each call is numbered; its outcomes are recorded.
+final class RawHelperConnection: @unchecked Sendable {
+    // @unchecked Sendable: `connection` is configured in `init` only;
+    // the outcomes are guarded by `lock`.
+
+    enum Outcome: Equatable, Sendable {
+        case reply(status: Int)
+        case error(HelperXPCError)
+    }
+
+    let connection: NSXPCConnection
+    private let lock = NSLock()
+    private var recorded: [Int: [Outcome]] = [:]
+
+    init(endpoint: NSXPCListenerEndpoint) throws {
+        connection = NSXPCConnection(listenerEndpoint: endpoint)
+        connection.remoteObjectInterface = HelperXPCInterface.make()
+        connection.setCodeSigningRequirement(try ownRequirement().text)
+        connection.resume()
+    }
+
+    deinit {
+        connection.invalidate()
+    }
+
+    /// The proxy for call `id`: an error NSXPC reports for it is recorded.
+    func proxy(_ id: Int) -> CellKeeperHelperXPCProtocol {
+        // The interface is the protocol's, so the cast cannot fail.
+        connection.remoteObjectProxyWithErrorHandler { [weak self] error in
+            self?.record(id, .error(HelperXPCError(error)))
+        } as! CellKeeperHelperXPCProtocol
+    }
+
+    func record(_ id: Int, _ outcome: Outcome) {
+        lock.withLock { recorded[id, default: []].append(outcome) }
+    }
+
+    func outcomes(_ id: Int) -> [Outcome] {
+        lock.withLock { recorded[id] ?? [] }
+    }
+
+    /// Sends `hello` as call `id`.
+    func hello(_ id: Int) {
+        proxy(id).hello(clientProtocolVersion: HelperProtocolVersion.current) { [weak self] status, _, _, _, _, _, _ in
+            self?.record(id, .reply(status: status))
+        }
+    }
+
+    func readState(_ id: Int) {
+        proxy(id).readState { [weak self] status, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ in
+            self?.record(id, .reply(status: status))
+        }
+    }
+
+    func lease(_ id: Int, seconds: Int) {
+        proxy(id).acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: seconds) { [weak self] status, _ in
+            self?.record(id, .reply(status: status))
+        }
+    }
+
+    func activate(_ id: Int) {
+        proxy(id).setControl(control: HelperControl.chargingInhibited.rawValue, active: true) { [weak self] status in
+            self?.record(id, .reply(status: status))
+        }
+    }
+}
+
+/// An NSXPC proxy that reply blocks can use to send the next request.
+final class SendableProxy: @unchecked Sendable {
+    // @unchecked Sendable: NSXPC proxies may be messaged from any thread.
+    let helper: CellKeeperHelperXPCProtocol
+
+    init(_ helper: CellKeeperHelperXPCProtocol) {
+        self.helper = helper
     }
 }
 
 /// Waits until `condition` holds, at most `seconds`; returns whether it did.
 @discardableResult
-func eventually(within seconds: Double = 5, _ condition: () async -> Bool) async -> Bool {
+func eventually(within seconds: Double = 10, _ condition: () async -> Bool) async -> Bool {
     let deadline = Date().addingTimeInterval(seconds)
     while Date() < deadline {
         if await condition() { return true }

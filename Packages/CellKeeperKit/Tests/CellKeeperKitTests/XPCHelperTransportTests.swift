@@ -96,26 +96,34 @@ struct XPCHelperTransportTests {
 
     // MARK: - Code-signing requirements
 
-    @Test("A client that does not meet the listener's requirement never reaches the engine")
+    @Test("A client that does not meet the listener's requirement is refused, and never reaches the server or the engine")
     func listenerRefusesClient() async throws {
         let rig = try await XPCRig(clientRequirement: try unmatchableRequirement())
         let client = try rig.client()
-        await #expect(throws: HelperXPCError.self) {
-            try await client.hello(clientProtocolVersion: HelperProtocolVersion.current)
+        // A refusal, not a timeout: the timeout is generous, and a timeout is
+        // what a test would also see if no connection were processed at all.
+        // NSXPC reports the refusal as an interruption or an invalidation,
+        // depending on the macOS version.
+        let failure = await clientFailure {
+            _ = try await client.hello(clientProtocolVersion: HelperProtocolVersion.current)
         }
-        #expect(client.transportFailure != nil)
+        #expect(connectionFailures.contains(failure), "got \(String(describing: failure))")
+        #expect(connectionFailures.contains(client.transportFailure))
         await #expect(throws: HelperXPCError.invalidated) {
             try await client.restoreDefaults()
         }
         #expect(rig.events.openedSessions.isEmpty)
+        #expect(rig.connections.events.isEmpty)
         #expect(rig.server.connectionCount == 0)
 
         // Through the app's transport, the failure is a transport error.
         let connection = try await rig.transport().connect()
-        await #expect(throws: HelperTransportError.self) {
-            try await connection.hello(clientProtocolVersion: HelperProtocolVersion.current)
+        let appFailure = await transportFailure {
+            _ = try await connection.hello(clientProtocolVersion: HelperProtocolVersion.current)
         }
+        #expect(appConnectionFailures.contains(appFailure), "got \(String(describing: appFailure))")
         #expect(rig.events.openedSessions.isEmpty)
+        #expect(rig.connections.events.isEmpty)
     }
 
     @Test("A helper that does not meet the client's requirement gets no reply delivered, and the client is closed")
@@ -140,7 +148,7 @@ struct XPCHelperTransportTests {
     @Test("A reply with a status this version does not know is never read as a status: it fails the call and closes the client")
     func unknownStatus() async throws {
         let helper = try RawStatusHelper(status: 999)
-        let client = HelperXPCClient(destination: .endpoint(helper.listener.endpoint), helperRequirement: try ownRequirement())
+        let client = HelperXPCClient(destination: .endpoint(helper.listener.endpoint), helperRequirement: try ownRequirement(), timeout: setupTimeout)
         await #expect(throws: HelperXPCError.malformedReply) {
             try await client.setControl(control: 1, active: false)
         }
@@ -150,7 +158,7 @@ struct XPCHelperTransportTests {
         }
 
         // Through the app's transport, every kind of reply.
-        let transport = XPCHelperTransport(destination: .endpoint(helper.listener.endpoint), helperRequirement: try ownRequirement())
+        let transport = XPCHelperTransport(destination: .endpoint(helper.listener.endpoint), helperRequirement: try ownRequirement(), timeout: setupTimeout)
         let requests: [@Sendable (any HelperConnection) async throws -> Void] = [
             { _ = try await $0.hello(clientProtocolVersion: HelperProtocolVersion.current) },
             { _ = try await $0.readState() },
@@ -166,7 +174,7 @@ struct XPCHelperTransportTests {
 
         // The same stand-in with a known status is read as it is.
         let refusing = try RawStatusHelper(status: HelperStatus.blockedByInterlock.rawValue)
-        let connection = try await XPCHelperTransport(destination: .endpoint(refusing.listener.endpoint), helperRequirement: try ownRequirement()).connect()
+        let connection = try await XPCHelperTransport(destination: .endpoint(refusing.listener.endpoint), helperRequirement: try ownRequirement(), timeout: setupTimeout).connect()
         #expect(try await connection.setControl(control: 1, active: true) == .blockedByInterlock)
         #expect(try await connection.acquireOrRenewLease(control: 1, seconds: 900) == HelperLeaseReply(status: .blockedByInterlock, grantedSeconds: 900))
         await connection.invalidate()
@@ -186,22 +194,39 @@ struct XPCHelperTransportTests {
         connection.setCodeSigningRequirement(try ownRequirement().text)
         connection.resume()
         defer { connection.invalidate() }
-        let proxy = try #require(connection.remoteObjectProxy as? CellKeeperHelperXPCProtocol)
+        let proxy = SendableProxy(try #require(connection.remoteObjectProxy as? CellKeeperHelperXPCProtocol))
 
         let count = 300
-        // Reply blocks run on NSXPC's queue; the test checks what they saw.
+        // Many requests in flight at once, never more than the server lets
+        // wait (more would be a protocol violation that closes the
+        // connection): the first `window` go out together, and each reply
+        // sends the next one. Reply blocks run on NSXPC's queue; the test
+        // checks what they saw.
+        let window = HelperXPCServer.maximumQueuedRequests * 3 / 4
         let replies = Captured<[HelperLeaseReply]>()
         replies.set([])
         let introduced = Captured<Int>()
-        // Sent one after another without waiting for any reply.
-        proxy.hello(clientProtocolVersion: HelperProtocolVersion.current) { status, _, _, _, _, _, _ in introduced.set(status) }
-        for index in 0..<count {
-            proxy.acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: 600 + index) { status, granted in
+        let sent = Captured<Int>()
+        sent.set(0)
+        @Sendable func sendNext() {
+            var index = 0
+            sent.mutate {
+                index = $0
+                $0 += 1
+            }
+            guard index < count else { return }
+            proxy.helper.acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: 600 + index) { status, granted in
                 replies.mutate { $0.append(HelperLeaseReply(status: HelperStatus(rawValue: status) ?? .hardwareError, grantedSeconds: granted)) }
+                sendNext()
             }
         }
-        #expect(await eventually(within: 10) { replies.value?.count == count })
+        proxy.helper.hello(clientProtocolVersion: HelperProtocolVersion.current) { status, _, _, _, _, _, _ in introduced.set(status) }
+        for _ in 0..<window {
+            sendNext()
+        }
+        #expect(await eventually(within: 20) { replies.value?.count == count })
         #expect(introduced.value == HelperStatus.ok.rawValue)
+        #expect(rig.server.openConnectionCount == 1)
 
         let reached = rig.events.events.compactMap { event -> Int? in
             switch event {
@@ -211,112 +236,6 @@ struct XPCHelperTransportTests {
         }
         #expect(reached == Array(600..<(600 + count)))
         #expect(replies.value == (600..<(600 + count)).map { HelperLeaseReply(status: .ok, grantedSeconds: $0) })
-    }
-
-    // MARK: - Revocation
-
-    @Test("A session revoked for exceeding its budget gets its reply, then its connection is closed, its control cleared, and later calls throw")
-    func revocation() async throws {
-        let control = SimulatedChargeControl()
-        let rig = try await XPCRig(control: control)
-        let client = try rig.client()
-        #expect(try await client.hello(clientProtocolVersion: HelperProtocolVersion.current).status == .ok)
-        #expect(try await client.acquireOrRenewLease(control: 1, seconds: 900).status == .ok)
-        #expect(try await client.setControl(control: 1, active: true) == .ok)
-        #expect(control.activeControls == [.chargingInhibited])
-
-        // The clock stands still, so the budget never refills: 10 requests
-        // at once, then more than 20 in a row beyond it revoke the session.
-        var requests = 3
-        var lastStatus: HelperStatus?
-        while !rig.events.events.contains(where: { if case .sessionRevoked = $0 { true } else { false } }), requests < 40 {
-            lastStatus = try await client.readState().status
-            requests += 1
-        }
-        #expect(requests == HelperEngine.requestBurst + HelperEngine.maximumOverBudgetRequests + 1)
-        // The request that caused it got its reply.
-        #expect(lastStatus == .rateLimited)
-        #expect(control.activeControls.isEmpty)
-
-        // The server closed the connection; the client noticed and is closed.
-        #expect(await eventually { client.transportFailure != nil })
-        await #expect(throws: HelperXPCError.invalidated) {
-            try await client.restoreDefaults()
-        }
-        #expect(await eventually { rig.server.connectionCount == 0 })
-    }
-
-    // MARK: - Disconnect
-
-    @Test("Invalidating the client ends the session, and the engine clears the control it held")
-    func disconnect() async throws {
-        let control = SimulatedChargeControl()
-        let rig = try await XPCRig(control: control)
-        let client = try rig.client()
-        let hello = try await client.hello(clientProtocolVersion: HelperProtocolVersion.current)
-        #expect(try await client.acquireOrRenewLease(control: 1, seconds: 900).status == .ok)
-        #expect(try await client.setControl(control: 1, active: true) == .ok)
-        #expect(control.activeControls == [.chargingInhibited])
-
-        client.invalidate()
-        let session = HelperSessionID(rawValue: Int(hello.sessionID))
-        #expect(await eventually { rig.events.contains(.sessionInvalidated(session)) })
-        #expect(control.activeControls.isEmpty)
-        #expect(rig.events.contains(.deactivated(.chargingInhibited, .sessionInvalidated)))
-        #expect(await eventually { rig.server.connectionCount == 0 })
-        await #expect(throws: HelperXPCError.invalidated) {
-            try await client.readState()
-        }
-    }
-
-    @Test("Stopping the server ends every session and refuses new connections")
-    func stop() async throws {
-        let control = SimulatedChargeControl()
-        let rig = try await XPCRig(control: control)
-        let client = try rig.client()
-        #expect(try await client.hello(clientProtocolVersion: HelperProtocolVersion.current).status == .ok)
-        #expect(try await client.acquireOrRenewLease(control: 1, seconds: 900).status == .ok)
-        #expect(try await client.setControl(control: 1, active: true) == .ok)
-
-        await rig.server.stop()
-        #expect(control.activeControls.isEmpty)
-        #expect(rig.server.connectionCount == 0)
-        #expect(await eventually { client.transportFailure != nil })
-
-        let late = try rig.client()
-        await #expect(throws: HelperXPCError.self) {
-            try await late.hello(clientProtocolVersion: HelperProtocolVersion.current)
-        }
-        #expect(rig.events.openedSessions.count == 1)
-    }
-
-    // MARK: - Timeout
-
-    @Test("A call the helper does not answer in time throws, and the connection is invalidated so a late reply goes nowhere")
-    func timeout() async throws {
-        let control = StallingChargeControl()
-        let rig = try await XPCRig(control: control)
-        let client = try rig.client(timeout: .milliseconds(300))
-        let hello = try await client.hello(clientProtocolVersion: HelperProtocolVersion.current)
-        #expect(hello.status == .ok)
-
-        control.stallNextReadBack()
-        let started = ContinuousClock.now
-        await #expect(throws: HelperXPCError.timedOut) {
-            try await client.readState()
-        }
-        #expect(ContinuousClock.now - started >= .milliseconds(300))
-        #expect(client.transportFailure == .timedOut)
-        await #expect(throws: HelperXPCError.invalidated) {
-            try await client.restoreDefaults()
-        }
-
-        // The engine finishes the request; its reply has nowhere to go, and
-        // the session ends with the connection.
-        control.release()
-        let session = HelperSessionID(rawValue: Int(hello.sessionID))
-        #expect(await eventually { rig.events.contains(.sessionInvalidated(session)) })
-        #expect(await eventually { rig.server.connectionCount == 0 })
     }
 
     // MARK: - The app's backend
