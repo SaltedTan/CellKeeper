@@ -165,7 +165,7 @@ struct HelperRemovalControllerTests {
         #expect(rig.control.activeControls == [.chargingInhibited])
 
         let registration = FakeHelperRegistration(.enabled)
-        let outcome = await controller.removeHelper(using: HelperRemoval(transport: rig.transport, registration: registration))
+        let outcome = await controller.removeHelper(using: removalThatNeverTimesOut(transport: rig.transport, registration: registration))
 
         #expect(outcome == .helperRemoval(.removed(.simulated)))
         #expect(rig.control.activeControls.isEmpty)

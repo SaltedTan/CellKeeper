@@ -453,19 +453,37 @@ struct RemovalRig {
         helper.engine
     }
 
-    /// - Parameter clock: if given, every deadline is judged on it, and its
-    ///   timers wake only when the test advances it; otherwise the system's.
+    /// A removal whose deadlines are judged on `clock`, whose timers wake
+    /// only when the test advances it. By default the clock never moves, so
+    /// no call can time out: only a call the test holds, and only once the
+    /// test advances the clock after seeing that call wait, ever does. A
+    /// test therefore never depends on how fast the scheduler runs.
     func removal(
         helperDeadline: Duration = HelperRemoval.defaultHelperDeadline,
         registrationDeadline: Duration = HelperRemoval.defaultRegistrationDeadline,
-        clock: ManualDeadlineClock? = nil
+        clock: ManualDeadlineClock = ManualDeadlineClock()
     ) -> HelperRemoval {
         HelperRemoval(
             transport: transport,
             registration: registration,
             helperDeadline: helperDeadline,
             registrationDeadline: registrationDeadline,
-            clock: clock?.removalClock ?? .system
+            clock: clock.removalClock
+        )
+    }
+
+    /// A removal on the system's clock, for the one smoke test that needs a
+    /// real timer. Only the conversation's deadline is short; the
+    /// registration keeps its 15 s, far more than its calls, which answer
+    /// at once, ever take. A real timer establishes no stage, so such a
+    /// test asserts only what holds whichever stage the deadline finds.
+    func realTimeRemoval(helperDeadline: Duration) -> HelperRemoval {
+        HelperRemoval(
+            transport: transport,
+            registration: registration,
+            helperDeadline: helperDeadline,
+            registrationDeadline: HelperRemoval.defaultRegistrationDeadline,
+            clock: .system
         )
     }
 
@@ -528,6 +546,10 @@ final class Observed<Value: Sendable>: @unchecked Sendable {
 /// advances it, and a timer wakes once its time has come, unless the test
 /// holds the timers back: then the deadline has passed by the clock, but no
 /// timer has woken to check it.
+///
+/// A timer checks its deadline once before it first waits, so holding the
+/// timers keeps one from deciding only once it waits. A test that holds
+/// the timers therefore first awaits ``waitForSuspendedTimer(dueIn:)``.
 final class ManualDeadlineClock: @unchecked Sendable {
     private let lock = NSLock()
     private let origin = ContinuousClock.now
@@ -536,6 +558,9 @@ final class ManualDeadlineClock: @unchecked Sendable {
     private var sleepers: [Int: (due: Duration, continuation: CheckedContinuation<Void, Never>)] = [:]
     private var cancelledSleepers: Set<Int> = []
     private var nextSleeper = 0
+    private var suspensionWaiters: [Int: (due: Duration, continuation: CheckedContinuation<Bool, Never>)] = [:]
+    private var suspensionTimeouts: [Int: Task<Void, Never>] = [:]
+    private var nextSuspensionWaiter = 0
 
     var removalClock: RemovalClock {
         RemovalClock(now: { self.now() }, wake: { await self.wake(at: $0) })
@@ -572,6 +597,48 @@ final class ManualDeadlineClock: @unchecked Sendable {
         }
     }
 
+    /// Returns true once a timer due `duration` from now (by this clock) is
+    /// suspended in its wake-up, where it checks nothing until the clock
+    /// reaches its deadline with the timers not held; false after
+    /// ``testWaitLimit``. The waiter is registered before its timeout
+    /// starts, so the timeout always finds it.
+    func waitForSuspendedTimer(dueIn duration: Duration) async -> Bool {
+        let expiresAt = ContinuousClock.now.advanced(by: testWaitLimit)
+        let (id, due) = lock.withLock {
+            nextSuspensionWaiter += 1
+            return (nextSuspensionWaiter, elapsed + duration)
+        }
+        let isSuspended = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let isAlreadySuspended = lock.withLock {
+                if sleepers.values.contains(where: { $0.due == due }) { return true }
+                suspensionWaiters[id] = (due, continuation)
+                return false
+            }
+            if isAlreadySuspended {
+                continuation.resume(returning: true)
+                return
+            }
+            let timeout = Task { [weak self] in
+                try? await Task.sleep(until: expiresAt, clock: .continuous)
+                self?.giveUpWaitingForSuspension(id)
+            }
+            let isWaiting = lock.withLock {
+                guard suspensionWaiters[id] != nil else { return false }
+                suspensionTimeouts[id] = timeout
+                return true
+            }
+            if !isWaiting {
+                timeout.cancel()
+            }
+        }
+        lock.withLock { suspensionTimeouts.removeValue(forKey: id) }?.cancel()
+        return isSuspended
+    }
+
+    private func giveUpWaitingForSuspension(_ id: Int) {
+        lock.withLock { suspensionWaiters.removeValue(forKey: id) }?.continuation.resume(returning: false)
+    }
+
     private func takeDue() -> [CheckedContinuation<Void, Never>] {
         let ready = sleepers.filter { $0.value.due <= elapsed }
         for id in ready.keys {
@@ -590,14 +657,18 @@ final class ManualDeadlineClock: @unchecked Sendable {
         }
         await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                let wakesNow: Bool = lock.withLock {
-                    if cancelledSleepers.remove(id) != nil { return true }
-                    if !isHeld, due <= elapsed { return true }
+                let (wakesNow, suspended): (Bool, [CheckedContinuation<Bool, Never>]) = lock.withLock {
+                    if cancelledSleepers.remove(id) != nil { return (true, []) }
+                    if !isHeld, due <= elapsed { return (true, []) }
                     sleepers[id] = (due, continuation)
-                    return false
+                    let ids = suspensionWaiters.filter { $0.value.due == due }.map(\.key)
+                    return (false, ids.compactMap { suspensionWaiters.removeValue(forKey: $0)?.continuation })
                 }
                 if wakesNow {
                     continuation.resume()
+                }
+                for waiter in suspended {
+                    waiter.resume(returning: true)
                 }
             }
         } onCancel: {
@@ -611,4 +682,17 @@ final class ManualDeadlineClock: @unchecked Sendable {
             continuation?.resume()
         }
     }
+}
+
+/// A removal whose deadlines are judged on a clock that never moves, so no
+/// call can time out: for tests that hold nothing and must not depend on
+/// how fast the scheduler runs.
+func removalThatNeverTimesOut(transport: any HelperTransport, registration: any HelperRegistration) -> HelperRemoval {
+    HelperRemoval(
+        transport: transport,
+        registration: registration,
+        helperDeadline: HelperRemoval.defaultHelperDeadline,
+        registrationDeadline: HelperRemoval.defaultRegistrationDeadline,
+        clock: ManualDeadlineClock().removalClock
+    )
 }
