@@ -1021,7 +1021,7 @@ public actor ChargeController {
         note(fault, isThrown: false) { fault in
             switch fault {
             case .outside(let detail, _):
-                "Charging control changed outside CellKeeper: \(detail). Backend faulted; CellKeeper releases its own restrictions and does not override the change."
+                "Charging control changed outside CellKeeper: \(detail). Backend faulted; CellKeeper asks for the release of its own restrictions and does not override the change."
             case .acknowledgement(let detail):
                 "\(detail). Backend faulted: clear the fault to acknowledge it; until then only normal charging is requested."
             }

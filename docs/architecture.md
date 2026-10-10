@@ -395,7 +395,10 @@ public protocol ChargingBackend: Sendable {
   controller uses it to log each outside change once: the same change read
   again is not news, and a newer one (a new generation, or one a restarted
   helper recorded) is, whatever the message says. Empty for a backend
-  without such records; the controller then goes by the message.
+  without such records: it cannot tell its changes apart, and a read
+  reports a change in other words than a request throws it, so the
+  controller gives all its outside changes one identity until a read
+  reports no fault, and one change read and then thrown is logged once.
 - `recheckAvailability()` is the user's "check again": the next
   `capabilities()` must not rely on what the backend cached about what it
   depends on (the native backend's shortcut check; macOS's Charge Limit for
@@ -550,9 +553,10 @@ The controller adds, independent of the backend:
   failure (nor does the request whose confirming read it was). A problem
   needing acknowledgement is logged once for as long as the backend keeps
   reporting faults; an outside change once per change the backend recorded
-  (`outsideChangeEvidence()`), or per message for a backend without
-  records, so the same change read again is not logged twice and a newer
-  one is never hidden behind the same message;
+  (`outsideChangeEvidence()`), so the same change read again is not logged
+  twice and a newer one is never hidden behind the same message (a backend
+  without records has its outside changes logged once until a read reports
+  no fault);
 - renewal of the hold at the end of every evaluation in which CellKeeper
   holds a confirmed non-normal mode that the policy still wants, including
   evaluations whose action is "no change", and only if the backend accepts
@@ -601,7 +605,7 @@ Implementations today:
 | `MockChargingBackend` (default) | `simulated` | Records requests, tracks a simulated mode, supports failure injection for tests. Never touches hardware. |
 | `ReadOnlyChargingBackend` | `unavailable` | Accepts nothing; CellKeeper still computes and shows what it would do. |
 | `NativeChargeLimitBackend` (opt-in) | `experimental`, or `unavailable(reason)` | Sets macOS's Charge Limit by running the user's “CellKeeper Set Charge Limit” shortcut; reads it back with `pmset -g battlimit`. See below. |
-| `HelperChargingBackend` (Simulated helper) | `simulated`, or `unavailable(reason)` | CellKeeper's own charge control at any limit through the helper's logic, run in process on a simulated control: nothing on the Mac changes. Restricts nothing while macOS's own Charge Limit is on. See "Helper backend". |
+| `HelperChargingBackend` (Simulated helper) | `simulated`, or `unavailable(reason)` | CellKeeper's own charge control at any limit through the helper's logic, run in process on a simulated control: nothing on the Mac changes. While macOS's own Charge Limit is on, it withholds new restrictions and asks for the release of existing holds until a read-back confirms it. See "Helper backend". |
 
 ## Native Charge Limit backend
 

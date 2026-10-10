@@ -102,7 +102,8 @@ No public mechanism exists; every candidate is private and needs root
 owner's long-term direction (2026-10-06): CellKeeper controls charging
 itself, and the user turns macOS's own Charge Limit off. The app should then
 guide the user through turning it off, and detect it if it is turned back
-on, so two limits never compete.
+on: while it is on, CellKeeper withholds new restrictions and asks for the
+release of existing holds until a read-back confirms it.
 
 ### Phase 4a — Foundations without hardware writes (in progress)
 
