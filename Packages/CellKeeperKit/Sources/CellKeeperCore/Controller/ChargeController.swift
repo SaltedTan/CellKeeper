@@ -137,15 +137,15 @@ public actor ChargeController {
     /// The non-normal mode CellKeeper may have put into effect and has not
     /// seen end: set before a non-normal request is sent, and cleared only by
     /// a read taken after it that shows normal charging, or by the backend's
-    /// records showing that nothing in effect is CellKeeper's. Faults and
-    /// ownership bookkeeping (``ownedMode``) never clear it.
+    /// records showing positively that nothing in effect is CellKeeper's
+    /// (``ChargingBackend/isReportedModeOwn()`` false; nil, unknown, keeps
+    /// it). Faults, ownership bookkeeping (``ownedMode``), a restarted helper
+    /// and attempted restores never clear it.
     private var responsibleMode: ChargeControlMode?
     /// What the last successful read's backend records say about who set
     /// the mode in effect (``ChargingBackend/isReportedModeOwn()``); nil
     /// after a failed read or a request that may have changed it.
     private var reportedModeIsOwn: Bool?
-    /// The last successful read came with an outside change reported.
-    private var isOutsideChangeReported = false
     private var managementRefusal: String?
     private var events: [ControlEvent] = []
     private var nextEventID = 0
@@ -199,7 +199,6 @@ public actor ChargeController {
             currentMode: currentMode,
             ownRestrictionMode: responsibleMode,
             isReportedModeOwn: reportedModeIsOwn,
-            isOutsideChangeReported: isOutsideChangeReported,
             nativeLimit: nativeLimit,
             adoptedChange: adoptedChange,
             adoptionCount: adoptionCount,
@@ -405,7 +404,6 @@ public actor ChargeController {
         macOSLimitReleaseUnconfirmed = nil
         responsibleMode = nil
         reportedModeIsOwn = nil
-        isOutsideChangeReported = false
         lastExecution = nil
         record(.settings, "Control backend changed from \(previousName) to \(newBackend.descriptor.displayName).")
         await performEvaluation(.backendChanged)
@@ -799,7 +797,6 @@ public actor ChargeController {
             responsibleMode = mode
             currentMode = nil
             reportedModeIsOwn = nil
-            isOutsideChangeReported = false
         }
         record(.request, "Requesting \(target) from \(backend.descriptor.displayName) backend.")
         do {
@@ -901,7 +898,6 @@ public actor ChargeController {
             mode = try await backend.currentMode()
         } catch {
             reportedModeIsOwn = nil
-            isOutsideChangeReported = false
             await handleReportedFault()
             throw error
         }
@@ -925,20 +921,15 @@ public actor ChargeController {
     private func noteResponsibility(after mode: ChargeControlMode?) async {
         guard let mode else {
             reportedModeIsOwn = nil
-            isOutsideChangeReported = false
             return
         }
         reportedModeIsOwn = await backend.isReportedModeOwn()
-        if case .changedOutside? = await backend.reportedModeOrigin() {
-            isOutsideChangeReported = true
-        } else {
-            isOutsideChangeReported = false
-        }
         if mode == .normal {
             responsibleMode = nil
         } else if reportedModeIsOwn == false {
-            // Someone else's, by the backend's records: CellKeeper's own
-            // restriction has ended, but not as the release it asked for.
+            // Someone else's, by positive evidence in the backend's records:
+            // CellKeeper's own restriction has ended, but not as the release
+            // it asked for.
             responsibleMode = nil
             macOSLimitReleaseUnconfirmed = nil
         }

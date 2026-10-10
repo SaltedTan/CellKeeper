@@ -137,8 +137,9 @@ public actor HelperChargingBackend: ChargingBackend {
     /// of one, that ``currentMode()`` has not reported yet.
     private var unreportedHardwareError: String?
     private var origin: ReportedModeOrigin?
-    /// Whether a control CellKeeper set, or may have set, was in effect at
-    /// the last ``currentMode()``; nil if that read failed.
+    /// What the helper's history said, at the last ``currentMode()`` that
+    /// returned normally, about whether a control CellKeeper set or may have
+    /// set is in effect (see ``ownership(in:)``); nil after one that threw.
     private var isLastReportedOwn: Bool?
     /// Whether ``activity`` is held.
     private var isActivityHeld = false
@@ -285,7 +286,7 @@ public actor HelperChargingBackend: ChargingBackend {
             unreportedHardwareError = nil
             let loss = takeOutsideLoss()
             if state.interlocks.contains(.externalModification) {
-                origin = .changedOutside(Self.externalModificationDetail)
+                origin = .changedOutside(Self.externalModificationDetail(state, isSimulated: isSimulated))
             } else if let loss {
                 origin = .changedOutside(loss)
             } else if let waiting = Self.acknowledgementNeeded(state) {
@@ -295,20 +296,20 @@ public actor HelperChargingBackend: ChargingBackend {
         }
         observe(state)
         let active = state.activeControls.controls
-        // By the helper's history: a hold is CellKeeper's only while its
-        // generation is current, and a pending activation may have set its
-        // control.
-        isLastReportedOwn = !active.isDisjoint(with: unresolvedControls)
+        // Published only when this read returns normally.
+        let ownership = ownership(in: state)
         // A fault reported here makes a hardware error moot.
         let loss = takeOutsideLoss()
         if let outside = currentOutsideChange ?? loss {
             unreportedHardwareError = nil
             origin = .changedOutside(outside)
+            isLastReportedOwn = ownership
             return Self.mode(for: active)
         }
         if let waiting = Self.acknowledgementNeeded(state) {
             unreportedHardwareError = nil
             origin = .needsAcknowledgement(waiting)
+            isLastReportedOwn = ownership
             return Self.mode(for: active)
         }
         if let error = unreportedHardwareError {
@@ -323,7 +324,46 @@ public actor HelperChargingBackend: ChargingBackend {
         } else if isOwnReleaseConfirmed {
             origin = .cellKeeper
         }
+        isLastReportedOwn = ownership
         return mode
+    }
+
+    /// Whether, by the helper's history, a control CellKeeper set or may
+    /// have set is in effect.
+    ///
+    /// - true: a control CellKeeper holds, or one an activation it sent may
+    ///   have set, is active, or the latest change of an active control is an
+    ///   activation by one of CellKeeper's sessions.
+    /// - false, only on positive evidence: nothing is active, or every active
+    ///   control's latest change is another client's activation or a change
+    ///   made outside the helper, on this helper process, with no write or
+    ///   restore of the helper's in doubt.
+    /// - nil otherwise. Missing bookkeeping proves nothing: a control a
+    ///   failed or wrong write or restore of the helper's may have made
+    ///   active (D37), one left active by a start whose restore failed, one
+    ///   with no recorded change, or any control while a restore is owed
+    ///   (`hardwareFault`) or a write failed (`writeFailed`), may still be
+    ///   CellKeeper's.
+    private func ownership(in state: HelperStateReply) -> Bool? {
+        let active = state.activeControls.controls
+        guard !active.isEmpty else { return false }
+        var isEveryActiveForeign = true
+        for control in active {
+            if unresolvedControls.contains(control) { return true }
+            let change = state.change(for: control)
+            switch change.cause {
+            case .setByClient? where ownSessions.contains(change.session):
+                return true
+            case .setByClient?, .changedOutside?:
+                continue
+            default:
+                isEveryActiveForeign = false
+            }
+        }
+        guard isEveryActiveForeign, state.interlocks.isDisjoint(with: [.hardwareFault, .writeFailed]) else {
+            return nil
+        }
+        return false
     }
 
     public func reportedModeOrigin() async -> ReportedModeOrigin? {
@@ -665,7 +705,7 @@ public actor HelperChargingBackend: ChargingBackend {
         }
         let foreign = active.subtracting(holds.keys)
         if state.interlocks.contains(.externalModification) {
-            currentOutsideChange = Self.externalModificationDetail
+            currentOutsideChange = Self.externalModificationDetail(state, isSimulated: isSimulated)
         } else if !foreign.isEmpty {
             currentOutsideChange = "CellKeeper's helper reports \(Self.describe(foreign)), which CellKeeper did not set or no longer holds"
         } else {
@@ -893,7 +933,18 @@ public actor HelperChargingBackend: ChargingBackend {
         .adapterPresenceUnknown, .thermalPressure, .powerStateUnavailable, .sleepImminent,
     ]
 
-    static let externalModificationDetail = "CellKeeper's helper found its controls changed by something other than CellKeeper (another tool may be controlling charging); it restored macOS's defaults and changes nothing more until the fault is cleared"
+    /// What the helper's `externalModification` interlock means, and what
+    /// came of the restore that follows it: confirmed, or owed because it
+    /// failed or did not read back clean (`hardwareFault`). Never claims more
+    /// than the helper reports.
+    static func externalModificationDetail(_ state: HelperStateReply, isSimulated: Bool) -> String {
+        let found = "CellKeeper's helper found its controls changed by something other than CellKeeper (another tool may be controlling charging)"
+        let restore = state.interlocks.contains(.hardwareFault)
+            ? "it tried to restore macOS's defaults, but that restore has not read back clean, so it is owed and retried, and a control may still be active"
+            : "it restored macOS's defaults and read them back with nothing active, then writes nothing more on its own until the fault is cleared"
+        let simulated = isSimulated ? " (simulated controls; your Mac's charging is not changed)" : ""
+        return "\(found); \(restore)\(simulated)"
+    }
 
     static func mode(for control: HelperControl) -> ChargeControlMode {
         switch control {

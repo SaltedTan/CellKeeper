@@ -25,7 +25,9 @@ public enum OwnRestrictionState: Sendable, Equatable {
     /// of its own that could be in effect there.
     case noneKnown
     /// The last read shows `mode` in effect, and the backend's records show
-    /// that it is not CellKeeper's.
+    /// positively that it is not CellKeeper's (for the helper: another
+    /// client's activation or a change made outside it, with none of the
+    /// helper's writes or restores in doubt).
     case notCellKeepers(ChargeControlMode)
     /// The last read shows `mode` in effect; CellKeeper knows of no request
     /// of its own that set it, but nothing shows who did.
@@ -60,7 +62,10 @@ extension ControllerStatus {
             if isReportedModeOwn == true {
                 return .inEffect(mode, own: mode)
             }
-            return isOutsideChangeReported ? .notCellKeepers(mode) : .unexplained(mode)
+            // Nothing establishes who set it; a reported outside change does
+            // not, since the helper reports one also while its own failed
+            // restore may have left a control active.
+            return .unexplained(mode)
         case nil:
             if let own = ownRestrictionMode { return .unconfirmed(own) }
             return capabilities.availability.acceptsRequests ? .unknown : .noneKnown

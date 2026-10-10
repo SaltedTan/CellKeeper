@@ -423,10 +423,12 @@ public protocol ChargingBackend: Sendable {
 
     /// Whether what the last ``currentMode()`` reported is CellKeeper's, by
     /// the backend's own records (for the helper, its change history): true
-    /// if a control CellKeeper set, or may have set, is in effect; false if
-    /// nothing in effect is CellKeeper's; nil if that read failed or the
-    /// backend keeps no such records. Returns what is already known, without
-    /// new I/O. Default: nil.
+    /// if a control CellKeeper set, or may have set, is in effect; false
+    /// only on positive evidence that nothing in effect is CellKeeper's;
+    /// nil if that read threw, the records cannot establish it (absence
+    /// from the backend's bookkeeping is not evidence), or the backend keeps
+    /// no such records. Returns what is already known, without new I/O.
+    /// Default: nil.
     func isReportedModeOwn() async -> Bool?
 
     /// How the mode last reported by ``currentMode()`` came about, when the

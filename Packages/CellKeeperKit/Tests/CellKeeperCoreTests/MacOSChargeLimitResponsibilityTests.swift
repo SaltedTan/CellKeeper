@@ -249,6 +249,118 @@ struct OwnRestrictionResponsibilityTests {
     }
 }
 
+@Suite("Helper backend: who set what is in effect")
+struct HelperOwnershipEvidenceTests {
+    @Test("Ownership is reported only by a read that returns normally")
+    func publishedOnlyOnSuccess() async throws {
+        let rig = HelperRig()
+        #expect(try await rig.backend.currentMode() == .normal)
+        #expect(await rig.backend.isReportedModeOwn() == false)
+        // The read-back fails: the read throws, and says nothing about who
+        // set what.
+        rig.control.failNextReadBacks(1)
+        await #expect(throws: BackendError.self) { _ = try await rig.backend.currentMode() }
+        #expect(await rig.backend.isReportedModeOwn() == nil)
+        #expect(try await rig.backend.currentMode() == .normal)
+        #expect(await rig.backend.isReportedModeOwn() == false)
+        // Another client's read-back fails and the helper's restore after it
+        // reads back clean: CellKeeper's next read succeeds, but reports the
+        // new hardware error by throwing, after the ownership was computed.
+        rig.control.failNextReadBacks(1)
+        let other = await rig.otherClient()
+        _ = await other.readState()
+        await #expect(throws: BackendError.self) { _ = try await rig.backend.currentMode() }
+        #expect(await rig.backend.isReportedModeOwn() == nil)
+        #expect(try await rig.backend.currentMode() == .normal)
+        #expect(await rig.backend.isReportedModeOwn() == false)
+    }
+
+    @Test("A control the helper's failed restore activated after CellKeeper's failed release is not someone else's")
+    func misrestoreAfterFailedRelease() async {
+        let reader = StubMacOSChargeLimit(.noLimit)
+        let rig = HelperRig(macOSReader: reader)
+        let (controller, telemetry) = rig.controller(percent: 85)
+        #expect(await rig.confirmedEvaluation(controller).currentMode == .inhibitCharging)
+        // CellKeeper asks for the release; the clear fails, and the helper's
+        // restore after it activates the adapter-disable instead.
+        await telemetry.set(snapshot(percent: 70))
+        rig.control.failNextApplies(1)
+        rig.control.misrestoreNextRestores(1)
+        rig.clock.advance(by: 60)
+        let failed = await controller.evaluate(.periodic)
+        #expect(rig.control.activeControls == [.adapterDisabled])
+        // Later restores fail too.
+        rig.control.failNextRestores(50)
+        reader.set(.limit(80))
+        rig.clock.advance(by: 31)
+        let gated = await controller.evaluate(.periodic)
+        #expect(rig.control.activeControls == [.adapterDisabled])
+        for status in [failed, gated] {
+            #expect(status.isReportedModeOwn != false)
+            #expect(status.ownRestrictionMode == .inhibitCharging)
+            if case .notCellKeepers = status.ownRestriction {
+                Issue.record("a control the helper's own restore activated reported as someone else's: \(status.ownRestriction)")
+            }
+            #expect(status.ownRestriction.mayBeInEffect)
+        }
+        #expect(gated.events.contains { $0.kind == .safety && $0.message.contains("macOS's Charge Limit was turned on (80%) while CellKeeper held inhibitCharging") })
+    }
+
+    @Test("A restarted helper whose start restore keeps failing establishes nothing: CellKeeper's hold stays its responsibility")
+    func restartWithFailingStartRestore() async {
+        let reader = StubMacOSChargeLimit(.noLimit)
+        let rig = HelperRig(macOSReader: reader)
+        let (controller, _) = rig.controller(percent: 85)
+        #expect(await rig.confirmedEvaluation(controller).currentMode == .inhibitCharging)
+        // The helper stops without confirming its restore, and launchd starts
+        // it again; its start restore fails and keeps failing.
+        rig.control.failNextRestores(50)
+        _ = await rig.engine.terminate()
+        rig.transport.relaunch()
+        reader.set(.limit(80))
+        rig.clock.advance(by: 61)
+        let status = await controller.evaluate(.periodic)
+        #expect(rig.control.activeControls == [.chargingInhibited])
+        #expect(status.isReportedModeOwn != false)
+        #expect(status.ownRestrictionMode == .inhibitCharging)
+        if case .notCellKeepers = status.ownRestriction {
+            Issue.record("CellKeeper's hold reported as someone else's after a failed start restore: \(status.ownRestriction)")
+        }
+        #expect(status.ownRestriction.mayBeInEffect)
+        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("macOS's Charge Limit was turned on (80%) while CellKeeper held inhibitCharging") })
+    }
+
+    @Test("An outside change whose restore fails is not reported as restored")
+    func outsideChangeWithFailingRestore() async {
+        let rig = HelperRig()
+        let (controller, _) = rig.controller(percent: 85)
+        #expect(await rig.confirmedEvaluation(controller).currentMode == .inhibitCharging)
+        rig.control.failNextRestores(50)
+        rig.control.failNextApplies(50)
+        rig.control.simulateOutsideChange(.adapterDisabled, active: true)
+        rig.clock.advance(by: 5)
+        let status = await controller.evaluate(.periodic)
+        #expect(rig.control.activeControls == [.chargingInhibited, .adapterDisabled])
+        #expect(status.isBackendFaulted)
+        let fault = status.events.last { $0.kind == .safety && $0.message.contains("changed by something other than CellKeeper") }
+        #expect(fault?.message.contains("it tried to restore macOS's defaults, but that restore has not read back clean") == true)
+        #expect(fault?.message.contains("(simulated controls; your Mac's charging is not changed)") == true)
+        #expect(!status.events.contains { $0.message.contains("it restored macOS's defaults") })
+    }
+
+    @Test("An outside change whose restore reads back clean says so")
+    func outsideChangeWithConfirmedRestore() async {
+        let rig = HelperRig()
+        let (controller, _) = rig.controller(percent: 85)
+        #expect(await rig.confirmedEvaluation(controller).currentMode == .inhibitCharging)
+        rig.control.simulateOutsideChange(.adapterDisabled, active: true)
+        rig.clock.advance(by: 5)
+        let status = await controller.evaluate(.periodic)
+        #expect(rig.control.activeControls.isEmpty)
+        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("it restored macOS's defaults and read them back with nothing active") })
+    }
+}
+
 /// Holds a status captured inside a hook.
 final class StatusBox: @unchecked Sendable {
     private let lock = NSLock()
