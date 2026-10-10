@@ -24,8 +24,10 @@ public protocol HelperConnection: Sendable {
     func invalidate() async
 }
 
-/// Opens connections to CellKeeper's helper: in process today
-/// (``InProcessHelperTransport``), over NSXPC to the daemon later.
+/// Opens connections to CellKeeper's helper: in process
+/// (``InProcessHelperTransport``, the Simulated helper), or over NSXPC to
+/// the daemon (`XPCHelperTransport` in CellKeeperKit, not used by the app
+/// until the daemon is registered).
 public protocol HelperTransport: Sendable {
     /// A new connection, not yet introduced with `hello`. Throws if the
     /// helper cannot be reached (not installed, not running, not allowed).
@@ -35,15 +37,36 @@ public protocol HelperTransport: Sendable {
 /// A session used directly is a connection whose transport never fails.
 extension HelperSession: HelperConnection {}
 
-/// Why a transport ended a connection.
+/// Why a transport ended a connection. Any of them leaves the connection
+/// unusable.
 public enum HelperTransportError: Error, Sendable, Equatable, CustomStringConvertible {
     /// The helper revoked the session for exceeding its request budget, and
     /// the transport closed the connection.
     case sessionRevoked
+    /// The connection was interrupted: the helper exited or crashed, or
+    /// closed the connection.
+    case interrupted
+    /// The connection is not valid: the helper could not be reached (not
+    /// installed, not running, not allowed), or the connection was closed
+    /// after an earlier failure.
+    case invalidated
+    /// The helper's code signature does not satisfy the requirement
+    /// CellKeeper places on it.
+    case requirementNotMet
+    /// The helper did not reply in time.
+    case timedOut
+    /// The helper's reply could not be read, for example a status this
+    /// version does not know.
+    case malformedReply
 
     public var description: String {
         switch self {
         case .sessionRevoked: "the helper revoked the session and the connection was closed"
+        case .interrupted: "the connection to the helper was interrupted"
+        case .invalidated: "the connection to the helper is not valid"
+        case .requirementNotMet: "the helper's code signature does not meet CellKeeper's requirement"
+        case .timedOut: "the helper did not reply in time"
+        case .malformedReply: "the helper's reply could not be read"
         }
     }
 }
