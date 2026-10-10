@@ -150,8 +150,8 @@ hardware.
   helper's restore, and only then unregisters, tested against fakes, and
   the daemon restores defaults on `restoreDefaultsAndExit` and SIGTERM);
   a documented recovery procedure (research rule R31, done in
-  `safety.md`). Still to come for 9: its button (with the UI below) and
-  the real unregistration (phase 4b).
+  `safety.md`). Still to come for 9: its button (a deferred follow-up
+  tracked in issue #1) and the real unregistration (phase 4b).
 - UI: limits at any level with the helper backend, honest status
   (Simulated or Unavailable), and guidance for turning macOS's Charge Limit
   off. Done: the menu and Settings › Control say in one line what controls

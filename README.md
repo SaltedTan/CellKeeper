@@ -51,9 +51,11 @@ documented-as-far-as-possible mechanisms, with the fail-safe rules in
 Limits at any level, including below 80%, need CellKeeper to switch
 charging itself, and every known way to do that is private and needs root.
 This is CellKeeper's current priority: the parts that need no hardware
-writes are being built now, and real control stays gated on a dedicated
-test Mac and an Apple Developer ID (milestone 4 on the
-[roadmap](docs/roadmap.md)).
+writes (phase 4a) were completed on 2026-10-11, with their deferred
+follow-ups tracked in
+[issue #1](https://github.com/SaltedTan/CellKeeper/issues/1), and real
+control stays gated on a dedicated test Mac and an Apple Developer ID
+(milestone 4 on the [roadmap](docs/roadmap.md)).
 
 ## Using macOS's Charge Limit (experimental)
 

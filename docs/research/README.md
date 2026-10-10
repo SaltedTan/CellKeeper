@@ -82,7 +82,7 @@ Some notes use their own evidence labels alongside these tags:
 | Native Charge Limit (80–100%) | System Settings; “Set Battery Charge Limit” Shortcuts action run with the `shortcuts` CLI | PUBLIC (user setting, CLI), ARCH-SPECIFIC (Apple silicon, macOS 26.4+), verified from the App Sandbox (08) | Used by the opt-in macOS Charge Limit backend |
 | Read native limit state | `pmset -g battlimit` | PRIVATE/UNDOCUMENTED, verified read-only (08) | Used read-only to confirm every change; unrecognised output blocks changes |
 | Inhibit charging / force discharge | Only private: SMC keys (largely gated on macOS 27 firmware), private `ChargeInhibit`/`DisableInflow` assertions (root) | PRIVATE, PRIVILEGED, SMC/HW, unverified | Not implemented; simulated |
-| Privileged helper | `SMAppService` daemon + XPC with code-signing requirements | PUBLIC-API | Logic and NSXPC transport implemented and tested in process, on a simulated control; no daemon, nothing registered |
+| Privileged helper | `SMAppService` daemon + XPC with code-signing requirements | PUBLIC-API | Logic and NSXPC transport implemented and tested, on a simulated control; the daemon exists and serves the authenticated transport, but controls no hardware, is neither embedded nor registered, and the app does not connect to it yet |
 | Mac App Store with control | Incompatible (sandbox, no root, no helpers) | — | Not a goal |
 | Intel | macOS 26 is the last Intel release; no supported control | — | Telemetry only (code is architecture-neutral) |
 
