@@ -200,27 +200,25 @@ struct XPCHelperTransportTests {
         // Many requests in flight at once, never more than the server lets
         // wait (more would be a protocol violation that closes the
         // connection): the first `window` go out together, and each reply
-        // sends the next one. Reply blocks run on NSXPC's queue; the test
-        // checks what they saw.
+        // sends the next one. Numbering and sending happen together on one
+        // serial queue, so the numbers are the order on the wire. Reply
+        // blocks run on NSXPC's queue; the test checks what they saw.
         let window = HelperXPCServer.maximumQueuedRequests * 3 / 4
         let replies = Captured<[HelperLeaseReply]>()
         replies.set([])
         let introduced = Captured<Int>()
-        let sent = Captured<Int>()
-        sent.set(0)
+        let producer = OrderedProducer(count: count)
         @Sendable func sendNext() {
-            var index = 0
-            sent.mutate {
-                index = $0
-                $0 += 1
-            }
-            guard index < count else { return }
-            proxy.helper.acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: 600 + index) { status, granted in
-                replies.mutate { $0.append(HelperLeaseReply(status: HelperStatus(rawValue: status) ?? .hardwareError, grantedSeconds: granted)) }
-                sendNext()
+            producer.next { index in
+                proxy.helper.acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: 600 + index) { status, granted in
+                    replies.mutate { $0.append(HelperLeaseReply(status: HelperStatus(rawValue: status) ?? .hardwareError, grantedSeconds: granted)) }
+                    sendNext()
+                }
             }
         }
-        proxy.helper.hello(clientProtocolVersion: HelperProtocolVersion.current) { status, _, _, _, _, _, _ in introduced.set(status) }
+        producer.run {
+            proxy.helper.hello(clientProtocolVersion: HelperProtocolVersion.current) { status, _, _, _, _, _, _ in introduced.set(status) }
+        }
         for _ in 0..<window {
             sendNext()
         }

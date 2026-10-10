@@ -1176,7 +1176,11 @@ process.
     client quit, crashed or invalidated it, a protocol violation, a
     revocation, a stop), the session is invalidated at once, which clears
     what it held. The request in progress finishes, since the engine runs
-    one call at a time, and nothing queued behind it runs.
+    one call at a time, and nothing queued behind it runs. Every decision
+    that ends admission (an overflow, a revocation, a stop, the connection's
+    end) records the close in the same critical section that takes it,
+    before the consumer can take another request; ending the queue and
+    invalidating the connection and the session follow outside the lock.
   - *Revocation.* The engine's `sessionRevoked` event, delivered before the
     revoking call returns, marks the session. After that request the server
     invalidates the connection behind a send barrier, so the reply
@@ -1239,7 +1243,8 @@ process.
   helper that replies with a status this version does not know; arrival
   order over 300 pipelined requests; a burst across the revocation boundary
   and requests sent at the instant of revocation; disconnect, also while a
-  request is blocked in the engine; the queue bound; the connection limit;
+  request is blocked in the engine; the queue bound, also when the request
+  in progress ends just as an overflow is decided; the connection limit;
   a timeout against a stalled engine; start and stop racing; connections
   arriving while the server stops; the audit events; and
   `HelperChargingBackend` reconnecting after the server drops its

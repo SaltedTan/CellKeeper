@@ -79,15 +79,22 @@ struct XPCHelperServerTests {
         let rig = try await XPCRig(control: control)
         let raw = try rig.raw()
 
-        // All sent at once, in order: hello, lease and activation (requests
-        // 1 to 3), 27 reads (4 to 30), the revoking read (31), and four
-        // leases behind it. When the revoking reply arrives, before the
-        // client could have seen the connection close, it sends a lease and
-        // an activation at once.
+        // Hello, lease and activation (requests 1 to 3) and 22 reads (4 to
+        // 25), all answered before the rest is sent, so the burst after them
+        // stays well within the server's queue bound.
         raw.hello(0)
         raw.lease(1, seconds: 900)
         raw.activate(2)
-        for id in 3...29 {
+        for id in 3...24 {
+            raw.readState(id)
+        }
+        try #require(await eventually { (0...24).allSatisfy { !raw.outcomes($0).isEmpty } })
+
+        // Then ten at once, in order: five reads (26 to 30), the revoking
+        // read (31), and four leases behind it. When the revoking reply
+        // arrives, before the client could have seen the connection close,
+        // it sends a lease and an activation at once.
+        for id in 25...29 {
             raw.readState(id)
         }
         raw.proxy(30).readState { status, _, _, _, _, _, _, _, _, _, _, _, _, _, _, _ in
@@ -243,6 +250,62 @@ struct XPCHelperServerTests {
         }
         #expect(await eventually { rig.connections.closeReason(of: session) == .requestQueueFull })
         #expect(await eventually { rig.server.connectionCount == 0 })
+    }
+
+    @Test("An overflow ends admission at once: a request that finishes just as the overflow is detected cannot let a queued activation through")
+    func overflowRacesCompletion() async throws {
+        let control = StallingChargeControl()
+        defer { control.release() }
+        let rig = try await XPCRig(control: control)
+        let client = try rig.client()
+        let hello = try await client.hello(clientProtocolVersion: HelperProtocolVersion.current)
+        let session = HelperSessionID(rawValue: Int(hello.sessionID))
+        // With the lease held, the engine would carry out the activation
+        // queued below.
+        #expect(try await client.acquireOrRenewLease(control: 1, seconds: 900).status == .ok)
+        let requestEventsBefore = rig.events.requestEvents(of: session)
+
+        control.stallNextReadBack()
+        let blocked = Task { await clientFailure { _ = try await client.readState() } }
+        try #require(await eventually { control.isStalled })
+        let activation = Task { await clientFailure { _ = try await client.setControl(control: 1, active: true) } }
+        try #require(await eventually { rig.server.queuedRequestCount == 1 })
+        let limit = HelperXPCServer.maximumQueuedRequests
+        let queued = (1..<limit).map { index in
+            Task { await clientFailure { _ = try await client.acquireOrRenewLease(control: 1, seconds: 500 + index) } }
+        }
+        try #require(await eventually { rig.server.queuedRequestCount == limit })
+
+        // Once the overflow is decided, and before it is carried out, the
+        // running request ends and the consumer gets every chance to take
+        // the activation: it may take it off the queue, but must not run it.
+        let server = rig.server
+        server.onOverflowDecided {
+            control.release()
+            let deadline = Date().addingTimeInterval(5)
+            while server.queuedRequestCount == limit, Date() < deadline {
+                usleep(1_000)
+            }
+            usleep(200_000)
+        }
+        let overflow = await clientFailure { _ = try await client.restoreDefaults() }
+        #expect(connectionFailures.contains(overflow), "got \(String(describing: overflow))")
+        #expect(server.queuedRequestCount < limit)
+
+        #expect(await eventually { rig.events.contains(.sessionInvalidated(session)) })
+        #expect(rig.events.requestEvents(of: session) == requestEventsBefore)
+        #expect(!rig.events.events.contains { if case .activated = $0 { true } else { false } })
+        #expect(control.inner.activeControls.isEmpty)
+        #expect(!control.inner.writes.contains(.apply(.chargingInhibited, active: true)))
+        #expect(connectionFailures.contains(await activation.value))
+        // The request in progress was allowed to finish: it may have been
+        // answered before the connection closed.
+        let blockedFailure = await blocked.value
+        #expect(blockedFailure == nil || connectionFailures.contains(blockedFailure), "got \(String(describing: blockedFailure))")
+        for call in queued {
+            #expect(connectionFailures.contains(await call.value))
+        }
+        #expect(await eventually { rig.connections.closeReason(of: session) == .requestQueueFull })
     }
 
     // MARK: - Timeout

@@ -384,6 +384,35 @@ final class SendableProxy: @unchecked Sendable {
     }
 }
 
+/// Numbers requests and sends them on one serial queue, so a request's
+/// number is its place on the wire.
+final class OrderedProducer: @unchecked Sendable {
+    // @unchecked Sendable: `nextIndex` is only touched on `queue`.
+    private let queue = DispatchQueue(label: "io.github.saltedtan.CellKeeper.tests.ordered-producer")
+    private let count: Int
+    private var nextIndex = 0
+
+    init(count: Int) {
+        self.count = count
+    }
+
+    /// Takes the next number, while there is one, and sends with it, both
+    /// on the producer's queue.
+    func next(_ send: @escaping @Sendable (Int) -> Void) {
+        queue.async {
+            guard self.nextIndex < self.count else { return }
+            let index = self.nextIndex
+            self.nextIndex += 1
+            send(index)
+        }
+    }
+
+    /// Runs `work` on the producer's queue, in order with the sends.
+    func run(_ work: @escaping @Sendable () -> Void) {
+        queue.async(execute: work)
+    }
+}
+
 /// Waits until `condition` holds, at most `seconds`; returns whether it did.
 @discardableResult
 func eventually(within seconds: Double = 10, _ condition: () async -> Bool) async -> Bool {
