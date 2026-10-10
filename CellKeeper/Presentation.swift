@@ -1,4 +1,5 @@
 import CellKeeperCore
+import CellKeeperKit
 import SwiftUI
 
 /// User-facing wording for core types. Kept in the app so the core stays free
@@ -81,6 +82,9 @@ struct MacOSChargeLimitNotice: View {
     let macOSLimit: MacOSChargeLimitStatus
     let status: ControllerStatus
     let recheck: () -> Void
+    /// Shows the steps for turning macOS's limit off; nil shows no button
+    /// (Settings shows the steps below the notice).
+    var showGuide: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -94,9 +98,66 @@ struct MacOSChargeLimitNotice: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
+                if let showGuide, macOSLimit.isLimiting {
+                    Button("How to Turn It Off", action: showGuide)
+                        .help("Opens Settings › Control with the steps for turning off macOS's Charge Limit in System Settings.")
+                }
                 Button("Check Again", action: recheck)
                     .help("Reads macOS's Charge Limit again now. CellKeeper also reads it about once a minute.")
             }
+        }
+    }
+}
+
+/// The steps for turning macOS's Charge Limit off (``MacOSChargeLimitGuide``),
+/// with a way to open System Settings › Battery and to check again.
+struct MacOSChargeLimitGuideView: View {
+    let isSimulated: Bool
+    let openBatterySettings: () -> Void
+    let recheck: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(MacOSChargeLimitGuide.steps.enumerated()), id: \.offset) { index, step in
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text("\(index + 1).")
+                        .monospacedDigit()
+                    Text(step)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            ForEach(Array(MacOSChargeLimitGuide.notes(isSimulated: isSimulated).enumerated()), id: \.offset) { index, note in
+                Label(note, systemImage: isSimulated && index == 0 ? "exclamationmark.triangle" : "info.circle")
+                    .foregroundStyle(isSimulated && index == 0 ? Color.orange : Color.secondary)
+            }
+            HStack {
+                Button("Open Battery Settings", action: openBatterySettings)
+                    .help("Opens System Settings › Battery. CellKeeper changes nothing there.")
+                Button("Check Again", action: recheck)
+                    .help("Reads macOS's Charge Limit again now.")
+            }
+            .padding(.top, 2)
+        }
+        .font(.caption)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// One line saying what controls charging (``ControlStatement``), or the
+/// availability's explanation for macOS's Charge Limit.
+struct ControlStatementText: View {
+    let status: ControllerStatus
+
+    var body: some View {
+        if let statement = ControlStatement.text(for: status) {
+            Text(statement)
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+        } else {
+            Text(status.capabilities.explanation)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

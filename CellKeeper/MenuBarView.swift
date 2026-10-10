@@ -1,4 +1,5 @@
 import CellKeeperCore
+import CellKeeperKit
 import SwiftUI
 
 struct MenuBarView: View {
@@ -10,7 +11,11 @@ struct MenuBarView: View {
             if let status = model.status {
                 BatteryHeader(snapshot: status.snapshot, telemetryError: status.telemetryError, nativeLimit: status.nativeLimit)
                 Divider()
-                ControlSummary(status: status, selectBackend: { model.selectBackend($0) }, recheck: { model.recheckBackend() })
+                ControlSummary(status: status, selectBackend: { model.selectBackend($0) }, recheck: { model.recheckBackend() }, showMacOSLimitGuide: {
+                    model.showMacOSLimitGuide()
+                    NSApp.activate()
+                    openSettings()
+                })
                 Divider()
                 ChargeLimitControl(model: model)
                 FullChargeControl(model: model, status: status)
@@ -83,6 +88,9 @@ private struct ControlSummary: View {
     let selectBackend: (ControlBackendChoice) -> Void
     /// Checks again what the backend depends on, such as macOS's Charge Limit.
     let recheck: () -> Void
+    /// Opens Settings › Control with the steps for turning macOS's Charge
+    /// Limit off.
+    let showMacOSLimitGuide: () -> Void
 
     var body: some View {
         // When macOS's Charge Limit is settled, its summary says it all; the
@@ -97,29 +105,37 @@ private struct ControlSummary: View {
                 StatusBadge(title: status.capabilities.availability.badgeTitle, color: status.capabilities.availability.badgeColor)
             }
             if !isSettled {
-                Text(status.capabilities.explanation)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                // What controls charging, in one line (macOS's Charge Limit:
+                // what its availability means).
+                ControlStatementText(status: status)
             }
 
             if status.capabilities.isEnforcedByMacOS {
                 NativeLimitSummary(status: status)
             }
             // What macOS reports and how to turn it off, whatever the policy
-            // says first (an unfinished restore, for example).
-            if let macOSLimit = status.capabilities.macOSChargeLimit, macOSLimit.isLimiting, !status.capabilities.isEnforcedByMacOS {
-                MacOSChargeLimitNotice(macOSLimit: macOSLimit, status: status, recheck: recheck)
+            // says first (an unfinished restore, for example). Not for a
+            // backend that controls nothing: turning macOS's limit off would
+            // then leave nothing limiting charging.
+            if let macOSLimit = status.capabilities.macOSChargeLimit, ControlStatement.offersMacOSLimitGuide(status) {
+                MacOSChargeLimitNotice(macOSLimit: macOSLimit, status: status, recheck: recheck, showGuide: showMacOSLimitGuide)
                     .font(.caption)
             }
             PendingSwitchNotice(status: status, select: selectBackend)
 
             if let decision = status.decision, !isSettled {
-                LabeledContent("Policy", value: decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS))
-                LabeledContent("Wants", value: decision.desiredMode.intentTitle(nativeLimit: status.capabilities.isEnforcedByMacOS))
-                // While the policy defers to macOS's limit, the notice above
-                // says all its reason would.
+                // A backend that accepts no requests carries nothing out:
+                // the decision is only what CellKeeper would do, so its
+                // reason and notes, which speak of pausing charging, are not
+                // shown.
+                let isApplied = ControlStatement.isPolicyApplied(status)
+                // While the policy defers to macOS's limit, the line and the
+                // notice above say all its state and reason would.
                 if decision.state != .deferringToMacOS {
+                    LabeledContent(isApplied ? "Policy" : "Policy (not applied)", value: decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS))
+                }
+                LabeledContent(isApplied ? "Wants" : "Would want", value: decision.desiredMode.intentTitle(nativeLimit: status.capabilities.isEnforcedByMacOS))
+                if decision.state != .deferringToMacOS, isApplied {
                     Text(status.displayedReason ?? decision.reason.description)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -132,7 +148,7 @@ private struct ControlSummary: View {
                     }
                     .font(.caption)
                 }
-                ForEach(Array(decision.notes.enumerated()), id: \.offset) { _, note in
+                ForEach(Array((isApplied ? decision.notes : []).enumerated()), id: \.offset) { _, note in
                     Label(note.description, systemImage: "info.circle")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -297,6 +313,12 @@ private struct ChargeLimitSlider: View {
             Text("Resumes charging at \(model.settings.resumeThreshold)%.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let status = model.status, let note = ControlStatement.limitNote(for: status) {
+                Text(note)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if shown < 50 {
                 Text("Limits below 50% leave little charge for unplugged use.")
                     .font(.caption)
