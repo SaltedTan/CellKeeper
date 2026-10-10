@@ -321,10 +321,15 @@ the simulated control:
   client of the helper clearing or restoring a control, faults the backend,
   also when CellKeeper finds it while releasing and the release succeeds.
   The fault names an outside writer only when the helper's history names
-  one (another client, or an outside change the helper reports); a control
-  the helper's own failed restore or failed start left active, or one with
-  no recorded change, faults the backend just the same, as a restriction
-  CellKeeper cannot attribute or the helper's own failure.
+  one (another client, or a change the helper recorded as made outside
+  it). A control the helper's own failed restore left active, one it found
+  active when it started (before writing anything, it cannot tell its
+  earlier process from another tool), or one with no recorded change
+  faults the backend just the same, as a restriction CellKeeper cannot
+  attribute or the helper's own failure. Every path faults at once,
+  whether a read reports the fault or a request throws it (an evaluation,
+  a restore, a backend switch, quitting), and a later outside change is
+  logged even while an earlier helper failure keeps the backend faulted.
   CellKeeper deactivates only controls it still owns by that record, and the
   helper checks that record itself right before it clears
   (`clearControlIfUnchanged`), so a control that changed hands in between
