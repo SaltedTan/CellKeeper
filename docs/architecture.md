@@ -252,7 +252,7 @@ even when the charge reading is unusable.
 | 1 | Settings invalid, or the controller requires a release (`ReleaseReason`: a pending backend switch, an unfinished restore, or a state it set but could not read back) | `failSafe` | normal |
 | 2 | Management disabled | `unmanaged` | normal |
 | 3 | No/stale telemetry (by read time, or by the driver's own update time > 180 s), future timestamps, no battery, unknown % or power source | `failSafe` | normal (a discharge session is interrupted) |
-| 4 | macOS's own Charge Limit is on, or its report cannot be read and recognised (`ControlCapabilities.macOSChargeLimit`, reported by backends that switch charging themselves and check it) | `deferringToMacOS` | normal (nothing below applies; a discharge session is interrupted; the latches keep following the readings) |
+| 4 | macOS's own Charge Limit is on, or its report cannot be read and recognised (`ControlCapabilities.macOSChargeLimit`, reported by backends that switch charging themselves and check it) | `deferringToMacOS` | normal (nothing below applies; a discharge session is interrupted; the latches keep following the readings; whether a hold in place ended is up to the read-back) |
 | 5 | Safety floor latched | `safetyFloor` | normal |
 | 6 | On battery power | `onBattery` | normal (restrictions cleared; limit latch kept) |
 | 7 | Temperature latch set (cooling clears it no sooner than 5 minutes after it was set) | `temperaturePause` | inhibitCharging |
@@ -265,9 +265,11 @@ even when the charge reading is unusable.
 
 Row 4 is safety precondition 7 for backends that switch charging
 themselves (decision D50): macOS's lower limit would win anyway (R25), so
-CellKeeper restricts nothing rather than claim a limit it does not
-enforce, or fight macOS (R26). Its reason names macOS's limit, or the read
-problem, and says to turn the limit off in System Settings › Battery.
+CellKeeper asks for normal charging and withholds its own restrictions
+rather than claim a limit it does not enforce, or fight macOS (R26). Its
+reason names macOS's limit, or the read problem, describes that request
+(not its outcome), and says to turn the limit off in System Settings ›
+Battery.
 
 ### Native Charge Limit
 
@@ -325,6 +327,7 @@ user is never made to wait.
 public protocol ChargingBackend: Sendable {
     var descriptor: BackendDescriptor { get }
     func capabilities() async -> ControlCapabilities     // availability, style, supported modes
+    func capabilitiesForRelease() async -> ControlCapabilities // default: capabilities()
     func currentMode() async throws -> ChargeControlMode? // nil = unknown
     func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome
     func reportedModeOrigin() async -> ReportedModeOrigin? // default nil; no I/O
@@ -349,6 +352,12 @@ public protocol ChargingBackend: Sendable {
   simulated and read-only backends. While it is limiting, such a backend
   offers only `.normal`, keeps its availability (the backend is fine; macOS
   is in the way), and the policy defers to macOS (row 4 above).
+- `capabilitiesForRelease()` is what `ChargeController.restoreNormal`
+  (quitting, a backend switch, every safety fallback) asks for: the same
+  as `capabilities()` without reading anything a request for `.normal`
+  does not depend on, so a release never waits for it. The helper backend
+  attaches the kept reading of macOS's Charge Limit instead of reading it
+  again, and withholds restricting modes if it has none.
 - `recheckAvailability()` is the user's "check again": the next
   `capabilities()` must not rely on what the backend cached about what it
   depends on (the native backend's shortcut check; macOS's Charge Limit for
@@ -694,15 +703,26 @@ The app does not use the XPC transport until the daemon can be registered
   read-only, through `ChargeLimitReportParser`), keeps the latest reading
   with its date and problem text, and reads again only when it is 30 s old
   or older, so the capability checks of one evaluation run pmset at most
-  once; concurrent callers share one read. `recheckAvailability()` reads
-  again at once. Only a recognised report of no limit, or of 100%, counts
-  as off; an unrecognised one (how an Optimized Battery Charging entry or
-  a temporary state would appear) or a failed read counts as "macOS may be
-  limiting". Nothing new happens on release: when macOS's limit turns on
-  while CellKeeper holds a control, the policy wants `.normal`, and the
-  ordinary release clears it. The controller logs that as a safety event
-  (or that the release is not confirmed yet), and other changes of macOS's
-  limit as notices. CellKeeper never turns macOS's limit off itself.
+  once. A read under way is shared: every caller waits for it rather than
+  return an older reading, and its result is kept before any of them
+  returns. A cancelled caller cancels the read it waits for, which stops
+  pmset at once; a cancelled read is not kept, and the reading before it is
+  dropped too. `recheckAvailability()` reads again at once. Only a
+  recognised report of no active limit, or of 100%, counts as off; an
+  unrecognised one (how an Optimized Battery Charging entry or a temporary
+  state would appear) or a failed read counts as "macOS may be limiting",
+  and replaces an earlier reading of "off". Nothing new happens on
+  release: when macOS's limit turns on while CellKeeper holds a control,
+  the policy wants `.normal`, and the ordinary release clears it,
+  confirmed by a read like any other; `capabilitiesForRelease()` keeps
+  quitting, switching and fallbacks from waiting for pmset. The controller
+  logs a safety event saying whether a read-back confirmed the end, and, if
+  not, another once one does; until then `ControllerStatus.ownRestriction`
+  says the restriction may remain, and `MacOSChargeLimitWording` (the menu,
+  Settings and the diagnostics report) says so too. Other changes of
+  macOS's limit are notices that claim no more than the report: its going
+  off is "CellKeeper stops deferring to it", never "manages again".
+  CellKeeper never turns macOS's limit off itself.
 - **Reading.** `currentMode()` comes from a fresh `readState`, never from
   what CellKeeper asked for. A read-back the helper could not make is an
   error, but the interlocks and error count in that reply are still read, so
@@ -878,9 +898,16 @@ Known limitations:
   that leaves no entry there is not seen (note 08, I3 and open questions
   2–4). "Charge to Full Now" may appear as "no limit" (I2); CellKeeper's
   own limit then applies.
-- A single failed read of macOS's limit releases a hold; it is taken again,
-  within the rate limits, once a read shows the limit off.
+- A single failed read of macOS's limit asks for a hold's release (an
+  earlier reading of "off" is not kept); the hold is taken again, within
+  the rate limits, once a read shows no active limit.
 - The check is the app's: the helper does not read macOS's limit itself.
+  Whether it should enforce it independently is to be decided before any
+  privileged write.
+- In the App Sandbox, every pmset run logs the kernel's denial of pmset's
+  own SMC user-client attempt (note 08, O7), now about once a minute while
+  the helper backend is selected; the report is unaffected and no
+  entitlement is added.
 
 ## Future control backends
 
@@ -1783,4 +1810,4 @@ The helper daemon logs under its own subsystem,
 | D60 | Sleep is acknowledged when the engine's sleep checks return or 5 s after the announcement, whichever comes first, with a fault logged at the deadline | Safety precondition 13 asks for acknowledged sleep handling in the privileged component; an unacknowledged notification only delays sleep (by up to 30 s) and the engine's leases count sleep, so holding sleep for a stuck engine would buy nothing |
 | D61 | The activation history file is keyed by the boot session UUID (`kern.bootsessionuuid`), with no fallback; it is bounded (64 KiB, 20 records), replaced by rename, opened without blocking and refused at once unless it is a regular file, discarded whole on anything unexpected, and loaded only after SIGTERM is handled (review of PR #65) | The engine's clock starts again at every boot (D35), and only a value the kernel sets once per boot identifies one: `kern.boottime` moves when the calendar time is set, which would discard valid records within a boot. A corrupt, foreign or special file must be neither trusted nor allowed to stop or delay the restore at start, and losing the history only loosens the limits for at most an hour |
 | D62 | Nothing that may block runs on Swift's cooperative thread pool: the helper engine runs on a serial dispatch queue of its own (a custom actor executor), and the daemon writes its log, saves its history and calls its blocking seams on dispatch queues of their own. Tests that stall on purpose stall on those queues (review of PR #65, after #64) | The pool has as many threads as cores (three on CI's macOS 15 image). A synchronous control call, a log write or a file write that blocks there takes one of them, and a few at once take every thread: nothing else runs, neither the daemon's shutdown and sleep handling nor, in tests, other suites in the same process, until the stalls end. A dispatch queue's thread blocks alone. `.serialized` only orders tests within one suite, so it could not prevent that |
-| D50 | While macOS's own Charge Limit is on, or its `pmset -g battlimit` report cannot be read and recognised, a backend that switches charging itself restricts nothing: it offers only `.normal` and keeps its availability, the policy wants `.normal` (`deferringToMacOS`, before the safety floor, temperature, overrides and the limit), a hold in place is released by the ordinary path and logged as a safety event, and CellKeeper asks the user to turn macOS's limit off; it never turns it off itself. macOS's limit is read at most every 30 s (lead's decision, 2026-10-10; a deviation from R25) | The owner's direction (2026-10-06, 2026-10-09): CellKeeper controls charging, and the user turns macOS's limit off, so two limits never compete. The lower limit wins anyway (R25), so CellKeeper's status would be dishonest, and restricting on top of macOS fights it (R26). Restrictions toward safety are not needed while macOS enforces its own limit, and macOS has its own thermal limiting. An unreadable report is not guessed to be off, and `.unavailable` would misreport a backend that works |
+| D50 | While macOS's own Charge Limit is on, or its `pmset -g battlimit` report cannot be read and recognised, a backend that switches charging itself is asked for nothing but `.normal`: it offers only `.normal` and keeps its availability, the policy wants `.normal` (`deferringToMacOS`, before the safety floor, temperature, overrides and the limit), a hold in place is asked to end through the ordinary path and counts as ended only once a read-back shows it (logged as safety events either way), and CellKeeper asks the user to turn macOS's limit off; it never turns it off itself. macOS's limit is read at most every 30 s, and never on the release path (lead's decision, 2026-10-10; a deviation from R25) | The owner's direction (2026-10-06, 2026-10-09): CellKeeper controls charging, and the user turns macOS's limit off, so two limits never compete. The lower limit wins anyway (R25), so CellKeeper's status would be dishonest, and restricting on top of macOS fights it (R26). Restrictions toward safety are not needed while macOS enforces its own limit, and macOS has its own thermal limiting. An unreadable report is not guessed to be off, and `.unavailable` would misreport a backend that works |
