@@ -27,7 +27,11 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
 - The hardware gates are unchanged. No private mechanism is tried until a
   dedicated test Mac is available, and no privileged helper ships without an
   Apple Developer ID.
-- The open items of milestone 3 wait until phase 4a is done.
+- Phase 4a was completed on 2026-10-11. Its remaining follow-ups (the
+  request pacer, #67; a removal button and in-app recovery help; three
+  timing-sensitive tests) are listed in
+  [issue #1](https://github.com/SaltedTan/CellKeeper/issues/1). Phases 4b
+  and 4c stay blocked on an Apple Developer ID and a dedicated test Mac.
 
 ## Milestone 1 — Architecture and vertical slice ✅
 
@@ -105,7 +109,7 @@ guide the user through turning it off, and detect it if it is turned back
 on: while it is on, CellKeeper withholds new restrictions and asks for the
 release of existing holds until a read-back confirms it.
 
-### Phase 4a — Foundations without hardware writes (in progress)
+### Phase 4a — Foundations without hardware writes (done)
 
 Needs no test Mac and no Developer ID. Nothing in this phase writes to
 hardware.
@@ -146,8 +150,8 @@ hardware.
   helper's restore, and only then unregisters, tested against fakes, and
   the daemon restores defaults on `restoreDefaultsAndExit` and SIGTERM);
   a documented recovery procedure (research rule R31, done in
-  `safety.md`). Still to come for 9: its button (with the UI below) and
-  the real unregistration (phase 4b).
+  `safety.md`). Still to come for 9: its button (a deferred follow-up
+  tracked in issue #1) and the real unregistration (phase 4b).
 - UI: limits at any level with the helper backend, honest status
   (Simulated or Unavailable), and guidance for turning macOS's Charge Limit
   off. Done: the menu and Settings › Control say in one line what controls

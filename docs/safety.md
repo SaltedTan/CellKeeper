@@ -199,8 +199,8 @@ list.
    that defaults were not confirmed. The daemon's side is implemented as
    well: it restores defaults on that request and on SIGTERM, and exits
    with status 0 only once they are confirmed (see "Where the helper
-   backend stands"). The button for the removal comes with phase 4a's
-   interface work, and the real unregistration with phase 4b.
+   backend stands"). The button for the removal is a follow-up (in
+   issue #1), and the real unregistration comes with phase 4b.
 10. **Opt-in.** Real control is off by default and marked experimental until
     verified on that model.
 11. **Tested independent recovery.** Before the first experimental write, prove
@@ -660,8 +660,8 @@ necessarily restored anything.
    confirmed": it says so, and that no helper starts at the next startup
    to restore defaults (see step 5).
    *Status:* the logic is implemented and tested against simulated parts.
-   The button comes with phase 4a's interface work, and the real
-   unregistration (`SMAppService`) with phase 4b.
+   The button is a follow-up (issue #1), and the real unregistration
+   (`SMAppService`) comes with phase 4b.
 3. **Without CellKeeper: turn off its background item.** In System
    Settings › General › Login Items & Extensions, turn off CellKeeper's
    item under Allow in the Background. This revokes the helper's approval,
