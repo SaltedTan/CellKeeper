@@ -453,19 +453,37 @@ struct RemovalRig {
         helper.engine
     }
 
-    /// - Parameter clock: if given, every deadline is judged on it, and its
-    ///   timers wake only when the test advances it; otherwise the system's.
+    /// A removal whose deadlines are judged on `clock`, whose timers wake
+    /// only when the test advances it. By default the clock never moves, so
+    /// no call can time out: only a call the test holds, and only once the
+    /// test advances the clock after seeing that call wait, ever does. A
+    /// test therefore never depends on how fast the scheduler runs.
     func removal(
         helperDeadline: Duration = HelperRemoval.defaultHelperDeadline,
         registrationDeadline: Duration = HelperRemoval.defaultRegistrationDeadline,
-        clock: ManualDeadlineClock? = nil
+        clock: ManualDeadlineClock = ManualDeadlineClock()
     ) -> HelperRemoval {
         HelperRemoval(
             transport: transport,
             registration: registration,
             helperDeadline: helperDeadline,
             registrationDeadline: registrationDeadline,
-            clock: clock?.removalClock ?? .system
+            clock: clock.removalClock
+        )
+    }
+
+    /// A removal on the system's clock, for the one smoke test that needs a
+    /// real timer. Only the conversation's deadline is short; the
+    /// registration keeps its 15 s, far more than its calls, which answer
+    /// at once, ever take. A real timer establishes no stage, so such a
+    /// test asserts only what holds whichever stage the deadline finds.
+    func realTimeRemoval(helperDeadline: Duration) -> HelperRemoval {
+        HelperRemoval(
+            transport: transport,
+            registration: registration,
+            helperDeadline: helperDeadline,
+            registrationDeadline: HelperRemoval.defaultRegistrationDeadline,
+            clock: .system
         )
     }
 
@@ -611,4 +629,17 @@ final class ManualDeadlineClock: @unchecked Sendable {
             continuation?.resume()
         }
     }
+}
+
+/// A removal whose deadlines are judged on a clock that never moves, so no
+/// call can time out: for tests that hold nothing and must not depend on
+/// how fast the scheduler runs.
+func removalThatNeverTimesOut(transport: any HelperTransport, registration: any HelperRegistration) -> HelperRemoval {
+    HelperRemoval(
+        transport: transport,
+        registration: registration,
+        helperDeadline: HelperRemoval.defaultHelperDeadline,
+        registrationDeadline: HelperRemoval.defaultRegistrationDeadline,
+        clock: ManualDeadlineClock().removalClock
+    )
 }
