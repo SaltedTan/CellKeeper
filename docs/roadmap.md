@@ -131,12 +131,19 @@ hardware.
   power reading, the activation history file and the property list (not
   installed or embedded). Still open: wiring in the XPC listener.
 - The `safety.md` preconditions that do not depend on the mechanism:
-  debounce and dwell (6); coexistence with macOS's Charge Limit and
-  Optimized Battery Charging (7); an uninstall flow that restores defaults
-  (9); a documented recovery procedure (research rule R31).
+  debounce and dwell (6, done); coexistence with macOS's Charge Limit and
+  Optimized Battery Charging (7: done for macOS's Charge Limit with
+  backends that switch charging themselves, which ask for normal charging,
+  withhold their restrictions and ask the user to turn it off while it is
+  on or its report cannot be read; coexistence with Optimized Battery
+  Charging and battery health management is partial and unverified, as
+  they are visible only through that report); an uninstall flow that
+  restores defaults (9); a documented recovery procedure (research rule
+  R31).
 - UI: limits at any level with the helper backend, honest status
   (Simulated or Unavailable), and guidance for turning macOS's Charge Limit
-  off.
+  off (a first version: the menu and Settings › Control say when macOS's
+  limit is on, how to turn it off, and offer Check Again).
 
 ### Phase 4b — Signed helper (needs an Apple Developer ID)
 

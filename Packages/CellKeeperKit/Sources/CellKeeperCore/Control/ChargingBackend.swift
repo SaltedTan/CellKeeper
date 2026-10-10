@@ -95,6 +95,12 @@ public struct ControlCapabilities: Sendable, Equatable {
     /// Modes the backend can apply. `.normal` is always included when the
     /// backend accepts requests, so that the fail-safe mode is reachable.
     public private(set) var supportedModes: Set<ChargeControlMode>
+    /// macOS's own Charge Limit, as last read by a backend that switches
+    /// charging itself and checks it (safety precondition 7); nil for
+    /// backends that do not check it. While it ``MacOSChargeLimitStatus/isLimiting``,
+    /// such a backend offers only `.normal` and keeps its availability, and
+    /// the policy asks for normal charging and withholds every restriction.
+    public var macOSChargeLimit: MacOSChargeLimitStatus?
 
     /// Capabilities of a backend that switches charging itself.
     public init(availability: ControlAvailability, supportedModes: Set<ChargeControlMode>) {
@@ -128,6 +134,15 @@ public struct ControlCapabilities: Sendable, Equatable {
 
     public func supports(_ mode: ChargeControlMode) -> Bool {
         availability.acceptsRequests && supportedModes.contains(mode)
+    }
+
+    /// The same capabilities without any mode other than `.normal`: what a
+    /// backend that switches charging itself offers while macOS's own
+    /// Charge Limit may be limiting charging. The availability is kept.
+    public var withoutRestrictingModes: ControlCapabilities {
+        var capabilities = self
+        capabilities.supportedModes = supportedModes.intersection([.normal])
+        return capabilities
     }
 
     /// The limits a native-limit backend can set, ascending; empty otherwise.
@@ -198,6 +213,12 @@ public enum BackendError: Error, Sendable, Equatable, CustomStringConvertible {
     /// set: someone else changed it. Native-limit backends adopt such a
     /// change instead (``ControlOutcome/adoptedOutsideChange``).
     case changedOutside(expected: ChargeControlMode, found: ChargeControlMode?)
+    /// The backend found a problem it cannot attribute to anyone, or one of
+    /// its own (a restriction its records do not explain, a failure), and
+    /// changes nothing until someone acknowledges it. Like
+    /// ``changedOutside(expected:found:)`` it faults the controller at once,
+    /// but names no outside writer.
+    case needsAcknowledgement(String)
 
     public var description: String {
         switch self {
@@ -211,6 +232,8 @@ public enum BackendError: Error, Sendable, Equatable, CustomStringConvertible {
             "Read-back mismatch: expected \(expected), got \(actual.map(String.init(describing:)) ?? "unknown")"
         case .changedOutside(let expected, let found):
             "Changed outside CellKeeper: expected \(expected), found \(found.map(String.init(describing:)) ?? "unknown")"
+        case .needsAcknowledgement(let detail):
+            detail
         }
     }
 }
@@ -321,6 +344,28 @@ public enum HoldRelease: Sendable, Equatable, CustomStringConvertible {
 /// What a backend knows about how the mode it last reported came about,
 /// beyond what the controller can tell by comparing it with the mode
 /// CellKeeper last confirmed.
+/// One change as a backend's records identify it: for the helper, the helper
+/// process (its instance), the control and the change's generation. Used to
+/// tell a new outside change from the same one read again, whatever a
+/// message says.
+public struct RecordedChange: Hashable, Sendable, CustomStringConvertible {
+    /// The process or source that recorded it (the helper's instance).
+    public var source: UInt64
+    /// The control, by its raw value on the wire.
+    public var control: Int
+    public var generation: UInt64
+
+    public init(source: UInt64, control: Int, generation: UInt64) {
+        self.source = source
+        self.control = control
+        self.generation = generation
+    }
+
+    public var description: String {
+        "control \(control) generation \(generation) of \(source)"
+    }
+}
+
 public enum ReportedModeOrigin: Sendable, Equatable {
     /// CellKeeper set or restored it, even if it could not confirm it at the
     /// time.
@@ -395,10 +440,35 @@ public protocol ChargingBackend: Sendable {
 
     func capabilities() async -> ControlCapabilities
 
+    /// What the backend can do, for restoring `.normal` (quitting, a backend
+    /// switch, a safety fallback): like ``capabilities()``, but without
+    /// reading anything a request for `.normal` does not depend on, so a
+    /// release never waits for it. Default: ``capabilities()``.
+    func capabilitiesForRelease() async -> ControlCapabilities
+
     /// The mode currently in effect, or nil if it cannot be determined.
     func currentMode() async throws -> ChargeControlMode?
 
     func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome
+
+    /// Whether what the last ``currentMode()`` reported is CellKeeper's, by
+    /// the backend's own records (for the helper, its change history): true
+    /// if a control CellKeeper set, or may have set, is in effect; false
+    /// only on positive evidence that nothing in effect is CellKeeper's;
+    /// nil if that read threw, the records cannot establish it (absence
+    /// from the backend's bookkeeping is not evidence), or the backend keeps
+    /// no such records. Returns what is already known, without new I/O.
+    /// Default: nil.
+    func isReportedModeOwn() async -> Bool?
+
+    /// The changes, by the backend's own records, behind the outside change
+    /// it last reported with a read (``ReportedModeOrigin/changedOutside(_:)``)
+    /// or threw (``BackendError/changedOutside(expected:found:)``): what
+    /// identifies it, so the same change read again is recognised and a new
+    /// one is never hidden behind the same message. Empty if the backend
+    /// keeps no such records. Returns what is already known, without new
+    /// I/O. Default: empty.
+    func outsideChangeEvidence() async -> Set<RecordedChange>
 
     /// How the mode last reported by ``currentMode()`` came about, when the
     /// backend knows; nil otherwise. After a ``currentMode()`` that threw,
@@ -418,6 +488,12 @@ public protocol ChargingBackend: Sendable {
     /// macOS's defaults now. Default: nothing.
     func resetAfterFault() async throws
 
+    /// The user asked CellKeeper to check again (for example after creating
+    /// the shortcut, or turning macOS's Charge Limit off): the next
+    /// ``capabilities()`` must not rely on what the backend cached about
+    /// what it depends on. Default: nothing.
+    func recheckAvailability() async
+
     /// State of macOS's Charge Limit for native-limit backends; nil for
     /// others. Returns what is already known, without new I/O.
     func nativeLimitStatus() async -> NativeLimitStatus?
@@ -428,9 +504,13 @@ public protocol ChargingBackend: Sendable {
 }
 
 extension ChargingBackend {
+    public func capabilitiesForRelease() async -> ControlCapabilities { await capabilities() }
+    public func isReportedModeOwn() async -> Bool? { nil }
+    public func outsideChangeEvidence() async -> Set<RecordedChange> { [] }
     public func reportedModeOrigin() async -> ReportedModeOrigin? { nil }
     public func renewHold(_ mode: ChargeControlMode) async throws {}
     public func resetAfterFault() async throws {}
+    public func recheckAvailability() async {}
     public func nativeLimitStatus() async -> NativeLimitStatus? { nil }
     public func takeAdoptedLimitChange() async -> AdoptedLimitChange? { nil }
 }

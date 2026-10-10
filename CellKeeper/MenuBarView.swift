@@ -10,7 +10,7 @@ struct MenuBarView: View {
             if let status = model.status {
                 BatteryHeader(snapshot: status.snapshot, telemetryError: status.telemetryError, nativeLimit: status.nativeLimit)
                 Divider()
-                ControlSummary(status: status, selectBackend: { model.selectBackend($0) })
+                ControlSummary(status: status, selectBackend: { model.selectBackend($0) }, recheck: { model.recheckBackend() })
                 Divider()
                 ChargeLimitControl(model: model)
                 FullChargeControl(model: model, status: status)
@@ -81,6 +81,8 @@ private struct ControlSummary: View {
     let status: ControllerStatus
     /// Selects a backend, to cancel a pending switch.
     let selectBackend: (ControlBackendChoice) -> Void
+    /// Checks again what the backend depends on, such as macOS's Charge Limit.
+    let recheck: () -> Void
 
     var body: some View {
         // When macOS's Charge Limit is settled, its summary says it all; the
@@ -104,15 +106,25 @@ private struct ControlSummary: View {
             if status.capabilities.isEnforcedByMacOS {
                 NativeLimitSummary(status: status)
             }
+            // What macOS reports and how to turn it off, whatever the policy
+            // says first (an unfinished restore, for example).
+            if let macOSLimit = status.capabilities.macOSChargeLimit, macOSLimit.isLimiting, !status.capabilities.isEnforcedByMacOS {
+                MacOSChargeLimitNotice(macOSLimit: macOSLimit, status: status, recheck: recheck)
+                    .font(.caption)
+            }
             PendingSwitchNotice(status: status, select: selectBackend)
 
             if let decision = status.decision, !isSettled {
                 LabeledContent("Policy", value: decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS))
                 LabeledContent("Wants", value: decision.desiredMode.intentTitle(nativeLimit: status.capabilities.isEnforcedByMacOS))
-                Text(status.displayedReason ?? decision.reason.description)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                // While the policy defers to macOS's limit, the notice above
+                // says all its reason would.
+                if decision.state != .deferringToMacOS {
+                    Text(status.displayedReason ?? decision.reason.description)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let execution = status.lastExecution {
                     LabeledContent("Last action") {
                         Text(execution.result.title)

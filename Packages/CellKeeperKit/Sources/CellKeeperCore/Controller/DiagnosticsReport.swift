@@ -52,6 +52,18 @@ public enum DiagnosticsReport {
             field("Style", "switches charging, modes \(capabilities.supportedModes.map(\.description).sorted().joined(separator: ", "))")
         }
         field("Reported mode", status.currentMode.map(\.description) ?? "unknown")
+        if let macOSLimit = capabilities.macOSChargeLimit {
+            // While macOS's own Charge Limit may be limiting, the policy asks
+            // for normal charging and withholds restrictions; only a
+            // read-back says whether CellKeeper's own restriction ended.
+            field("macOS Charge Limit", "\(MacOSChargeLimitWording.summary(macOSLimit)), read \(timestamp(macOSLimit.readAt))\(macOSLimit.isLimiting ? "; CellKeeper defers to it: it withholds new restrictions and asks for the release of any restriction of its own" : "")")
+            if let problem = macOSLimit.readProblem {
+                field("macOS Charge Limit read problem", problem)
+            }
+            if macOSLimit.isLimiting {
+                field("Own restriction", MacOSChargeLimitWording.releaseState(status.ownRestriction, isSimulated: status.isControlSimulated))
+            }
+        }
         field("Pending switch", status.pendingBackend.map(\.displayName) ?? "none")
         field("Consecutive failures", "\(status.consecutiveFailures)\(status.isBackendFaulted ? " (faulted)" : "")")
         if let refusal = status.managementRefusal {

@@ -210,6 +210,49 @@ struct HelperStateReportTests {
             == HelperControlChange(generation: 1, cause: .changedOutside, interlocks: [], session: 0))
     }
 
+    @Test("A control the first read-back finds active, before any write, is recorded as found at start, not as an outside change")
+    func foundActiveAtStart() async {
+        let control = SimulatedChargeControl(initiallyActive: [.chargingInhibited])
+        control.failNextRestores(10)
+        let h = Harness(control: control)
+        #expect(await h.engine.start() == .hardwareError)
+        let session = await h.introducedSession()
+        let state = await session.readState()
+        #expect(state.activeControls.controls == [.chargingInhibited])
+        #expect(state.change(for: .chargingInhibited) == HelperControlChange(generation: 1, cause: .foundActiveAtStart, interlocks: [], session: 0))
+        #expect(state.interlocks.contains(.hardwareFault))
+        #expect(!state.interlocks.contains(.externalModification))
+    }
+
+    @Test("A start restore that succeeds clears a control found at start, and records both")
+    func foundActiveAtStartThenRestored() async {
+        let h = Harness(control: SimulatedChargeControl(initiallyActive: [.adapterDisabled]))
+        let session = await h.startedSession()
+        let state = await session.readState()
+        #expect(state.activeControls.controls.isEmpty)
+        #expect(state.change(for: .adapterDisabled) == HelperControlChange(generation: 2, cause: .start, interlocks: [], session: 0))
+        #expect(h.recorder.events.contains { if case .write = $0 { true } else { false } })
+    }
+
+    @Test("While a restore is owed, a control another tool activates is recorded as changed outside")
+    func outsideChangeDuringOwedRestore() async {
+        let h = Harness()
+        let session = await h.startedSession()
+        #expect(await session.acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: 900).status == .ok)
+        #expect(await session.setControl(control: HelperControl.chargingInhibited.rawValue, active: true) == .ok)
+        // The clear fails, and so does the restore after it: a restore is owed.
+        h.control.failNextApplies(1)
+        h.control.failNextRestores(50)
+        _ = await session.setControl(control: HelperControl.chargingInhibited.rawValue, active: false)
+        _ = await session.readState()
+        let before = await session.readState()
+        #expect(before.interlocks.contains(.hardwareFault))
+        h.control.simulateOutsideChange(.adapterDisabled, active: true)
+        let after = await session.readState()
+        #expect(after.change(for: .adapterDisabled).cause == .changedOutside)
+        #expect(after.change(for: .adapterDisabled).generation == before.change(for: .adapterDisabled).generation + 1)
+    }
+
     @Test("A clear that fails at lease expiry is reported as the restore after a failed write, not as the expiry")
     func failedClearAtExpiry() async {
         let h = Harness()

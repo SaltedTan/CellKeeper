@@ -207,6 +207,9 @@ private struct ControlSettingsTab: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    if let macOSLimit = status.capabilities.macOSChargeLimit, !status.capabilities.isEnforcedByMacOS {
+                        MacOSChargeLimitNotice(macOSLimit: macOSLimit, status: status, recheck: { model.recheckBackend() })
+                    }
                     if status.isBackendFaulted {
                         Label(faultExplanation(for: status),
                               systemImage: "exclamationmark.triangle")

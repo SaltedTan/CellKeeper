@@ -46,6 +46,15 @@ import os
 /// - Restricting requests are recorded on a monotonic clock for rate limiting.
 ///   After a failed restore of `.normal`, automatic evaluations wait
 ///   ``ChargingPolicy/minimumRestoreRetryInterval`` before retrying it.
+/// - While macOS's own Charge Limit is on, or its report cannot be read, a
+///   backend that switches charging itself is asked for nothing but
+///   `.normal` (the policy defers to macOS; safety precondition 7). If that
+///   starts while CellKeeper holds a restriction, the evaluation asks for
+///   its release and a safety event says whether a read-back confirmed it;
+///   if not, a later one says when a read-back shows it ended. Other changes
+///   of macOS's limit are logged as notices, which never claim more than
+///   the report: in particular, macOS's limit going off does not mean that
+///   CellKeeper manages charging again.
 /// - With a native-limit backend, `.normal` means the user's own macOS Charge
 ///   Limit, so every path above restores exactly that value. If the backend
 ///   remembers a limit it set in an earlier session (which a normal quit
@@ -103,7 +112,12 @@ public actor ChargeController {
     /// (``ReportedModeOrigin/changedOutside(_:)`` or
     /// ``ReportedModeOrigin/needsAcknowledgement(_:)``) has faulted it
     /// already.
-    private var isReportedFaultHandled = false
+    private var didLastReadReportFault = false
+    /// The faults the backend reported (thrown, or with a read) since its
+    /// reads last reported none, so each kind is logged once and counted
+    /// once: an outside change by its detail, so a different one, or an
+    /// escalation from a problem needing acknowledgement, is logged again.
+    private var handledFaults = HandledFaults()
     private var decision: PolicyDecision?
     private var lastExecution: ExecutionRecord?
     private var consecutiveFailures = 0
@@ -118,6 +132,25 @@ public actor ChargeController {
     /// management is turned on again.
     private var adoptedChange: AdoptedLimitChange?
     private var adoptionCount = 0
+    /// macOS's own Charge Limit as the current backend last reported it
+    /// (``ControlCapabilities/macOSChargeLimit``), for logging its changes;
+    /// nil if the backend does not check it, or has not reported it yet.
+    private var macOSLimitGate: MacOSLimitGate?
+    /// A restriction CellKeeper asked to end when macOS's Charge Limit
+    /// started to apply, whose end no read-back has shown yet.
+    private var macOSLimitReleaseUnconfirmed: ChargeControlMode?
+    /// The non-normal mode CellKeeper may have put into effect and has not
+    /// seen end: set before a non-normal request is sent, and cleared only by
+    /// a read taken after it that shows normal charging, or by the backend's
+    /// records showing positively that nothing in effect is CellKeeper's
+    /// (``ChargingBackend/isReportedModeOwn()`` false; nil, unknown, keeps
+    /// it). Faults, ownership bookkeeping (``ownedMode``), a restarted helper
+    /// and attempted restores never clear it.
+    private var responsibleMode: ChargeControlMode?
+    /// What the last successful read's backend records say about who set
+    /// the mode in effect (``ChargingBackend/isReportedModeOwn()``); nil
+    /// after a failed read or a request that may have changed it.
+    private var reportedModeIsOwn: Bool?
     private var managementRefusal: String?
     private var events: [ControlEvent] = []
     private var nextEventID = 0
@@ -169,6 +202,8 @@ public actor ChargeController {
             backend: backend.descriptor,
             capabilities: capabilities,
             currentMode: currentMode,
+            ownRestrictionMode: responsibleMode,
+            isReportedModeOwn: reportedModeIsOwn,
             nativeLimit: nativeLimit,
             adoptedChange: adoptedChange,
             adoptionCount: adoptionCount,
@@ -314,11 +349,13 @@ public actor ChargeController {
         }
     }
 
-    /// Native-limit backends: looks for the shortcut again, then evaluates.
+    /// Asks the backend to check again what it depends on (the native
+    /// backend's shortcut; macOS's own Charge Limit for the helper backend,
+    /// read again at once), then evaluates.
     @discardableResult
     public func recheckBackendAvailability() async -> ControllerStatus {
         await exclusively {
-            await (backend as? NativeChargeLimitBackend)?.recheckAvailability()
+            await backend.recheckAvailability()
             await performEvaluation(.manual)
         }
     }
@@ -366,8 +403,13 @@ public actor ChargeController {
         unconfirmedRequests = []
         isRestoreOutstanding = false
         hasSeededOwnership = false
-        isReportedFaultHandled = false
+        didLastReadReportFault = false
+        handledFaults = HandledFaults()
         nativeLimit = nil
+        macOSLimitGate = nil
+        macOSLimitReleaseUnconfirmed = nil
+        responsibleMode = nil
+        reportedModeIsOwn = nil
         lastExecution = nil
         record(.settings, "Control backend changed from \(previousName) to \(newBackend.descriptor.displayName).")
         await performEvaluation(.backendChanged)
@@ -407,7 +449,8 @@ public actor ChargeController {
             guard consecutiveFailures > 0 else { return }
             consecutiveFailures = 0
             lastFailureUptime = nil
-            isReportedFaultHandled = false
+            didLastReadReportFault = false
+            handledFaults = HandledFaults()
             record(.safety, "Backend fault cleared by user.")
             do {
                 try await backend.resetAfterFault()
@@ -476,6 +519,7 @@ public actor ChargeController {
 
         capabilities = await backend.capabilities()
         await observeBackendMode()
+        let heldWhenMacOSLimitStarted = noteMacOSChargeLimit()
         let releaseReason: ReleaseReason? = pendingBackend != nil ? .backendSwitch
             : isRestoreOutstanding ? .restoreUnfinished
             : isOwnedStateUnverified ? .stateUnverified
@@ -517,6 +561,12 @@ public actor ChargeController {
 
         await execute(newDecision.action)
         nativeLimit = await backend.nativeLimitStatus()
+        if let held = heldWhenMacOSLimitStarted {
+            recordMacOSLimitRelease(of: held)
+        } else if let held = macOSLimitReleaseUnconfirmed, currentMode == .normal {
+            macOSLimitReleaseUnconfirmed = nil
+            record(.safety, "A read-back now shows normal charging: CellKeeper's \(describeTarget(held))\(simulationNote), which it asked to end when macOS's Charge Limit started to apply, has ended.")
+        }
         await renewHoldIfStillWanted(newDecision)
 
         if pendingBackend != nil, currentMode == .normal, !(nativeLimit?.hasUnresolvedOwnership ?? false), !isAdoptionUnsaved {
@@ -539,7 +589,7 @@ public actor ChargeController {
             nativeLimit = await backend.nativeLimitStatus()
             // A fault reported with the failed read has faulted the backend
             // already (`readBackendMode()`).
-            if !isReportedFaultHandled {
+            if !didLastReadReportFault {
                 registerFailure("Could not read the backend's mode: \(error)")
             }
             isOwnedStateUnverified = holdsNonNormalState
@@ -566,7 +616,7 @@ public actor ChargeController {
         guard capabilities.availability.acceptsRequests else { return }
         // A fault the backend found itself, possibly while CellKeeper held
         // nothing, has been handled by `readBackendMode()`.
-        guard !isReportedFaultHandled else { return }
+        guard !didLastReadReportFault else { return }
         let origin = await backend.reportedModeOrigin()
         guard let observed else {
             registerFailure("The backend did not report its mode.")
@@ -597,6 +647,98 @@ public actor ChargeController {
             } else {
                 record(.safety, "Charging mode changed outside CellKeeper (expected \(owned), found \(observed)); another tool may be controlling charging. Backend faulted; restoring normal charging.", level: .fault)
             }
+        }
+    }
+
+    /// macOS's own Charge Limit, as a backend that switches charging itself
+    /// reports it.
+    private enum MacOSLimitGate: Equatable {
+        /// Off: macOS reports no limit, or 100%.
+        case off
+        /// On at this percentage.
+        case on(Int)
+        /// The report could not be read or recognised; macOS may be limiting.
+        case unknown(String)
+
+        init?(_ status: MacOSChargeLimitStatus?) {
+            guard let status else { return nil }
+            if !status.isLimiting {
+                self = .off
+            } else if let limit = status.reportedLimit {
+                self = .on(limit)
+            } else {
+                self = .unknown(status.readProblem ?? "no report")
+            }
+        }
+
+        var isLimiting: Bool { self != .off }
+
+        /// What macOS's report shows now, for the activity log.
+        var summary: String {
+            switch self {
+            case .off: "macOS reports no active Charge Limit"
+            case .on(let limit): "macOS reports its Charge Limit on at \(limit)%"
+            case .unknown(let problem): "CellKeeper could not read macOS's Charge Limit report (\(problem)), so macOS may be limiting charging"
+            }
+        }
+    }
+
+    /// Marks restrictions as simulated in safety events, so a standalone
+    /// message is never read as a change to the Mac's charging.
+    private var simulationNote: String {
+        capabilities.availability == .simulated ? " (simulated; your Mac's charging is not changed)" : ""
+    }
+
+    /// Logs a change of macOS's own Charge Limit as the backend reports it
+    /// (``ControlCapabilities/macOSChargeLimit``). Returns the restriction
+    /// CellKeeper held if macOS's limit has just started to apply (turned
+    /// on, or became unreadable) while CellKeeper held one; this evaluation
+    /// releases it, and ``recordMacOSLimitRelease(of:)`` logs the outcome.
+    private func noteMacOSChargeLimit() -> ChargeControlMode? {
+        let previous = macOSLimitGate
+        let gate = MacOSLimitGate(capabilities.macOSChargeLimit)
+        macOSLimitGate = gate
+        guard let gate, gate != previous else { return nil }
+        guard gate.isLimiting else {
+            // Nothing to report the first time macOS's limit is seen off. A
+            // release still unconfirmed stays a failure like any other, and
+            // the decision log says what CellKeeper wants now.
+            macOSLimitReleaseUnconfirmed = nil
+            if previous != nil {
+                record(.decision, "\(gate.summary) any more, so CellKeeper stops deferring to it. This does not establish that the setting is 100% or that macOS holds nothing else.")
+            }
+            return nil
+        }
+        if previous?.isLimiting == true {
+            record(.decision, "\(gate.summary). CellKeeper keeps deferring to it: it withholds new restrictions and asks for the release of any restriction of its own.")
+            return nil
+        }
+        if let held = responsibleMode {
+            return held
+        }
+        record(.decision, "\(gate.summary). CellKeeper defers to it: it withholds new restrictions and asks for the release of any restriction of its own. To let CellKeeper manage charging, turn macOS's Charge Limit off in System Settings › Battery › Charging (set it to 100%).")
+        return nil
+    }
+
+    /// After an evaluation that found macOS's own Charge Limit starting to
+    /// apply while CellKeeper held `held`: logs, as a safety event, whether
+    /// a read-back confirmed that the restriction ended. If not, it may
+    /// remain; normal charging keeps being requested, and a later safety
+    /// event says when a read-back shows it ended.
+    private func recordMacOSLimitRelease(of held: ChargeControlMode) {
+        let gate = macOSLimitGate ?? .unknown("no report")
+        let started: String = switch gate {
+        case .on(let limit): "macOS's Charge Limit was turned on (\(limit)%)"
+        case .unknown, .off: gate.summary
+        }
+        let deferring = "CellKeeper withholds new restrictions until macOS reports no active limit."
+        let heldText = "\(describeTarget(held))\(simulationNote)"
+        if currentMode == .normal {
+            macOSLimitReleaseUnconfirmed = nil
+            record(.safety, "\(started) while CellKeeper held \(heldText). A read-back confirms that this restriction ended. \(deferring)")
+        } else {
+            macOSLimitReleaseUnconfirmed = held
+            record(.safety, "\(started) while CellKeeper held \(heldText). No read-back has confirmed that this restriction ended, so it may remain; CellKeeper keeps asking for its release. \(deferring)", level: .error)
         }
     }
 
@@ -656,6 +798,13 @@ public actor ChargeController {
         }
         let target = describeTarget(mode)
         let ownerLimitBefore = nativeLimit?.ownerLimit
+        if mode != .normal {
+            // From here on the request may take effect, whatever its reply:
+            // no read taken before it can show what is in effect.
+            responsibleMode = mode
+            currentMode = nil
+            reportedModeIsOwn = nil
+        }
         record(.request, "Requesting \(target) from \(backend.descriptor.displayName) backend.")
         do {
             let result = try await setAndConfirm(mode)
@@ -698,11 +847,10 @@ public actor ChargeController {
         } catch {
             let message = String(describing: error)
             lastExecution = ExecutionRecord(date: now(), action: action, result: .failed(message))
-            if case BackendError.changedOutside = error {
-                consecutiveFailures = max(consecutiveFailures + 1, Self.maximumConsecutiveFailures)
-                lastFailureUptime = uptime()
-                record(.safety, "Not applied: \(message). It may have been changed in System Settings or by another tool. Backend faulted; restoring \(describeTarget(.normal)).", level: .fault)
-            } else {
+            if error is FaultAlreadyHandled {
+                // The confirmation's read reported a fault, which faulted the
+                // backend and counted it already.
+            } else if await !handleThrownFault(error, context: "Not applied") {
                 registerFailure("Backend failed to apply \(target): \(message)")
             }
             if mode != .normal {
@@ -755,9 +903,11 @@ public actor ChargeController {
         do {
             mode = try await backend.currentMode()
         } catch {
+            reportedModeIsOwn = nil
             await handleReportedFault()
             throw error
         }
+        await noteResponsibility(after: mode)
         if let change = await backend.takeAdoptedLimitChange() {
             nativeLimit = await backend.nativeLimitStatus()
             // A marker from an earlier session needs nothing more if
@@ -770,30 +920,157 @@ public actor ChargeController {
         return mode
     }
 
-    /// Faults the backend for a fault it reported with its last read
-    /// (``ReportedModeOrigin/changedOutside(_:)`` or
-    /// ``ReportedModeOrigin/needsAcknowledgement(_:)``), once for as long as
-    /// it keeps reporting it. Afterwards ``isReportedFaultHandled`` says
-    /// whether the last read reported one.
-    private func handleReportedFault() async {
-        let reportedFault: String? = switch await backend.reportedModeOrigin() {
-        case .changedOutside(let detail)?:
-            "Charging control changed outside CellKeeper: \(detail). Backend faulted; CellKeeper releases its own restrictions and does not override the change."
-        case .needsAcknowledgement(let detail)?:
-            "\(detail). Backend faulted: clear the fault to acknowledge it; until then only normal charging is requested."
-        default:
-            nil
-        }
-        guard let reportedFault else {
-            isReportedFaultHandled = false
+    /// Updates what CellKeeper may still have in effect after a successful
+    /// read (requests are serialised, so it was taken after the last one).
+    /// Only normal charging, or the backend's records showing that nothing
+    /// in effect is CellKeeper's, ends the responsibility; a fault does not.
+    private func noteResponsibility(after mode: ChargeControlMode?) async {
+        guard let mode else {
+            reportedModeIsOwn = nil
             return
         }
-        guard !isReportedFaultHandled else { return }
-        isReportedFaultHandled = true
+        reportedModeIsOwn = await backend.isReportedModeOwn()
+        if mode == .normal {
+            responsibleMode = nil
+        } else if reportedModeIsOwn == false {
+            // Someone else's, by positive evidence in the backend's records:
+            // CellKeeper's own restriction has ended, but not as the release
+            // it asked for.
+            responsibleMode = nil
+            macOSLimitReleaseUnconfirmed = nil
+        }
+    }
+
+    /// Faults the backend for a fault it reported with its last read
+    /// (``ReportedModeOrigin/changedOutside(_:)`` or
+    /// ``ReportedModeOrigin/needsAcknowledgement(_:)``), through
+    /// ``note(_:isThrown:message:)``: counted once, and logged once per kind
+    /// and per distinct outside change for as long as the backend keeps
+    /// reporting faults. Afterwards ``didLastReadReportFault`` says whether
+    /// the last read reported one.
+    private func handleReportedFault() async {
+        let fault: BackendFault?
+        switch await backend.reportedModeOrigin() {
+        case .changedOutside(let detail)?:
+            fault = .outside(detail, evidence: await backend.outsideChangeEvidence())
+        case .needsAcknowledgement(let detail)?:
+            fault = .acknowledgement(detail)
+        default:
+            fault = nil
+        }
+        guard let fault else {
+            didLastReadReportFault = false
+            handledFaults = HandledFaults()
+            return
+        }
+        didLastReadReportFault = true
+        note(fault, isThrown: false) { fault in
+            switch fault {
+            case .outside(let detail, _):
+                "Charging control changed outside CellKeeper: \(detail). Backend faulted; CellKeeper releases its own restrictions and does not override the change."
+            case .acknowledgement(let detail):
+                "\(detail). Backend faulted: clear the fault to acknowledge it; until then only normal charging is requested."
+            }
+        }
+    }
+
+    /// A fault a backend reports: an outside change it found (rule R27), or
+    /// a problem it waits for someone to acknowledge (its own failure, or a
+    /// restriction it cannot attribute).
+    private enum BackendFault: Equatable {
+        /// An outside change, with the backend's records of the changes
+        /// behind it (``ChargingBackend/outsideChangeEvidence()``).
+        case outside(String, evidence: Set<RecordedChange>)
+        case acknowledgement(String)
+    }
+
+    /// The faults handled since the backend's reads last reported none.
+    private struct HandledFaults {
+        /// What identifies an outside change: the backend's record of it, or
+        /// for a backend without records, its message.
+        enum OutsideKey: Hashable {
+            case recorded(RecordedChange)
+            case message(String)
+        }
+
+        var acknowledgement = false
+        var outsideKeys: Set<OutsideKey> = []
+
+        var isEmpty: Bool { !acknowledgement && outsideKeys.isEmpty }
+
+        /// Whether `fault` is news: the first problem needing
+        /// acknowledgement, or an outside change with a recorded change not
+        /// seen yet (the same change read again is not news; a new one, a
+        /// new generation or another helper process, is). Notes it either
+        /// way.
+        mutating func note(_ fault: BackendFault) -> Bool {
+            switch fault {
+            case .acknowledgement:
+                defer { acknowledgement = true }
+                return !acknowledgement
+            case .outside(let detail, let evidence):
+                let keys: Set<OutsideKey> = evidence.isEmpty ? [.message(detail)] : Set(evidence.map(OutsideKey.recorded))
+                let isNew = !keys.isSubset(of: outsideKeys)
+                outsideKeys.formUnion(keys)
+                return isNew
+            }
+        }
+    }
+
+    /// A request whose confirmation read reported a fault: the fault faulted
+    /// the backend and was counted when the read reported it, so the
+    /// request's failure is not counted again.
+    private struct FaultAlreadyHandled: Error, CustomStringConvertible {
+        let failure: BackendError
+        var description: String { String(describing: failure) }
+    }
+
+    /// Faults the backend at once for `fault`, from a read or a request,
+    /// whatever the operation: an evaluation, a restore, a backend switch or
+    /// quitting. A fault is counted only once while the backend keeps
+    /// reporting faults; each kind is logged once, and an outside change is
+    /// logged again when it is a new one, also after a problem needing
+    /// acknowledgement (an escalation), so an existing fault never hides
+    /// fresh evidence of another writer.
+    private func note(_ fault: BackendFault, isThrown: Bool, message: (BackendFault) -> String) {
+        let wasFaulted = !handledFaults.isEmpty
+        let isNews = handledFaults.note(fault)
         ownedMode = nil
         unconfirmedRequests = []
-        consecutiveFailures = max(consecutiveFailures, Self.maximumConsecutiveFailures)
-        record(.safety, reportedFault, level: .fault)
+        if !wasFaulted {
+            consecutiveFailures = max(consecutiveFailures + (isThrown ? 1 : 0), Self.maximumConsecutiveFailures)
+            lastFailureUptime = uptime()
+        } else {
+            consecutiveFailures = max(consecutiveFailures, Self.maximumConsecutiveFailures)
+        }
+        if isNews {
+            record(.safety, message(fault), level: .fault)
+        }
+    }
+
+    /// For an error a request threw that is a fault (``BackendError/changedOutside(expected:found:)``
+    /// or ``BackendError/needsAcknowledgement(_:)``): faults the backend at
+    /// once through ``note(_:isThrown:message:)`` and returns true. Any other
+    /// error is left to the caller.
+    private func handleThrownFault(_ error: any Error, context: String) async -> Bool {
+        let fault: BackendFault
+        switch error {
+        case BackendError.changedOutside:
+            fault = .outside(String(describing: error), evidence: await backend.outsideChangeEvidence())
+        case BackendError.needsAcknowledgement(let detail):
+            fault = .acknowledgement(detail)
+        default:
+            return false
+        }
+        note(fault, isThrown: true) { fault in
+            switch fault {
+            case .outside(let detail, _):
+                "\(context): \(detail). It may have been changed in System Settings or by another tool. Backend faulted; CellKeeper does not override the change and only normal charging is requested."
+            case .acknowledgement(let detail):
+                "\(context): \(detail). Backend faulted: clear the fault to acknowledge it; until then only normal charging is requested."
+            }
+        }
+        return true
     }
 
     /// Sets a mode and confirms it by read-back. On success the mode is
@@ -820,7 +1097,10 @@ public actor ChargeController {
                 readBack = try await readBackendMode()
             } catch {
                 unconfirmedRequests.insert(mode)
-                throw BackendError.verificationFailed(expected: mode, actual: nil)
+                let failure = BackendError.verificationFailed(expected: mode, actual: nil)
+                // A fault the backend reported with this read has faulted it
+                // and been counted; the caller must not count it again.
+                throw didLastReadReportFault ? FaultAlreadyHandled(failure: failure) : failure
             }
             nativeLimit = await backend.nativeLimitStatus()
             if adoptionCount > adoptionsBefore {
@@ -830,7 +1110,8 @@ public actor ChargeController {
             }
             guard readBack == mode else {
                 unconfirmedRequests.insert(mode)
-                throw BackendError.verificationFailed(expected: mode, actual: readBack)
+                let failure = BackendError.verificationFailed(expected: mode, actual: readBack)
+                throw didLastReadReportFault ? FaultAlreadyHandled(failure: failure) : failure
             }
             currentMode = mode
             ownedMode = mode
@@ -861,7 +1142,9 @@ public actor ChargeController {
     /// confirmed to be in `.normal`, or cannot control anything and reports no
     /// other mode. Caller must hold the lock.
     private func restoreNormal(reason: String) async -> Bool {
-        let capabilities = await backend.capabilities()
+        // Never waits for anything `.normal` does not depend on, such as a
+        // read of macOS's Charge Limit.
+        let capabilities = await backend.capabilitiesForRelease()
         let ownerLimit = await backend.nativeLimitStatus()?.ownerLimit
         let isNative = capabilities.isEnforcedByMacOS
         guard capabilities.availability.acceptsRequests else {
@@ -910,7 +1193,9 @@ public actor ChargeController {
         } catch {
             if isNative, let ownerLimit {
                 registerFailure("Could not restore your own macOS Charge Limit of \(ownerLimit)% (\(reason)): \(error). CellKeeper will retry; you can also set it in System Settings › Battery › Charging", level: .fault)
-            } else {
+            } else if error is FaultAlreadyHandled {
+                // The confirmation's read reported a fault, handled already.
+            } else if await !handleThrownFault(error, context: "Could not restore normal charging (\(reason))") {
                 registerFailure("Could not restore normal charging (\(reason)): \(error)", level: .fault)
             }
             return false
@@ -925,6 +1210,7 @@ public actor ChargeController {
     private func adopt(_ change: AdoptedLimitChange?) {
         currentMode = .normal
         ownedMode = .normal
+        responsibleMode = nil
         unconfirmedRequests = []
         isRestoreOutstanding = false
         isOwnedStateUnverified = false

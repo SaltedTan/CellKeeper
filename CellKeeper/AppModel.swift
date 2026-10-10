@@ -360,8 +360,9 @@ final class AppModel {
         send(.resetFault)
     }
 
-    /// Looks for the shortcut again (for example after the user created it)
-    /// and re-evaluates.
+    /// Checks again what the backend depends on (the shortcut after the user
+    /// created it, or macOS's Charge Limit after the user turned it off) and
+    /// re-evaluates.
     func recheckBackend() {
         send(.recheckBackend)
     }
@@ -471,7 +472,7 @@ final class AppModel {
         case .failSafe: return "exclamationmark.triangle"
         case .temperaturePause: return "thermometer.high"
         case .discharging: return "minus.plus.batteryblock"
-        case .holding, .onBattery, .charging, .fullChargeOverride, .safetyFloor, .osEnforcedLimit:
+        case .holding, .onBattery, .charging, .fullChargeOverride, .safetyFloor, .osEnforcedLimit, .deferringToMacOS:
             // A state that allows charging does not mean the battery is
             // charging (unplugged at the safety floor, full at a 100% limit).
             return status.snapshot?.isCharging == true ? "bolt.batteryblock" : "batteryblock"

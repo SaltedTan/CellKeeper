@@ -165,6 +165,10 @@ public actor HelperEngine {
     private var lastReadBack: Set<HelperControl>?
     /// The latest read-back that succeeded.
     private var lastKnownReadBack: Set<HelperControl> = []
+    /// Whether a read-back has succeeded in this process. Until one has, a
+    /// control found active cannot be told apart from one an earlier helper
+    /// process set (`foundActiveAtStart`).
+    private var hasReadBack = false
     private var interlocks: HelperInterlocks = []
     private var isBatteryFloorLatched = false
     private var isAdapterFloorLatched = false
@@ -977,14 +981,17 @@ public actor HelperEngine {
     /// Records every control whose read-back differs from the last
     /// successful one (``lastKnownReadBack``): a control in `controls`
     /// changed for `cause`; one an unconfirmed write targeted, for that
-    /// write; any other changed outside the engine. Called before
-    /// ``lastKnownReadBack`` is updated, and not for a failed read-back, so a
-    /// change during an unknown state is recorded at the next read that
-    /// sees it.
+    /// write; one the first successful read-back of this process finds
+    /// active, before any write, as `foundActiveAtStart`, because an earlier
+    /// helper process may have set it; any other changed outside the engine.
+    /// Called before ``lastKnownReadBack`` is updated, and not for a failed
+    /// read-back, so a change during an unknown state is recorded at the next
+    /// read that sees it.
     private func recordChanges(to readBack: Set<HelperControl>, of controls: Set<HelperControl>, for cause: ChangeContext?) {
         defer { unconfirmedWrites = [:] }
+        let unexplained = ChangeContext(cause: hasReadBack ? .changedOutside : .foundActiveAtStart)
         for control in HelperControl.allCases where readBack.contains(control) != lastKnownReadBack.contains(control) {
-            let made = (controls.contains(control) ? cause : nil) ?? unconfirmedWrites[control] ?? ChangeContext(cause: .changedOutside)
+            let made = (controls.contains(control) ? cause : nil) ?? unconfirmedWrites[control] ?? unexplained
             let generation = (history[control]?.generation ?? 0) + 1
             history[control] = HelperControlChange(
                 generation: generation,
@@ -1006,6 +1013,7 @@ public actor HelperEngine {
             hardwareCalls += 1
             let readBack = try hardware.readBack()
             recordChanges(to: readBack, of: controls, for: cause)
+            hasReadBack = true
             lastReadBack = readBack
             lastKnownReadBack = readBack
             owned.formIntersection(readBack)

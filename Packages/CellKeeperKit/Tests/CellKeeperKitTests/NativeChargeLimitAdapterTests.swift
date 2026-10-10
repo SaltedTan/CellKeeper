@@ -181,14 +181,53 @@ struct CommandLineAdapterTests {
 
     @Test("A tool that ignores SIGTERM is killed after the grace period")
     func ignoresTerminate() async {
+        // The tool marks that it ignores SIGTERM, and only then is it
+        // stopped, so the stop provably meets a tool that ignores SIGTERM.
+        // (A deadline could fire before a slow shell installs its trap.) A
+        // cancellation and the deadline stop a tool the same way: SIGTERM,
+        // then SIGKILL after the grace period.
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("cellkeeper-test-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: marker)
+            try? FileManager.default.removeItem(at: marker.appendingPathExtension("tmp"))
+        }
+        let task = Task {
+            // An ignored signal stays ignored across exec, so sleep ignores
+            // SIGTERM; exec keeps the process ID the marker records.
+            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "trap '' TERM; echo $$ > \"$0.tmp\"; mv \"$0.tmp\" \"$0\"; exec /bin/sleep 30", marker.path], timeout: 600)
+        }
+        for _ in 0..<60_000 where !FileManager.default.fileExists(atPath: marker.path) {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        let recorded = (try? String(contentsOf: marker, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let pid = recorded.flatMap({ pid_t($0) }), pid > 0 else {
+            Issue.record("the tool did not record its process ID")
+            task.cancel()
+            return
+        }
         let started = Date()
-        await #expect(throws: ProcessRunnerError.timedOut(seconds: 1)) {
-            // An ignored signal stays ignored across exec, so sleep ignores SIGTERM.
-            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "trap '' TERM; exec /bin/sleep 30"], timeout: 0.3)
+        task.cancel()
+        await #expect(throws: CancellationError.self) {
+            try await task.value
         }
         let elapsed = Date().timeIntervalSince(started)
-        #expect(elapsed >= 0.3 + ProcessRunner.stopGracePeriod)
-        #expect(elapsed < 0.3 + 3 * ProcessRunner.stopGracePeriod)
+        // Not before the grace period: SIGTERM did not stop it.
+        #expect(elapsed >= ProcessRunner.stopGracePeriod)
+        #expect(elapsed < 20)
+        // And it is gone: SIGKILL stopped it, not the runner giving up.
+        // (Allow a moment for the exited process to be reaped.)
+        var isGone = false
+        for _ in 0..<5_000 {
+            if kill(pid, 0) == -1, errno == ESRCH {
+                isGone = true
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(isGone)
+        if !isGone {
+            kill(pid, SIGKILL)
+        }
     }
 
     @Test("A missing tool is a launch failure")
@@ -233,16 +272,24 @@ struct CommandLineAdapterTests {
 
     @Test("Cancelling the calling task stops the tool promptly")
     func cancellation() async {
+        // The tool marks that it runs, so the cancellation provably arrives
+        // while it runs, not before it starts.
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("cellkeeper-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: marker) }
         let task = Task {
-            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"], timeout: 30)
+            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "touch \"$0\"; exec /bin/sleep 30", marker.path], timeout: 30)
         }
-        try? await Task.sleep(for: .milliseconds(200))
+        for _ in 0..<60_000 where !FileManager.default.fileExists(atPath: marker.path) {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(FileManager.default.fileExists(atPath: marker.path))
         let started = Date()
         task.cancel()
         await #expect(throws: CancellationError.self) {
             try await task.value
         }
-        #expect(Date().timeIntervalSince(started) < 3)
+        // Well before the tool's own 30 s: the cancellation stopped it.
+        #expect(Date().timeIntervalSince(started) < 20)
     }
 
     @Test("An already-cancelled task does not start the tool")

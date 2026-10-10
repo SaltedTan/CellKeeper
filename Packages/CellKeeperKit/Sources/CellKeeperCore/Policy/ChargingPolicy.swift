@@ -15,22 +15,27 @@ import Foundation
 /// 4. Telemetry missing, stale (by read time or by the system's own update
 ///    time), without a battery, or with an unknown power source → fail safe.
 ///    A discharge session never survives this.
-/// 5. Safety floor latched (≤ 10%, until ≥ 15%) → charging always allowed.
-/// 6. On battery power → CellKeeper's restrictions cleared (a later plug-in
+/// 5. macOS's own Charge Limit is on, or its report cannot be read and
+///    recognised (``ControlCapabilities/macOSChargeLimit``) → new
+///    restrictions are withheld and normal charging is requested, to release
+///    any restriction of CellKeeper's own (safety precondition 7). A
+///    discharge session ends. The latches still follow the readings.
+/// 6. Safety floor latched (≤ 10%, until ≥ 15%) → charging always allowed.
+/// 7. On battery power → CellKeeper's restrictions cleared (a later plug-in
 ///    then charges normally even if CellKeeper has stopped; the limit latch
 ///    is kept and re-applied once power returns).
-/// 7. Temperature protection tripped → charging paused. Cooling alone ends
+/// 8. Temperature protection tripped → charging paused. Cooling alone ends
 ///    the pause no sooner than ``minimumTemperaturePause`` after it began.
-/// 8. Temporary full charge active → charging allowed.
-/// 9. Discharge session active → run from the battery down to the confirmed
-///    target (never below it, never below the current limit).
-/// 10. Charge limit of 100% → charging allowed.
-/// 11. Limit latch set → hold (raising the limit releases it).
-/// 12. Sleep imminent at or above the resume threshold → hold, so a software
+/// 9. Temporary full charge active → charging allowed.
+/// 10. Discharge session active → run from the battery down to the confirmed
+///     target (never below it, never below the current limit).
+/// 11. Charge limit of 100% → charging allowed.
+/// 12. Limit latch set → hold (raising the limit releases it).
+/// 13. Sleep imminent at or above the resume threshold → hold, so a software
 ///     limit cannot overshoot while the Mac sleeps.
-/// 13. Otherwise → charge toward the limit. This includes a first reading at
+/// 14. Otherwise → charge toward the limit. This includes a first reading at
 ///     or above the limit, which the next distinct reading must confirm
-///     before the latch in rule 11 is set.
+///     before the latch in rule 12 is set.
 ///
 /// Only that latch is debounced (research rule R14): every other rule acts on
 /// the first reading that calls for it, because each either relaxes toward
@@ -40,7 +45,7 @@ import Foundation
 /// With a native-limit backend (macOS enforces the limit; see
 /// ``evaluateNativeLimit(_:steps:overrideEnded:)``) rules 1–3 apply
 /// unchanged and the rest are replaced: CellKeeper only chooses the value of
-/// macOS's Charge Limit.
+/// macOS's Charge Limit. Rule 5 never applies to it.
 ///
 /// The desired mode is then turned into an action against the backend's
 /// capabilities and current mode. A faulted backend is only ever asked for
@@ -132,6 +137,7 @@ public enum ChargingPolicy {
         guard snapshot.powerSource != .unknown else {
             return failSafe(.powerSourceUnknown)
         }
+        let macOSLimit = macOSChargeLimitReason(input.capabilities)
 
         var notes: [PolicyNote] = []
         let protection = settings.temperatureProtection
@@ -169,6 +175,9 @@ public enum ChargingPolicy {
                 } else if !dischargeTargetRange.contains(target) || input.isSleepImminent
                     || memory.temperatureTripped || memory.belowSafetyFloor || input.isBackendFaulted {
                     overrideEnded = .interrupted
+                } else if macOSLimit != nil {
+                    overrideEnded = .interrupted
+                    notes.append(.dischargeEndedForMacOSChargeLimit)
                 } else if !input.capabilities.supports(.forceDischarge) {
                     overrideEnded = .interrupted
                     notes.append(.dischargeUnsupported)
@@ -180,6 +189,15 @@ public enum ChargingPolicy {
 
         func make(_ state: PolicyState, _ mode: ChargeControlMode, _ reason: DecisionReason) -> PolicyDecision {
             decision(state, mode, reason, memory: memory, input: input, notes: notes, overrideEnded: overrideEnded)
+        }
+
+        // macOS's own Charge Limit decides charging: nothing below may ask for
+        // a restriction, not even temperature protection or the limit (macOS
+        // has its own thermal limiting). The latches above still follow the
+        // readings, as they describe the battery, so a limit confirmed
+        // meanwhile holds as soon as macOS's limit is off.
+        if let macOSLimit {
+            return make(.deferringToMacOS, .normal, macOSLimit)
         }
 
         if memory.belowSafetyFloor {
@@ -240,6 +258,20 @@ public enum ChargingPolicy {
             ? .belowResumeThreshold(percent: percent, resumeThreshold: settings.resumeThreshold)
             : .chargingTowardLimit(percent: percent, limit: limit)
         return make(.charging, .normal, reason)
+    }
+
+    // MARK: - macOS's own Charge Limit
+
+    /// Why the policy must ask a backend that switches charging itself for
+    /// normal charging and withhold every restriction: macOS's own Charge
+    /// Limit is on, or its report could not be read and recognised. Nil if
+    /// the backend does not check it or macOS reports no active limit.
+    static func macOSChargeLimitReason(_ capabilities: ControlCapabilities) -> DecisionReason? {
+        guard !capabilities.isEnforcedByMacOS, let status = capabilities.macOSChargeLimit, status.isLimiting else { return nil }
+        if let limit = status.reportedLimit {
+            return .macOSChargeLimitActive(limit: limit)
+        }
+        return .macOSChargeLimitUnknown(problem: status.readProblem ?? "no report")
     }
 
     // MARK: - Native limit

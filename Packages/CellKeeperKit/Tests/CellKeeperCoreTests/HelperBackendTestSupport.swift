@@ -326,6 +326,8 @@ struct HelperRig {
     let activity = RecordingLeaseActivity()
     let transport: TestHelperTransport
     let backend: HelperChargingBackend
+    /// Watches macOS's Charge Limit through the reader given, if any.
+    let macOSChargeLimit: MacOSChargeLimitMonitor?
 
     /// The helper engine now running; a relaunch replaces it.
     var engine: HelperEngine {
@@ -339,7 +341,15 @@ struct HelperRig {
     ///   - chargeControl: replaces the control (for a monitor-only helper).
     ///   - backendClockOffset: added to the backend's clock, which otherwise
     ///     is the engine's.
-    init(clock: TestClock = TestClock(), isSimulated: Bool = true, chargeControl: (any HelperChargeControl)? = nil, backendClockOffset: TimeInterval = 0) {
+    ///   - macOSReader: macOS's Charge Limit report, watched on the rig's
+    ///     clock; nil for a Mac without the Charge Limit.
+    init(
+        clock: TestClock = TestClock(),
+        isSimulated: Bool = true,
+        chargeControl: (any HelperChargeControl)? = nil,
+        backendClockOffset: TimeInterval = 0,
+        macOSReader: (any ChargeLimitReading)? = nil
+    ) {
         self.clock = clock
         let control = SimulatedChargeControl()
         self.control = control
@@ -351,12 +361,15 @@ struct HelperRig {
             HelperEngine(control: hardware, power: power, build: 7, uptime: { clock.uptime }, events: { events.record($0) })
         }
         transport = TestHelperTransport(engine: makeEngine(), relaunching: makeEngine)
+        let macOSChargeLimit = macOSReader.map { MacOSChargeLimitMonitor(reader: $0, now: { clock.now }, uptime: { clock.uptime }) }
+        self.macOSChargeLimit = macOSChargeLimit
         backend = HelperChargingBackend(
             descriptor: Self.descriptor,
             transport: transport,
             uptime: { clock.uptime + backendClockOffset },
             pause: { clock.advance(by: $0) },
-            activity: activity
+            activity: activity,
+            macOSChargeLimit: macOSChargeLimit
         )
     }
 

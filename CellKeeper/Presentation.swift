@@ -68,6 +68,35 @@ extension PolicyState {
         case .holding: "Holding at limit"
         case .discharging: "Discharging to limit"
         case .osEnforcedLimit: "Limit enforced by macOS"
+        case .deferringToMacOS: "Deferring to macOS's Charge Limit"
+        }
+    }
+}
+
+/// macOS's own Charge Limit as a backend that switches charging itself
+/// reads it: what macOS reports, what CellKeeper does about it as far as
+/// read-backs establish (``MacOSChargeLimitWording``), and a way to check
+/// again after changing it in System Settings.
+struct MacOSChargeLimitNotice: View {
+    let macOSLimit: MacOSChargeLimitStatus
+    let status: ControllerStatus
+    let recheck: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            LabeledContent("macOS's Charge Limit", value: MacOSChargeLimitWording.summary(macOSLimit))
+            Text(MacOSChargeLimitWording.guidance(macOSLimit, ownRestriction: status.ownRestriction, isSimulated: status.isControlSimulated))
+                .font(.caption)
+                .foregroundStyle(macOSLimit.isLimiting ? Color.orange : Color.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Text("Read at \(macOSLimit.readAt.formatted(date: .omitted, time: .standard))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Check Again", action: recheck)
+                    .help("Reads macOS's Charge Limit again now. CellKeeper also reads it about once a minute.")
+            }
         }
     }
 }

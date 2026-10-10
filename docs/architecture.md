@@ -49,7 +49,8 @@ rules are in [`docs/safety.md`](safety.md).
 │  NativeChargeLimitSupport  – platform check; `NativeChargeLimitBackend.system`││
 │  FileOwnershipRecordStore  – durable record of the user's own Charge Limit    ││
 │  SystemHelperPowerReading  – the helper's own read-only power state;          ││
-│                              `HelperChargingBackend.simulatedHelper()`        ││
+│                              `HelperChargingBackend.simulatedHelper()`,       ││
+│                              `MacOSChargeLimitMonitor.system()`               ││
 │  XPCHelperTransport        – `HelperTransport` over NSXPC (not used yet)      ││
 └───────────────┬──────────────────────────────────────────────────────────────┘│
                 │ depends on                                                    │
@@ -60,7 +61,7 @@ rules are in [`docs/safety.md`](safety.md).
 │  Control:    ChargingBackend (protocol), MockChargingBackend, ReadOnlyChargingBackend,         │
 │              NativeChargeLimitBackend (+ ShortcutRunning / ChargeLimitReading /                │
 │              OwnershipRecordStore protocols), HelperChargingBackend (+ HelperTransport /       │
-│              HelperConnection protocols, InProcessHelperTransport)                             │
+│              HelperConnection protocols, InProcessHelperTransport), MacOSChargeLimitMonitor    │
 │  Controller: ChargeController (actor: telemetry → policy → backend, safety fallbacks, log)     │
 │  Support:    CellKeeperLog (os.Logger categories)                                              │
 └───────────────┬────────────────────────────────────────────────────────────────────────────────┘
@@ -213,6 +214,10 @@ The policy's only memory is `PolicyMemory`:
   `safety.md`).
 - `belowSafetyFloor` — set at ≤ 10%, cleared at ≥ 15%.
 
+Evaluations that defer to macOS's own Charge Limit (row 4 below) look at
+the charge, so the latches keep following the readings meanwhile, and a
+reading then counts toward the debounce.
+
 Only the limit latch is debounced. Every other rule acts on the first
 reading that calls for it: the safety floor, the sleep precaution and a
 temperature trip because they are safety actions, and the resume threshold,
@@ -236,8 +241,9 @@ even when the charge reading is unusable.
   charged.
 - **Discharge to limit** — a confirmed, one-shot session (never a persistent
   setting). Ends at the limit, and is interrupted before sleep, on temperature
-  pause, on lost or stale telemetry, when the backend cannot discharge, or if
-  its confirmed target is outside 20–95%. After it ends it never restarts by itself.
+  pause, on lost or stale telemetry, while macOS's own Charge Limit is on or
+  unreadable, when the backend cannot discharge, or if its confirmed target
+  is outside 20–95%. After it ends it never restarts by itself.
 
 ### Precedence (highest first)
 
@@ -246,15 +252,24 @@ even when the charge reading is unusable.
 | 1 | Settings invalid, or the controller requires a release (`ReleaseReason`: a pending backend switch, an unfinished restore, or a state it set but could not read back) | `failSafe` | normal |
 | 2 | Management disabled | `unmanaged` | normal |
 | 3 | No/stale telemetry (by read time, or by the driver's own update time > 180 s), future timestamps, no battery, unknown % or power source | `failSafe` | normal (a discharge session is interrupted) |
-| 4 | Safety floor latched | `safetyFloor` | normal |
-| 5 | On battery power | `onBattery` | normal (restrictions cleared; limit latch kept) |
-| 6 | Temperature latch set (cooling clears it no sooner than 5 minutes after it was set) | `temperaturePause` | inhibitCharging |
-| 7 | Temporary full charge active | `fullChargeOverride` | normal |
-| 8 | Discharge session active | `discharging` | forceDischarge |
-| 9 | Limit is 100% | `charging` | normal |
-| 10 | Limit latch set (by two consecutive distinct readings) | `holding` | inhibitCharging |
-| 11 | Sleep imminent and charge ≥ resume threshold | `holding` | inhibitCharging |
-| 12 | Otherwise, including a first reading at or above the limit that awaits confirmation | `charging` | normal |
+| 4 | macOS's own Charge Limit is on, or its report cannot be read and recognised (`ControlCapabilities.macOSChargeLimit`, reported by backends that switch charging themselves and check it) | `deferringToMacOS` | normal (nothing below applies; a discharge session is interrupted; the latches keep following the readings; whether a hold in place ended is up to the read-back) |
+| 5 | Safety floor latched | `safetyFloor` | normal |
+| 6 | On battery power | `onBattery` | normal (restrictions cleared; limit latch kept) |
+| 7 | Temperature latch set (cooling clears it no sooner than 5 minutes after it was set) | `temperaturePause` | inhibitCharging |
+| 8 | Temporary full charge active | `fullChargeOverride` | normal |
+| 9 | Discharge session active | `discharging` | forceDischarge |
+| 10 | Limit is 100% | `charging` | normal |
+| 11 | Limit latch set (by two consecutive distinct readings) | `holding` | inhibitCharging |
+| 12 | Sleep imminent and charge ≥ resume threshold | `holding` | inhibitCharging |
+| 13 | Otherwise, including a first reading at or above the limit that awaits confirmation | `charging` | normal |
+
+Row 4 is safety precondition 7 for backends that switch charging
+themselves (decision D63): macOS's lower limit would win anyway (R25), so
+CellKeeper asks for normal charging and withholds its own restrictions
+rather than claim a limit it does not enforce, or fight macOS (R26). Its
+reason names macOS's limit, or the read problem, describes that request
+(not its outcome), and says to turn the limit off in System Settings ›
+Battery.
 
 ### Native Charge Limit
 
@@ -264,8 +279,8 @@ drop of more than 5%. It also includes its behaviour during sleep and its
 occasional calibration charge. CellKeeper only chooses the limit's value.
 Rows 1 and 2 of the table above apply unchanged (invalid settings or a
 required release, then management off), and so do override expiry and
-unplugging. Row 3 does not (see "Missing or stale telemetry" below). The
-rest are replaced by:
+unplugging. Row 3 does not (see "Missing or stale telemetry" below), and
+row 4 never applies. The rest are replaced by:
 
 | # | Condition | State | Desired mode |
 |---|---|---|---|
@@ -312,11 +327,15 @@ user is never made to wait.
 public protocol ChargingBackend: Sendable {
     var descriptor: BackendDescriptor { get }
     func capabilities() async -> ControlCapabilities     // availability, style, supported modes
+    func capabilitiesForRelease() async -> ControlCapabilities // default: capabilities()
+    func isReportedModeOwn() async -> Bool?               // default nil; no I/O
     func currentMode() async throws -> ChargeControlMode? // nil = unknown
     func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome
     func reportedModeOrigin() async -> ReportedModeOrigin? // default nil; no I/O
+    func outsideChangeEvidence() async -> Set<RecordedChange> // default []; no I/O
     func renewHold(_ mode: ChargeControlMode) async throws // default: nothing
     func resetAfterFault() async throws                     // default: nothing
+    func recheckAvailability() async                        // default: nothing
     func nativeLimitStatus() async -> NativeLimitStatus?  // default nil; no I/O
     func takeAdoptedLimitChange() async -> AdoptedLimitChange? // native only; each adoption once
 }
@@ -328,6 +347,57 @@ public protocol ChargingBackend: Sendable {
   `nativeLimit(steps:)` (macOS enforces a limit; CellKeeper picks its value
   from `steps`). The style is kept when a backend is unavailable, so the
   policy and UI can still explain what would happen.
+- `ControlCapabilities.macOSChargeLimit`: macOS's own Charge Limit as a
+  backend that switches charging itself last read it (the limit, 100 for
+  none, or nil with the read problem; the read time; `isLimiting`, meaning
+  on or unreadable). Nil for backends that do not check it: the native,
+  simulated and read-only backends. While it is limiting, such a backend
+  offers only `.normal`, keeps its availability (the backend is fine; macOS
+  is in the way), and the policy defers to macOS (row 4 above).
+- `capabilitiesForRelease()` is what `ChargeController.restoreNormal`
+  (quitting, a backend switch, every safety fallback) asks for: the same
+  as `capabilities()` without reading anything a request for `.normal`
+  does not depend on, so a release never waits for it. The helper backend
+  attaches the kept reading of macOS's Charge Limit instead of reading it
+  again, and withholds restricting modes if it has none.
+- `isReportedModeOwn()` says, by the backend's own records, whether what
+  the last `currentMode()` reported is CellKeeper's (decision D64):
+  - true if a control CellKeeper set, or may have set, is in effect;
+  - false only on positive evidence that nothing in effect is CellKeeper's;
+  - nil if that read threw, if the records cannot establish it, or if the
+    backend keeps no records. Absence from the backend's bookkeeping is not
+    evidence.
+  The helper backend answers from the helper's change history, and only
+  for a read that returns normally. True: a control it holds or may have
+  set by a pending activation is active, or an active control's latest
+  change is an activation by one of CellKeeper's sessions. False: nothing
+  is active, or every active control's latest change is another client's
+  activation or a change made outside the helper, with no restore owed
+  (`hardwareFault`) and no failed write (`writeFailed`). Anything else is
+  nil: a control a failed or wrong restore of the helper's may have made
+  active (`restoredAfterWriteFailure`, `restoredAfterReadBackFailure`,
+  `restoreRetried`; the engine's "own controls", D37), one a restarted
+  helper left active because its start restore failed, one with no
+  recorded change. The controller calls a restriction someone else's, and
+  ends its responsibility for it, only on false; a reported outside change
+  alone never does.
+- `outsideChangeEvidence()` identifies, by the backend's own records, the
+  changes behind the outside change it last reported with a read
+  (`ReportedModeOrigin.changedOutside`) or threw
+  (`BackendError.changedOutside`): a `RecordedChange` is the source that
+  recorded it, the control and the change's generation. The helper
+  backend gives, for each control whose latest change is another client's
+  activation or a change made outside the helper (and for a control it
+  held that ended that way), the helper's instance, the control's raw
+  value and the generation, the same for a read and for a request. The
+  controller uses it to log each outside change once: the same change read
+  again is not news, and a newer one (a new generation, or one a restarted
+  helper recorded) is, whatever the message says. Empty for a backend
+  without such records; the controller then goes by the message.
+- `recheckAvailability()` is the user's "check again": the next
+  `capabilities()` must not rely on what the backend cached about what it
+  depends on (the native backend's shortcut check; macOS's Charge Limit for
+  the helper backend, read again at once).
 - `ControlAvailability`: `available` (verified real control), `experimental`
   (real, unverified, opt-in only), `simulated`, `unavailable(reason)`. The UI
   shows exactly these four states.
@@ -475,8 +545,12 @@ The controller adds, independent of the backend:
   every read, not only an evaluation's: also when it confirms a request
   (including a successful `.normal`, which still counts as confirmed), in a
   fallback, and when the read itself fails, which then counts as no further
-  failure. Each is logged once for as long as the backend keeps reporting
-  it;
+  failure (nor does the request whose confirming read it was). A problem
+  needing acknowledgement is logged once for as long as the backend keeps
+  reporting faults; an outside change once per change the backend recorded
+  (`outsideChangeEvidence()`), or per message for a backend without
+  records, so the same change read again is not logged twice and a newer
+  one is never hidden behind the same message;
 - renewal of the hold at the end of every evaluation in which CellKeeper
   holds a confirmed non-normal mode that the policy still wants, including
   evaluations whose action is "no change", and only if the backend accepts
@@ -495,7 +569,10 @@ The controller adds, independent of the backend:
 - a backend that finds an outside change itself, just before writing
   (`BackendError.changedOutside`), faults at once, like the controller's own
   detection. A native backend adopts it instead (`adoptedOutsideChange`),
-  which counts as nothing written;
+  which counts as nothing written. A backend that finds a problem it cannot
+  attribute to anyone, or one of its own, throws
+  `BackendError.needsAcknowledgement` instead, which faults at once too but
+  names no outside writer;
 - on the first read from a backend, ownership that the backend remembers from
   an earlier session (`nativeLimitStatus().target`) is taken on as
   CellKeeper's own. A change made while CellKeeper was not running is then
@@ -522,7 +599,7 @@ Implementations today:
 | `MockChargingBackend` (default) | `simulated` | Records requests, tracks a simulated mode, supports failure injection for tests. Never touches hardware. |
 | `ReadOnlyChargingBackend` | `unavailable` | Accepts nothing; CellKeeper still computes and shows what it would do. |
 | `NativeChargeLimitBackend` (opt-in) | `experimental`, or `unavailable(reason)` | Sets macOS's Charge Limit by running the user's “CellKeeper Set Charge Limit” shortcut; reads it back with `pmset -g battlimit`. See below. |
-| `HelperChargingBackend` (Simulated helper) | `simulated`, or `unavailable(reason)` | CellKeeper's own charge control at any limit through the helper's logic, run in process on a simulated control: nothing on the Mac changes. See "Helper backend". |
+| `HelperChargingBackend` (Simulated helper) | `simulated`, or `unavailable(reason)` | CellKeeper's own charge control at any limit through the helper's logic, run in process on a simulated control: nothing on the Mac changes. Restricts nothing while macOS's own Charge Limit is on. See "Helper backend". |
 
 ## Native Charge Limit backend
 
@@ -659,6 +736,56 @@ The app does not use the XPC transport until the daemon can be registered
   capability bits, minus every mode an interlock the helper reports blocks
   right now, so the policy refuses them as unsupported instead of counting
   failures.
+- **macOS's own Charge Limit** (safety precondition 7, decision D63). With
+  a `MacOSChargeLimitMonitor`, `capabilities()` attaches macOS's Charge
+  Limit as last read and, while it is below 100% or its report cannot be
+  read and recognised, withholds every mode but `.normal`, as for the
+  helper's interlocks (D42), keeping the availability. A restriction asked
+  for anyway is refused (`unsupportedMode`) and nothing is written. The
+  monitor wraps a `ChargeLimitReading` (in the app, `pmset -g battlimit`,
+  read-only, through `ChargeLimitReportParser`), keeps the latest reading
+  with its date and problem text, and reads again only when it is 30 s old
+  or older, so the capability checks of one evaluation run pmset at most
+  once. A read under way is shared: every caller waits for it rather than
+  return an older reading, and its result is kept before any of them
+  returns. Reads are numbered and only the newest settled one counts: a
+  result is kept only if no later read has been kept or cancelled, and a
+  caller whose read was overtaken takes the current reading. A cancelled
+  caller cancels the read it waits for, which stops pmset at once; a
+  cancelled read is not kept, the reading before it is dropped too, and a
+  caller still waiting for it that was not cancelled reads again, at most
+  twice (`maximumRereads`); then it gets "may be limiting" (the read was
+  interrupted), so other callers' cancellations cannot hold up an
+  evaluation, and the commands queued behind it, without end.
+  `recheckAvailability()` reads again at once. Only a
+  recognised report of no active limit, or of 100%, counts as off; an
+  unrecognised one (how an Optimized Battery Charging entry or a temporary
+  state would appear) or a failed read counts as "macOS may be limiting",
+  and replaces an earlier reading of "off". Nothing new happens on
+  release: when macOS's limit turns on while CellKeeper holds a control,
+  the policy wants `.normal`, and the ordinary release clears it,
+  confirmed by a read like any other; `capabilitiesForRelease()` keeps
+  quitting, switching and fallbacks from waiting for pmset. The controller
+  logs a safety event saying whether a read-back confirmed the end, and, if
+  not, another once one does; until then `ControllerStatus.ownRestriction`
+  says the restriction may remain, and `MacOSChargeLimitWording` (the menu,
+  Settings and the diagnostics report) says so too, marked as simulated on
+  the Simulated helper. What CellKeeper may still have in effect
+  (`ownRestrictionMode`) is kept apart from ownership bookkeeping and
+  faults: it is set before a restricting request is sent (which also
+  clears the mode last read, so a read taken before the request cannot
+  vouch for it), and cleared only by a later read showing normal charging,
+  or by `isReportedModeOwn() == false`, which needs positive evidence; an
+  attempted restore, a fault or a restarted helper never clears it. The
+  safety event fires for any such responsibility, also a hold that a failed
+  restore, a failed activation, a restore that activated the other control,
+  or a restarted helper whose start restore failed left unresolved. The
+  helper's outside-change report says whether its restore read back clean
+  or is owed (`hardwareFault`), and never claims a restore it has not
+  confirmed. Other changes of
+  macOS's limit are notices that claim no more than the report: its going
+  off is "CellKeeper stops deferring to it", never "manages again".
+  CellKeeper never turns macOS's limit off itself.
 - **Reading.** `currentMode()` comes from a fresh `readState`, never from
   what CellKeeper asked for. A read-back the helper could not make is an
   error, but the interlocks and error count in that reply are still read, so
@@ -673,15 +800,21 @@ The app does not use the XPC transport until the daemon can be registered
   stays responsible for the control. The next successful read settles it:
   if the helper names it as the control's latest change (`setByClient`, on
   that session, after that generation) and the control is active, it
-  becomes a hold; otherwise nothing of it is still in effect (it did not
-  take effect, it has ended since, or the helper restarted), and an active
-  control is someone else's. If the control changed since the generation
-  before, the latest change is classified as for the end of a hold (below):
-  another client's clear or restore, or any other outside change, is
-  reported as `changedOutside`, so the controller faults and does not set
-  the control again (R27); one of the helper's own releases is not
-  reported. A pending activation grants no ownership: nothing is ever
-  cleared on its account.
+  becomes a hold; otherwise CellKeeper does not own the control (it did
+  not take effect, it has ended since, or the helper restarted). Ownership
+  is not responsibility: the controller stays responsible for what the
+  activation may have set until a read shows normal charging or the
+  helper's history shows positively that nothing in effect is CellKeeper's
+  (`isReportedModeOwn()`, D64). An active control CellKeeper does not own is
+  classified by its latest recorded change, as for the end of a hold
+  (below): another client's activation, clear or restore, or a change the
+  helper recorded as made outside it, is reported as `changedOutside`, so
+  the controller faults and does not set the control again (R27); anything
+  else (one of the helper's own restores after a failure, a control it
+  found active when it started, no recorded change) is reported as
+  `needsAcknowledgement`, which faults just the same but names no writer;
+  one of the helper's own releases is not reported. A pending activation
+  grants no ownership: nothing is ever cleared on its account.
 - **Ownership.** A hold records the generation of CellKeeper's activation.
   The control stays CellKeeper's only while that generation is current.
   Holds are kept across disconnects until a fresh read explains how they
@@ -735,16 +868,41 @@ The app does not use the XPC transport until the daemon can be registered
   | The next generation, control off, `interlock` with only power and sleep interlocks (as they were then, even if lifted since) | `releasedByBackend(.interlock(…))`, named |
   | The next generation, control off, `sessionEnded` or `sessionRevoked` of a CellKeeper session | `releasedByBackend(.connectionLost)` |
   | The next generation, control off, `shutdown` or `start`; or a hold made with an earlier helper process, now off | `releasedByBackend(.backendStopped)` |
+  | A hold made with an earlier helper process, still active | by the new process's record of the control (the row below for an active control): a control its first read-back found active before it wrote anything is recorded as `foundActiveAtStart`, which names no writer, so this is `needsAcknowledgement`, a fault that names none |
   | The next generation, control off, cleared by one of CellKeeper's sessions (also an earlier one, after a reconnect) | `cellKeeper`: CellKeeper's own release |
   | The next generation, control off, a restore after a failed write or read-back, or an interlock that needs an acknowledgement | a failure, reported by `currentMode()` |
   | The next generation, control off, cleared by another session (a deactivation or a restore), `changedOutside` or the restore after it | `changedOutside` |
-  | Any other generation, or the control active again | `changedOutside`, and CellKeeper no longer owns the control |
+  | The next generation, control off, `setByClient` or no recorded cause | `needsAcknowledgement`: a change the history does not explain |
+  | Any other generation, or the control active again | by the latest change only (changes in between are unknown): another client's activation, clear or restore, or `changedOutside` or the restore after it → `changedOutside`, whatever the interlocks; anything else, including one of the helper's own restores after a failure, its start or shutdown, `foundActiveAtStart`, or no recorded change → `needsAcknowledgement`, naming no writer. Either way CellKeeper no longer owns the control |
 
-  Releases are reported until CellKeeper's next request; an outside change
-  found in the history is kept until a read reports it. The helper's
-  `externalModification` interlock and any active control CellKeeper does
-  not own are reported as `changedOutside` for as long as the backend sees
-  them. An outside change takes precedence over everything else.
+  Releases are reported until CellKeeper's next request; an outside change,
+  or a change the history does not explain, found in the history is kept
+  until a read reports it. The engine reports causality; the backend does
+  not infer it. An active control CellKeeper does not own is classified by
+  its latest recorded change, as in the last row: `changedOutside` if the
+  history names another client of the helper or a change the helper
+  recorded as made outside it, whatever the interlocks; a control one of
+  the helper's own restores after a failure, its start or shutdown left
+  active, one it found active when it started (`foundActiveAtStart`), or
+  one with no recorded change, is `needsAcknowledgement` with what the
+  helper reports (a restriction CellKeeper cannot attribute, the helper's
+  failure). Both fault the controller at once (R27), for as long as the
+  backend sees them, and the backend refuses to set a control meanwhile; a
+  request that finds such a control fails with `changedOutside` or
+  `BackendError.needsAcknowledgement` to match. The controller handles
+  both the same way whether a read reports them or a request throws them,
+  in every path (an evaluation, a restore, a backend switch, quitting): it
+  faults at once, counts the fault once, and logs a problem needing
+  acknowledgement once while the backend keeps reporting faults, and each
+  outside change once by what identifies it in the helper's history (the
+  helper's instance, the control, the generation), also after a problem
+  needing acknowledgement, so an existing fault never hides fresh evidence
+  of another writer and the same change read again adds nothing. The helper's
+  `externalModification` interlock is reported as `changedOutside`, and
+  says whether its restore read back clean; if not, the helper retries only
+  while a control it set itself may still be active, and otherwise writes
+  nothing until the user clears the fault (D28). An outside change takes
+  precedence over everything else.
 - **Helper failures.** A helper that waits for an acknowledgement (an
   interlock other than the power and sleep conditions and an outside change:
   `writeFailed`, `hardwareFault`, or one this version does not know) is
@@ -783,8 +941,13 @@ The app does not use the XPC transport until the daemon can be registered
 **Simulated helper** (Kit). `HelperChargingBackend.simulatedHelper()` builds
 an engine on `SimulatedChargeControl` and `SystemHelperPowerReading`, with
 `HelperEngine.continuousUptime` as the one clock of the engine, the power
-reading and the backend. Releasing the backend (after a backend switch) ends
-its session and stops the ticking. The app forwards NSWorkspace's will-sleep
+reading and the backend. On a Mac that has macOS's Charge Limit (Apple
+silicon, macOS 26.4 or later: `NativeChargeLimitSupport.featureIssue()` is
+nil) it installs `MacOSChargeLimitMonitor.system()` with
+`PmsetChargeLimitReader`; if pmset is missing, every read fails and the
+limit counts as unreadable. On a Mac without the Charge Limit it installs
+none, and nothing is withheld for it. Releasing the backend (after a
+backend switch) ends its session and stops the ticking. The app forwards NSWorkspace's will-sleep
 and did-wake to the engine; unlike the daemon's, these are not acknowledged
 sleep notifications.
 
@@ -817,6 +980,28 @@ Known limitations:
 - A lease release still clears the control if CellKeeper holds the lease;
   only the holder's session can have set a control under it, so this never
   clears another client's.
+- macOS's Charge Limit is read periodically: at most every 30 s, and
+  evaluations run every 60 s, so a change is normally seen within about a
+  minute, and at worst after about 90 s (an evaluation that an event
+  triggered can reuse a reading up to 30 s old). Until then a hold stays in
+  place alongside macOS's limit; both only restrict, and the lower limit
+  wins.
+- Optimized Battery Charging, temporary states and battery health
+  management are seen only if they appear in the `battlimit` report: an
+  entry the parser does not recognise withholds restrictions, but a hold
+  that leaves no entry there is not seen (note 08, I3 and open questions
+  2–4). "Charge to Full Now" may appear as "no limit" (I2); CellKeeper's
+  own limit then applies.
+- A single failed read of macOS's limit asks for a hold's release (an
+  earlier reading of "off" is not kept); the hold is taken again, within
+  the rate limits, once a read shows no active limit.
+- The check is the app's: the helper does not read macOS's limit itself.
+  Whether it should enforce it independently is to be decided before any
+  privileged write.
+- In the App Sandbox, every pmset run logs the kernel's denial of pmset's
+  own SMC user-client attempt (note 08, O7), now about once a minute while
+  the helper backend is selected; the report is unaffected and no
+  entitlement is added.
 
 ## Future control backends
 
@@ -924,7 +1109,9 @@ four primitive fields on the wire):
   `leaseExpired`, `interlock`, `sessionEnded`, `sessionRevoked`, `shutdown`,
   `start`, `changedOutside`, `restoredAfterOutsideChange`,
   `restoredAfterWriteFailure`, `restoredAfterReadBackFailure`,
-  `restoreRetried` or `activationLimited`;
+  `restoreRetried`, `activationLimited` or `foundActiveAtStart` (raw value
+  16; raw values are never changed or reused, and a client reads one it does
+  not know as no known cause);
 - `interlocks`: for `interlock`, the interlocks that cleared it, as they were
   then;
 - `session`: the session that made the change or whose end made it, by the
@@ -933,9 +1120,13 @@ four primitive fields on the wire):
 A change is recorded by the read-back that first shows it, for what the
 engine was doing: a write records the change of the control it wrote, a
 restore the changes of every control, and any other change a read-back finds
-is `changedOutside`. The checks record each clear for the lease that ran out
-or the interlocks that made it, also when the time limits are settled again
-after a slow write, in the same check or at the end of the call. A lease
+is `changedOutside`, except that a control the process's first successful
+read-back finds active, before it has written anything, is
+`foundActiveAtStart`: an earlier helper process may have set it, and the
+engine cannot tell that from another tool. The checks record each clear
+for the lease that ran out or the interlocks that made it, also when the
+time limits are settled again after a slow write, in the same check or at
+the end of the call. A lease
 ending is not a change, so a later expiry never hides an earlier
 deactivation. `hello` also returns the caller's session number and the
 helper's instance (random, fixed for the process), so a client recognises
@@ -1694,9 +1885,9 @@ The helper daemon logs under its own subsystem,
 | D35 | The helper's clock is the system's `CLOCK_MONOTONIC`, and a new engine takes the activation history of the previous one in the same boot | A relaunch the client asks for must not reset the activation limits; the daemon persists the history and discards it at a new boot |
 | D36 | The helper engine queues its events and delivers them, in order, when each operation has ended (lead's decision, 2026-10-09). Lease expiry and the power state's age are judged on a clock reading taken after every read they depend on, and again after any write, including the last write of a request, before the call returns; an activation follows on that reading with only pure checks, and `activationRecorded` reports the write with its time | A sink that ran mid-operation could block or re-enter the engine between a check and a write; removing that class of bug beats re-checking after every callback. A time limit judged on a reading taken before a slow read or write could let an expired lease or a stale power state stay in force |
 | D37 | A control that a failed or wrong restore may have made active counts as the engine's until it reads back inactive; a control active before and after a restore keeps its owner, and the state before is read afresh, falling back to the controls last known to be another tool's | A restore that went wrong must not leave a restriction that nothing retries, while another tool's control must not become the engine's to fight over. A tool that sets an inactive control during each restore still looks like a wrong restore (a known limitation) |
-| D38 | `readState` reports, per control, a change generation and the cause, interlocks and session of its latest change, and how many hardware errors there have been; `hello` gives the caller's session number and the helper's instance. Any live session may still clear a control toward safety (lead's decisions, 2026-10-09) | Snapshots of active bits, current interlocks and lease state cannot establish why a control changed; the engine knows, so a client's classification becomes a lookup. Limiting deactivation to the lease holder would make a move toward safety depend on who asks |
+| D38 | `readState` reports, per control, a change generation and the cause, interlocks and session of its latest change, and how many hardware errors there have been; `hello` gives the caller's session number and the helper's instance. Any live session may still clear a control toward safety (lead's decisions, 2026-10-09). A control the first successful read-back of a process finds active, before any write, is recorded as `foundActiveAtStart`, never as `changedOutside` (amended 2026-10-10) | Snapshots of active bits, current interlocks and lease state cannot establish why a control changed; the engine knows, so a client's classification becomes a lookup. Limiting deactivation to the lease holder would make a move toward safety depend on who asks |
 | D39 | The app renews a helper lease only at the end of an evaluation that still wants the mode it holds, including one that changes nothing; a failed renewal is a failure and `.normal` is requested at once | Safety precondition 3 and rule R3: a hung or stalled policy loop must let the restriction lapse, and a renewal that cannot be made must not leave one in place |
-| D40 | The helper backend owns a control only while the change generation it recorded at activation is current, and classifies how a hold ended by the cause the helper recorded for the next change. An expired lease, a power or sleep interlock (as raised then), the end of one of CellKeeper's sessions, or a helper shutdown or start is logged as the helper's release; CellKeeper's own deactivation, also from an earlier session, is its own; anything else, including any later generation, another client's restore or deactivation and `externalModification`, faults the backend at once | Only the helper knows why a control changed; inferring it from active bits, current interlocks or lease state misreads handoffs, later expiries and lifted interlocks. The helper's releases are its safety rules working, and faulting on them would stop control for nothing; anything else may be another tool, which R27 says to stop for |
+| D40 | The helper backend owns a control only while the change generation it recorded at activation is current, and classifies how a hold ended by the cause the helper recorded for the next change. An expired lease, a power or sleep interlock (as raised then), the end of one of CellKeeper's sessions, or a helper shutdown or start is logged as the helper's release; CellKeeper's own deactivation, also from an earlier session, is its own; anything else, including any later generation, another client's restore or deactivation and `externalModification`, faults the backend at once. The fault names an outside writer only when the helper's history does (another client's change, or an outside change the helper reports); otherwise it says what the helper reports, without a writer (amended 2026-10-10) | Only the helper knows why a control changed; inferring it from active bits, current interlocks or lease state misreads handoffs, later expiries and lifted interlocks. The helper's releases are its safety rules working, and faulting on them would stop control for nothing; anything else may be another tool, which R27 says to stop for |
 | D41 | The helper backend never asks the helper to restore defaults by itself; `.normal` clears only controls CellKeeper still owns, each with `clearControlIfUnchanged` naming its own activation (D48), ends only leases it holds, and succeeds when nothing is active, even after an outside change, which faults the controller through `reportedModeOrigin()`. Only the user clearing the fault restores defaults, and only if the helper waits for that (lead's decision, 2026-10-09) | A restore or deactivation may undo another tool's change (R26, R27), so it must be a deliberate act; and quitting or switching backend must not be blocked while macOS's defaults are in effect |
 | D42 | Modes an interlock of the helper blocks are not offered by the backend's capabilities | The policy then refuses them as unsupported instead of counting each refusal as a failure, which would fault the backend for conditions such as a warm Mac or a low battery |
 | D43 | The helper backend paces its requests against a copy of the session's request budget, and sends at most 4 requests in a row beyond it | A well-behaved client must never be refused or revoked (20 in a row), including during bursts of user actions; moves toward safety must not wait for a token |
@@ -1719,3 +1910,5 @@ The helper daemon logs under its own subsystem,
 | D60 | Sleep is acknowledged when the engine's sleep checks return or 5 s after the announcement, whichever comes first, with a fault logged at the deadline | Safety precondition 13 asks for acknowledged sleep handling in the privileged component; an unacknowledged notification only delays sleep (by up to 30 s) and the engine's leases count sleep, so holding sleep for a stuck engine would buy nothing |
 | D61 | The activation history file is keyed by the boot session UUID (`kern.bootsessionuuid`), with no fallback; it is bounded (64 KiB, 20 records), replaced by rename, opened without blocking and refused at once unless it is a regular file, discarded whole on anything unexpected, and loaded only after SIGTERM is handled (review of PR #65) | The engine's clock starts again at every boot (D35), and only a value the kernel sets once per boot identifies one: `kern.boottime` moves when the calendar time is set, which would discard valid records within a boot. A corrupt, foreign or special file must be neither trusted nor allowed to stop or delay the restore at start, and losing the history only loosens the limits for at most an hour |
 | D62 | Nothing that may block runs on Swift's cooperative thread pool: the helper engine runs on a serial dispatch queue of its own (a custom actor executor), and the daemon writes its log, saves its history and calls its blocking seams on dispatch queues of their own. Tests that stall on purpose stall on those queues (review of PR #65, after #64) | The pool has as many threads as cores (three on CI's macOS 15 image). A synchronous control call, a log write or a file write that blocks there takes one of them, and a few at once take every thread: nothing else runs, neither the daemon's shutdown and sleep handling nor, in tests, other suites in the same process, until the stalls end. A dispatch queue's thread blocks alone. `.serialized` only orders tests within one suite, so it could not prevent that |
+| D63 | While macOS's own Charge Limit is on, or its `pmset -g battlimit` report cannot be read and recognised, a backend that switches charging itself is asked for nothing but `.normal`: it offers only `.normal` and keeps its availability, the policy wants `.normal` (`deferringToMacOS`, before the safety floor, temperature, overrides and the limit), a hold in place is asked to end through the ordinary path and counts as ended only once a read taken after CellKeeper's last restricting request shows it (logged as safety events either way; a restriction is someone else's only on the backend's records), and CellKeeper asks the user to turn macOS's limit off; it never turns it off itself. macOS's limit is read at most every 30 s, and never on the release path (lead's decision, 2026-10-10; a deviation from R25) | The owner's direction (2026-10-06, 2026-10-09): CellKeeper controls charging, and the user turns macOS's limit off, so two limits never compete. The lower limit wins anyway (R25), so CellKeeper's status would be dishonest, and restricting on top of macOS fights it (R26). Restrictions toward safety are not needed while macOS enforces its own limit, and macOS has its own thermal limiting. An unreadable report is not guessed to be off, and `.unavailable` would misreport a backend that works |
+| D64 | `ChargingBackend.isReportedModeOwn()` is false only on positive evidence in the backend's records that nothing in effect is CellKeeper's (for the helper: nothing active, or every active control last changed by another client's activation or an outside change, with no restore owed and no failed write); it is nil when the records cannot establish it and after a read that threw. The controller ends its responsibility for a restriction only on a read showing normal charging or on false (reviewer's principle, 2026-10-10) | Missing activation bookkeeping, an attempted restore or a new helper instance does not prove that CellKeeper's restriction ended or became someone else's: a failed or wrong restore of the helper's can leave or make a control active on CellKeeper's account (D37), and a helper serves sessions after a failed start restore. Calling such a control someone else's would drop CellKeeper's responsibility and the safety event for it |

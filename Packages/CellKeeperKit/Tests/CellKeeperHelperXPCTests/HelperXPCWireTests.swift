@@ -76,6 +76,11 @@ struct HelperXPCWireTests {
             adapterDisabledChange: HelperControlChange(generation: 3, cause: .changedOutside, interlocks: [], session: 0)
         )
         #expect(try roundTrip(reply) == reply)
+        // A cause added later, such as foundActiveAtStart, crosses as it is.
+        var found = reply
+        found.chargingInhibitedChangeCause = HelperChangeCause.foundActiveAtStart.rawValue
+        let foundDecoded = try roundTrip(found)
+        #expect(foundDecoded.change(for: .chargingInhibited).cause == .foundActiveAtStart)
         // An unknown cause is carried as it came and read as no known cause.
         reply.adapterDisabledChangeCause = 999
         let decoded = try roundTrip(reply)
