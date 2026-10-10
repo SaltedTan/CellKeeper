@@ -88,7 +88,7 @@ app (`AppModel`, `AppDelegate` and the views) are checked by hand.
 | Slider changes applied on release (no request bursts) | R13 | `MenuBarView` |
 | Simulated actions never reported as hardware actions; UI shows available / experimental / simulated / unavailable | R30 | `ControlOutcome`, `ControlAvailability`, UI |
 | With a backend that switches charging itself, the menu and Settings › Control say in one line what controls charging: the Simulated helper's simulated control, deferring to macOS's Charge Limit, or Unavailable with the reason. An unavailable backend is never said to defer or to control anything, and its policy is shown as not applied | R30 | `ControlStatement`, `MenuBarView`, `ControlSettingsTab` |
-| Steps for turning macOS's Charge Limit off are offered only while it may be limiting and the backend accepts requests. They say that CellKeeper never changes these settings, that macOS may still hold charging, and that CellKeeper withholds its own restrictions meanwhile; with simulated controls they first say that nothing would then limit charging. CellKeeper only opens System Settings › Battery | R25, R26, R30 | `MacOSChargeLimitGuide`, `ControlStatement.offersMacOSLimitGuide`, `MacOSChargeLimitGuideView` |
+| Steps for turning macOS's Charge Limit off are offered only while it may be limiting and the backend accepts requests. They say that CellKeeper never changes these settings, that macOS may still hold charging, and that CellKeeper withholds its own restrictions meanwhile; with simulated controls they first say that the Simulated helper provides no replacement charge limit and the Mac may charge to 100%. The menu's notice says only what macOS reports, that CellKeeper withholds its own restrictions, and, where they apply, that a restriction of its own may remain and the simulation's caution. CellKeeper only opens System Settings › Battery | R25, R26, R30 | `MacOSChargeLimitGuide`, `ControlStatement.offersMacOSLimitGuide`, `MacOSChargeLimitGuideView` |
 | Decisions, requests, results, and safety fallbacks logged (unified logging + in-app activity log); no device identifiers read or logged | R32 | `ChargeController.record`, allowlists in `BatteryTelemetryParser` |
 | An automatic retry of a failed restore waits 60 s; user actions retry at once | R13 | `ChargingPolicy.restoreRetryRefusal`, `ChargeController` |
 
@@ -404,7 +404,8 @@ the simulated control:
   (System Settings › Battery, ⓘ next to Charging, Charge Limit 100%,
   Optimized Battery Charging off, Check Again) and an Open Battery Settings
   button that only opens System Settings; on the Simulated helper they say
-  first that nothing would then limit charging (D74).
+  first that it provides no replacement charge limit, so the Mac may charge
+  to 100% (D74).
   CellKeeper never turns it off itself, and a release, quitting and a
   backend switch never wait for a read of it (only an evaluation or Check
   Again reads it, and a cancelled read is stopped at once). What remains or
