@@ -395,3 +395,166 @@ struct MacOSChargeLimitPolicyTests {
         #expect(unknown.contains("System Settings › Battery › Charging"))
     }
 }
+
+@Suite("Controller and macOS's Charge Limit")
+struct MacOSChargeLimitControllerTests {
+    @Test("Turning macOS's Charge Limit on releases CellKeeper's hold at the next evaluation, logged as a safety event, not a fault")
+    func releasesHoldWhenTurnedOn() async {
+        let reader = StubMacOSChargeLimit(.noLimit)
+        let rig = HelperRig(macOSReader: reader)
+        let (controller, _) = rig.controller(percent: 85)
+        let held = await rig.confirmedEvaluation(controller)
+        #expect(held.currentMode == .inhibitCharging)
+        #expect(held.capabilities.macOSChargeLimit?.isLimiting == false)
+
+        reader.set(.limit(80))
+        rig.clock.advance(by: 60)
+        let released = await controller.evaluate(.periodic)
+        #expect(released.decision?.state == .deferringToMacOS)
+        #expect(released.decision?.reason == .macOSChargeLimitActive(limit: 80))
+        #expect(released.currentMode == .normal)
+        #expect(released.capabilities.availability == .simulated)
+        #expect(released.capabilities.supportedModes == [.normal])
+        #expect(released.capabilities.macOSChargeLimit?.reportedLimit == 80)
+        #expect(!released.isBackendFaulted)
+        #expect(released.consecutiveFailures == 0)
+        #expect(rig.control.activeControls.isEmpty)
+        let safety = released.events.filter { $0.kind == .safety && $0.message.contains("macOS's Charge Limit was turned on (80%)") }
+        #expect(safety.count == 1)
+        #expect(safety.first?.message.contains("released its hold") == true)
+        #expect(!released.events.contains { $0.message.contains("outside CellKeeper") })
+    }
+
+    @Test("While macOS's limit is on nothing is restricted, even hot or at the limit; once it is off, the limit holds again")
+    func nothingWhileOnThenHoldsAgain() async {
+        let reader = StubMacOSChargeLimit(.noLimit)
+        let rig = HelperRig(macOSReader: reader)
+        let (controller, telemetry) = rig.controller(percent: 85)
+        await rig.confirmedEvaluation(controller)
+        reader.set(.limit(80))
+        for _ in 0..<4 {
+            rig.clock.advance(by: 60)
+            let status = await controller.evaluate(.periodic)
+            #expect(status.currentMode == .normal)
+            #expect(status.decision?.desiredMode == .normal)
+        }
+        await telemetry.set(snapshot(percent: 90, temperature: 45))
+        for _ in 0..<3 {
+            rig.clock.advance(by: 60)
+            let status = await controller.evaluate(.periodic)
+            #expect(status.decision?.state == .deferringToMacOS)
+            #expect(status.currentMode == .normal)
+        }
+        #expect(rig.control.writes.filter { $0 == .apply(.chargingInhibited, active: true) }.count == 1)
+        #expect(rig.control.activeControls.isEmpty)
+
+        // Cooled for longer than the minimum pause; macOS's limit is off.
+        await telemetry.set(snapshot(percent: 85))
+        rig.clock.advance(by: 360)
+        await controller.evaluate(.periodic)
+        reader.set(.noLimit)
+        rig.clock.advance(by: 60)
+        let holding = await controller.evaluate(.periodic)
+        #expect(holding.decision?.state == .holding)
+        #expect(holding.currentMode == .inhibitCharging)
+        #expect(holding.events.contains { $0.kind == .decision && $0.message.contains("macOS's Charge Limit is off") })
+    }
+
+    @Test("macOS's limit on at launch: a notice, never a restriction, and no safety event")
+    func onAtLaunch() async {
+        let reader = StubMacOSChargeLimit(.limit(80))
+        let rig = HelperRig(macOSReader: reader)
+        let (controller, _) = rig.controller(percent: 85)
+        let status = await rig.confirmedEvaluation(controller)
+        #expect(status.decision?.state == .deferringToMacOS)
+        #expect(status.currentMode == .normal)
+        #expect(status.lastExecution == nil)
+        let notices = status.events.filter { $0.message.contains("macOS's Charge Limit is on at 80%") }
+        #expect(notices.count == 1)
+        #expect(notices.first?.kind == .decision)
+        #expect(notices.first?.message.contains("System Settings › Battery › Charging") == true)
+        #expect(!status.events.contains { $0.kind == .safety && $0.message.contains("macOS's Charge Limit") })
+        #expect(!rig.control.writes.contains { if case .apply(_, active: true) = $0 { true } else { false } })
+    }
+
+    @Test("A report that becomes unreadable while CellKeeper holds a control releases it too")
+    func releasesWhenUnreadable() async {
+        let reader = StubMacOSChargeLimit(.noLimit)
+        let rig = HelperRig(macOSReader: reader)
+        let (controller, _) = rig.controller(percent: 85)
+        await rig.confirmedEvaluation(controller)
+        reader.set(.unrecognized("a limit with reason optimizedBatteryCharging"))
+        rig.clock.advance(by: 60)
+        let released = await controller.evaluate(.periodic)
+        #expect(released.decision?.reason == .macOSChargeLimitUnknown(problem: "unrecognised report (a limit with reason optimizedBatteryCharging)"))
+        #expect(released.currentMode == .normal)
+        #expect(!released.isBackendFaulted)
+        #expect(released.events.contains { $0.kind == .safety && $0.message.contains("could not read macOS's Charge Limit report") && $0.message.contains("released its hold") })
+    }
+
+    @Test("A discharge session ends when macOS's limit is turned on, and the adapter is given back")
+    func dischargeEnds() async {
+        let reader = StubMacOSChargeLimit(.noLimit)
+        let rig = HelperRig(macOSReader: reader)
+        let (controller, _) = rig.controller(percent: 90)
+        let discharging = await controller.startDischargeToLimit()
+        #expect(discharging.currentMode == .forceDischarge)
+        reader.set(.limit(80))
+        rig.clock.advance(by: 60)
+        let ended = await controller.evaluate(.periodic)
+        #expect(ended.activeOverride == nil)
+        #expect(ended.decision?.notes.contains(.dischargeEndedForMacOSChargeLimit) == true)
+        #expect(ended.currentMode == .normal)
+        #expect(rig.control.activeControls.isEmpty)
+        #expect(ended.events.contains { $0.kind == .safety && $0.message.contains("while CellKeeper held forceDischarge") })
+    }
+
+    @Test("Checking again reads macOS's limit at once; evaluations within 30 s reuse the reading")
+    func recheck() async {
+        let reader = StubMacOSChargeLimit(.limit(80))
+        let rig = HelperRig(macOSReader: reader)
+        let (controller, _) = rig.controller(percent: 85)
+        await controller.evaluate(.launch)
+        #expect(reader.reads == 1)
+        // The user turns macOS's limit off in System Settings.
+        reader.set(.noLimit)
+        rig.clock.advance(by: 10)
+        let cached = await controller.evaluate(.periodic)
+        #expect(reader.reads == 1)
+        #expect(cached.decision?.state == .deferringToMacOS)
+        let rechecked = await controller.recheckBackendAvailability()
+        #expect(reader.reads == 2)
+        #expect(rechecked.capabilities.macOSChargeLimit?.isLimiting == false)
+        // Two distinct readings at the limit were taken meanwhile.
+        #expect(rechecked.decision?.state == .holding)
+        #expect(rechecked.currentMode == .inhibitCharging)
+    }
+
+    @Test("The diagnostics report shows macOS's limit and that CellKeeper restricts nothing")
+    func diagnostics() async {
+        let reader = StubMacOSChargeLimit(.unrecognized("a limit with reason optimizedBatteryCharging"))
+        let rig = HelperRig(macOSReader: reader)
+        let (controller, _) = rig.controller(percent: 70)
+        let status = await controller.evaluate(.launch)
+        let environment = DiagnosticsEnvironment(appVersion: "0.1.0 (1)", systemVersion: "Version 27.0.1", modelIdentifier: "Mac16,1")
+        let report = DiagnosticsReport.text(status: status, environment: environment, generatedAt: referenceDate)
+        #expect(report.contains("macOS Charge Limit: unreadable, read "))
+        #expect(report.contains("; CellKeeper restricts nothing while it is on"))
+        #expect(report.contains("macOS Charge Limit read problem: unrecognised report (a limit with reason optimizedBatteryCharging)"))
+        #expect(report.contains("State: deferringToMacOS"))
+    }
+
+    @Test("A change of the limit while it stays on is a notice, not a safety event")
+    func valueChangeWhileOn() async {
+        let reader = StubMacOSChargeLimit(.limit(80))
+        let rig = HelperRig(macOSReader: reader)
+        let (controller, _) = rig.controller(percent: 70)
+        await controller.evaluate(.launch)
+        reader.set(.limit(90))
+        rig.clock.advance(by: 60)
+        let status = await controller.evaluate(.periodic)
+        #expect(status.decision?.reason == .macOSChargeLimitActive(limit: 90))
+        #expect(status.events.contains { $0.kind == .decision && $0.message.contains("macOS's Charge Limit is on at 90%") && $0.message.contains("still restricts nothing") })
+        #expect(!status.events.contains { $0.kind == .safety && $0.message.contains("macOS's Charge Limit") })
+    }
+}

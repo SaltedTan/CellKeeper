@@ -52,6 +52,14 @@ public enum DiagnosticsReport {
             field("Style", "switches charging, modes \(capabilities.supportedModes.map(\.description).sorted().joined(separator: ", "))")
         }
         field("Reported mode", status.currentMode.map(\.description) ?? "unknown")
+        if let macOSLimit = capabilities.macOSChargeLimit {
+            // A backend that switches charging itself restricts nothing while
+            // macOS's own Charge Limit is on or unreadable.
+            field("macOS Charge Limit", "\(macOSLimit.reportedLimit.map { "\($0)%" } ?? "unreadable"), read \(timestamp(macOSLimit.readAt))\(macOSLimit.isLimiting ? "; CellKeeper restricts nothing while it is on" : "")")
+            if let problem = macOSLimit.readProblem {
+                field("macOS Charge Limit read problem", problem)
+            }
+        }
         field("Pending switch", status.pendingBackend.map(\.displayName) ?? "none")
         field("Consecutive failures", "\(status.consecutiveFailures)\(status.isBackendFaulted ? " (faulted)" : "")")
         if let refusal = status.managementRefusal {
