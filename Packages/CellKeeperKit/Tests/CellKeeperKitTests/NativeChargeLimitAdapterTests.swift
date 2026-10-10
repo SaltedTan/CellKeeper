@@ -233,10 +233,17 @@ struct CommandLineAdapterTests {
 
     @Test("Cancelling the calling task stops the tool promptly")
     func cancellation() async {
+        // The tool marks that it runs, so the cancellation provably arrives
+        // while it runs, not before it starts.
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("cellkeeper-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: marker) }
         let task = Task {
-            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"], timeout: 30)
+            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "touch \"$0\"; exec /bin/sleep 30", marker.path], timeout: 30)
         }
-        try? await Task.sleep(for: .milliseconds(200))
+        for _ in 0..<5_000 where !FileManager.default.fileExists(atPath: marker.path) {
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(FileManager.default.fileExists(atPath: marker.path))
         let started = Date()
         task.cancel()
         await #expect(throws: CancellationError.self) {

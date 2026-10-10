@@ -1,4 +1,4 @@
-import CellKeeperCore
+@testable import CellKeeperCore
 import CellKeeperHelperCore
 import Foundation
 import Testing
@@ -80,13 +80,12 @@ struct MacOSChargeLimitMonitorInFlightTests {
 
         reader.hold()
         let forced = Task { await monitor.refresh() }
-        for _ in 0..<1_000 where reader.reads < 2 {
-            try await Task.sleep(for: .milliseconds(1))
-        }
-        #expect(reader.reads == 2)
-        // The cached "no limit" is fresh, but a read is under way.
+        await eventually("the forced read is under way") { await monitor.waitingCallerCount == 1 && reader.reads == 2 }
+        // The cached "no limit" is fresh, but a read is under way: the
+        // concurrent check must join it, which the waiter count establishes
+        // before the read is let through.
         let concurrent = Task { await monitor.status() }
-        try await Task.sleep(for: .milliseconds(20))
+        await eventually("both callers wait for the forced read") { await monitor.waitingCallerCount == 2 }
         reader.release(with: .limit(80))
         let concurrentStatus = await concurrent.value
         let forcedStatus = await forced.value
@@ -103,7 +102,7 @@ struct MacOSChargeLimitMonitorInFlightTests {
         let clock = clock
         let monitor = MacOSChargeLimitMonitor(reader: EndlessChargeLimitReader(), now: { clock.now }, uptime: { clock.uptime })
         let waiting = Task { await monitor.status() }
-        try? await Task.sleep(for: .milliseconds(20))
+        await eventually("the caller waits for the read") { await monitor.waitingCallerCount == 1 }
         waiting.cancel()
         let status = await waiting.value
         #expect(status.isLimiting)
@@ -120,7 +119,7 @@ struct MacOSChargeLimitMonitorInFlightTests {
         _ = await monitor.status()
         reader.hold()
         let forced = Task { await monitor.refresh() }
-        try? await Task.sleep(for: .milliseconds(20))
+        await eventually("the forced read is under way") { await monitor.waitingCallerCount == 1 && reader.reads == 2 }
         forced.cancel()
         // The held read ignores cancellation; let it finish.
         reader.release(with: .noLimit)
