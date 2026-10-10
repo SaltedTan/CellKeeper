@@ -312,6 +312,60 @@ struct HelperDaemonFrontendStopTests {
         #expect(await running.value == 0)
     }
 
+    @Test("The frontend's stop gets the shutdown's own deadline, fixed when shutdown began: a slow frontend start does not move it")
+    func slowStartKeepsDeadline() async {
+        let h = DaemonHarness()
+        let starting = DispatchSemaphore(value: 0)
+        let entered = Flag()
+        // The start runs on the daemon's seam queue, never on the
+        // cooperative pool, so it may block there.
+        h.frontend.onStart { _ in
+            entered.set(true)
+            _ = starting.wait(timeout: .now() + 10)
+        }
+        h.frontend.holdStopUntilDeadline(thenReturn: false)
+        let daemon = h.daemon
+        let running = Task { await daemon.run() }
+        let inStart = await eventually { entered.value }
+        #expect(inStart)
+
+        let before = h.clock.uptime()
+        h.signals.sendSIGTERM()
+        let stopping = await eventually { h.log.contains(.notice, .lifecycle, "SIGTERM: stopping the frontend") }
+        #expect(stopping)
+        // The start takes another 4 s; only then can the stop begin.
+        h.clock.advance(by: 4)
+        starting.signal()
+        let stopped = await eventually { h.frontend.stopDeadlines.count == 1 }
+        #expect(stopped)
+        let expected = before + HelperDaemon.terminationDeadline - HelperDaemon.finalisationReserve
+        #expect(abs((h.frontend.stopDeadlines.first ?? 0) - expected) < 0.01)
+        #expect(h.frontend.stopResults.isEmpty)
+
+        // It gives up at that deadline, 3 s later, not a full budget after
+        // it began.
+        h.clock.advance(by: 3)
+        let gaveUp = await eventually { h.frontend.stopResults == [false] }
+        #expect(gaveUp)
+        #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+    }
+
+    @Test("A frontend that confirms its stop only after its deadline is not counted: the daemon exits with 75")
+    func confirmationAfterDeadline() async {
+        let h = DaemonHarness()
+        h.frontend.holdStopUntilDeadline(thenReturn: true)
+        let running = await h.run()
+        h.signals.sendSIGTERM()
+        let retrying = HelperDaemon.terminationDeadline - HelperDaemon.finalisationReserve
+        let waiting = await eventually { h.clock.waits.filter { (retrying - 0.001...retrying).contains($0) }.count == 2 }
+        #expect(waiting)
+        h.clock.advance(by: retrying)
+        let confirmed = await eventually { h.frontend.stopResults == [true] }
+        #expect(confirmed)
+        #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+        #expect(await h.daemon.engine.isSafeToExit)
+    }
+
     @Test("A frontend that reports it could not stop cleanly makes the daemon exit non-zero")
     func refusedStop() async {
         let h = DaemonHarness()

@@ -35,7 +35,8 @@ public protocol HelperFrontend: Sendable {
     /// once and never call into the engine. The default does nothing.
     func handle(_ event: HelperEvent)
 
-    /// Stops serving, and confirms that it has.
+    /// Stops serving, by `deadline`, and says whether it can prove that it
+    /// did so with everything it accepted answered.
     ///
     /// A request is *accepted* once the frontend has admitted it to be
     /// served (for ``XPCFrontend``: put it on its connection's queue). A
@@ -43,9 +44,9 @@ public protocol HelperFrontend: Sendable {
     /// reply; its client sees the connection end. A reply is *sent* once the
     /// transport has confirmed that the send completed: for NSXPC, a send
     /// barrier (`NSXPCConnection.scheduleSendBarrierBlock(_:)`) scheduled
-    /// after the reply has run. That confirms the send, not that the client
-    /// received it; receipt would need an acknowledgement, which the
-    /// protocol does not have. In this order, `stop()`:
+    /// after the reply has run while the connection was valid. That confirms
+    /// the send, not that the client received it; receipt would need an
+    /// acknowledgement, which the protocol does not have. In this order, it:
     /// 1. Stops accepting connections and requests.
     /// 2. Waits until every accepted request has been answered by the engine
     ///    and its reply sent. The reply to a `restoreDefaultsAndExit` is sent
@@ -53,23 +54,31 @@ public protocol HelperFrontend: Sendable {
     /// 3. Invalidates every session it opened (``HelperSession/invalidate()``)
     ///    and closes every connection.
     ///
-    /// A connection that ends on its own meanwhile (its client goes away,
-    /// the engine revokes its session) ends as it always does; whatever of it
-    /// had not run never runs.
+    /// It returns true only if it can prove all of that for every
+    /// connection it was still serving when the stop began: every request
+    /// that connection ever accepted answered, every reply's send confirmed,
+    /// the connection closed only after that, and its session invalidated.
+    /// That a connection's work has ended is not that proof. So it returns
+    /// false, never true, if an accepted request was discarded (one queued
+    /// behind a revocation, which never runs; one queued when its client
+    /// went away; one cut off at the deadline), if a reply's send was never
+    /// confirmed, or if it is done only after `deadline`. A frontend that
+    /// never started has nothing to stop and returns true.
     ///
-    /// It returns true only once all of that is done and the stop itself cut
-    /// nothing off, so that nothing it accepted can change the engine's state
-    /// afterwards. Otherwise it returns false, never true: an implementation
-    /// that discards accepted requests, or invalidates a connection before
-    /// its replies are sent (at a deadline, for example), returns false. A
-    /// frontend that never started has nothing to stop and returns true.
+    /// `deadline` is absolute, on the daemon's clock, and fixed when
+    /// shutdown began: time spent before the stop starts (a slow start, a
+    /// task scheduled late) is taken from it, never added. At the deadline
+    /// the frontend cuts off whatever remains and returns false promptly,
+    /// without waiting for a request still in the engine.
     ///
     /// The daemon calls it once, when shutdown begins (SIGTERM, a client's
     /// `restoreDefaultsAndExit`, or a seam that could not start), after any
-    /// `start(serving:log:)` in progress has returned, and waits for it
-    /// only within its shutdown budget: it exits with 0 only after a stop
-    /// that returned true, followed by a check that defaults are confirmed.
-    func stop() async -> Bool
+    /// `start(serving:log:)` in progress has returned, with the shutdown's
+    /// deadline less ``HelperDaemon/finalisationReserve``. It counts the stop
+    /// as confirmed only if it returned true before that deadline, and exits
+    /// with 0 only after a confirmed stop, followed by a check that defaults
+    /// are confirmed.
+    func stop(by deadline: HelperDaemonDeadline) async -> Bool
 }
 
 extension HelperFrontend {
@@ -87,7 +96,7 @@ public struct NoFrontend: HelperFrontend {
     }
 
     /// Nothing was accepted, so there is nothing to wait for.
-    public func stop() async -> Bool {
+    public func stop(by deadline: HelperDaemonDeadline) async -> Bool {
         true
     }
 }

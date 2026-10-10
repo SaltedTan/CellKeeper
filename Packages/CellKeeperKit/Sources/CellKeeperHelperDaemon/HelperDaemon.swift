@@ -67,9 +67,10 @@ public struct HelperDaemonEnvironment: Sendable {
 /// start. Whatever began it, one absolute deadline,
 /// ``terminationDeadline`` after it began, bounds all of it, logging and
 /// the final decision included, and every wait is bounded by what is left:
-/// 1. The frontend is told to stop; it confirms once everything it
-///    accepted is answered and every session invalidated (see
-///    ``HelperFrontend/stop()``).
+/// 1. The frontend is told to stop by ``finalisationReserve`` before the
+///    deadline; it confirms once everything it accepted is answered and
+///    every session invalidated (see ``HelperFrontend/stop(by:)``), and a
+///    confirmation after that deadline does not count.
 /// 2. `terminate()`, retried about once a second until the frontend has
 ///    confirmed and the engine is safe to exit, or until
 ///    ``finalisationReserve`` before the deadline.
@@ -388,9 +389,15 @@ public actor HelperDaemon {
         let queue = queue
         queue.log(.notice, .lifecycle, "\(reason): stopping the frontend and restoring defaults; exiting within \(Int(Self.terminationDeadline)) s.")
 
-        // 1. Stop the frontend (once a start in progress has returned); its
-        // confirmation may come later.
-        let stop = FrontendStop(environment.frontend, after: frontendStart, log: queue)
+        // 1. Stop the frontend (once a start in progress has returned) by
+        // the end of the retries, on the same deadline; its confirmation may
+        // come later.
+        let stop = FrontendStop(
+            environment.frontend,
+            after: frontendStart,
+            by: HelperDaemonDeadline(uptime: deadline - Self.finalisationReserve, on: clock),
+            log: queue
+        )
 
         // 2. Restore and retry until the frontend has confirmed and the
         // engine is safe to exit, keeping the reserve.
@@ -530,8 +537,8 @@ final class DaemonRelay: @unchecked Sendable {
 }
 
 /// The frontend's stop, on a task of its own. The daemon waits for it only
-/// within its budget, and counts it as confirmed only once `stop()` has
-/// returned true.
+/// within its budget, and counts it as confirmed only once `stop(by:)` has
+/// returned true before its deadline.
 final class FrontendStop: @unchecked Sendable {
     enum Outcome: Equatable {
         case pending
@@ -543,15 +550,19 @@ final class FrontendStop: @unchecked Sendable {
     private var current = Outcome.pending
     private var task: Task<Void, Never>?
 
-    /// Stops `frontend` once `start`, if any, has returned, and logs when
-    /// its stop returns.
-    init(_ frontend: any HelperFrontend, after start: Task<Void, any Error>?, log: DaemonEventQueue) {
+    /// Stops `frontend` by `deadline` once `start`, if any, has returned,
+    /// and logs when its stop returns. A true that comes after the deadline
+    /// is not counted: the daemon has stopped waiting for it by then.
+    init(_ frontend: any HelperFrontend, after start: Task<Void, any Error>?, by deadline: HelperDaemonDeadline, log: DaemonEventQueue) {
         let task = Task.detached { [self] in
             _ = await start?.result
-            let confirmed = await frontend.stop()
+            let returned = await frontend.stop(by: deadline)
+            let confirmed = returned && !deadline.hasPassed
             lock.withLock { current = confirmed ? .confirmed : .refused }
             if confirmed {
                 log.log(.info, .xpc, "The frontend stopped and confirmed that everything it accepted was answered.")
+            } else if returned {
+                log.log(.fault, .xpc, "The frontend confirmed its stop only after its deadline: not counted.")
             } else {
                 log.log(.fault, .xpc, "The frontend stopped without confirming that everything it accepted was answered.")
             }
@@ -563,7 +574,7 @@ final class FrontendStop: @unchecked Sendable {
         lock.withLock { current }
     }
 
-    /// Returns when `stop()` has returned.
+    /// Returns when `stop(by:)` has returned.
     func wait() async {
         let task = lock.withLock { self.task }
         await task?.value

@@ -16,10 +16,12 @@ import Foundation
 /// - **Revocations.** The daemon passes the engine's events to
 ///   ``handle(_:)``, so the server closes the connection of a session the
 ///   engine revokes.
-/// - **Stop.** ``stop()`` is ``HelperXPCServer/stop(drainingUntil:)``,
-///   cut off after ``stopTimeout``: it returns true only if every admitted
-///   request ran and its reply was sent (a send barrier confirms the send,
-///   not receipt) before its connection and session were invalidated.
+/// - **Stop.** ``stop(by:)`` is ``HelperXPCServer/stop(by:)`` on the
+///   daemon's deadline and clock: it returns true only if every connection
+///   it drained can prove that every request it admitted ran and its reply
+///   was sent (a send barrier confirms the send, not receipt) before the
+///   connection and its session were invalidated, and only before the
+///   deadline; at the deadline it cuts off what remains and returns false.
 /// - **Audit.** Accepted, refused and closed connections go to the daemon's
 ///   log. The process and user IDs in them are informational only (note 04,
 ///   §2.3).
@@ -29,10 +31,6 @@ public final class XPCFrontend: HelperFrontend, @unchecked Sendable {
 
     /// CellKeeper's signing identifier, required of every client.
     public static let clientIdentifier = "io.github.saltedtan.CellKeeper"
-    /// How long a stop lets the requests already admitted finish. Well
-    /// within the daemon's shutdown budget, so a stop that cannot drain
-    /// says so before the daemon's retries end.
-    public static let stopTimeout: TimeInterval = 5
 
     private enum ListenerSource {
         case machService
@@ -41,38 +39,33 @@ public final class XPCFrontend: HelperFrontend, @unchecked Sendable {
 
     private let listenerSource: ListenerSource
     private let makeRequirement: @Sendable () throws -> HelperCodeSigningRequirement
-    private let stopDeadline: @Sendable () async -> Void
     private let lock = NSLock()
     private var server: HelperXPCServer?
 
-    /// The daemon's frontend: the Mach service, CellKeeper with this
-    /// process's own team, and a stop cut off after ``stopTimeout``.
+    /// The daemon's frontend: the Mach service, and CellKeeper with this
+    /// process's own team.
     public convenience init() {
         self.init(
             listenerSource: .machService,
-            requirement: { try HelperCodeSigningRequirement.forClientApp(identifier: XPCFrontend.clientIdentifier) },
-            stopDeadline: { try? await Task.sleep(for: .seconds(XPCFrontend.stopTimeout)) }
+            requirement: { try HelperCodeSigningRequirement.forClientApp(identifier: XPCFrontend.clientIdentifier) }
         )
     }
 
-    /// For tests: an anonymous listener, the requirement to place on
-    /// clients, and when a stop gives up draining.
+    /// For tests: an anonymous listener, and the requirement to place on
+    /// clients.
     convenience init(
         listener: NSXPCListener,
-        requirement: @escaping @Sendable () throws -> HelperCodeSigningRequirement,
-        stopDeadline: @escaping @Sendable () async -> Void
+        requirement: @escaping @Sendable () throws -> HelperCodeSigningRequirement
     ) {
-        self.init(listenerSource: .given(listener), requirement: requirement, stopDeadline: stopDeadline)
+        self.init(listenerSource: .given(listener), requirement: requirement)
     }
 
     private init(
         listenerSource: ListenerSource,
-        requirement: @escaping @Sendable () throws -> HelperCodeSigningRequirement,
-        stopDeadline: @escaping @Sendable () async -> Void
+        requirement: @escaping @Sendable () throws -> HelperCodeSigningRequirement
     ) {
         self.listenerSource = listenerSource
         makeRequirement = requirement
-        self.stopDeadline = stopDeadline
     }
 
     /// Builds the client requirement first, and only then the listener, so a
@@ -101,9 +94,12 @@ public final class XPCFrontend: HelperFrontend, @unchecked Sendable {
         server?.handle(event)
     }
 
-    public func stop() async -> Bool {
+    public func stop(by deadline: HelperDaemonDeadline) async -> Bool {
         guard let server = lock.withLock({ self.server }) else { return true }
-        return await server.stop(drainingUntil: stopDeadline)
+        return await server.stop(by: HelperXPCServer.Deadline(
+            hasPassed: { deadline.hasPassed },
+            wait: { await deadline.wait() }
+        ))
     }
 
     static func log(_ event: HelperXPCConnectionEvent, to log: any HelperDaemonLog) {

@@ -140,7 +140,8 @@ final class StubPower: HelperPowerReading, @unchecked Sendable {
 }
 
 /// Records what the daemon does to its frontend. Its stop confirms at once
-/// unless the test holds it back or makes it refuse.
+/// unless the test holds it back, makes it refuse, or makes it wait for its
+/// deadline.
 final class FakeFrontend: HelperFrontend, @unchecked Sendable {
     enum Call: Equatable {
         case start
@@ -154,6 +155,28 @@ final class FakeFrontend: HelperFrontend, @unchecked Sendable {
     private var heldStops: [CheckedContinuation<Bool, Never>] = []
     private var stopResult = true
     private var handled: [HelperEvent] = []
+    /// What a stop returns once its deadline has passed; nil: it does not
+    /// wait for its deadline.
+    private var resultAtDeadline: Bool?
+    private var deadlines: [TimeInterval] = []
+    private var returned: [Bool] = []
+
+    /// The deadline (uptime) of every stop, in order.
+    var stopDeadlines: [TimeInterval] {
+        lock.withLock { deadlines }
+    }
+
+    /// What every stop that has returned returned, in order.
+    var stopResults: [Bool] {
+        lock.withLock { returned }
+    }
+
+    /// Makes `stop(by:)` wait until its deadline has passed and then return
+    /// `result`, as a frontend that cannot drain would (`false`), or one
+    /// whose confirmation comes too late (`true`).
+    func holdStopUntilDeadline(thenReturn result: Bool) {
+        lock.withLock { resultAtDeadline = result }
+    }
 
     /// The engine's events the daemon passed on.
     var handledEvents: [HelperEvent] {
@@ -164,13 +187,13 @@ final class FakeFrontend: HelperFrontend, @unchecked Sendable {
         lock.withLock { handled.append(event) }
     }
 
-    /// Makes `stop()` wait until ``confirmStop(_:)``, as a frontend still
+    /// Makes `stop(by:)` wait until ``confirmStop(_:)``, as a frontend still
     /// draining its requests would.
     func holdStop() {
         lock.withLock { isHoldingStop = true }
     }
 
-    /// Ends a held `stop()` with `confirmed`; later stops return it at once.
+    /// Ends a held `stop(by:)` with `confirmed`; later stops return it at once.
     func confirmStop(_ confirmed: Bool = true) {
         let held = lock.withLock { () -> [CheckedContinuation<Bool, Never>] in
             isHoldingStop = false
@@ -183,12 +206,12 @@ final class FakeFrontend: HelperFrontend, @unchecked Sendable {
         }
     }
 
-    /// Makes `stop()` report that it could not confirm.
+    /// Makes `stop(by:)` report that it could not confirm.
     func refuseStop() {
         lock.withLock { stopResult = false }
     }
 
-    /// True while a `stop()` is held.
+    /// True while a `stop(by:)` is held.
     var isStopHeld: Bool {
         lock.withLock { !heldStops.isEmpty }
     }
@@ -210,10 +233,22 @@ final class FakeFrontend: HelperFrontend, @unchecked Sendable {
         try check?(engine)
     }
 
-    func stop() async -> Bool {
-        let result = lock.withLock { () -> Bool? in
+    func stop(by deadline: HelperDaemonDeadline) async -> Bool {
+        let result = await stopResult(by: deadline)
+        lock.withLock { returned.append(result) }
+        return result
+    }
+
+    private func stopResult(by deadline: HelperDaemonDeadline) async -> Bool {
+        let (result, atDeadline) = lock.withLock { () -> (Bool?, Bool?) in
             recorded.append(.stop)
-            return isHoldingStop ? nil : stopResult
+            deadlines.append(deadline.uptime)
+            if let resultAtDeadline { return (nil, resultAtDeadline) }
+            return (isHoldingStop ? nil : stopResult, nil)
+        }
+        if let atDeadline {
+            await deadline.wait()
+            return atDeadline
         }
         if let result {
             return result

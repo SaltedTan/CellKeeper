@@ -14,21 +14,20 @@ import Testing
 @Suite("Helper daemon over NSXPC", .serialized)
 struct HelperDaemonXPCTests {
     /// A daemon whose frontend is an ``XPCFrontend`` on an anonymous
-    /// listener; its stop gives up only when `stopDeadline` opens.
+    /// listener; what its stops return is recorded.
     private struct Served {
         let harness: DaemonHarness
         let listener: NSXPCListener
-        let stopDeadline = Gate()
+        let frontend: StopRecordingFrontend
 
         init(control: any HelperChargeControl) {
             let listener = NSXPCListener.anonymous()
-            let stopDeadline = stopDeadline
-            let frontend = XPCFrontend(
+            let frontend = StopRecordingFrontend(XPCFrontend(
                 listener: listener,
-                requirement: { try HelperCodeSigningRequirement.currentProcessDesignatedRequirement() },
-                stopDeadline: { await stopDeadline.wait() }
-            )
+                requirement: { try HelperCodeSigningRequirement.currentProcessDesignatedRequirement() }
+            ))
             self.listener = listener
+            self.frontend = frontend
             harness = DaemonHarness(control: control, frontend: frontend)
         }
 
@@ -122,7 +121,7 @@ struct HelperDaemonXPCTests {
         #expect(h.log.lines.contains { $0.message == "engine: \(HelperEvent.sessionInvalidated(session))" })
     }
 
-    @Test("A stop that cannot drain within its budget reports it, and the daemon exits with 75")
+    @Test("A stop that cannot drain by the shutdown's deadline cuts the connection off and returns false, and the daemon exits with 75")
     func stopCannotDrain() async throws {
         let control = BlockingControl()
         let served = Served(control: control)
@@ -139,23 +138,64 @@ struct HelperDaemonXPCTests {
         let stopping = await eventually { h.log.contains(.notice, .lifecycle, "SIGTERM: stopping the frontend") }
         #expect(stopping)
 
-        // The frontend's stop gives up: the request is still in the engine,
-        // and so is the daemon's restore behind it, so its retries run out.
-        served.stopDeadline.open()
-        let gaveUp = await eventually { h.log.contains(.fault, .xpc, "The frontend stopped without confirming") }
-        #expect(gaveUp)
+        // The request is still in the engine, and so is the daemon's restore
+        // behind it. The frontend's deadline and the end of the retries are
+        // the same instant: 7 s into the shutdown, on the daemon's clock.
         let retrying = HelperDaemon.terminationDeadline - HelperDaemon.finalisationReserve
-        let waiting = await eventually { h.clock.waits.contains(retrying - 0.001...retrying) }
+        let waiting = await eventually { h.clock.waits.filter { (retrying - 0.001...retrying).contains($0) }.count == 2 }
         #expect(waiting)
         h.clock.advance(by: retrying)
+        // The stop returns false without waiting for the engine.
+        let frontend = served.frontend
+        let gaveUp = await eventually { frontend.stopResults == [false] }
+        #expect(gaveUp)
+        #expect(control.isHolding)
         let exited = await eventually { !h.exits.statuses.isEmpty }
         #expect(exited)
         #expect(h.exits.statuses == [HelperDaemon.restoreNotConfirmedExitStatus])
 
-        #expect(h.log.contains(.fault, .xpc, "The frontend could not confirm that it stopped serving"))
-
         control.release()
         #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+        #expect(connectionFailures.contains(await inFlight.value))
+    }
+
+    @Test("A stop whose timer starts only after its deadline has passed returns false as soon as it starts: the deadline is absolute")
+    func lateTimer() async throws {
+        let clock = ManualClock()
+        let control = BlockingControl()
+        let engine = HelperEngine(control: control, power: StubPower(clock: clock), build: 1, uptime: { clock.uptime() }, events: { _ in })
+        #expect(await engine.start() == .ok)
+        let listener = NSXPCListener.anonymous()
+        let frontend = XPCFrontend(listener: listener, requirement: { try HelperCodeSigningRequirement.currentProcessDesignatedRequirement() })
+        try frontend.start(serving: engine, log: RecordingLog())
+        let client = HelperXPCClient(
+            destination: .endpoint(listener.endpoint),
+            helperRequirement: try HelperCodeSigningRequirement.currentProcessDesignatedRequirement(),
+            timeout: .seconds(30)
+        )
+        #expect(try await client.hello(clientProtocolVersion: HelperProtocolVersion.current).status == .ok)
+        control.holdNextReadBack()
+        let inFlight = Task { await clientFailure { _ = try await client.readState() } }
+        let held = await eventually { control.isHolding }
+        #expect(held)
+
+        // The stop's timer is scheduled late: it starts only once `late`
+        // opens, after the clock has passed the deadline.
+        let late = Gate()
+        let timerStarting = Flag()
+        clock.beforeNextSleep { timerStarting.set(true) }
+        clock.holdNextSleep(until: late)
+        let deadline = HelperDaemonDeadline(uptime: clock.uptime() + 5, on: clock)
+        let stopping = Task { await frontend.stop(by: deadline) }
+        let starting = await eventually { timerStarting.value }
+        #expect(starting)
+        clock.advance(by: 6)
+        late.open()
+        // No further time passes: the timer finds its deadline gone.
+        #expect(await stopping.value == false)
+        #expect(control.isHolding)
+
+        control.release()
         #expect(connectionFailures.contains(await inFlight.value))
     }
 
@@ -167,15 +207,14 @@ struct HelperDaemonXPCTests {
         let listener = NSXPCListener.anonymous()
         let frontend = XPCFrontend(
             listener: listener,
-            requirement: { try HelperCodeSigningRequirement.forClientApp(identifier: XPCFrontend.clientIdentifier) },
-            stopDeadline: {}
+            requirement: { try HelperCodeSigningRequirement.forClientApp(identifier: XPCFrontend.clientIdentifier) }
         )
         let h = DaemonHarness(frontend: frontend)
         let daemon = h.daemon
         #expect(await daemon.run() == 0)
         #expect(h.log.contains(.fault, .xpc, "The frontend could not start (\(HelperCodeSigningRequirementError.noTeamIdentifier))"))
         #expect(!h.log.contains(.notice, .xpc, "Serving CellKeeper over NSXPC"))
-        #expect(await frontend.stop())
+        #expect(await frontend.stop(by: HelperDaemonDeadline(uptime: h.clock.uptime() + 1, on: h.clock)))
     }
 
     @Test(
@@ -188,6 +227,36 @@ struct HelperDaemonXPCTests {
         #expect(throws: HelperCodeSigningRequirementError.noTeamIdentifier) {
             try XPCFrontend().start(serving: engine, log: RecordingLog())
         }
+    }
+}
+
+/// Passes everything to another frontend, and records what its stops
+/// returned.
+private final class StopRecordingFrontend: HelperFrontend, @unchecked Sendable {
+    private let inner: any HelperFrontend
+    private let lock = NSLock()
+    private var results: [Bool] = []
+
+    init(_ inner: any HelperFrontend) {
+        self.inner = inner
+    }
+
+    var stopResults: [Bool] {
+        lock.withLock { results }
+    }
+
+    func start(serving engine: HelperEngine, log: any HelperDaemonLog) throws {
+        try inner.start(serving: engine, log: log)
+    }
+
+    func handle(_ event: HelperEvent) {
+        inner.handle(event)
+    }
+
+    func stop(by deadline: HelperDaemonDeadline) async -> Bool {
+        let result = await inner.stop(by: deadline)
+        lock.withLock { results.append(result) }
+        return result
     }
 }
 

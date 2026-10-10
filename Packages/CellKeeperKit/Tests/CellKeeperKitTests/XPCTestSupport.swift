@@ -103,6 +103,8 @@ final class ConnectionEventLog: @unchecked Sendable {
     private var recorded: [HelperXPCConnectionEvent] = []
     private var waiters: [Waiter] = []
     private var nextWaiter = 0
+    /// Waits whose time ran out before they were registered.
+    private var expired: Set<Int> = []
 
     var events: [HelperXPCConnectionEvent] {
         lock.withLock { recorded }
@@ -121,34 +123,45 @@ final class ConnectionEventLog: @unchecked Sendable {
     }
 
     /// Waits until an event that `matches` has been recorded, woken by its
-    /// arrival, for at most `seconds`. Connection events reach the host
-    /// asynchronously, so a test waits for them rather than expecting them
-    /// when a call returns.
+    /// arrival, until `seconds` after the call at most. Connection events
+    /// reach the host asynchronously, so a test waits for them rather than
+    /// expecting them when a call returns. The deadline is fixed on entry,
+    /// and a timeout that fires before the wait is registered is remembered,
+    /// so the wait is bounded whichever comes first.
     func waitFor(within seconds: Double = 10, _ matches: @escaping @Sendable (HelperXPCConnectionEvent) -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(seconds))
         let id = lock.withLock {
             nextWaiter += 1
             return nextWaiter
         }
         let timeout = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(seconds))
+            do {
+                try await Task.sleep(until: deadline, clock: .continuous)
+            } catch {
+                return
+            }
             self?.expire(id)
         }
         defer { timeout.cancel() }
         return await withCheckedContinuation { continuation in
-            let found = lock.withLock { () -> Bool in
+            let found = lock.withLock { () -> Bool? in
                 if recorded.contains(where: matches) { return true }
+                if expired.remove(id) != nil { return false }
                 waiters.append(Waiter(id: id, matches: matches, continuation: continuation))
-                return false
+                return nil
             }
-            if found {
-                continuation.resume(returning: true)
+            if let found {
+                continuation.resume(returning: found)
             }
         }
     }
 
     private func expire(_ id: Int) {
         let waiter = lock.withLock { () -> Waiter? in
-            guard let index = waiters.firstIndex(where: { $0.id == id }) else { return nil }
+            guard let index = waiters.firstIndex(where: { $0.id == id }) else {
+                expired.insert(id)
+                return nil
+            }
             return waiters.remove(at: index)
         }
         waiter?.continuation.resume(returning: false)
@@ -584,5 +597,136 @@ final class ServerBox: @unchecked Sendable {
     var server: HelperXPCServer? {
         get { lock.withLock { held } }
         set { lock.withLock { held = newValue } }
+    }
+}
+
+/// A stop's deadline the test moves by hand: it passes when the test says
+/// so, and its timer can be woken with it, or left asleep as if it ran late.
+final class TestDeadline: @unchecked Sendable {
+    // @unchecked Sendable: all state is guarded by `lock`.
+
+    private let lock = NSLock()
+    private var passed = false
+    private var isExpired = false
+    private var waiters: [Int: CheckedContinuation<Void, Never>] = [:]
+    private var nextID = 0
+
+    var deadline: HelperXPCServer.Deadline {
+        HelperXPCServer.Deadline(hasPassed: { [self] in hasPassed }, wait: { [self] in await wait() })
+    }
+
+    var hasPassed: Bool {
+        lock.withLock { passed }
+    }
+
+    /// True while the stop's timer waits for the deadline.
+    var isAwaited: Bool {
+        lock.withLock { !waiters.isEmpty }
+    }
+
+    /// The deadline passes, but its timer is not woken: a timer that runs
+    /// late.
+    func pass() {
+        lock.withLock { passed = true }
+    }
+
+    /// The deadline passes and its timer is woken.
+    func expire() {
+        let waiting = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            passed = true
+            isExpired = true
+            defer { waiters = [:] }
+            return Array(waiters.values)
+        }
+        for waiter in waiting {
+            waiter.resume()
+        }
+    }
+
+    /// Returns once ``expire()`` has been called, or when the task is
+    /// cancelled.
+    private func wait() async {
+        let id = lock.withLock {
+            nextID += 1
+            return nextID
+        }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                let resumeNow = lock.withLock { () -> Bool in
+                    if isExpired || Task.isCancelled { return true }
+                    waiters[id] = continuation
+                    return false
+                }
+                if resumeNow {
+                    continuation.resume()
+                }
+            }
+        } onCancel: {
+            let waiter = lock.withLock { waiters.removeValue(forKey: id) }
+            waiter?.resume()
+        }
+    }
+}
+
+/// Holds the server's send barriers of the given kinds when they run, as a
+/// slow transport would, until the test releases them; others take effect
+/// at once.
+final class HeldBarriers: @unchecked Sendable {
+    // @unchecked Sendable: all state is guarded by `lock`.
+
+    private let lock = NSLock()
+    private let kinds: Set<SendBarrierKind>
+    private var held: [@Sendable () -> Void] = []
+
+    init(holding kinds: Set<SendBarrierKind> = [.closing]) {
+        self.kinds = kinds
+    }
+
+    /// Installs the hold on `server`.
+    func install(on server: HelperXPCServer) {
+        server.onSendBarrier { [self] kind, run in
+            intercept(kind, run)
+        }
+    }
+
+    private func intercept(_ kind: SendBarrierKind, _ run: @escaping @Sendable () -> Void) {
+        let isHeld = lock.withLock { () -> Bool in
+            guard kinds.contains(kind) else { return false }
+            held.append(run)
+            return true
+        }
+        if !isHeld {
+            run()
+        }
+    }
+
+    /// Barriers that have run and are being held.
+    var heldCount: Int {
+        lock.withLock { held.count }
+    }
+
+    /// Lets every held barrier take effect, and stops holding new ones.
+    func releaseAll() {
+        let released = lock.withLock { () -> [@Sendable () -> Void] in
+            defer { held = [] }
+            return held
+        }
+        for run in released {
+            run()
+        }
+    }
+}
+
+/// Set once, read by the test: whether an asynchronous step has finished.
+final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isSet = false
+
+    var value: Bool {
+        lock.withLock { isSet }
+    }
+
+    func set() {
+        lock.withLock { isSet = true }
     }
 }
