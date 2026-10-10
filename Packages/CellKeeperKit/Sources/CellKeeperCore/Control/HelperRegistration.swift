@@ -73,7 +73,9 @@ public protocol HelperRegistration: Sendable {
     /// helper confirmed that it restored defaults, or for a forced removal
     /// when nothing confirmed the restore because the transport failed or
     /// no reply arrived in time, at any stage (connecting, `hello`, the
-    /// restore). An explicit reply other than `ok` is never overridden: the
-    /// helper is then not unregistered, forced or not.
+    /// restore). An explicit reply to the restore request other than `ok`
+    /// is never overridden: the helper is then not unregistered, forced or
+    /// not. (A `hello` refused with a status does not count: the restore
+    /// request is still sent, and may confirm.)
     func unregister() async throws
 }

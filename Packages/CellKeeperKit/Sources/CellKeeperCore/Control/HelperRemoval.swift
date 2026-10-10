@@ -16,8 +16,8 @@ import os
 /// 3. Only after `ok`: unregister, then read the registration again. The
 ///    helper counts as removed only if it is then `notRegistered` or
 ///    `notFound`.
-/// 4. An explicit reply other than `ok` is never overridden, not even with
-///    force. `hardwareError` means the helper's restore did not read back
+/// 4. An explicit reply to `restoreDefaultsAndExit` other than `ok` is
+///    never overridden, not even with force. `hardwareError` means the helper's restore did not read back
 ///    clean and the helper keeps retrying it, so unregistering would stop
 ///    the one process that is restoring; `notIntroduced` and `rateLimited`
 ///    mean it refused the request.
