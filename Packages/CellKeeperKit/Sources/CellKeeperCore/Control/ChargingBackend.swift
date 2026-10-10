@@ -466,8 +466,9 @@ public protocol ChargingBackend: Sendable {
     /// or threw (``BackendError/changedOutside(expected:found:)``): what
     /// identifies it, so the same change read again is recognised and a new
     /// one is never hidden behind the same message. Empty if the backend
-    /// keeps no such records. Returns what is already known, without new
-    /// I/O. Default: empty.
+    /// keeps no such records; the controller then treats all its outside
+    /// changes as one until a read reports no fault. Returns what is
+    /// already known, without new I/O. Default: empty.
     func outsideChangeEvidence() async -> Set<RecordedChange>
 
     /// How the mode last reported by ``currentMode()`` came about, when the
