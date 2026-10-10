@@ -187,25 +187,47 @@ struct CommandLineAdapterTests {
         // cancellation and the deadline stop a tool the same way: SIGTERM,
         // then SIGKILL after the grace period.
         let marker = FileManager.default.temporaryDirectory.appendingPathComponent("cellkeeper-test-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: marker) }
+        defer {
+            try? FileManager.default.removeItem(at: marker)
+            try? FileManager.default.removeItem(at: marker.appendingPathExtension("tmp"))
+        }
         let task = Task {
-            // An ignored signal stays ignored across exec, so sleep ignores SIGTERM.
-            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "trap '' TERM; touch \"$0\"; exec /bin/sleep 30", marker.path], timeout: 600)
+            // An ignored signal stays ignored across exec, so sleep ignores
+            // SIGTERM; exec keeps the process ID the marker records.
+            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "trap '' TERM; echo $$ > \"$0.tmp\"; mv \"$0.tmp\" \"$0\"; exec /bin/sleep 30", marker.path], timeout: 600)
         }
         for _ in 0..<60_000 where !FileManager.default.fileExists(atPath: marker.path) {
             try? await Task.sleep(for: .milliseconds(1))
         }
-        #expect(FileManager.default.fileExists(atPath: marker.path))
+        let recorded = (try? String(contentsOf: marker, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let pid = recorded.flatMap({ pid_t($0) }), pid > 0 else {
+            Issue.record("the tool did not record its process ID")
+            task.cancel()
+            return
+        }
         let started = Date()
         task.cancel()
         await #expect(throws: CancellationError.self) {
             try await task.value
         }
         let elapsed = Date().timeIntervalSince(started)
-        // Not before the grace period: SIGTERM did not stop it. Well before
-        // the tool's own 30 s: SIGKILL did.
+        // Not before the grace period: SIGTERM did not stop it.
         #expect(elapsed >= ProcessRunner.stopGracePeriod)
         #expect(elapsed < 20)
+        // And it is gone: SIGKILL stopped it, not the runner giving up.
+        // (Allow a moment for the exited process to be reaped.)
+        var isGone = false
+        for _ in 0..<5_000 {
+            if kill(pid, 0) == -1, errno == ESRCH {
+                isGone = true
+                break
+            }
+            try? await Task.sleep(for: .milliseconds(1))
+        }
+        #expect(isGone)
+        if !isGone {
+            kill(pid, SIGKILL)
+        }
     }
 
     @Test("A missing tool is a launch failure")
