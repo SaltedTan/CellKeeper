@@ -68,6 +68,22 @@ struct HelperDaemonDeadlineTests {
         #expect(!ran.value)
     }
 
+    @Test("A result that arrives after its deadline is not used")
+    func lateResult() async {
+        let clock = ManualClock()
+        let deadline = clock.uptime() + 1
+        // Hold the timer back (suspended, not blocking a thread), so that
+        // only the operation can end the wait.
+        let timerStart = Gate()
+        clock.holdNextSleep(until: timerStart)
+        let value = await withDeadline(at: deadline, on: clock) { () -> Int in
+            clock.advance(by: 2)
+            return 1
+        }
+        #expect(value == nil)
+        timerStart.open()
+    }
+
     @Test("An operation that finishes in time returns its result and cancels the timer")
     func inTime() async {
         let clock = ManualClock()
@@ -75,36 +91,5 @@ struct HelperDaemonDeadlineTests {
         #expect(value == 42)
         let cancelled = await eventually { clock.waits.isEmpty }
         #expect(cancelled)
-    }
-}
-
-/// An operation's end, opened by the test.
-final class Gate: @unchecked Sendable {
-    private let lock = NSLock()
-    private var isOpen = false
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-
-    func wait() async {
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let openNow = lock.withLock { () -> Bool in
-                if isOpen { return true }
-                waiters.append(continuation)
-                return false
-            }
-            if openNow {
-                continuation.resume()
-            }
-        }
-    }
-
-    func open() {
-        let waiting = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
-            isOpen = true
-            defer { waiters = [] }
-            return waiters
-        }
-        for waiter in waiting {
-            waiter.resume()
-        }
     }
 }

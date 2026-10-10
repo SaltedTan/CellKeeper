@@ -4,9 +4,10 @@ import Foundation
 import Testing
 
 /// Calls that do not return in time: a hung call to the control, a slow log
-/// or history file. Each test holds one thread of the cooperative pool on
-/// purpose, as such a call would, so they run one at a time and a small
-/// pool (CI machines have three cores) never runs out of threads.
+/// or history file. The stalls block threads outside Swift's cooperative
+/// pool (the engine's queue, the log writer's queue), never a pool thread,
+/// so they cannot starve other suites (see `HelperDaemonThreadTests`). The
+/// tests still run one at a time, to keep their choreography simple.
 @Suite("Helper daemon: calls that do not return in time", .serialized)
 struct HelperDaemonStuckCallTests {
     @Test("A startup notice the log cannot write does not keep SIGTERM from shutting the daemon down (NoFrontend)")
@@ -64,21 +65,6 @@ struct HelperDaemonStuckCallTests {
         #expect(acknowledged)
         control.release()
         #expect(await h.terminate(running) == 0)
-    }
-
-    @Test("A result that arrives after its deadline is not used")
-    func lateResult() async {
-        let clock = ManualClock()
-        let deadline = clock.uptime() + 1
-        // Hold the timer back, so that only the operation can end the wait.
-        let timerStart = DispatchSemaphore(value: 0)
-        clock.beforeNextSleep { _ = timerStart.wait(timeout: .now() + 10) }
-        let value = await withDeadline(at: deadline, on: clock) { () -> Int in
-            clock.advance(by: 2)
-            return 1
-        }
-        #expect(value == nil)
-        timerStart.signal()
     }
 
     @Test("SIGTERM while the engine is still starting: the frontend never starts")

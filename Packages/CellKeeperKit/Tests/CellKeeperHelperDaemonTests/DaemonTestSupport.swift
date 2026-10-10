@@ -21,10 +21,17 @@ final class ManualClock: HelperDaemonClock, @unchecked Sendable {
     /// Waits cancelled before they were registered.
     private var cancelled: Set<Int> = []
     private var beforeSleep: (@Sendable () -> Void)?
+    private var sleepGate: Gate?
 
     /// Runs `hook` at the start of the next wait, before it is registered.
     func beforeNextSleep(_ hook: @escaping @Sendable () -> Void) {
         lock.withLock { beforeSleep = hook }
+    }
+
+    /// Makes the next wait start only once `gate` opens, as a task scheduled
+    /// late would. The waiting task is suspended, not blocked.
+    func holdNextSleep(until gate: Gate) {
+        lock.withLock { sleepGate = gate }
     }
 
     func uptime() -> TimeInterval {
@@ -35,24 +42,28 @@ final class ManualClock: HelperDaemonClock, @unchecked Sendable {
     }
 
     func sleep(until deadline: TimeInterval) async {
-        runHook()
+        await runHooks()
         await register(deadline)
     }
 
-    /// Runs the hook first, as if this task had started late, and only then
+    /// Runs the hooks first, as if this task had started late, and only then
     /// computes the deadline: a caller that captured a duration earlier
     /// loses nothing to the delay and ends late.
     func sleep(for seconds: TimeInterval) async {
-        runHook()
+        await runHooks()
         await register(uptime() + seconds)
     }
 
-    private func runHook() {
-        let hook = lock.withLock { () -> (@Sendable () -> Void)? in
-            defer { beforeSleep = nil }
-            return beforeSleep
+    private func runHooks() async {
+        let (hook, gate) = lock.withLock { () -> ((@Sendable () -> Void)?, Gate?) in
+            defer {
+                beforeSleep = nil
+                sleepGate = nil
+            }
+            return (beforeSleep, sleepGate)
         }
         hook?()
+        await gate?.wait()
     }
 
     private func register(_ deadline: TimeInterval) async {
@@ -569,5 +580,36 @@ struct DaemonHarness {
 extension Array where Element == TimeInterval {
     func contains(_ range: ClosedRange<TimeInterval>) -> Bool {
         contains { range.contains($0) }
+    }
+}
+
+/// An operation's end, opened by the test.
+final class Gate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            let openNow = lock.withLock { () -> Bool in
+                if isOpen { return true }
+                waiters.append(continuation)
+                return false
+            }
+            if openNow {
+                continuation.resume()
+            }
+        }
+    }
+
+    func open() {
+        let waiting = lock.withLock { () -> [CheckedContinuation<Void, Never>] in
+            isOpen = true
+            defer { waiters = [] }
+            return waiters
+        }
+        for waiter in waiting {
+            waiter.resume()
+        }
     }
 }

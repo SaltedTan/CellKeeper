@@ -113,28 +113,30 @@ struct ActivationHistoryStoreTests {
     }
 
     @Test("A FIFO is refused at once, without waiting for a writer")
-    func fifo() throws {
-        try withStore { store, url in
-            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            #expect(mkfifo(url.path, 0o600) == 0)
-            // On a thread of its own, so that a load stuck in open(2) shows
-            // as a failure instead of hanging the tests.
-            let result = LoadResult()
-            let done = DispatchSemaphore(value: 0)
-            Thread.detachNewThread {
-                result.set(store.load(boot: .testBoot, now: 5_000))
-                done.signal()
-            }
-            let finished = done.wait(timeout: .now() + 5) == .success
-            if !finished {
-                // Give the stuck reader a writer, so its thread can end.
-                let writer = open(url.path, O_WRONLY | O_NONBLOCK)
-                if writer >= 0 { close(writer) }
-                _ = done.wait(timeout: .now() + 5)
-            }
-            #expect(finished)
-            #expect(result.value == .discarded(.notARegularFile))
+    func fifo() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CellKeeperHelperDaemonTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("Helper/activation-history.json")
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        #expect(mkfifo(url.path, 0o600) == 0)
+        let store = FileActivationHistoryStore(url: url)
+
+        // On a thread of its own, outside Swift's cooperative pool, so that a
+        // load stuck in open(2) shows as a failure instead of holding a pool
+        // thread or hanging the tests. The test only polls, suspended.
+        let result = LoadResult()
+        Thread.detachNewThread {
+            result.set(store.load(boot: .testBoot, now: 5_000))
         }
+        let finished = await eventually { result.value != nil }
+        if !finished {
+            // Give the stuck reader a writer, so its thread can end.
+            let writer = open(url.path, O_WRONLY | O_NONBLOCK)
+            if writer >= 0 { close(writer) }
+        }
+        #expect(finished)
+        #expect(result.value == .discarded(.notARegularFile))
     }
 
     @Test("Saving where the daemon may not write throws, and loads nothing", .enabled(if: geteuid() != 0, "root may write anywhere"))
@@ -172,21 +174,24 @@ struct ActivationHistoryStoreTests {
     }
 
     @Test("This boot's identifier is kern.bootsessionuuid, a UUID, and stable")
-    func bootIdentifier() throws {
+    func bootIdentifier() async throws {
         let boot = try #require(BootIdentifier.current())
         #expect(BootIdentifier.current() == boot)
-        // The same value the sysctl tool reports (read-only).
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/sysctl")
-        process.arguments = ["-n", "kern.bootsessionuuid"]
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardInput = FileHandle.nullDevice
-        try process.run()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        let reported = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-        #expect(BootIdentifier(sysctlValue: reported) == boot)
+        // The same value the sysctl tool reports (read-only). Run and waited
+        // for on a thread outside Swift's cooperative pool.
+        let reported = await HelperDaemon.blocking { () -> String? in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/sbin/sysctl")
+            process.arguments = ["-n", "kern.bootsessionuuid"]
+            let output = Pipe()
+            process.standardOutput = output
+            process.standardInput = FileHandle.nullDevice
+            guard (try? process.run()) != nil else { return nil }
+            let data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
+            return String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        #expect(reported.flatMap(BootIdentifier.init(sysctlValue:)) == boot)
     }
 
     @Test("Only a UUID is a boot identifier", arguments: ["", "not a UUID", "1791289092", "{ sec = 1791289092, usec = 905426 }"])

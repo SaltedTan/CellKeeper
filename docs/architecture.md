@@ -1111,6 +1111,12 @@ Other rules:
   macOS. That origin is observed (it matched `kern.boottime` to the
   millisecond on macOS 27, and exceeded sleep-excluding uptime by the time
   slept), not documented, so persisted values are kept only within a boot.
+- **Its own thread (D62).** The engine runs on a serial dispatch queue of
+  its own (a custom actor executor), not on Swift's cooperative thread
+  pool. Its calls into the control are synchronous; a call that blocks
+  holds that queue's thread, never one of the pool's few threads (as many
+  as there are cores), which every other task needs, the host's shutdown
+  and sleep handling and other clients' transport included.
 
 Deliberate deviations from research note 06:
 
@@ -1294,11 +1300,12 @@ Limitations:
   signing requirement", subsystem `com.apple.xpc`, category `connection`).
 - Calls into the control are not bounded in time on the helper's side: a
   stalled control stalls the engine for every client, whose calls then
-  time out, and, being synchronous, holds one of Swift's cooperative
-  threads while it lasts. The daemon stops waiting for such a call where it
-  must (see "Helper daemon"), but cannot interrupt it; a real control must
-  bound its calls. (The tests that stall the engine on purpose run one at
-  a time for this reason.)
+  time out. Being synchronous, it blocks the engine's own dispatch queue
+  while it lasts, not a thread of Swift's cooperative pool (D62). The
+  daemon stops waiting for such a call where it must (see "Helper
+  daemon"), but cannot interrupt it; a real control must bound its calls.
+  (The tests that stall the engine on purpose run one at a time, to keep
+  their timing simple.)
 
 ### Helper daemon (`CellKeeperHelperDaemon`, `CellKeeperHelper`)
 
@@ -1340,12 +1347,16 @@ refuses to start, the daemon serves nobody and shuts down as below.
 
 **A responsive coordinator.** The daemon's actor only coordinates, and
 nothing that can block runs on it: every log line, the frontend's
-included, is only enqueued for the logging task (`DaemonEventQueue`, which
-the frontend receives as its log); the activation history is saved on that
-task; and the frontend's `start` and `stop`, the sleep registration and
-its removal, and the signal source's removal run on tasks of their own. So
-a log, a disk or a frontend that blocks cannot keep SIGTERM from beginning
-the shutdown. Every wait carries an absolute deadline on the daemon's
+included, is only enqueued for the log writer (`DaemonEventQueue`, which
+the frontend receives as its log); the activation history is saved by the
+same writer; and the frontend's `start` and `stop`, the sleep registration
+and its removal, and the signal source's removal run off the actor. Nor
+does anything that can block run on Swift's cooperative thread pool, which
+the coordination needs (D62): the log writer (`DaemonEventWriter`) runs on
+a dispatch queue of its own, the blocking seam calls on another
+(`HelperDaemon.blocking`), and the engine on its own. So a log, a disk, a
+frontend or a control that blocks cannot keep SIGTERM from beginning the
+shutdown. Every wait carries an absolute deadline on the daemon's
 clock and works out what is left when it actually starts: a timer that
 starts late shortens its wait instead of postponing the deadline, a
 deadline already passed is not waited for, and a result that arrives
@@ -1707,3 +1718,4 @@ The helper daemon logs under its own subsystem,
 | D59 | Every shutdown (SIGTERM, a client's `restoreDefaultsAndExit`, a seam that cannot start) runs one procedure within one absolute deadline 8 s after it began: stop the frontend and have it confirm that everything it accepted is answered and every session invalidated; terminate and retry; write the log; then the final bounded `isSafeToExit` check, made only after that confirmation; only then commit the exit status, 0 if the check passed and 75 (`EX_TEMPFAIL`) otherwise. Retries and SIGTERM handling stay live until the commit. The daemon's actor only coordinates: nothing that can block (log writes, history saves, frontend calls, sleep and signal registration) runs on it, and every wait carries an absolute deadline that it recomputes when it starts (reviews of PR #65) | The exit status must come from the last safety check, after everything that could still change safety: a request the frontend accepted can still make a restore owed, so an unconfirmed stop establishes nothing, and a check before the log is written can be outdated by then. launchd restarts a job that exits non-zero (`KeepAlive.SuccessfulExit = false`), and the next start restores defaults first (R2, D31); one deadline that includes logging keeps the exit ahead of SIGKILL at `ExitTimeOut` even with a stuck engine or log; a coordinator blocked by a log write cannot even begin the shutdown, and a timer that restarts its duration when it starts late postpones the deadline into launchd's margin; a clean exit after a failed start is restarted only on demand, not in a loop |
 | D60 | Sleep is acknowledged when the engine's sleep checks return or 5 s after the announcement, whichever comes first, with a fault logged at the deadline | Safety precondition 13 asks for acknowledged sleep handling in the privileged component; an unacknowledged notification only delays sleep (by up to 30 s) and the engine's leases count sleep, so holding sleep for a stuck engine would buy nothing |
 | D61 | The activation history file is keyed by the boot session UUID (`kern.bootsessionuuid`), with no fallback; it is bounded (64 KiB, 20 records), replaced by rename, opened without blocking and refused at once unless it is a regular file, discarded whole on anything unexpected, and loaded only after SIGTERM is handled (review of PR #65) | The engine's clock starts again at every boot (D35), and only a value the kernel sets once per boot identifies one: `kern.boottime` moves when the calendar time is set, which would discard valid records within a boot. A corrupt, foreign or special file must be neither trusted nor allowed to stop or delay the restore at start, and losing the history only loosens the limits for at most an hour |
+| D62 | Nothing that may block runs on Swift's cooperative thread pool: the helper engine runs on a serial dispatch queue of its own (a custom actor executor), and the daemon writes its log, saves its history and calls its blocking seams on dispatch queues of their own. Tests that stall on purpose stall on those queues (review of PR #65, after #64) | The pool has as many threads as cores (three on CI's macOS 15 image). A synchronous control call, a log write or a file write that blocks there takes one of them, and a few at once take every thread: nothing else runs, neither the daemon's shutdown and sleep handling nor, in tests, other suites in the same process, until the stalls end. A dispatch queue's thread blocks alone. `.serialized` only orders tests within one suite, so it could not prevent that |

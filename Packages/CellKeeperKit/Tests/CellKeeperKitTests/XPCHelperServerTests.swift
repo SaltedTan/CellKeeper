@@ -288,11 +288,11 @@ struct XPCHelperServerTests {
 }
 
 /// Tests whose engine stalls inside the control's read-back. The control is
-/// synchronous, so each stall blocks a thread of Swift's cooperative pool
-/// until the test releases it. They run one at a time: on a runner with few
-/// cores (three on GitHub's macOS 15 image), several stalls at once could
-/// take every thread, and nothing would be left to run the code that
-/// releases them.
+/// synchronous, so each stall blocks the thread of the engine's own dispatch
+/// queue until the test releases it, never a thread of Swift's cooperative
+/// pool (the engine does not run there; see `HelperEngineExecutorTests`), so
+/// other suites keep running. The tests still run one at a time, to keep
+/// their timing simple.
 @Suite("Helper NSXPC server with a stalled engine", .serialized)
 struct XPCStalledEngineTests {
     @Test("A client that disconnects while a request is blocked: that request finishes, nothing queued behind it runs, and the session ends right after")

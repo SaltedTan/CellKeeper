@@ -88,11 +88,14 @@ public struct HelperDaemonEnvironment: Sendable {
 /// never from inside the engine's event sink.
 ///
 /// The daemon's actor coordinates and must stay responsive, so nothing that
-/// can block runs on it: log lines are only enqueued (``DaemonEventQueue``),
-/// and the frontend, the sleep notifications and the signal source are
-/// called from tasks of their own. Every wait is bounded by an absolute
-/// deadline, recomputed when the wait actually starts, so a late start
-/// shortens a wait instead of postponing its end.
+/// can block runs on it: log lines are only enqueued (``DaemonEventQueue``).
+/// Nothing that can block runs on Swift's cooperative thread pool either,
+/// which the coordination needs: the log is written and the activation
+/// history saved on a dispatch queue of their own (`DaemonEventWriter`),
+/// the frontend's start and the sleep and signal registrations run on
+/// another (``blocking(_:)``), and the engine runs on its own. Every wait is
+/// bounded by an absolute deadline, recomputed when the wait actually
+/// starts, so a late start shortens a wait instead of postponing its end.
 ///
 /// Sleep: on will-sleep the engine runs its sleep checks and only then is
 /// sleep acknowledged, or after ``sleepAcknowledgementTimeout`` at the
@@ -218,7 +221,9 @@ public actor HelperDaemon {
         // once this has returned.
         let frontend = environment.frontend
         let engine = engine
-        let start = Task.detached { try frontend.start(serving: engine, log: queue) }
+        let start = Task {
+            try await Self.blocking { Result { try frontend.start(serving: engine, log: queue) } }.get()
+        }
         frontendStart = start
         if case .failure(let error) = await start.result {
             queue.log(.fault, .xpc, "The frontend could not start (\(error)); exiting without serving anyone.")
@@ -251,50 +256,32 @@ public actor HelperDaemon {
     }
 
     /// Logs the engine's events and saves the activation history, in
-    /// order, on a task of its own.
+    /// order, on a dispatch queue of their own.
     private func startEventPump() {
+        let writer = DaemonEventWriter(
+            log: environment.log,
+            engine: engine,
+            store: environment.historyStore,
+            boot: environment.bootIdentifier
+        )
         let items = queue.items
-        let log = environment.log
-        let engine = engine
-        let store = environment.historyStore
-        let boot = environment.bootIdentifier
         Task {
-            await Self.pumpEvents(items, log: log, engine: engine, store: store, boot: boot)
+            await writer.pump(items)
         }
     }
 
-    private static func pumpEvents(
-        _ items: AsyncStream<DaemonEventQueue.Item>,
-        log: any HelperDaemonLog,
-        engine: HelperEngine,
-        store: any ActivationHistoryStore,
-        boot: BootIdentifier?
-    ) async {
-        var isFailingToSave = false
-        for await item in items {
-            switch item {
-            case .log(let level, let category, let message):
-                log.write(level, category, message)
-            case .flush(let waiter):
-                waiter.resume()
-            case .event(let event):
-                let placement = event.logPlacement
-                log.write(placement.level, placement.category, "engine: \(event)")
-                guard case .activationRecorded = event, let boot else { continue }
-                let records = await engine.activationHistory
-                do {
-                    try store.save(records, boot: boot)
-                    if isFailingToSave {
-                        isFailingToSave = false
-                        log.write(.notice, .safety, "The activation history is being saved again.")
-                    }
-                } catch {
-                    if !isFailingToSave {
-                        isFailingToSave = true
-                        log.write(.fault, .safety, "Cannot save the activation history (\(error)); carrying on without it, so a relaunch in this boot would not know these activations.")
-                    }
-                }
-            }
+    /// Where the daemon calls seams that may block (the frontend's start,
+    /// the sleep and signal registrations and their removal): threads
+    /// outside Swift's cooperative pool, so a blocked call cannot take a
+    /// thread the daemon's coordination needs. Concurrent, so one blocked
+    /// call does not hold up the next.
+    private static let blockingQueue = DispatchQueue(label: "io.github.saltedtan.CellKeeper.Helper.seams", attributes: .concurrent)
+
+    /// Runs `work`, which may block, on ``blockingQueue`` and returns its
+    /// result; the calling task is suspended meanwhile, not blocked.
+    static func blocking<Value: Sendable>(_ work: @escaping @Sendable () -> Value) async -> Value {
+        await withCheckedContinuation { continuation in
+            blockingQueue.async { continuation.resume(returning: work()) }
         }
     }
 
@@ -319,7 +306,7 @@ public actor HelperDaemon {
             }
         }
         let notifications = environment.sleepNotifications
-        let result = await Task.detached { Result { try notifications.start(handler) } }.value
+        let result = await Self.blocking { Result { try notifications.start(handler) } }
         guard case .success = result else {
             continuation.finish()
             return result
@@ -327,7 +314,7 @@ public actor HelperDaemon {
         if exitStatus != nil {
             // The exit was committed meanwhile, without this registration.
             continuation.finish()
-            await Task.detached { notifications.stop() }.value
+            await Self.blocking { notifications.stop() }
             return result
         }
         isRegisteredForSleep = true
@@ -471,10 +458,12 @@ public actor HelperDaemon {
         let notifications = environment.sleepNotifications
         let signals = environment.terminationSignals
         _ = await withDeadline(at: deadline, on: clock) {
-            if isRegisteredForSleep {
-                notifications.stop()
+            await Self.blocking {
+                if isRegisteredForSleep {
+                    notifications.stop()
+                }
+                signals.stop()
             }
-            signals.stop()
         }
         _ = await withDeadline(at: min(clock.uptime() + Self.logFlushTimeout, deadline), on: clock) { await queue.flush() }
         queue.finish()
@@ -624,6 +613,58 @@ final class SleepAcknowledgement: @unchecked Sendable {
         }
         if isAcknowledged {
             timer.cancel()
+        }
+    }
+}
+
+/// Writes the daemon's log and saves the activation history, on a serial
+/// dispatch queue of its own: writing a log line or a file may block, and
+/// must never hold a thread of Swift's cooperative pool.
+actor DaemonEventWriter {
+    private let executor = DispatchSerialQueue(label: "io.github.saltedtan.CellKeeper.Helper.log")
+    private let log: any HelperDaemonLog
+    private let engine: HelperEngine
+    private let store: any ActivationHistoryStore
+    private let boot: BootIdentifier?
+
+    nonisolated var unownedExecutor: UnownedSerialExecutor {
+        executor.asUnownedSerialExecutor()
+    }
+
+    init(log: any HelperDaemonLog, engine: HelperEngine, store: any ActivationHistoryStore, boot: BootIdentifier?) {
+        self.log = log
+        self.engine = engine
+        self.store = store
+        self.boot = boot
+    }
+
+    /// Handles every item, in order, until the queue finishes.
+    func pump(_ items: AsyncStream<DaemonEventQueue.Item>) async {
+        var isFailingToSave = false
+        for await item in items {
+            switch item {
+            case .log(let level, let category, let message):
+                log.write(level, category, message)
+            case .flush(let waiter):
+                waiter.resume()
+            case .event(let event):
+                let placement = event.logPlacement
+                log.write(placement.level, placement.category, "engine: \(event)")
+                guard case .activationRecorded = event, let boot else { continue }
+                let records = await engine.activationHistory
+                do {
+                    try store.save(records, boot: boot)
+                    if isFailingToSave {
+                        isFailingToSave = false
+                        log.write(.notice, .safety, "The activation history is being saved again.")
+                    }
+                } catch {
+                    if !isFailingToSave {
+                        isFailingToSave = true
+                        log.write(.fault, .safety, "Cannot save the activation history (\(error)); carrying on without it, so a relaunch in this boot would not know these activations.")
+                    }
+                }
+            }
         }
     }
 }
