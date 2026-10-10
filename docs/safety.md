@@ -262,9 +262,15 @@ app. What is already in place, and tested against the simulated control:
   ad-hoc build cannot build these requirements at all, and every
   requirement is compiled before use. Process IDs are never trusted. Each
   connection's requests reach the engine in arrival order, one at a time,
-  and a session revoked for flooding the helper loses its connection.
-  Tests run both sides in the test process over an anonymous listener, with
-  the test binary's own code signature required on both sides.
+  and a session revoked for flooding the helper loses its connection. A
+  client can make the helper do only bounded work: at most 32 requests may
+  wait on a connection (one more closes it), at most 8 clients are served,
+  and a closed connection runs nothing more while its session, and with it
+  any restriction it held, ends at once. Tests run both sides in the test
+  process over an anonymous listener, with the test binary's own code
+  signature required on both sides. The release-only requirement clauses
+  (Developer ID certificate, no debugger entitlement) wait for signed
+  builds (phase 4b).
 - **6, debounce and dwell:** the policy's debounce and minimum pause apply to
   the helper backend, as to any backend that switches charging itself.
 - **7, external-writer detection (in part):** the helper records why each

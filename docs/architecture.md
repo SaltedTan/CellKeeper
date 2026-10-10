@@ -612,10 +612,14 @@ the helper's code signature, and it throws `interrupted`, `invalidated`,
 `requirementNotMet`, `timedOut` or `malformedReply` when the transport fails
 (see "Helper transport" below). Any of them leaves that connection
 unusable, and the backend connects again, as for any transport failure. A
-revoked session's connection is closed by the server after the reply to
-the request that caused it (`rateLimited`), so over NSXPC that request
-returns and the next one throws. The app does not use the XPC transport
-until the daemon can be registered (phase 4b).
+revoked session's connection is closed by the server once the reply to
+the request that caused it (`rateLimited`) has been sent, so over NSXPC
+that request normally returns. A request sent after it throws once the
+client has seen the connection close; one sent before then may instead
+reach a new session that has not said hello, which refuses it
+(`notIntroduced`, except a restore). Either way the backend reconnects.
+The app does not use the XPC transport until the daemon can be registered
+(phase 4b).
 
 | Mode | Helper control | Lease |
 |---|---|---|
@@ -1153,30 +1157,52 @@ process.
   revokes. It sets the client requirement on the listener
   (`setConnectionCodeSigningRequirement`) before resuming it, and `start()`
   starts the engine, which restores defaults first, before the listener
-  accepts anything. Each accepted connection gets its own session.
+  accepts anything. Each accepted connection gets its own session. A
+  client can make the helper do only bounded work, and cannot delay the
+  release of what it holds:
   - *Order.* NSXPC calls the exported object on the connection's own
     queue, which only appends the request to that connection's FIFO (an
     `AsyncStream` with one consumer task). The consumer opens the session,
     then runs the requests strictly in arrival order, one at a time, and
     sends each reply after the engine has returned. Connections run
     concurrently; the engine serialises them.
-  - *End of a connection.* When NSXPC invalidates a connection (the client
-    quit, crashed or invalidated it), the request in progress finishes,
-    requests not yet started are dropped, and the session is invalidated,
-    which clears what it held.
+  - *Bounds.* At most 32 requests may wait behind the one in progress
+    (`maximumQueuedRequests`; CellKeeper waits for each reply, and the
+    engine's budget allows 10 at once). One more is a protocol violation:
+    the server closes the connection, never drops a request silently. At
+    most 8 clients are served at once (`maximumConnections`); one more is
+    refused.
+  - *End of a connection.* When a connection closes for any reason (the
+    client quit, crashed or invalidated it, a protocol violation, a
+    revocation, a stop), the session is invalidated at once, which clears
+    what it held. The request in progress finishes, since the engine runs
+    one call at a time, and nothing queued behind it runs.
   - *Revocation.* The engine's `sessionRevoked` event, delivered before the
     revoking call returns, marks the session. After that request the server
     invalidates the connection behind a send barrier, so the reply
-    (`rateLimited`) goes out first; requests after it never run.
-  - *Stop.* `stop()` invalidates the listener and every connection, and
-    returns when their sessions are invalidated. Ticks, sleep and wake,
-    SIGTERM and exit stay with the host, on `server.engine`.
+    (`rateLimited`) is sent first; requests behind it never run.
+  - *Lifecycle.* Resuming and invalidating the listener, and configuring,
+    resuming and publishing each accepted connection, all happen under one
+    lock together with the decision to do them, so `start()` cannot resume
+    a listener `stop()` has invalidated, and a connection accepted while
+    the server stops is either closed by the stop or refused. A server
+    stopped before it ever listened resumes its listener once, already
+    stopped, so that clients waiting to connect are refused rather than
+    left waiting; it then invalidates it. `stop()` returns when every
+    session is invalidated. Ticks, sleep and wake, SIGTERM and exit stay
+    with the host, on `server.engine`.
+  - *Audit.* The host gets each accepted connection (its session, process
+    ID and effective user ID), each refusal and each close with its reason,
+    asynchronously and in order on a queue of its own. Process and user IDs
+    are for the log only, never for a decision (note 04, §2.3).
 - **Client** (`HelperXPCClient`, the app's side). It connects to the
   daemon's Mach service with `.privileged`, or to an endpoint in tests, and
   sets the helper requirement (`setCodeSigningRequirement`) before
   `resume()`. Each call waits at most its timeout (10 s by default), and
   exactly one outcome is delivered per call: the reply, NSXPC's error, or
-  the timeout, whichever claims the call first. Any failure (interrupted,
+  the timeout, whichever claims the call first. (Tests inject the timer, so
+  a timeout fires when the test says, after it has seen the helper stall,
+  and never during connection setup.) Any failure (interrupted,
   invalidated, requirement not met, timed out, unreadable reply) makes the
   client unusable before the caller resumes: it records the failure,
   invalidates the connection and fails the calls in flight, and every later
@@ -1198,18 +1224,26 @@ process.
   limited to the characters of bundle identifiers, so they cannot change
   the requirement. An ad-hoc or unsigned build has no team and cannot build
   either requirement; the daemon must then not listen (note 04, §2.4). The
-  peer's process ID is never used (note 04, §2.3).
+  peer's process ID is never used (note 04, §2.3). The release-only
+  clauses of note 04 §2.4 (Developer ID certificate fields, no
+  `get-task-allow`) are not added yet: they can only be validated against
+  signed builds, in phase 4b.
 - **Tests.** The tests serve an engine on an anonymous listener in the test
   process, with the test process's own designated requirement on both
   sides (`SecCodeCopyDesignatedRequirement`; for the ad-hoc signed
   `swift test` host it names the exact build by its cdhash), so NSXPC checks
-  a real code signature on every connection. They cover every request
-  round-tripping with the in-process transport's replies, requirements
-  that cannot match on either side, a stand-in helper that replies with a
-  status this version does not know, arrival order under a burst of 300
-  requests, revocation, disconnect, stop, a timeout against a stalled
-  engine, and `HelperChargingBackend` reconnecting after the server drops
-  its connection.
+  a real code signature on every connection. Connections get a generous
+  30 s for setup, and a refusal is never accepted as a timeout. The tests
+  cover every request round-tripping with the in-process transport's
+  replies; requirements that cannot match on either side; a stand-in
+  helper that replies with a status this version does not know; arrival
+  order over 300 pipelined requests; a burst across the revocation boundary
+  and requests sent at the instant of revocation; disconnect, also while a
+  request is blocked in the engine; the queue bound; the connection limit;
+  a timeout against a stalled engine; start and stop racing; connections
+  arriving while the server stops; the audit events; and
+  `HelperChargingBackend` reconnecting after the server drops its
+  connection.
 
 Limitations:
 
@@ -1222,11 +1256,14 @@ Limitations:
   the client noticing may reach the helper on a new connection, because
   NSXPC reconnects by itself. That session has not said hello, so the
   helper refuses everything but a restore, which only moves toward safety;
-  the client closes itself as soon as it notices.
+  the client closes itself as soon as it notices. A send barrier
+  guarantees that a reply was sent before the connection closed, not that
+  the client received it.
 - A call is bounded by its timeout, but not cancelled with its task.
-- Connections the listener refuses are not reported to the host (NSXPC
-  drops them before the delegate sees them); accepted ones appear as
-  `sessionOpened`.
+- Clients that fail the listener's requirement never reach the server, so
+  the host cannot log them. The XPC runtime logs each one in the helper's
+  process (observed on macOS 27: "Dropping check-in message due to code
+  signing requirement", subsystem `com.apple.xpc`, category `connection`).
 - Calls into the control are not bounded in time on the helper's side: a
   stalled control stalls the engine for every client, whose calls then
   time out. The daemon must bound them.
@@ -1410,3 +1447,6 @@ decisions.
 | D53 | After any transport failure (interruption, invalidation, unmet requirement, timeout, unreadable reply) the XPC client is unusable: it invalidates its connection before the caller resumes, fails the calls in flight, and every later call throws; the backend connects again with a new client and reads afresh | NSXPC would otherwise reconnect an interrupted connection to a new session by itself, and a timed-out call's late reply must never be delivered. A fresh connection keeps the helper's state the only source of truth (D46) |
 | D54 | Every helper call times out, after 10 s by default. A timeout is a transport failure: the connection is invalidated, so the helper ends the session and clears what it held | A hung helper must not hang the app's controller (safety precondition 13). The engine answers in milliseconds, so 10 s only fires on a stuck helper, and ending the session moves toward the safe state |
 | D55 | A helper reply with a status this version does not know is an unreadable reply, a transport failure, and is never mapped to a status | A guess could read a refusal as `ok`. Failing the connection makes the backend read the state afresh, and a helper that keeps sending it is unavailable |
+| D56 | A client can make the helper do only bounded work: at most 32 requests wait behind the one in progress on a connection, and one more closes the connection as a protocol violation; at most 8 connections are served. A closed connection runs nothing more and its session is invalidated at once (after review, 2026-10-10) | The engine's request budget is judged only when a request runs, so it cannot bound what waits; a flooding client could otherwise pile up work that delays the end of its own session, and with it the release of its restriction. A silent drop would leave a client waiting for a reply that never comes |
+| D57 | Every transition that touches the listener or a connection (resume, invalidate, configure, publish) is made under one lock with the decision to make it; a server stopped before it ever listened resumes its listener, already stopped, and then invalidates it | Releasing the lock between deciding and acting let a stop be undone by a start or an acceptance in progress. A listener invalidated while still suspended left connecting clients waiting with no answer (seen in the start/stop race test) |
+| D58 | The server reports accepted connections (session, process ID, effective user ID), refusals and closes to the host asynchronously, for its log only | Research note 04 §3.7 asks for every accept and reject to be logged; process IDs are reused, so they never decide anything (§2.3). Clients that fail the requirement never reach the server; the XPC runtime logs them |
