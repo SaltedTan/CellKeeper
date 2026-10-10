@@ -3,11 +3,16 @@ import CellKeeperHelperCore
 import Foundation
 import Testing
 
-/// macOS's Charge Limit report whose first read waits until it is
-/// cancelled; later reads report 85%.
-final class FirstReadWaitsForCancellation: ChargeLimitReading, @unchecked Sendable {
+/// macOS's Charge Limit report whose first `waitingReads` reads wait until
+/// they are cancelled; later reads report 85%.
+final class ReadsWaitForCancellation: ChargeLimitReading, @unchecked Sendable {
     private let lock = NSLock()
+    private let waitingReads: Int
     private var readCount = 0
+
+    init(waitingReads: Int) {
+        self.waitingReads = waitingReads
+    }
 
     var reads: Int {
         lock.withLock { readCount }
@@ -18,11 +23,20 @@ final class FirstReadWaitsForCancellation: ChargeLimitReading, @unchecked Sendab
             readCount += 1
             return readCount
         }
-        if number == 1 {
+        if number <= waitingReads {
             try await Task.sleep(for: .seconds(3600))
         }
         return .limit(85)
     }
+}
+
+/// Waits, polling, until `condition` holds; fails the test after about 5 s.
+func eventually(_ what: String, _ condition: () async -> Bool) async {
+    for _ in 0..<5_000 {
+        if await condition() { return }
+        try? await Task.sleep(for: .milliseconds(1))
+    }
+    Issue.record("timed out waiting until \(what)")
 }
 
 @Suite("macOS's Charge Limit monitor: settled reads")
@@ -67,14 +81,14 @@ struct MacOSChargeLimitSettledReadTests {
     @Test("Another caller's cancellation does not cost a surviving caller its reading", .timeLimit(.minutes(1)))
     func survivorReadsAgain() async throws {
         let clock = TestClock()
-        let reader = FirstReadWaitsForCancellation()
+        let reader = ReadsWaitForCancellation(waitingReads: 1)
         let monitor = MacOSChargeLimitMonitor(reader: reader, now: { clock.now }, uptime: { clock.uptime })
         let cancelled = Task { await monitor.status() }
-        for _ in 0..<1_000 where reader.reads < 1 {
-            try await Task.sleep(for: .milliseconds(1))
-        }
+        await eventually("the first caller waits for the read") { await monitor.waitingCallerCount == 1 }
         let survivor = Task { await monitor.status() }
-        try await Task.sleep(for: .milliseconds(20))
+        // Both callers wait for the same read before one is cancelled.
+        await eventually("both callers wait for the same read") { await monitor.waitingCallerCount == 2 }
+        #expect(reader.reads == 1)
         cancelled.cancel()
         let cancelledStatus = await cancelled.value
         let survivorStatus = await survivor.value
@@ -84,6 +98,34 @@ struct MacOSChargeLimitSettledReadTests {
         #expect(reader.reads == 2)
         let kept = await monitor.lastStatus
         #expect(kept == survivorStatus)
+    }
+
+    @Test("Other callers' cancellations cannot hold a surviving caller up without end: after two re-reads it gets \"may be limiting\"", .timeLimit(.minutes(1)))
+    func repeatedCancellationsEnd() async {
+        let clock = TestClock()
+        let reader = ReadsWaitForCancellation(waitingReads: 100)
+        let monitor = MacOSChargeLimitMonitor(reader: reader, now: { clock.now }, uptime: { clock.uptime })
+        let survivor = Task { await monitor.status() }
+        await eventually("the survivor waits for the first read") { await monitor.waitingCallerCount == 1 }
+        for attempt in 1...(MacOSChargeLimitMonitor.maximumRereads + 1) {
+            let canceller = Task { await monitor.status() }
+            await eventually("caller \(attempt) shares read \(attempt)") { await monitor.waitingCallerCount == 2 }
+            #expect(reader.reads == attempt)
+            canceller.cancel()
+            _ = await canceller.value
+            if attempt <= MacOSChargeLimitMonitor.maximumRereads {
+                // The survivor reads again and waits for the new read.
+                await eventually("the survivor waits for read \(attempt + 1)") {
+                    await monitor.waitingCallerCount == 1 && reader.reads == attempt + 1
+                }
+            }
+        }
+        let status = await survivor.value
+        #expect(status.readProblem == "the read was interrupted")
+        #expect(status.isLimiting)
+        #expect(reader.reads == MacOSChargeLimitMonitor.maximumRereads + 1)
+        let kept = await monitor.lastStatus
+        #expect(kept == nil)
     }
 }
 

@@ -60,7 +60,10 @@ public struct MacOSChargeLimitStatus: Sendable, Equatable {
 ///   waits for, so it never waits for the reader's own deadline. A cancelled
 ///   read is not kept, and the reading before it is dropped too, so the next
 ///   call reads again. Another caller still waiting for that read, and not
-///   cancelled itself, reads again rather than take the cancelled result.
+///   cancelled itself, reads again rather than take the cancelled result,
+///   at most ``maximumRereads`` times; then it gets "may be limiting" (the
+///   read was interrupted), so other callers' cancellations cannot hold it
+///   up without end.
 /// - A failed read is kept like any other: it replaces an earlier reading of
 ///   "off".
 ///
@@ -69,6 +72,9 @@ public struct MacOSChargeLimitStatus: Sendable, Equatable {
 public actor MacOSChargeLimitMonitor {
     /// How long a reading is reused before it is read again.
     public static let defaultMaximumAge: TimeInterval = 30
+    /// How many times a caller reads again after other callers'
+    /// cancellations stopped the reads it waited for.
+    public static let maximumRereads = 2
 
     public nonisolated let maximumAge: TimeInterval
     private let reader: any ChargeLimitReading
@@ -125,6 +131,9 @@ public actor MacOSChargeLimitMonitor {
     private var cache = ReadingCache()
     private var inFlight: PendingRead?
     private var readCount = 0
+    /// Callers waiting for a read now; for tests that need two callers to
+    /// share one read before cancelling one of them.
+    private(set) var waitingCallerCount = 0
 
     /// - Parameters:
     ///   - maximumAge: how long a reading is reused, in seconds of `uptime`.
@@ -147,8 +156,19 @@ public actor MacOSChargeLimitMonitor {
     /// ``maximumAge`` (or dated in the future of the monotonic clock), in
     /// which case it is read again.
     public func status() async -> MacOSChargeLimitStatus {
+        await status(rereadsLeft: Self.maximumRereads)
+    }
+
+    /// Reads macOS's Charge Limit now, whatever the age of the latest
+    /// reading. A read already under way is shared.
+    @discardableResult
+    public func refresh() async -> MacOSChargeLimitStatus {
+        await refresh(rereadsLeft: Self.maximumRereads)
+    }
+
+    private func status(rereadsLeft: Int) async -> MacOSChargeLimitStatus {
         if let inFlight {
-            return await wait(for: inFlight)
+            return await wait(for: inFlight, rereadsLeft: rereadsLeft)
         }
         if let latest = cache.latest {
             let age = uptime() - latest.startedAt
@@ -156,22 +176,19 @@ public actor MacOSChargeLimitMonitor {
                 return latest.status
             }
         }
-        return await refresh()
+        return await refresh(rereadsLeft: rereadsLeft)
     }
 
-    /// Reads macOS's Charge Limit now, whatever the age of the latest
-    /// reading. A read already under way is shared.
-    @discardableResult
-    public func refresh() async -> MacOSChargeLimitStatus {
+    private func refresh(rereadsLeft: Int) async -> MacOSChargeLimitStatus {
         if let inFlight {
-            return await wait(for: inFlight)
+            return await wait(for: inFlight, rereadsLeft: rereadsLeft)
         }
         let reader = reader
         let now = now
         readCount += 1
         let read = PendingRead(task: Task { await Self.read(reader, now: now) }, startedAt: uptime(), number: readCount)
         inFlight = read
-        return await wait(for: read)
+        return await wait(for: read, rereadsLeft: rereadsLeft)
     }
 
     /// The latest reading kept, without reading; nil before the first and
@@ -183,14 +200,17 @@ public actor MacOSChargeLimitMonitor {
     /// Waits for `read`, cancelling it if the caller is cancelled, and
     /// settles it before returning. A caller that is not cancelled itself
     /// never gets a cancelled or overtaken result: it reads again, or takes
-    /// the current reading.
-    private func wait(for read: PendingRead) async -> MacOSChargeLimitStatus {
+    /// the current reading, at most `rereadsLeft` more times, and then gets
+    /// "may be limiting".
+    private func wait(for read: PendingRead, rereadsLeft: Int) async -> MacOSChargeLimitStatus {
         let task = read.task
+        waitingCallerCount += 1
         let status = await withTaskCancellationHandler {
             await task.value
         } onCancel: {
             task.cancel()
         }
+        waitingCallerCount -= 1
         if inFlight?.number == read.number {
             inFlight = nil
         }
@@ -208,9 +228,16 @@ public actor MacOSChargeLimitMonitor {
         if Task.isCancelled {
             return MacOSChargeLimitStatus(reportedLimit: nil, readAt: now(), readProblem: "the read was cancelled")
         }
+        guard rereadsLeft > 0 else {
+            // Other callers keep cancelling the reads this one waits for;
+            // nothing was learned, and nothing older stands in for it.
+            return MacOSChargeLimitStatus(reportedLimit: nil, readAt: now(), readProblem: "the read was interrupted")
+        }
         // Another caller's cancellation stopped the read: read again. Or a
         // later read settled first: take the current reading.
-        return wasCancelled ? await refresh() : await self.status()
+        return wasCancelled
+            ? await refresh(rereadsLeft: rereadsLeft - 1)
+            : await self.status(rereadsLeft: rereadsLeft - 1)
     }
 
     private static func read(_ reader: any ChargeLimitReading, now: @Sendable () -> Date) async -> MacOSChargeLimitStatus {
