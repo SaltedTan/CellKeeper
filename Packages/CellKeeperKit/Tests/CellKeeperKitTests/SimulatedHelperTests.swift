@@ -101,10 +101,26 @@ final class CountingPower: HelperPowerReading, @unchecked Sendable {
 
 @Suite("Simulated helper")
 struct SimulatedHelperTests {
+    /// A Simulated helper on a clock that moves only when the backend waits
+    /// for its request budget (by the time it waits) and by a microsecond
+    /// per reading. On the real clock, the backend's copy of the helper's
+    /// budget is judged on the backend's readings and the helper's on its
+    /// own; a machine that stalls between the two can make the helper
+    /// refuse a request the backend paced, so the outcome would depend on
+    /// how fast the machine runs.
+    private func steppedHelper() -> HelperChargingBackend {
+        let clock = XPCTestClock(step: 1e-6)
+        let uptime: @Sendable () -> TimeInterval = { clock.uptime }
+        return HelperChargingBackend.simulatedHelper(
+            power: CountingPower(uptime: uptime),
+            uptime: uptime,
+            pause: { clock.advance(by: $0) }
+        )
+    }
+
     @Test("The Simulated helper is simulated, offers both charging modes, and changes nothing")
     func simulatedHelper() async throws {
-        let power = CountingPower(uptime: HelperEngine.continuousUptime)
-        let backend = HelperChargingBackend.simulatedHelper(power: power)
+        let backend = steppedHelper()
         #expect(backend.descriptor.identifier == HelperChargingBackend.simulatedHelperIdentifier)
         #expect(backend.descriptor.displayName == "Simulated helper")
         let capabilities = await backend.capabilities()
@@ -123,14 +139,15 @@ struct SimulatedHelperTests {
         #expect(engine.object != nil)
         _ = try await backend?.setMode(.inhibitCharging)
 
+        // Waits for real ticks, for at most 10 s.
         let before = power.count
-        for _ in 0..<200 where power.count < before + 3 {
+        for _ in 0..<2_000 where power.count < before + 3 {
             try await Task.sleep(for: .milliseconds(5))
         }
         #expect(power.count >= before + 3)
 
         backend = nil
-        for _ in 0..<200 where engine.object != nil {
+        for _ in 0..<2_000 where engine.object != nil {
             try await Task.sleep(for: .milliseconds(5))
         }
         #expect(engine.object == nil)
@@ -141,7 +158,7 @@ struct SimulatedHelperTests {
 
     @Test("Sleep and wake reach the in-process engine")
     func sleepAndWake() async throws {
-        let backend = HelperChargingBackend.simulatedHelper(power: CountingPower(uptime: HelperEngine.continuousUptime))
+        let backend = steppedHelper()
         _ = try await backend.setMode(.forceDischarge)
         let transport = try #require(backend.transport as? InProcessHelperTransport)
         await transport.systemWillSleep()
