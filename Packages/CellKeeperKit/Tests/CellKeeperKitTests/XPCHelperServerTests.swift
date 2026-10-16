@@ -75,7 +75,8 @@ struct XPCHelperServerTests {
 
     @Test("Requests sent at the moment of revocation activate nothing, even if NSXPC carries them to a new session")
     func revocationRace() async throws {
-        let control = SimulatedChargeControl()
+        let control = StallingChargeControl()
+        defer { control.release() }
         let rig = try await XPCRig(control: control)
         let raw = try rig.raw()
 
@@ -90,10 +91,16 @@ struct XPCHelperServerTests {
         }
         try #require(await eventually { (0...24).allSatisfy { !raw.outcomes($0).isEmpty } })
 
-        // Then ten at once, in order: five reads (26 to 30), the revoking
-        // read (31), and four leases behind it. When the revoking reply
-        // arrives, before the client could have seen the connection close,
-        // it sends a lease and an activation at once.
+        // Then ten in order, all admitted on this connection before the
+        // engine runs any of them (a tick holds it meanwhile): five reads
+        // (26 to 30), the revoking read (31), and four leases behind it.
+        // When the revoking reply arrives, before the client could have
+        // seen the connection close, it sends a lease and an activation at
+        // once.
+        control.stallNextReadBack()
+        let engine = rig.server.engine
+        let tick = Task { await engine.tick() }
+        try #require(await eventually { control.isStalled })
         for id in 25...29 {
             raw.readState(id)
         }
@@ -105,6 +112,10 @@ struct XPCHelperServerTests {
         for id in 31...34 {
             raw.lease(id, seconds: 800 + id)
         }
+        // The first waits for the engine, the other nine on the queue.
+        try #require(await eventually { rig.server.queuedRequestCount == 9 })
+        control.release()
+        await tick.value
         let ids = Array(0...34) + [100, 101]
         #expect(await eventually { ids.allSatisfy { !raw.outcomes($0).isEmpty } })
         // NSXPC calls each call's reply or its error handler, never both,
@@ -145,7 +156,7 @@ struct XPCHelperServerTests {
         // nothing ran on the revoked session after it.
         let activations = rig.events.events.filter { if case .activated = $0 { true } else { false } }
         #expect(activations == [.activated(.chargingInhibited, by: session)])
-        #expect(control.activeControls.isEmpty)
+        #expect(control.inner.activeControls.isEmpty)
         #expect(!rig.events.requestEvents(of: session).contains {
             if case .requestRejected(_, _, .notIntroduced) = $0 { true } else { false }
         })
