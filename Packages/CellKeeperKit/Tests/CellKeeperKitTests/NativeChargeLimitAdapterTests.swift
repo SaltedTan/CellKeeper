@@ -438,14 +438,14 @@ struct CommandLineAdapterTests {
         #expect(ShortcutsCommandRunner().runTimeout == ShortcutsCommandRunner.runTimeout)
         // The tool runs while the hold file exists, which it does until the
         // calls are over, checking every 0.1 s, and gives up by itself after
-        // 1200 checks (at least 120 s). A tool that ended before its call's
-        // deadline would end the call some other way than timedOut, failing
-        // the test; with the hold, that takes a call that sets its deadline
-        // over 120 s after starting the tool. The watchdog cancels a call
-        // still running after 60 s. timedOut names the timeout the call ran
-        // under, rounded up to whole seconds: 1 s or 2 s here, where a
-        // production timeout would be 5, 10 or 20 s. The list and the run get
-        // different timeouts, so a swap would show.
+        // 1200 checks (at least 120 s). A tool exit the runner observes
+        // before the call's deadline would end the call some other way than
+        // timedOut, failing the test; with the hold, that takes a call that
+        // sets its deadline roughly 120 s or more after starting the tool.
+        // The watchdog cancels a call still running after 60 s. timedOut
+        // names the timeout the call ran under, rounded up to whole seconds:
+        // 1 s or 2 s here, where a production timeout would be 5, 10 or 20 s.
+        // The list and the run get different timeouts, so a swap would show.
         let tools = try FakeTools()
         let hold = tools.path("hold")
         try Data().write(to: URL(fileURLWithPath: hold))
