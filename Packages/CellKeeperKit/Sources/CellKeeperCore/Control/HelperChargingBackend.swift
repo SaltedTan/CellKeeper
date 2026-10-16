@@ -42,7 +42,11 @@ import Foundation
 ///   also when it cannot read its controls back, and a new hardware error as
 ///   a failure.
 /// - Requests are paced to stay within the helper's per-session request
-///   budget, far from the point where it revokes a session.
+///   budget, far from the point where it revokes a session, however late
+///   the helper admits them (``RequestPacer``). A read the budget refuses
+///   all the same is sent once more, after a wait for a token; nothing is
+///   read from a refused reply, and an activation is never sent again by
+///   the backend itself.
 /// - While CellKeeper holds a control through a live session, a
 ///   ``LeaseActivity`` keeps the app from being napped, so evaluations renew
 ///   the lease on time.
@@ -718,11 +722,17 @@ public actor HelperChargingBackend: ChargingBackend {
         leaseDeadlines[control] = requestedAt + TimeInterval(reply.grantedSeconds)
     }
 
-    /// The error for a refused activation.
+    /// The error for a refused activation. It is never sent again by the
+    /// backend: whether to restrict again is the policy's decision, at a
+    /// later evaluation.
     private func refusal(_ status: HelperStatus, activating control: HelperControl) async -> BackendError {
         if Self.isSessionLost(status) {
             await dropConnection()
             return .operationFailed("CellKeeper's helper ended its session (\(status))")
+        }
+        if status == .rateLimited {
+            // The reply does not say which of the two refused it.
+            return .operationFailed("CellKeeper's helper refused to set \(Self.describe([control])) (rateLimited: its request budget or the control's activation limit)")
         }
         guard status == .blockedByInterlock, let state = try? await readState() else {
             return .operationFailed("CellKeeper's helper refused to set \(Self.describe([control])) (\(status))")
@@ -1039,20 +1049,35 @@ public actor HelperChargingBackend: ChargingBackend {
 
     /// A fresh `readState` whose status is `ok` or `hardwareError` (the
     /// read-back failed; interlocks are still reported). If the helper no
-    /// longer knows the session, connects again and reads once more.
+    /// longer knows the session, connects again and reads once more. A read
+    /// the request budget refuses twice in a row is a failure.
     private func fetchState() async throws -> HelperStateReply {
-        var state = try await send(needsToken: true) { try await $0.readState() }
+        var state = try await requestState()
         if Self.isSessionLost(state.status) {
             await dropConnection()
-            state = try await send(needsToken: true) { try await $0.readState() }
+            state = try await requestState()
         }
         switch state.status {
         case .ok, .hardwareError:
             return state
+        case .rateLimited:
+            throw BackendError.operationFailed("CellKeeper's helper did not report its state: its request budget refused the read, and again after CellKeeper waited for a token (rateLimited)")
         default:
             if Self.isSessionLost(state.status) { await dropConnection() }
             throw BackendError.operationFailed("CellKeeper's helper did not report its state (\(state.status))")
         }
+    }
+
+    /// One `readState`. If the helper's request budget refuses it
+    /// (`rateLimited`, which a read gets for nothing else), it is sent once
+    /// more: the pacer then counts the budget as empty, so the second read
+    /// waits for a token the helper has refilled by the time it admits it
+    /// (``RequestPacer``). A refused reply carries no state, so nothing is
+    /// read from it.
+    private func requestState() async throws -> HelperStateReply {
+        let state = try await send(needsToken: true) { try await $0.readState() }
+        guard state.status == .rateLimited else { return state }
+        return try await send(needsToken: true) { try await $0.readState() }
     }
 
     // MARK: - Connection
@@ -1070,7 +1095,7 @@ public actor HelperChargingBackend: ChargingBackend {
         }
         // The helper gives each new session a full request budget.
         pacer = RequestPacer(at: uptime())
-        await paced(needsToken: true)
+        let sentAt = await paced(needsToken: true)
         let reply: HelperHelloReply
         do {
             reply = try await new.hello(clientProtocolVersion: HelperProtocolVersion.current)
@@ -1078,6 +1103,7 @@ public actor HelperChargingBackend: ChargingBackend {
             await new.invalidate()
             throw BackendError.unavailable("The connection to CellKeeper's helper ended while connecting (\(error)).")
         }
+        pacer.record(sentAt: sentAt, repliedAt: uptime(), refused: reply.status == .rateLimited)
         guard reply.status == .ok else {
             await new.invalidate()
             throw BackendError.unavailable(Self.helloRefusal(reply))
@@ -1097,10 +1123,11 @@ public actor HelperChargingBackend: ChargingBackend {
         return reply
     }
 
-    /// Sends one request on the introduced connection. A transport failure
-    /// drops the connection, so the next request connects again and reads
-    /// the state afresh.
-    private func send<Reply: Sendable>(
+    /// Sends one request on the introduced connection, and counts it against
+    /// the helper's request budget when its reply arrives. A transport
+    /// failure drops the connection, so the next request connects again
+    /// (with a new session and budget) and reads the state afresh.
+    private func send<Reply: HelperReply>(
         needsToken: Bool,
         _ request: @Sendable (any HelperConnection) async throws -> Reply
     ) async throws -> Reply {
@@ -1108,13 +1135,16 @@ public actor HelperChargingBackend: ChargingBackend {
         guard let connection else {
             throw BackendError.operationFailed("no connection to CellKeeper's helper")
         }
-        await paced(needsToken: needsToken)
+        let sentAt = await paced(needsToken: needsToken)
+        let reply: Reply
         do {
-            return try await request(connection)
+            reply = try await request(connection)
         } catch {
             await dropConnection()
             throw BackendError.operationFailed("lost the connection to CellKeeper's helper (\(error))")
         }
+        pacer.record(sentAt: sentAt, repliedAt: uptime(), refused: reply.status == .rateLimited)
+        return reply
     }
 
     /// Ends the current connection. The helper clears what its session
@@ -1128,13 +1158,15 @@ public actor HelperChargingBackend: ChargingBackend {
     }
 
     /// Waits, if needed, so the helper's request budget never refuses
-    /// CellKeeper or revokes its session (see ``RequestPacer``).
-    private func paced(needsToken: Bool) async {
+    /// CellKeeper or revokes its session (see ``RequestPacer``), and returns
+    /// the time the request goes out at, for
+    /// ``RequestPacer/record(sentAt:repliedAt:refused:)``.
+    private func paced(needsToken: Bool) async -> TimeInterval {
         let wait = pacer.wait(needsToken: needsToken, at: uptime())
         if wait > 0 {
             await pause(wait)
         }
-        pacer.take(at: uptime())
+        return uptime()
     }
 
     // MARK: - Vocabulary
@@ -1239,21 +1271,63 @@ public actor HelperChargingBackend: ChargingBackend {
     }
 }
 
-/// Mirrors a helper session's request budget (``HelperEngine/requestBurst``
-/// at once, refilled at ``HelperEngine/requestsPerSecond``) with one token
-/// in reserve for timing differences.
+/// A reply of the helper's, with the status the pacer reads.
+private protocol HelperReply: Sendable {
+    var status: HelperStatus { get }
+}
+
+extension HelperStateReply: HelperReply {}
+extension HelperLeaseReply: HelperReply {}
+
+extension HelperStatus: HelperReply {
+    fileprivate var status: HelperStatus { self }
+}
+
+/// CellKeeper's count of a helper session's request budget
+/// (``HelperEngine/requestBurst`` at once, refilled at
+/// ``HelperEngine/requestsPerSecond``), kept no higher than what the helper
+/// may hold, however late the helper admits each request.
+///
+/// The helper takes a token when it admits a request, at a moment between
+/// the request's sending and its reply that CellKeeper cannot see. The
+/// pacer counts each request as admitted at its reply, the latest moment,
+/// and as having taken a token if the helper might have had one (never
+/// going below zero). This never overcounts: the pacer credits refill only
+/// from a reply on, and the helper admitted that request no later; its
+/// capacity is below the helper's; and a take at the reply leaves the
+/// fewest tokens there, because refill lost at the cap before an earlier
+/// take is regained after it. A request is sure of a token if the count
+/// held one when it was sent, since the helper admits it no earlier. So a
+/// paced request finds a token at the helper, and the pacer's streak of
+/// requests sent without a sure token is never shorter than the helper's
+/// over-budget streak.
+///
+/// This holds while one request at a time is in flight on the session (the
+/// controller serialises calls into the backend, and each request awaits
+/// its reply) and the helper has this build's budget on the same monotonic
+/// clock. If the budget refuses a request all the same (something else
+/// used the session, say), the count is empty from that reply, the one
+/// value sure to be no more than the helper's, so the next request waits
+/// for a token the helper refills after the refusal.
 struct RequestPacer {
+    /// One token below the helper's burst (D43). The count stays safe
+    /// without it (D75); it is kept as a margin for what the count does not
+    /// model.
     static let capacity = Double(HelperEngine.requestBurst - 1)
     static let rate = HelperEngine.requestsPerSecond
     /// Requests that only move toward safety are sent without waiting, but
-    /// never more than this many in a row beyond the budget: far below
+    /// never more than this many in a row without a sure token: far below
     /// ``HelperEngine/maximumOverBudgetRequests``, after which the helper
     /// revokes the session.
     static let maximumUnpacedStreak = 4
+    /// Added to every wait, so a request that waited finds its token even
+    /// though either side's arithmetic rounds, or the pause ends a little
+    /// early.
+    static let waitMargin: TimeInterval = 0.001
 
     private var tokens: Double
     private var refilledAt: TimeInterval
-    /// Requests sent in a row without a token.
+    /// Requests sent in a row without a sure token.
     private(set) var overBudgetStreak = 0
 
     init(at now: TimeInterval) {
@@ -1262,30 +1336,36 @@ struct RequestPacer {
     }
 
     /// Seconds to wait before sending a request; 0 to send it now. A request
-    /// the helper's budget may refuse waits for a token; one that only moves
-    /// toward safety waits only after ``maximumUnpacedStreak`` requests in a
-    /// row went without one.
+    /// the helper's budget may refuse waits until the count holds a token;
+    /// one that only moves toward safety waits only after
+    /// ``maximumUnpacedStreak`` requests in a row went without a sure token.
     mutating func wait(needsToken: Bool, at now: TimeInterval) -> TimeInterval {
         refill(at: now)
         guard tokens < 1, needsToken || overBudgetStreak >= Self.maximumUnpacedStreak else { return 0 }
-        return (1 - tokens) / Self.rate
+        return (1 - tokens) / Self.rate + Self.waitMargin
     }
 
-    /// Uses a token if one is available, as the helper does for every
-    /// request.
-    mutating func take(at now: TimeInterval) {
-        refill(at: now)
-        if tokens >= 1 {
-            tokens -= 1
-            overBudgetStreak = 0
-        } else {
-            overBudgetStreak += 1
-        }
+    /// Counts a request sent at `sentAt` whose reply arrived at `repliedAt`.
+    /// It was sure of a token if the count held one when it was sent: the
+    /// helper holds at least as many when it admits the request. `refused`:
+    /// the reply was `rateLimited`, so the helper found no token (or, for an
+    /// activation, its activation limits refused it); either way the request
+    /// counts toward the streak, and the count is empty.
+    mutating func record(sentAt: TimeInterval, repliedAt: TimeInterval, refused: Bool) {
+        let wasSureOfToken = !refused && level(at: sentAt) >= 1
+        overBudgetStreak = wasSureOfToken ? 0 : overBudgetStreak + 1
+        refill(at: repliedAt)
+        tokens = refused ? 0 : max(0, tokens - 1)
+    }
+
+    /// The count at `now`, refilled up to the capacity.
+    private func level(at now: TimeInterval) -> Double {
+        guard now > refilledAt else { return tokens }
+        return min(Self.capacity, tokens + (now - refilledAt) * Self.rate)
     }
 
     private mutating func refill(at now: TimeInterval) {
-        guard now > refilledAt else { return }
-        tokens = min(Self.capacity, tokens + (now - refilledAt) * Self.rate)
-        refilledAt = now
+        tokens = level(at: now)
+        refilledAt = max(refilledAt, now)
     }
 }

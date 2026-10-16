@@ -72,19 +72,68 @@ struct TransportTestError: Error, CustomStringConvertible {
 
 /// A connection to an engine in the test that can fail like an NSXPC one:
 /// a failure throws and ends the session, as the helper would when the
-/// connection drops.
+/// connection drops. It records every request and the helper's reply, and
+/// runs its transport's latency hooks around each.
 final class TestHelperConnection: HelperConnection, @unchecked Sendable {
+    /// A request the backend sent, and the status of the helper's reply.
+    struct Exchange: Equatable {
+        var request: HelperRequestKind
+        var status: HelperStatus
+    }
+
     let session: HelperSession
+    private weak var transport: TestHelperTransport?
     private let lock = NSLock()
     private var pendingFailures = 0
     private var helloStatus: HelperStatus?
     private var isMismatchArmed = false
     private var reportsMismatchAfterActivation = false
     private var endsSessionBeforeRestore = false
+    private var budgetSpends: [HelperRequestKind: Int] = [:]
+    private var recorded: [Exchange] = []
 
-    init(session: HelperSession, helloStatus: HelperStatus?) {
+    init(session: HelperSession, helloStatus: HelperStatus?, transport: TestHelperTransport? = nil) {
         self.session = session
         self.helloStatus = helloStatus
+        self.transport = transport
+    }
+
+    /// Every request the backend sent on this connection, in order.
+    var exchanges: [Exchange] {
+        lock.withLock { recorded }
+    }
+
+    /// Before each of the next `count` requests of `kind` reaches the helper
+    /// (and after its admission delay), spends what is left of the session's
+    /// request budget, as requests made on the session behind the backend's
+    /// back would. Each spend ends with one refused read.
+    func spendBudget(before kind: HelperRequestKind, times count: Int = 1) {
+        lock.withLock { budgetSpends[kind, default: 0] += count }
+    }
+
+    private func takeBudgetSpend(before kind: HelperRequestKind) -> Bool {
+        lock.withLock {
+            guard let remaining = budgetSpends[kind], remaining > 0 else { return false }
+            budgetSpends[kind] = remaining - 1
+            return true
+        }
+    }
+
+    /// The request is about to reach the helper: its admission delay, then
+    /// any budget spent behind the backend's back.
+    private func arrive(_ kind: HelperRequestKind) async {
+        transport?.beforeAdmission?(kind)
+        guard takeBudgetSpend(before: kind) else { return }
+        for _ in 0...HelperEngine.requestBurst {
+            if await session.readState().status == .rateLimited { return }
+        }
+    }
+
+    /// The helper replied: the exchange is recorded, then the reply's delay.
+    private func depart<Reply>(_ kind: HelperRequestKind, _ status: HelperStatus, _ reply: Reply) -> Reply {
+        lock.withLock { recorded.append(Exchange(request: kind, status: status)) }
+        transport?.beforeReply?(kind)
+        return reply
     }
 
     /// Makes the next `count` requests fail as a transport failure.
@@ -159,44 +208,53 @@ final class TestHelperConnection: HelperConnection, @unchecked Sendable {
 
     func hello(clientProtocolVersion: Int) async throws -> HelperHelloReply {
         try await failIfInjected()
+        await arrive(.hello)
         var reply = await session.hello(clientProtocolVersion: clientProtocolVersion)
         if let status = lock.withLock({ helloStatus }) {
             reply.status = status
         }
-        return reply
+        return depart(.hello, reply.status, reply)
     }
 
     func readState() async throws -> HelperStateReply {
         try await failIfInjected()
+        await arrive(.readState)
         var reply = await session.readState()
         if takeArmedMismatch() {
             reply.activeControls = []
         }
-        return reply
+        return depart(.readState, reply.status, reply)
     }
 
     func acquireOrRenewLease(control: Int, seconds: Int) async throws -> HelperLeaseReply {
         try await failIfInjected()
-        return await session.acquireOrRenewLease(control: control, seconds: seconds)
+        await arrive(.acquireOrRenewLease)
+        let reply = await session.acquireOrRenewLease(control: control, seconds: seconds)
+        return depart(.acquireOrRenewLease, reply.status, reply)
     }
 
     func releaseLease(control: Int) async throws -> HelperStatus {
         try await failIfInjected()
-        return await session.releaseLease(control: control)
+        await arrive(.releaseLease)
+        let status = await session.releaseLease(control: control)
+        return depart(.releaseLease, status, status)
     }
 
     func setControl(control: Int, active: Bool) async throws -> HelperStatus {
         try await failIfInjected()
+        await arrive(.setControl)
         let status = await session.setControl(control: control, active: active)
         if active, status == .ok {
             armMismatchIfRequested()
         }
-        return status
+        return depart(.setControl, status, status)
     }
 
     func clearControlIfUnchanged(control: Int, generation: UInt64, helperInstance: UInt64) async throws -> HelperStatus {
         try await failIfInjected()
-        return await session.clearControlIfUnchanged(control: control, generation: generation, helperInstance: helperInstance)
+        await arrive(.clearControlIfUnchanged)
+        let status = await session.clearControlIfUnchanged(control: control, generation: generation, helperInstance: helperInstance)
+        return depart(.clearControlIfUnchanged, status, status)
     }
 
     func restoreDefaults() async throws -> HelperStatus {
@@ -204,12 +262,16 @@ final class TestHelperConnection: HelperConnection, @unchecked Sendable {
         if takeSessionEndBeforeRestore() {
             await session.invalidate()
         }
-        return await session.restoreDefaults()
+        await arrive(.restoreDefaults)
+        let status = await session.restoreDefaults()
+        return depart(.restoreDefaults, status, status)
     }
 
     func restoreDefaultsAndExit() async throws -> HelperStatus {
         try await failIfInjected()
-        return await session.restoreDefaultsAndExit()
+        await arrive(.restoreDefaultsAndExit)
+        let status = await session.restoreDefaultsAndExit()
+        return depart(.restoreDefaultsAndExit, status, status)
     }
 
     func invalidate() async {
@@ -227,6 +289,8 @@ final class TestHelperTransport: HelperTransport, @unchecked Sendable {
     private var opened: [TestHelperConnection] = []
     private var isReachableValue = true
     private var helloStatusValue: HelperStatus?
+    private var beforeAdmissionValue: (@Sendable (HelperRequestKind) -> Void)?
+    private var beforeReplyValue: (@Sendable (HelperRequestKind) -> Void)?
 
     init(engine: HelperEngine, relaunching makeEngine: (@Sendable () -> HelperEngine)? = nil) {
         self.currentEngine = engine
@@ -257,6 +321,22 @@ final class TestHelperTransport: HelperTransport, @unchecked Sendable {
         set { lock.withLock { helloStatusValue = newValue } }
     }
 
+    /// Runs, on every connection, as a request is about to reach the
+    /// helper. A test moves its clock here to delay the request's admission
+    /// (a loaded Mac, App Nap, the NSXPC transport); the backend cannot see
+    /// when the helper admits it.
+    var beforeAdmission: (@Sendable (HelperRequestKind) -> Void)? {
+        get { lock.withLock { beforeAdmissionValue } }
+        set { lock.withLock { beforeAdmissionValue = newValue } }
+    }
+
+    /// Runs, on every connection, as a reply is about to reach the backend;
+    /// a test moves its clock here to delay the reply.
+    var beforeReply: (@Sendable (HelperRequestKind) -> Void)? {
+        get { lock.withLock { beforeReplyValue } }
+        set { lock.withLock { beforeReplyValue = newValue } }
+    }
+
     var connections: [TestHelperConnection] {
         lock.withLock { opened }
     }
@@ -268,7 +348,7 @@ final class TestHelperTransport: HelperTransport, @unchecked Sendable {
     func connect() async throws -> any HelperConnection {
         guard isReachable else { throw TransportTestError() }
         await engine.start()
-        let connection = TestHelperConnection(session: await engine.openSession(), helloStatus: helloStatus)
+        let connection = TestHelperConnection(session: await engine.openSession(), helloStatus: helloStatus, transport: self)
         lock.withLock { opened.append(connection) }
         return connection
     }
