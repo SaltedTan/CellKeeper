@@ -107,8 +107,11 @@ struct XPCHelperServerTests {
         }
         let ids = Array(0...34) + [100, 101]
         #expect(await eventually { ids.allSatisfy { !raw.outcomes($0).isEmpty } })
-        // Let any second outcome arrive before counting.
-        try await Task.sleep(for: .milliseconds(100))
+        // NSXPC calls each call's reply or its error handler, never both,
+        // and nothing reaches a connection once it is invalidated. So end
+        // the connection, and count once NSXPC has called its invalidation
+        // handler, on the same queue as the outcomes.
+        try #require(await raw.invalidate())
 
         // Every call ended exactly once.
         for id in ids {
@@ -222,7 +225,7 @@ struct XPCHelperServerTests {
         #expect(try await client.acquireOrRenewLease(control: 1, seconds: 900).status == .ok)
         #expect(try await client.setControl(control: 1, active: true) == .ok)
 
-        let stopped = await rig.server.stop()
+        let stopped = await rig.server.stop(timeout: drainTimeout)
         #expect(stopped)
         #expect(control.activeControls.isEmpty)
         #expect(rig.server.connectionCount == 0)
@@ -370,7 +373,9 @@ struct XPCHelperServerTests {
                     }
                 }
             }
-            await rig.server.stop()
+            // A deadline far off, so the stop drains: one cut off by its
+            // deadline would only begin ending the sessions.
+            await rig.server.stop(timeout: drainTimeout)
             #expect(rig.server.connectionCount == 0)
             #expect(Set(rig.events.openedSessions) == Set(rig.events.invalidatedSessions))
             for call in calls {
@@ -687,22 +692,32 @@ struct XPCStalledEngineTests {
         try #require(await eventually { rig.server.queuedRequestCount == limit })
 
         // Once the overflow is decided, and before it is carried out, the
-        // running request ends and the consumer gets every chance to take
-        // the activation: it may take it off the queue, but must not run it.
+        // running request ends, and the close waits until the consumer has
+        // ended. The consumer runs one request at a time, each to its end,
+        // and ends only once it takes no more and has ended the session; so
+        // had it run the activation, the activation would have reached the
+        // engine by then.
         let server = rig.server
+        let consumerEnded = Flag()
         // Weak: the server keeps the hook, so a strong reference would keep
         // the server, its listener and the control alive after the test.
         server.onOverflowDecided { [weak server] in
             control.release()
-            let deadline = Date().addingTimeInterval(5)
-            while server?.queuedRequestCount == limit, Date() < deadline {
+            // The consumer drops the server's record of its connection (the
+            // only one) once it has ended the session, and runs nothing
+            // after that. One that does not end leaves the close to go ahead
+            // after 30 s, and the test fails.
+            let deadline = Date().addingTimeInterval(30)
+            while let server, server.connectionCount > 0, Date() < deadline {
                 usleep(1_000)
             }
-            usleep(200_000)
+            if server?.connectionCount == 0 {
+                consumerEnded.set()
+            }
         }
         let overflow = await clientFailure { _ = try await client.restoreDefaults() }
         #expect(connectionFailures.contains(overflow), "got \(String(describing: overflow))")
-        #expect(server.queuedRequestCount < limit)
+        #expect(consumerEnded.value)
 
         #expect(await eventually { rig.events.contains(.sessionInvalidated(session)) })
         #expect(rig.events.requestEvents(of: session) == requestEventsBefore)

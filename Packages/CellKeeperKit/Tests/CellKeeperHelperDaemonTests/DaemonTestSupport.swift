@@ -414,6 +414,8 @@ final class RecordingLog: HelperDaemonLog, @unchecked Sendable {
     private var gate: DispatchSemaphore?
     /// Only a write containing this waits at the gate; nil: the next write.
     private var gatedFragment: String?
+    /// How long a write waits at the gate before it goes through anyway.
+    private var gateLimit: TimeInterval = 10
     private var waitingAtGate = false
 
     var lines: [Line] {
@@ -424,20 +426,23 @@ final class RecordingLog: HelperDaemonLog, @unchecked Sendable {
         lines.contains { $0.level == level && $0.category == category && $0.message.contains(fragment) }
     }
 
-    /// Makes the next write wait until ``release()``.
-    func block() {
+    /// Makes the next write wait until ``release()``, or for `limit` at
+    /// most, so a test that never releases it cannot hang the run.
+    func block(limit: TimeInterval = 10) {
         lock.withLock {
             gate = DispatchSemaphore(value: 0)
             gatedFragment = nil
+            gateLimit = limit
         }
     }
 
     /// Makes the first write that contains `fragment` wait until
-    /// ``release()``; the writes before it go through.
+    /// ``release()``, or for 10 s at most; the writes before it go through.
     func block(whenMessageContains fragment: String) {
         lock.withLock {
             gate = DispatchSemaphore(value: 0)
             gatedFragment = fragment
+            gateLimit = 10
         }
     }
 
@@ -455,12 +460,12 @@ final class RecordingLog: HelperDaemonLog, @unchecked Sendable {
     }
 
     func write(_ level: HelperLogLevel, _ category: HelperLogCategory, _ message: String) {
-        let gate = lock.withLock { () -> DispatchSemaphore? in
-            guard let held = self.gate, gatedFragment.map({ message.contains($0) }) ?? true else { return nil }
+        let (gate, limit) = lock.withLock { () -> (DispatchSemaphore?, TimeInterval) in
+            guard let held = self.gate, gatedFragment.map({ message.contains($0) }) ?? true else { return (nil, 0) }
             waitingAtGate = true
-            return held
+            return (held, gateLimit)
         }
-        _ = gate?.wait(timeout: .now() + 10)
+        _ = gate?.wait(timeout: .now() + limit)
         lock.withLock {
             waitingAtGate = false
             recorded.append(Line(level: level, category: category, message: message))

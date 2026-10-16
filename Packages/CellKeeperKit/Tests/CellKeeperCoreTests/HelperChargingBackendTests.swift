@@ -433,7 +433,10 @@ struct HelperChargingBackendTests {
         _ = try await backend?.setMode(.inhibitCharging)
         #expect(control.activeControls == [.chargingInhibited])
         backend = nil
-        for _ in 0..<200 where !control.activeControls.isEmpty {
+        // The backend ends its session from a task of its own: wait for the
+        // helper to clear the control, and fail if it has not after 30 s.
+        let deadline = ContinuousClock.now + .seconds(30)
+        while !control.activeControls.isEmpty, ContinuousClock.now < deadline {
             try await Task.sleep(for: .milliseconds(5))
         }
         #expect(control.activeControls.isEmpty)

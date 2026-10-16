@@ -18,8 +18,10 @@ struct HelperEngineExecutorTests {
         // Every engine is blocked in its start-up read-back at the same time ...
         let allBlocked = await poll { controls.allSatisfy(\.isBlocked) }
         #expect(allBlocked)
-        // ... and work on the cooperative pool still runs at once.
-        let began = ContinuousClock.now
+        // ... and work on the cooperative pool still runs while they are:
+        // when it has ended, every engine is still blocked. Engines that
+        // held pool threads would leave it to run only once their controls
+        // gave up, 30 s after blocking.
         let sum = await withTaskGroup(of: Int.self) { group in
             for value in 1...200 {
                 group.addTask {
@@ -29,8 +31,9 @@ struct HelperEngineExecutorTests {
             }
             return await group.reduce(0, +)
         }
+        let stillBlocked = controls.allSatisfy(\.isBlocked)
         #expect(sum == 20_100)
-        #expect(ContinuousClock.now - began < .seconds(2))
+        #expect(stillBlocked)
 
         for control in controls {
             control.release()
@@ -41,9 +44,9 @@ struct HelperEngineExecutorTests {
     }
 }
 
-/// Waits, in real time and for at most 3 s, until `condition` holds.
+/// Waits, in real time and for at most 10 s, until `condition` holds.
 private func poll(_ condition: @Sendable () -> Bool) async -> Bool {
-    let deadline = ContinuousClock.now + .seconds(3)
+    let deadline = ContinuousClock.now + .seconds(10)
     while ContinuousClock.now < deadline {
         if condition() { return true }
         try? await Task.sleep(for: .milliseconds(1))
@@ -52,7 +55,8 @@ private func poll(_ condition: @Sendable () -> Bool) async -> Bool {
 }
 
 /// A control whose first read-back blocks its caller's thread until the test
-/// releases it, or for 5 s at the latest, as a hung hardware call would.
+/// releases it, as a hung hardware call would, or gives up after 30 s, so a
+/// failing test cannot hang the run.
 final class BlockingReadBackControl: HelperChargeControl, @unchecked Sendable {
     private let inner = SimulatedChargeControl()
     private let lock = NSLock()
@@ -60,6 +64,8 @@ final class BlockingReadBackControl: HelperChargeControl, @unchecked Sendable {
     private var hasBlocked = false
     private var blocked = false
 
+    /// True while the first read-back blocks: false again once the test
+    /// released it or it gave up.
     var isBlocked: Bool {
         lock.withLock { blocked }
     }
@@ -83,7 +89,7 @@ final class BlockingReadBackControl: HelperChargeControl, @unchecked Sendable {
             return !hasBlocked
         }
         if blocks {
-            _ = released.wait(timeout: .now() + 5)
+            _ = released.wait(timeout: .now() + 30)
             lock.withLock { blocked = false }
         }
         return try inner.readBack()

@@ -11,6 +11,11 @@ import Testing
 /// ``ManualTimeouts`` instead, never by this.
 let setupTimeout: Duration = .seconds(30)
 
+/// How long a stop whose deadline is not under test may drain: far longer
+/// than a healthy drain takes, also on a slow CI runner, so only a drain
+/// that hangs reaches it. Deadlines under test are ``TestDeadline``s.
+let drainTimeout: Duration = .seconds(30)
+
 /// A monotonic clock the test moves by hand. Unless `step` is set, readings
 /// repeat until the test advances it, so two engines that do the same work
 /// read the same times.
@@ -383,16 +388,26 @@ final class RawHelperConnection: @unchecked Sendable {
     let connection: NSXPCConnection
     private let lock = NSLock()
     private var recorded: [Int: [Outcome]] = [:]
+    private let invalidated = Flag()
 
     init(endpoint: NSXPCListenerEndpoint) throws {
         connection = NSXPCConnection(listenerEndpoint: endpoint)
         connection.remoteObjectInterface = HelperXPCInterface.make()
         connection.setCodeSigningRequirement(try ownRequirement().text)
+        connection.invalidationHandler = { [invalidated] in invalidated.set() }
         connection.resume()
     }
 
     deinit {
         connection.invalidate()
+    }
+
+    /// Invalidates the connection, and returns true once NSXPC has called
+    /// its invalidation handler; false if it has not after 10 s. Nothing
+    /// reaches a connection once it is invalidated.
+    func invalidate() async -> Bool {
+        connection.invalidate()
+        return await eventually { invalidated.value }
     }
 
     /// The proxy for call `id`: an error NSXPC reports for it is recorded.
