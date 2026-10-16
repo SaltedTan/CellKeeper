@@ -28,13 +28,15 @@ public struct PmsetChargeLimitReader: ChargeLimitReading {
     public static let timeout: TimeInterval = 5
 
     public let executable: URL
+    /// `Self.timeout`; tests give fake tools longer.
+    var timeout = PmsetChargeLimitReader.timeout
 
     public init(executable: URL = PmsetChargeLimitReader.defaultExecutable) {
         self.executable = executable
     }
 
     public func readChargeLimit() async throws -> NativeChargeLimitReading {
-        let result = try await ProcessRunner.run(executable, arguments: Self.arguments, timeout: Self.timeout)
+        let result = try await ProcessRunner.run(executable, arguments: Self.arguments, timeout: timeout)
         guard result.status == 0 else {
             throw PmsetChargeLimitError.failed(result.errorSummary)
         }

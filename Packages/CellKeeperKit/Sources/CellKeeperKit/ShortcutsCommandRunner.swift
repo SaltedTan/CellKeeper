@@ -28,13 +28,16 @@ public struct ShortcutsCommandRunner: ShortcutRunning {
     public static let listTimeout: TimeInterval = 10
 
     public let executable: URL
+    /// `Self.listTimeout` and `Self.runTimeout`; tests give fake tools longer.
+    var listTimeout = ShortcutsCommandRunner.listTimeout
+    var runTimeout = ShortcutsCommandRunner.runTimeout
 
     public init(executable: URL = ShortcutsCommandRunner.defaultExecutable) {
         self.executable = executable
     }
 
     public func shortcutNames() async throws -> [String] {
-        let result = try await ProcessRunner.run(executable, arguments: ["list"], timeout: Self.listTimeout)
+        let result = try await ProcessRunner.run(executable, arguments: ["list"], timeout: listTimeout)
         guard result.status == 0 else {
             throw ShortcutsCommandError.failed(command: "list", message: result.errorSummary)
         }
@@ -52,7 +55,7 @@ public struct ShortcutsCommandRunner: ShortcutRunning {
         try Data(input.utf8).write(to: file, options: .atomic)
         defer { try? FileManager.default.removeItem(at: file) }
 
-        let result = try await ProcessRunner.run(executable, arguments: ["run", name, "-i", file.path], timeout: Self.runTimeout)
+        let result = try await ProcessRunner.run(executable, arguments: ["run", name, "-i", file.path], timeout: runTimeout)
         guard result.status == 0 else {
             throw ShortcutsCommandError.failed(command: "run", message: result.errorSummary)
         }
