@@ -669,6 +669,21 @@ final class TestDeadline: @unchecked Sendable {
         }
     }
 
+    /// Returns what `stop`, a stop by this deadline, returned. If it has not
+    /// returned `seconds` after this is called, records an issue and
+    /// expires the deadline, which makes the stop cut off what remains and
+    /// return: a stop that would wait forever fails the test in bounded
+    /// time instead.
+    func value(of stop: Task<Bool, Never>, within seconds: Double = 10) async -> Bool {
+        let watchdog = Task {
+            try await Task.sleep(for: .seconds(seconds))
+            Issue.record("the stop had not returned after \(seconds) s, so its deadline was expired")
+            expire()
+        }
+        defer { watchdog.cancel() }
+        return await stop.value
+    }
+
     /// Returns once ``expire()`` has been called, or when the task is
     /// cancelled.
     private func wait() async {

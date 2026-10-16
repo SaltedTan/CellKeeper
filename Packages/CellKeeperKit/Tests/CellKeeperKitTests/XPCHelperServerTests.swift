@@ -293,7 +293,7 @@ struct XPCHelperServerTests {
         // Once it runs, the connection and the session end, and nothing
         // admitted was discarded: the stop confirms.
         barriers.releaseAll()
-        let drained = await stopping.value
+        let drained = await deadline.value(of: stopping)
         #expect(drained)
         #expect(server.connectionCount == 0)
         #expect(await eventually { client.transportFailure != nil })
@@ -349,7 +349,7 @@ struct XPCHelperServerTests {
         try #require(await eventually { barriers.heldCount == 1 })
         client.invalidate()
 
-        let drained = await stopping.value
+        let drained = await deadline.value(of: stopping)
         #expect(drained)
         #expect(rig.events.contains(.sessionInvalidated(session)))
         #expect(server.connectionCount == 0)
@@ -476,7 +476,7 @@ struct XPCStalledEngineTests {
         #expect(control.isStalled)
 
         control.release()
-        let drained = await stopping.value
+        let drained = await never.value(of: stopping)
         #expect(drained)
         #expect(await inProgress.value == .ok)
         #expect(await queued.value == .ok)
@@ -559,7 +559,7 @@ struct XPCStalledEngineTests {
 
         // Every connection ended, its session invalidated, before the
         // deadline; but two admitted requests were discarded.
-        let drained = await stopping.value
+        let drained = await deadline.value(of: stopping)
         #expect(!drained)
         #expect(!deadline.hasPassed)
         #expect(await tenth.value == .ok)
@@ -601,7 +601,7 @@ struct XPCStalledEngineTests {
         deadline.pass()
         control.release()
         #expect(await inProgress.value == .ok)
-        let drained = await stopping.value
+        let drained = await deadline.value(of: stopping)
         #expect(!drained)
         #expect(server.connectionCount == 0)
     }
