@@ -247,11 +247,15 @@ struct CommandLineAdapterTests {
 
     @Test("A tool flooding its output still stops at the deadline")
     func floodingToolTimesOut() async {
+        // yes floods its output and never stops by itself, so only the
+        // deadline can end the call; ending well within 20 s shows the flood
+        // did not hold the deadline off. A tighter bound would be a guess at
+        // how fast a loaded machine starts and stops the tool.
         let started = Date()
         await #expect(throws: ProcessRunnerError.timedOut(seconds: 1)) {
             try await ProcessRunner.run(URL(fileURLWithPath: "/usr/bin/yes"), arguments: [], timeout: 0.3)
         }
-        #expect(Date().timeIntervalSince(started) < 4)
+        #expect(Date().timeIntervalSince(started) < 20)
     }
 
     @Test("Ordinary output is complete")
@@ -262,12 +266,28 @@ struct CommandLineAdapterTests {
 
     @Test("A descendant holding the output open neither hides what was written nor delays the result")
     func descendantHoldsPipe() async throws {
+        // The descendant would hold the output open for 30 s, and records
+        // its process ID so the test can stop it afterwards instead of
+        // leaving it behind. The deadline is far off, so a slow start cannot
+        // run into it.
+        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("cellkeeper-test-\(UUID().uuidString)")
+        defer {
+            // The shell has exited by now, so the ID it wrote is whole.
+            let recorded = (try? String(contentsOf: marker, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let pid = recorded.flatMap({ pid_t($0) }), pid > 0 {
+                kill(pid, SIGKILL)
+            }
+            try? FileManager.default.removeItem(at: marker)
+        }
         let started = Date()
-        let result = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf already_written; sleep 5 & exit 0"], timeout: 10)
+        let result = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf already_written; /bin/sleep 30 & echo $! > \"$0\"; exit 0", marker.path], timeout: 600)
         #expect(result.status == 0)
         #expect(result.standardOutput == "already_written")
+        // The output was still open when the result came, so the result did
+        // not wait for the descendant.
         #expect(!result.isOutputComplete)
-        #expect(Date().timeIntervalSince(started) < 3)
+        // And well before the descendant's own 30 s.
+        #expect(Date().timeIntervalSince(started) < 20)
     }
 
     @Test("Cancelling the calling task stops the tool promptly")
