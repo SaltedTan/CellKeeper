@@ -161,10 +161,10 @@ struct CommandLineAdapterTests {
         }
     }
 
-    /// The timeout for a fake tool that finishes by itself, in an adapter
-    /// test not about timeouts, instead of the production timeouts (5 s for
-    /// pmset, 10 s and 20 s for shortcuts): a fake tool has taken longer than
-    /// 5 s on a loaded machine.
+    /// The timeout for a tool that finishes by itself, in a test not about
+    /// timeouts: far beyond the production timeouts (5 s for pmset, 10 s and
+    /// 20 s for shortcuts), as on a loaded machine a fake tool has taken
+    /// longer than 5 s, and a pipeline longer than 10 s.
     static let toolTimeout: TimeInterval = 120
 
     // MARK: - Process runner
@@ -186,7 +186,7 @@ struct CommandLineAdapterTests {
 
     @Test("Exit status and both output streams are captured")
     func capturesOutput() async throws {
-        let result = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf out; printf 'first\\nsecond' >&2; exit 3"], timeout: 10)
+        let result = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf out; printf 'first\\nsecond' >&2; exit 3"], timeout: Self.toolTimeout)
         #expect(result.status == 3)
         #expect(result.standardOutput == "out")
         #expect(result.standardError == "first\nsecond")
@@ -264,7 +264,7 @@ struct CommandLineAdapterTests {
 
     @Test("Large output neither blocks the tool nor is kept beyond the limit")
     func largeOutput() async throws {
-        let result = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "head -c 600000 /dev/zero | tr '\\0' x"], timeout: 10)
+        let result = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "head -c 600000 /dev/zero | tr '\\0' x"], timeout: Self.toolTimeout)
         #expect(result.status == 0)
         #expect(result.standardOutput.utf8.count == ProcessRunner.outputLimit)
         #expect(!result.isOutputComplete)
@@ -296,7 +296,7 @@ struct CommandLineAdapterTests {
 
     @Test("Ordinary output is complete")
     func completeOutput() async throws {
-        let result = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf done"], timeout: 10)
+        let result = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf done"], timeout: Self.toolTimeout)
         #expect(result.isOutputComplete)
     }
 
