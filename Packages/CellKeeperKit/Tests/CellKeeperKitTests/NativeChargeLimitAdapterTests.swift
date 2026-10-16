@@ -301,9 +301,9 @@ struct CommandLineAdapterTests {
         // least 30 s). Removing the file afterwards releases it at its next
         // check, and if the removal fails it still gives up.
         // A runner that waited for the output to close would return only
-        // then. The deadline is far beyond that, so a slow start cannot run
-        // into it, and a call that never notices the shell exit is cancelled
-        // by the watchdog after a minute instead.
+        // then. The deadline is far beyond that, leaving ample headroom for a
+        // slow start, and a call that never notices the shell exit is
+        // cancelled by the watchdog after a minute instead.
         let hold = FileManager.default.temporaryDirectory.appendingPathComponent("cellkeeper-test-\(UUID().uuidString)")
         try Data().write(to: hold)
         defer { try? FileManager.default.removeItem(at: hold) }
