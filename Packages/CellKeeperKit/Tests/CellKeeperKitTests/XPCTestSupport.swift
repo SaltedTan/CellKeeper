@@ -189,14 +189,21 @@ final class ConnectionEventLog: @unchecked Sendable {
 
 /// A charge control whose read-back can be made to hang until the test lets
 /// it go, to model a helper that does not answer. Tests release it in a
-/// `defer`, and the stall ends by itself after 10 s at the latest, so a
-/// failing test cannot hang the run.
+/// `defer`, and by default the stall ends by itself after 10 s at the
+/// latest, so a failing test cannot hang the run.
 final class StallingChargeControl: HelperChargeControl, @unchecked Sendable {
     let inner = SimulatedChargeControl()
     private let lock = NSLock()
     private var stallsNextReadBack = false
     private var stalled = false
     private let released = DispatchSemaphore(value: 0)
+    private let givesUp: Bool
+
+    /// - Parameter givesUp: false holds a stall until ``release()``, however
+    ///   long that takes; the test then bounds its own waits meanwhile.
+    init(givesUp: Bool = true) {
+        self.givesUp = givesUp
+    }
 
     /// The next read-back blocks until ``release()``.
     func stallNextReadBack() {
@@ -227,7 +234,11 @@ final class StallingChargeControl: HelperChargeControl, @unchecked Sendable {
             return stallsNextReadBack
         }
         if stalls {
-            _ = released.wait(timeout: .now() + 10)
+            if givesUp {
+                _ = released.wait(timeout: .now() + 10)
+            } else {
+                released.wait()
+            }
             lock.withLock { stalled = false }
         }
         return try inner.readBack()

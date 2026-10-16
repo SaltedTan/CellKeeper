@@ -291,6 +291,12 @@ public final class HelperXPCServer: @unchecked Sendable {
         registry.handlers.reduce(0) { $0 + $1.queuedCount }
     }
 
+    /// Requests each connection being served has admitted, ever, one count
+    /// per connection. For tests.
+    var admittedRequestCounts: [Int] {
+        registry.handlers.map(\.admittedCount)
+    }
+
     /// True once a stop has begun: nothing more is admitted. For tests.
     var hasStopped: Bool {
         registry.isStopped
@@ -718,6 +724,11 @@ final class HelperXPCConnectionHandler: @unchecked Sendable {
 
     var queuedCount: Int {
         lock.withLock { queued }
+    }
+
+    /// Requests admitted, ever. For tests.
+    var admittedCount: Int {
+        lock.withLock { admitted }
     }
 
     var isOpen: Bool {

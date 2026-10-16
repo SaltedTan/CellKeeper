@@ -75,7 +75,9 @@ struct XPCHelperServerTests {
 
     @Test("Requests sent at the moment of revocation activate nothing, even if NSXPC carries them to a new session")
     func revocationRace() async throws {
-        let control = StallingChargeControl()
+        // The stall below lasts until the test releases it: on success, or
+        // in the defer when a bounded wait fails.
+        let control = StallingChargeControl(givesUp: false)
         defer { control.release() }
         let rig = try await XPCRig(control: control)
         let raw = try rig.raw()
@@ -92,14 +94,15 @@ struct XPCHelperServerTests {
         try #require(await eventually { (0...24).allSatisfy { !raw.outcomes($0).isEmpty } })
 
         // Then ten in order, all admitted on this connection before the
-        // engine runs any of them (a tick holds it meanwhile): five reads
-        // (26 to 30), the revoking read (31), and four leases behind it.
-        // When the revoking reply arrives, before the client could have
-        // seen the connection close, it sends a lease and an activation at
-        // once.
+        // engine runs any of them: five reads (26 to 30), the revoking read
+        // (31), and four leases behind it. A tick holds the engine from
+        // before the first is sent until the connection has admitted all 35
+        // requests sent on it. When the revoking reply arrives, before the
+        // client could have seen the connection close, it sends a lease and
+        // an activation at once.
         control.stallNextReadBack()
         let engine = rig.server.engine
-        let tick = Task { await engine.tick() }
+        Task { await engine.tick() }
         try #require(await eventually { control.isStalled })
         for id in 25...29 {
             raw.readState(id)
@@ -112,16 +115,14 @@ struct XPCHelperServerTests {
         for id in 31...34 {
             raw.lease(id, seconds: 800 + id)
         }
-        // The first waits for the engine, the other nine on the queue.
-        try #require(await eventually { rig.server.queuedRequestCount == 9 })
+        try #require(await eventually { rig.server.admittedRequestCounts == [35] })
         control.release()
-        await tick.value
         let ids = Array(0...34) + [100, 101]
         #expect(await eventually { ids.allSatisfy { !raw.outcomes($0).isEmpty } })
         // NSXPC calls each call's reply or its error handler, never both,
-        // and nothing reaches a connection once it is invalidated. So end
-        // the connection, and count once NSXPC has called its invalidation
-        // handler, on the same queue as the outcomes.
+        // and its invalidation handler is always the last handler it calls
+        // on a connection. So end the connection, and count once that has
+        // run.
         try #require(await raw.invalidate())
 
         // Every call ended exactly once.
