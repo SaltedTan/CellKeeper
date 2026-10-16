@@ -298,8 +298,8 @@ struct CommandLineAdapterTests {
     func descendantHoldsPipe() async throws {
         // A descendant holds the output open while the hold file exists,
         // checking every 0.1 s, and gives up by itself after 300 checks (at
-        // least 30 s). Removing the file afterwards releases it, so it does
-        // not outlive the test, and if the removal fails it still gives up.
+        // least 30 s). Removing the file afterwards releases it at its next
+        // check, and if the removal fails it still gives up.
         // A runner that waited for the output to close would return only
         // then. The deadline is far beyond that, so a slow start cannot run
         // into it, and a call that never notices the shell exit is cancelled
