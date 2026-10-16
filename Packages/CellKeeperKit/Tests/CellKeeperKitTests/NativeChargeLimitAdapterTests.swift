@@ -436,21 +436,35 @@ struct CommandLineAdapterTests {
         #expect(PmsetChargeLimitReader().timeout == PmsetChargeLimitReader.timeout)
         #expect(ShortcutsCommandRunner().listTimeout == ShortcutsCommandRunner.listTimeout)
         #expect(ShortcutsCommandRunner().runTimeout == ShortcutsCommandRunner.runTimeout)
-        // The tool lasts 30 s, longer than any timeout given here, so each
-        // call ends in timedOut, naming the timeout it ran under rounded up
-        // to whole seconds: 1 s or 2 s, where a production timeout would be
-        // 5, 10 or 20 s. The list and the run get different timeouts, so a
-        // swap would show.
+        // The tool runs while the hold file exists, which it does until the
+        // calls are over, checking every 0.1 s, and gives up by itself after
+        // 1200 checks (at least 120 s). A tool that ended before its call's
+        // deadline would end the call some other way than timedOut, failing
+        // the test; with the hold, that takes a call that sets its deadline
+        // over 120 s after starting the tool. The watchdog cancels a call
+        // still running after 60 s. timedOut names the timeout the call ran
+        // under, rounded up to whole seconds: 1 s or 2 s here, where a
+        // production timeout would be 5, 10 or 20 s. The list and the run get
+        // different timeouts, so a swap would show.
         let tools = try FakeTools()
-        let executable = try tools.script("tool", "exec /bin/sleep 30")
+        let hold = tools.path("hold")
+        try Data().write(to: URL(fileURLWithPath: hold))
+        defer { try? FileManager.default.removeItem(atPath: hold) }
+        let executable = try tools.script("tool", "i=0; while [ -e '\(hold)' ] && [ $i -lt 1200 ]; do /bin/sleep 0.1; i=$((i + 1)); done")
         await #expect(throws: ProcessRunnerError.timedOut(seconds: 1)) {
-            try await Self.pmset(executable, timeout: 0.2).readChargeLimit()
+            try await Self.withWatchdog(.seconds(60)) {
+                try await Self.pmset(executable, timeout: 0.2).readChargeLimit()
+            }
         }
         await #expect(throws: ProcessRunnerError.timedOut(seconds: 1)) {
-            try await Self.shortcuts(executable, listTimeout: 0.2, runTimeout: 1.2).shortcutNames()
+            try await Self.withWatchdog(.seconds(60)) {
+                try await Self.shortcuts(executable, listTimeout: 0.2, runTimeout: 1.2).shortcutNames()
+            }
         }
         await #expect(throws: ProcessRunnerError.timedOut(seconds: 2)) {
-            try await Self.shortcuts(executable, listTimeout: 0.2, runTimeout: 1.2).runShortcut(named: "Any", input: "80")
+            try await Self.withWatchdog(.seconds(60)) {
+                try await Self.shortcuts(executable, listTimeout: 0.2, runTimeout: 1.2).runShortcut(named: "Any", input: "80")
+            }
         }
     }
 
