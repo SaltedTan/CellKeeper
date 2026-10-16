@@ -161,6 +161,12 @@ struct CommandLineAdapterTests {
         }
     }
 
+    /// The timeout for a fake tool that finishes by itself, in an adapter
+    /// test not about timeouts, instead of the production timeouts (5 s for
+    /// pmset, 10 s and 20 s for shortcuts): a fake tool has taken longer than
+    /// 5 s on a loaded machine.
+    static let toolTimeout: TimeInterval = 120
+
     // MARK: - Process runner
 
     /// Runs `operation`, and cancels it (recording an issue) if it is still
@@ -406,13 +412,55 @@ struct CommandLineAdapterTests {
         }
     }
 
+    // MARK: - Adapter timeouts
+
+    /// A runner of `executable` with `toolTimeout` for each command, unless
+    /// the test gives its own.
+    static func shortcuts(_ executable: URL, listTimeout: TimeInterval = toolTimeout, runTimeout: TimeInterval = toolTimeout) -> ShortcutsCommandRunner {
+        var runner = ShortcutsCommandRunner(executable: executable)
+        runner.listTimeout = listTimeout
+        runner.runTimeout = runTimeout
+        return runner
+    }
+
+    /// A reader of `executable` with `toolTimeout`, unless the test gives its
+    /// own.
+    static func pmset(_ executable: URL, timeout: TimeInterval = toolTimeout) -> PmsetChargeLimitReader {
+        var reader = PmsetChargeLimitReader(executable: executable)
+        reader.timeout = timeout
+        return reader
+    }
+
+    @Test("Each adapter runs its tool under the timeout it was given, by default the production one")
+    func adapterTimeouts() async throws {
+        #expect(PmsetChargeLimitReader().timeout == PmsetChargeLimitReader.timeout)
+        #expect(ShortcutsCommandRunner().listTimeout == ShortcutsCommandRunner.listTimeout)
+        #expect(ShortcutsCommandRunner().runTimeout == ShortcutsCommandRunner.runTimeout)
+        // The tool lasts 30 s, longer than any timeout given here, so each
+        // call ends in timedOut, naming the timeout it ran under rounded up
+        // to whole seconds: 1 s or 2 s, where a production timeout would be
+        // 5, 10 or 20 s. The list and the run get different timeouts, so a
+        // swap would show.
+        let tools = try FakeTools()
+        let executable = try tools.script("tool", "exec /bin/sleep 30")
+        await #expect(throws: ProcessRunnerError.timedOut(seconds: 1)) {
+            try await Self.pmset(executable, timeout: 0.2).readChargeLimit()
+        }
+        await #expect(throws: ProcessRunnerError.timedOut(seconds: 1)) {
+            try await Self.shortcuts(executable, listTimeout: 0.2, runTimeout: 1.2).shortcutNames()
+        }
+        await #expect(throws: ProcessRunnerError.timedOut(seconds: 2)) {
+            try await Self.shortcuts(executable, listTimeout: 0.2, runTimeout: 1.2).runShortcut(named: "Any", input: "80")
+        }
+    }
+
     // MARK: - shortcuts
 
     @Test("Shortcut names are listed one per line")
     func listsShortcuts() async throws {
         let tools = try FakeTools()
         let executable = try tools.script("shortcuts", #"[ "$1" = list ] && printf 'CellKeeper Set Charge Limit\nMorning  Briefing \nOther\n'"#)
-        let names = try await ShortcutsCommandRunner(executable: executable).shortcutNames()
+        let names = try await Self.shortcuts(executable).shortcutNames()
         #expect(names == ["CellKeeper Set Charge Limit", "Morning  Briefing ", "Other"])
     }
 
@@ -425,7 +473,7 @@ struct CommandLineAdapterTests {
         cat "$4" >> '\(log)'
         printf '|%s' "$4" >> '\(log)'
         """)
-        try await ShortcutsCommandRunner(executable: executable).runShortcut(named: "CellKeeper Set Charge Limit", input: "85")
+        try await Self.shortcuts(executable).runShortcut(named: "CellKeeper Set Charge Limit", input: "85")
         let parts = try String(contentsOfFile: log, encoding: .utf8).split(separator: "|", omittingEmptySubsequences: false).map(String.init)
         #expect(Array(parts.prefix(4)) == ["run", "CellKeeper Set Charge Limit", "-i", "85"])
         #expect(parts.count == 5)
@@ -438,7 +486,7 @@ struct CommandLineAdapterTests {
         let tools = try FakeTools()
         let executable = try tools.script("shortcuts", "head -c 300000 /dev/zero | tr '\\0' x")
         await #expect(throws: ShortcutsCommandError.failed(command: "list", message: "incomplete output")) {
-            try await ShortcutsCommandRunner(executable: executable).shortcutNames()
+            try await Self.shortcuts(executable).shortcutNames()
         }
     }
 
@@ -447,7 +495,7 @@ struct CommandLineAdapterTests {
         let tools = try FakeTools()
         let executable = try tools.script("shortcuts", "echo 'Error: The operation couldn’t be completed. Couldn’t find shortcut' >&2; exit 1")
         await #expect(throws: ShortcutsCommandError.failed(command: "run", message: "Error: The operation couldn’t be completed. Couldn’t find shortcut")) {
-            try await ShortcutsCommandRunner(executable: executable).runShortcut(named: "Missing", input: "80")
+            try await Self.shortcuts(executable).runShortcut(named: "Missing", input: "80")
         }
     }
 
@@ -459,7 +507,7 @@ struct CommandLineAdapterTests {
         let log = tools.path("args")
         let report = ChargeLimitReportParserTests.report(85)
         let executable = try tools.script("pmset", "printf '%s ' \"$@\" > '\(log)'\ncat <<'EOF'\n\(report)EOF")
-        let reading = try await PmsetChargeLimitReader(executable: executable).readChargeLimit()
+        let reading = try await Self.pmset(executable).readChargeLimit()
         #expect(reading == .limit(85))
         #expect(try String(contentsOfFile: log, encoding: .utf8) == "-g battlimit ")
     }
@@ -469,7 +517,7 @@ struct CommandLineAdapterTests {
         let tools = try FakeTools()
         let executable = try tools.script("pmset", "head -c 300000 /dev/zero | tr '\\0' x")
         await #expect(throws: PmsetChargeLimitError.failed("incomplete output")) {
-            try await PmsetChargeLimitReader(executable: executable).readChargeLimit()
+            try await Self.pmset(executable).readChargeLimit()
         }
     }
 
@@ -478,7 +526,7 @@ struct CommandLineAdapterTests {
         let tools = try FakeTools()
         let executable = try tools.script("pmset", "echo 'pmset: unknown option' >&2; exit 1")
         await #expect(throws: PmsetChargeLimitError.failed("pmset: unknown option")) {
-            try await PmsetChargeLimitReader(executable: executable).readChargeLimit()
+            try await Self.pmset(executable).readChargeLimit()
         }
     }
 }
