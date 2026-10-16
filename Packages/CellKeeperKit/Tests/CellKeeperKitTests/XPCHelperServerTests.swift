@@ -271,8 +271,11 @@ struct XPCHelperServerTests {
         #expect(rig.events.contains(.sessionRevoked(session)))
         try #require(await eventually { barriers.heldCount == 1 })
 
-        // The revoking reply was sent, but the closing barrier has not run:
-        // the connection is still valid and the consumer still waits.
+        // The revoking reply was sent, but the closing barrier has not run.
+        // Once the stop waits for the connection, whose consumer waits for
+        // that barrier, and the stop's timer for a deadline the test does
+        // not pass, nothing here but the barrier lets either go on: the stop
+        // has not returned, and the connection is still valid.
         let deadline = TestDeadline()
         let server = rig.server
         let returned = Flag()
@@ -281,8 +284,7 @@ struct XPCHelperServerTests {
             returned.set()
             return drained
         }
-        try #require(await eventually { server.hasStopped && deadline.isAwaited })
-        try await Task.sleep(for: .milliseconds(100))
+        try #require(await eventually { server.hasStopped && deadline.isAwaited && server.drainsWaitingForClosingBarrier == 1 })
         #expect(!returned.value)
         #expect(server.connectionCount == 1)
         #expect(client.transportFailure == nil)

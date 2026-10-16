@@ -302,6 +302,12 @@ public final class HelperXPCServer: @unchecked Sendable {
         registry.handlers.reduce(0) { $0 + $1.unconfirmedReplies }
     }
 
+    /// Connections whose drain is awaited (by a stop) while their consumer
+    /// waits for its closing barrier. For tests.
+    var drainsWaitingForClosingBarrier: Int {
+        registry.handlers.filter(\.isDrainWaitingForClosingBarrier).count
+    }
+
     /// Connections not yet closed (a closed one may still finish its request
     /// in progress). For tests.
     var openConnectionCount: Int {
@@ -645,6 +651,8 @@ final class HelperXPCConnectionHandler: @unchecked Sendable {
     /// A stop is draining: no request is admitted, the queued ones run.
     private var isDraining = false
     private var consumer: Task<Bool, Never>?
+    /// Calls of ``drained()`` waiting for the consumer to end.
+    private var drainWaits = 0
     /// Requests admitted, ever.
     private var admitted = 0
     /// Requests run whose reply was handed to the transport.
@@ -721,6 +729,14 @@ final class HelperXPCConnectionHandler: @unchecked Sendable {
         lock.withLock { answered - confirmed }
     }
 
+    /// A call of ``drained()`` waits while the consumer waits for its
+    /// closing barrier: neither goes on until the barrier runs or the
+    /// connection ends otherwise. For tests.
+    var isDrainWaitingForClosingBarrier: Bool {
+        let (isDrainAwaited, barrier) = lock.withLock { (drainWaits > 0, closingBarrier) }
+        return isDrainAwaited && barrier?.isAwaited == true
+    }
+
     /// The engine revoked the session. A request in progress (the one that
     /// caused it) gets its reply first: the consumer records the close when
     /// that request ends. Otherwise it is recorded now. Either way the
@@ -767,8 +783,13 @@ final class HelperXPCConnectionHandler: @unchecked Sendable {
     /// invalidated) and returns whether its drain outcome is complete (see
     /// the type's documentation).
     func drained() async -> Bool {
-        let task = lock.withLock { consumer }
-        return await task?.value ?? false
+        let task = lock.withLock { () -> Task<Bool, Never>? in
+            drainWaits += 1
+            return consumer
+        }
+        let isComplete = await task?.value ?? false
+        lock.withLock { drainWaits -= 1 }
+        return isComplete
     }
 
     /// What ending a connection at once still has to do outside the lock.
@@ -973,6 +994,12 @@ final class ClosingBarrier: @unchecked Sendable {
             return self.waiter
         }
         waiter?.resume()
+    }
+
+    /// True while a wait is suspended, which only ``finish()`` resumes. For
+    /// tests.
+    var isAwaited: Bool {
+        lock.withLock { waiter != nil }
     }
 }
 
