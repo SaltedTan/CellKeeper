@@ -1,5 +1,5 @@
 @testable import CellKeeperCore
-import CellKeeperHelperCore
+@testable import CellKeeperHelperCore
 import Foundation
 import Testing
 
@@ -105,36 +105,138 @@ struct HelperHoldEndTests {
     }
 }
 
+/// The helper's side of one session, admitting requests as the engine
+/// does: a token from the session's own ``RequestBudget`` if one is left,
+/// and a count of requests in a row that found none.
+private struct HelperSessionBudget {
+    var budget: RequestBudget
+    var overBudgetStreak = 0
+
+    /// Whether the request is served: one that needs a token is refused
+    /// without one.
+    mutating func admit(at now: TimeInterval, needsToken: Bool) -> Bool {
+        if budget.take(at: now) {
+            overBudgetStreak = 0
+            return true
+        }
+        overBudgetStreak += 1
+        return !needsToken
+    }
+}
+
+/// SplitMix64, so a test draws the same numbers on every run.
+private struct SeededGenerator: RandomNumberGenerator {
+    var state: UInt64
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+}
+
 @Suite("Helper backend: request budget")
 struct HelperRequestPacingTests {
+    private static let tokenTime = 1 / HelperEngine.requestsPerSecond
+
     @Test("Requests that need a token wait for one")
     func pacedRequests() {
         var pacer = RequestPacer(at: 0)
         for _ in 0..<Int(RequestPacer.capacity) {
             #expect(pacer.wait(needsToken: true, at: 0) == 0)
-            pacer.take(at: 0)
+            pacer.record(sentAt: 0, repliedAt: 0, refused: false)
         }
-        #expect(pacer.wait(needsToken: true, at: 0) == 1 / HelperEngine.requestsPerSecond)
-        #expect(pacer.wait(needsToken: true, at: 1 / HelperEngine.requestsPerSecond) == 0)
+        #expect(pacer.wait(needsToken: true, at: 0) == Self.tokenTime + RequestPacer.waitMargin)
+        #expect(pacer.wait(needsToken: true, at: Self.tokenTime + RequestPacer.waitMargin) == 0)
     }
 
     @Test("Requests toward safety go at once, but never more than a few in a row beyond the budget")
     func unpacedStreakIsBounded() {
         var pacer = RequestPacer(at: 0)
         for _ in 0..<Int(RequestPacer.capacity) {
-            pacer.take(at: 0)
+            pacer.record(sentAt: 0, repliedAt: 0, refused: false)
         }
         for _ in 0..<RequestPacer.maximumUnpacedStreak {
             #expect(pacer.wait(needsToken: false, at: 0) == 0)
-            pacer.take(at: 0)
+            pacer.record(sentAt: 0, repliedAt: 0, refused: false)
         }
         #expect(pacer.overBudgetStreak == RequestPacer.maximumUnpacedStreak)
         #expect(pacer.wait(needsToken: false, at: 0) > 0)
         #expect(RequestPacer.maximumUnpacedStreak * 4 <= HelperEngine.maximumOverBudgetRequests)
 
-        // A request within the budget ends the streak.
-        pacer.take(at: 1)
+        // A request sure of a token ends the streak.
+        pacer.record(sentAt: 1, repliedAt: 1, refused: false)
         #expect(pacer.overBudgetStreak == 0)
+    }
+
+    @Test("A request counts as admitted when its reply arrives, so time in flight at the cap earns nothing")
+    func admittedAtReply() {
+        var pacer = RequestPacer(at: 0)
+        // The helper may have admitted it only at the reply, its budget full
+        // until then.
+        pacer.record(sentAt: 0, repliedAt: 5, refused: false)
+        for _ in 1..<Int(RequestPacer.capacity) {
+            #expect(pacer.wait(needsToken: true, at: 5) == 0)
+            pacer.record(sentAt: 5, repliedAt: 5, refused: false)
+        }
+        #expect(pacer.wait(needsToken: true, at: 5) == Self.tokenTime + RequestPacer.waitMargin)
+    }
+
+    @Test("A request sent without a sure token counts as having taken what is left")
+    func unsureRequestEmptiesCount() {
+        var pacer = RequestPacer(at: 0)
+        for _ in 0..<Int(RequestPacer.capacity) {
+            pacer.record(sentAt: 0, repliedAt: 0, refused: false)
+        }
+        // Half a token: the helper, which may hold more, may have had a whole
+        // one and taken it.
+        let now = Self.tokenTime / 2
+        #expect(pacer.wait(needsToken: false, at: now) == 0)
+        pacer.record(sentAt: now, repliedAt: now, refused: false)
+        #expect(pacer.overBudgetStreak == 1)
+        #expect(pacer.wait(needsToken: true, at: now) == Self.tokenTime + RequestPacer.waitMargin)
+    }
+
+    @Test("A refusal empties the count from its reply and counts toward the streak")
+    func refusalEmptiesCount() {
+        var pacer = RequestPacer(at: 0)
+        pacer.record(sentAt: 0, repliedAt: 2, refused: true)
+        #expect(pacer.overBudgetStreak == 1)
+        #expect(pacer.wait(needsToken: true, at: 2) == Self.tokenTime + RequestPacer.waitMargin)
+        let retry = 2 + Self.tokenTime + RequestPacer.waitMargin
+        pacer.record(sentAt: retry, repliedAt: retry, refused: false)
+        #expect(pacer.overBudgetStreak == 0)
+    }
+
+    @Test("However late the helper admits and answers requests, a paced one finds a token and the over-budget streak stays bounded")
+    func latencyAgainstHelperBudget() throws {
+        var generator = SeededGenerator(state: 67)
+        func delay() -> TimeInterval {
+            Bool.random(using: &generator) ? 0 : .random(in: 0..<3, using: &generator)
+        }
+        for _ in 0..<500 {
+            var now: TimeInterval = 1_000
+            var pacer = RequestPacer(at: now)
+            var helper = HelperSessionBudget(budget: RequestBudget(at: now))
+            for _ in 0..<60 {
+                let needsToken = Bool.random(using: &generator)
+                // Mostly bursts, as an evaluation sends them.
+                if Int.random(in: 0..<4, using: &generator) == 0 {
+                    now += .random(in: 0..<2, using: &generator)
+                }
+                now += pacer.wait(needsToken: needsToken, at: now)
+                let sentAt = now
+                now += delay()
+                let isServed = helper.admit(at: now, needsToken: needsToken)
+                now += delay()
+                pacer.record(sentAt: sentAt, repliedAt: now, refused: !isServed)
+                try #require(isServed)
+                try #require(helper.overBudgetStreak <= pacer.overBudgetStreak)
+                try #require(pacer.overBudgetStreak <= RequestPacer.maximumUnpacedStreak)
+            }
+        }
     }
 
     @Test("A burst of holds and releases never exceeds the helper's budget")
