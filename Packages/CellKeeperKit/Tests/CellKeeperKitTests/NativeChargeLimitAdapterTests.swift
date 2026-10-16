@@ -174,9 +174,13 @@ struct CommandLineAdapterTests {
 
     @Test("A tool that does not finish in time is stopped")
     func timeout() async {
+        let started = Date()
         await #expect(throws: ProcessRunnerError.timedOut(seconds: 1)) {
             try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"], timeout: 0.3)
         }
+        // Well before the tool's own 30 s: the deadline stopped it, rather
+        // than the runner waiting it out and then reporting a timeout.
+        #expect(Date().timeIntervalSince(started) < 20)
     }
 
     @Test("A tool that ignores SIGTERM is killed after the grace period")
@@ -250,10 +254,12 @@ struct CommandLineAdapterTests {
         // yes floods its output and never stops by itself, so only the
         // deadline can end the call; ending well within 20 s shows the flood
         // did not hold the deadline off. A tighter bound would be a guess at
-        // how fast a loaded machine starts and stops the tool.
+        // how fast a loaded machine starts and stops the tool. The deadline
+        // is a whole second so that even a slow start leaves yes flooding
+        // when it arrives.
         let started = Date()
         await #expect(throws: ProcessRunnerError.timedOut(seconds: 1)) {
-            try await ProcessRunner.run(URL(fileURLWithPath: "/usr/bin/yes"), arguments: [], timeout: 0.3)
+            try await ProcessRunner.run(URL(fileURLWithPath: "/usr/bin/yes"), arguments: [], timeout: 1)
         }
         #expect(Date().timeIntervalSince(started) < 20)
     }
