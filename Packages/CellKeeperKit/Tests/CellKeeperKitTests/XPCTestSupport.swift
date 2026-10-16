@@ -11,6 +11,11 @@ import Testing
 /// ``ManualTimeouts`` instead, never by this.
 let setupTimeout: Duration = .seconds(30)
 
+/// How long a stop whose deadline is not under test may drain: far longer
+/// than a healthy drain takes, also on a slow CI runner, so only a drain
+/// that hangs reaches it. Deadlines under test are ``TestDeadline``s.
+let drainTimeout: Duration = .seconds(30)
+
 /// A monotonic clock the test moves by hand. Unless `step` is set, readings
 /// repeat until the test advances it, so two engines that do the same work
 /// read the same times.
@@ -184,14 +189,21 @@ final class ConnectionEventLog: @unchecked Sendable {
 
 /// A charge control whose read-back can be made to hang until the test lets
 /// it go, to model a helper that does not answer. Tests release it in a
-/// `defer`, and the stall ends by itself after 10 s at the latest, so a
-/// failing test cannot hang the run.
+/// `defer`, and by default the stall ends by itself after 10 s at the
+/// latest, so a failing test cannot hang the run.
 final class StallingChargeControl: HelperChargeControl, @unchecked Sendable {
     let inner = SimulatedChargeControl()
     private let lock = NSLock()
     private var stallsNextReadBack = false
     private var stalled = false
     private let released = DispatchSemaphore(value: 0)
+    private let givesUp: Bool
+
+    /// - Parameter givesUp: false holds a stall until ``release()``, however
+    ///   long that takes; the test then bounds its own waits meanwhile.
+    init(givesUp: Bool = true) {
+        self.givesUp = givesUp
+    }
 
     /// The next read-back blocks until ``release()``.
     func stallNextReadBack() {
@@ -222,7 +234,11 @@ final class StallingChargeControl: HelperChargeControl, @unchecked Sendable {
             return stallsNextReadBack
         }
         if stalls {
-            _ = released.wait(timeout: .now() + 10)
+            if givesUp {
+                _ = released.wait(timeout: .now() + 10)
+            } else {
+                released.wait()
+            }
             lock.withLock { stalled = false }
         }
         return try inner.readBack()
@@ -383,16 +399,26 @@ final class RawHelperConnection: @unchecked Sendable {
     let connection: NSXPCConnection
     private let lock = NSLock()
     private var recorded: [Int: [Outcome]] = [:]
+    private let invalidated = Flag()
 
     init(endpoint: NSXPCListenerEndpoint) throws {
         connection = NSXPCConnection(listenerEndpoint: endpoint)
         connection.remoteObjectInterface = HelperXPCInterface.make()
         connection.setCodeSigningRequirement(try ownRequirement().text)
+        connection.invalidationHandler = { [invalidated] in invalidated.set() }
         connection.resume()
     }
 
     deinit {
         connection.invalidate()
+    }
+
+    /// Invalidates the connection, and returns true once NSXPC has called
+    /// its invalidation handler; false if it has not after 10 s. Nothing
+    /// reaches a connection once it is invalidated.
+    func invalidate() async -> Bool {
+        connection.invalidate()
+        return await eventually { invalidated.value }
     }
 
     /// The proxy for call `id`: an error NSXPC reports for it is recorded.
@@ -641,6 +667,21 @@ final class TestDeadline: @unchecked Sendable {
         for waiter in waiting {
             waiter.resume()
         }
+    }
+
+    /// Returns what `stop`, a stop by this deadline, returned. If it has not
+    /// returned `seconds` after this is called, records an issue and
+    /// expires the deadline, which makes the stop cut off what remains and
+    /// return: a stop that would wait forever fails the test in bounded
+    /// time instead.
+    func value(of stop: Task<Bool, Never>, within seconds: Double = 10) async -> Bool {
+        let watchdog = Task {
+            try await Task.sleep(for: .seconds(seconds))
+            Issue.record("the stop had not returned after \(seconds) s, so its deadline was expired")
+            expire()
+        }
+        defer { watchdog.cancel() }
+        return await stop.value
     }
 
     /// Returns once ``expire()`` has been called, or when the task is
