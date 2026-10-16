@@ -163,6 +163,21 @@ struct CommandLineAdapterTests {
 
     // MARK: - Process runner
 
+    /// Runs `operation`, and cancels it (recording an issue) if it is still
+    /// running after `limit`, so a call that overruns ends in bounded time
+    /// instead of hanging the test, as long as the runner notices the
+    /// cancellation. The call is awaited either way.
+    static func withWatchdog<T: Sendable>(_ limit: Duration, _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+        let call = Task { try await operation() }
+        let watchdog = Task {
+            try await Task.sleep(for: limit)
+            Issue.record("still running after \(limit), so it was cancelled")
+            call.cancel()
+        }
+        defer { watchdog.cancel() }
+        return try await call.value
+    }
+
     @Test("Exit status and both output streams are captured")
     func capturesOutput() async throws {
         let result = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf out; printf 'first\\nsecond' >&2; exit 3"], timeout: 10)
@@ -174,9 +189,13 @@ struct CommandLineAdapterTests {
 
     @Test("A tool that does not finish in time is stopped")
     func timeout() async {
+        let started = Date()
         await #expect(throws: ProcessRunnerError.timedOut(seconds: 1)) {
             try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"], timeout: 0.3)
         }
+        // Well before the tool's own 30 s: the deadline stopped it, rather
+        // than the runner waiting it out and then reporting a timeout.
+        #expect(Date().timeIntervalSince(started) < 20)
     }
 
     @Test("A tool that ignores SIGTERM is killed after the grace period")
@@ -247,11 +266,26 @@ struct CommandLineAdapterTests {
 
     @Test("A tool flooding its output still stops at the deadline")
     func floodingToolTimesOut() async {
-        let started = Date()
-        await #expect(throws: ProcessRunnerError.timedOut(seconds: 1)) {
-            try await ProcessRunner.run(URL(fileURLWithPath: "/usr/bin/yes"), arguments: [], timeout: 0.3)
+        // The tool writes four times the output limit, which it can finish
+        // only once the runner has read more than the limit (a pipe holds
+        // far less), marks that, then floods without end. So a mark after
+        // the call shows the runner read past its limit from the tool before
+        // the deadline ended the call. If a slow start let the deadline come
+        // first, there is no mark, and the call is repeated with a longer
+        // deadline. The watchdog cancels a call still running 20 s past its
+        // deadline, which then fails as a cancellation instead of timedOut.
+        let flood = "head -c \(4 * ProcessRunner.outputLimit) /dev/zero; touch \"$0\"; exec /usr/bin/yes"
+        for deadline in [1.0, 4, 16] {
+            let marker = FileManager.default.temporaryDirectory.appendingPathComponent("cellkeeper-test-\(UUID().uuidString)")
+            defer { try? FileManager.default.removeItem(at: marker) }
+            await #expect(throws: ProcessRunnerError.timedOut(seconds: Int(deadline.rounded(.up)))) {
+                try await Self.withWatchdog(.seconds(deadline + 20)) {
+                    try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", flood, marker.path], timeout: deadline)
+                }
+            }
+            if FileManager.default.fileExists(atPath: marker.path) { return }
         }
-        #expect(Date().timeIntervalSince(started) < 4)
+        Issue.record("the runner never read past its output limit before the deadline")
     }
 
     @Test("Ordinary output is complete")
@@ -262,12 +296,29 @@ struct CommandLineAdapterTests {
 
     @Test("A descendant holding the output open neither hides what was written nor delays the result")
     func descendantHoldsPipe() async throws {
+        // A descendant holds the output open while the hold file exists,
+        // checking every 0.1 s, and gives up by itself after 300 checks (at
+        // least 30 s). Removing the file afterwards releases it at its next
+        // check, and if the removal fails it still gives up.
+        // A runner that waited for the output to close would return only
+        // then. The deadline is far beyond that, leaving ample headroom for a
+        // slow start, and a call that never notices the shell exit is
+        // cancelled by the watchdog after a minute instead.
+        let hold = FileManager.default.temporaryDirectory.appendingPathComponent("cellkeeper-test-\(UUID().uuidString)")
+        try Data().write(to: hold)
+        defer { try? FileManager.default.removeItem(at: hold) }
+        let descendant = "i=0; while [ -e \"$0\" ] && [ $i -lt 300 ]; do /bin/sleep 0.1; i=$((i + 1)); done"
         let started = Date()
-        let result = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf already_written; sleep 5 & exit 0"], timeout: 10)
+        let result = try await Self.withWatchdog(.seconds(60)) {
+            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf already_written; \(descendant) & exit 0", hold.path], timeout: 120)
+        }
         #expect(result.status == 0)
         #expect(result.standardOutput == "already_written")
+        // The output was still open when the result came, so the result did
+        // not wait for the descendant.
         #expect(!result.isOutputComplete)
-        #expect(Date().timeIntervalSince(started) < 3)
+        // And well before the descendant would give up by itself.
+        #expect(Date().timeIntervalSince(started) < 20)
     }
 
     @Test("Cancelling the calling task stops the tool promptly")
