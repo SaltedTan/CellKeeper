@@ -153,6 +153,15 @@ public enum TemporaryFullChargeWording {
         if case .unavailable = capabilities.availability {
             return "\(name) requested, but charging control is unavailable."
         }
+        // A safety rule that keeps the full charge from taking effect is
+        // the explanation, not the last request's result.
+        let suppressedBy = status.decision?.notes.lazy.compactMap { note -> PolicyState? in
+            if case .fullChargeSuppressed(let state) = note { return state }
+            return nil
+        }.first
+        if let suppressedBy {
+            return "\(name) requested, not in effect: \(PolicyNote.fullChargeSuppression(by: suppressedBy))."
+        }
         guard let decision = status.decision, decision.state == .fullChargeOverride, status.currentMode == decision.desiredMode else {
             return "\(name) requested, not in effect" + (lastResult.map { " (\($0))" } ?? "") + "."
         }

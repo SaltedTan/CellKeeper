@@ -105,7 +105,14 @@ struct FullChargeScheduleWordingTests {
         if let outcome = status.fullChargeScheduleOutcome, let line = FullChargeScheduleWording.outcomeLine(outcome) {
             texts.append(line)
         }
-        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix) == "Scheduled full charge requested, not in effect.")
+        #expect(status.decision?.notes.contains(.fullChargeSuppressed(by: .temperaturePause)) == true)
+        // The safety rule is the explanation, even when the last request (the
+        // pause) succeeded.
+        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: "Applied and confirmed", timeZone: utc, locale: posix) == "Scheduled full charge requested, not in effect: charging is paused for battery temperature.")
+        var manual = override
+        manual.source = .user
+        #expect(TemporaryFullChargeWording.line(for: manual, status: status, lastResult: nil, timeZone: utc, locale: posix) == "Temporary full charge requested, not in effect: charging is paused for battery temperature.")
+        #expect(status.decision?.notes.map(\.description).contains("Temporary full charge is not in effect: charging is paused for battery temperature.") == true)
         for text in texts {
             #expect(!text.lowercased().contains("allows charging"), "in: \(text)")
             #expect(!text.lowercased().contains("charging to 100%"), "in: \(text)")

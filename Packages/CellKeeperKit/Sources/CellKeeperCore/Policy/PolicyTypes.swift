@@ -249,13 +249,33 @@ public enum PolicyNote: Sendable, Equatable, CustomStringConvertible {
         case .dischargeUnsupported:
             "The current backend cannot discharge while plugged in."
         case .fullChargeSuppressed(let state):
-            "Temporary full charge is paused by \(state.rawValue)."
+            "Temporary full charge is not in effect: \(Self.fullChargeSuppression(by: state))."
         case .nativeLimitKeptWithoutTelemetry:
             "Battery telemetry is unavailable. macOS keeps enforcing its Charge Limit from its own measurements, so CellKeeper leaves it unchanged."
         case .confirmingLimit:
             "CellKeeper is confirming the limit with the next battery reading before it pauses charging, so a single wrong reading cannot pause it."
         case .dischargeEndedForMacOSChargeLimit:
             "The discharge session ended: while macOS's Charge Limit is on or cannot be read, CellKeeper starts no discharge and asks to end one in progress."
+        }
+    }
+
+    /// Why a temporary full charge is not in effect while the policy is in
+    /// `state`, in plain words, for ``fullChargeSuppressed(by:)`` and the
+    /// menu. Today only the temperature pause adds that note; every state
+    /// has words so none is ever shown by its identifier.
+    public static func fullChargeSuppression(by state: PolicyState) -> String {
+        switch state {
+        case .unmanaged: "charge management is off"
+        case .failSafe: "CellKeeper is using macOS default charging"
+        case .safetyFloor: "the safety floor applies"
+        case .onBattery: "the Mac is on battery"
+        case .temperaturePause: "charging is paused for battery temperature"
+        case .fullChargeOverride: "a temporary full charge is already in effect"
+        case .charging: "CellKeeper is charging toward its limit"
+        case .holding: "charging is paused at the limit"
+        case .discharging: "a discharge session is running"
+        case .osEnforcedLimit: "macOS enforces its Charge Limit"
+        case .deferringToMacOS: "macOS's Charge Limit is in charge"
         }
     }
 }
