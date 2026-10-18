@@ -6,10 +6,10 @@ import Testing
 @Suite("Helper daemon: sleep and wake")
 struct HelperDaemonSleepTests {
     @Test("Sleep is acknowledged only after the engine has run its sleep checks (R16, precondition 13)")
-    func acknowledgedAfterEngine() async {
+    func acknowledgedAfterEngine() async throws {
         let control = SimulatedChargeControl()
         let h = DaemonHarness(control: control)
-        let running = await h.run()
+        let running = try await h.run()
         let session = await h.introducedSession()
         _ = await session.acquireOrRenewLease(control: HelperControl.adapterDisabled.rawValue, seconds: 120)
         #expect(await session.setControl(control: HelperControl.adapterDisabled.rawValue, active: true) == .ok)
@@ -34,9 +34,9 @@ struct HelperDaemonSleepTests {
     }
 
     @Test("Wake is forwarded to the engine (R17)")
-    func wakeForwarded() async {
+    func wakeForwarded() async throws {
         let h = DaemonHarness()
-        let running = await h.run()
+        let running = try await h.run()
         let session = await h.introducedSession()
 
         let acknowledgements = Acknowledgements()
@@ -55,9 +55,9 @@ struct HelperDaemonSleepTests {
     }
 
     @Test("Sleep and wake reach the engine in the order they happened")
-    func ordered() async {
+    func ordered() async throws {
         let h = DaemonHarness()
-        let running = await h.run()
+        let running = try await h.run()
         let session = await h.introducedSession()
 
         let acknowledgements = Acknowledgements()

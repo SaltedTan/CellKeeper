@@ -7,9 +7,9 @@ import Testing
 struct HelperDaemonHistoryTests {
     /// Runs a daemon, activates the charging inhibit through it, and shuts
     /// it down; returns the history its engine kept.
-    private func activateOnce(store: InMemoryHistoryStore, clock: ManualClock) async -> [HelperActivationRecord] {
+    private func activateOnce(store: InMemoryHistoryStore, clock: ManualClock) async throws -> [HelperActivationRecord] {
         let h = DaemonHarness(store: store, clock: clock)
-        let running = await h.run()
+        let running = try await h.run()
         let session = await h.introducedSession()
         _ = await session.acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: 900)
         #expect(await session.setControl(control: HelperControl.chargingInhibited.rawValue, active: true) == .ok)
@@ -21,24 +21,24 @@ struct HelperDaemonHistoryTests {
     }
 
     @Test("Each activation saves the engine's history with this boot's identifier (D35)")
-    func persisted() async {
+    func persisted() async throws {
         let store = InMemoryHistoryStore()
         let clock = ManualClock()
-        let history = await activateOnce(store: store, clock: clock)
+        let history = try await activateOnce(store: store, clock: clock)
         #expect(history.map(\.control) == [.chargingInhibited])
         #expect(store.saved(boot: .testBoot, now: clock.uptime()) == .loaded(history))
     }
 
     @Test("A new daemon in the same boot starts with the saved history and keeps enforcing the limits")
-    func reloadedInSameBoot() async {
+    func reloadedInSameBoot() async throws {
         let store = InMemoryHistoryStore()
         let clock = ManualClock()
-        let history = await activateOnce(store: store, clock: clock)
+        let history = try await activateOnce(store: store, clock: clock)
 
         clock.advance(by: 10)
         let relaunched = DaemonHarness(store: store, clock: clock)
         #expect(await relaunched.daemon.engine.activationHistory == history)
-        let running = await relaunched.run()
+        let running = try await relaunched.run()
         let session = await relaunched.introducedSession()
         _ = await session.acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: 900)
         #expect(await session.setControl(control: HelperControl.chargingInhibited.rawValue, active: true) == .rateLimited)
@@ -48,14 +48,14 @@ struct HelperDaemonHistoryTests {
     }
 
     @Test("A history saved in another boot is discarded")
-    func discardedAfterReboot() async {
+    func discardedAfterReboot() async throws {
         let store = InMemoryHistoryStore()
         let clock = ManualClock()
-        _ = await activateOnce(store: store, clock: clock)
+        _ = try await activateOnce(store: store, clock: clock)
 
         let rebooted = DaemonHarness(store: store, boot: .otherBoot, clock: clock)
         #expect(await rebooted.daemon.engine.activationHistory.isEmpty)
-        let running = await rebooted.run()
+        let running = try await rebooted.run()
         let logged = await eventually { rebooted.log.contains(.notice, .safety, "Discarded the saved activation history because it was saved in another boot") }
         #expect(logged)
         #expect(await rebooted.terminate(running) == 0)
@@ -70,7 +70,7 @@ struct HelperDaemonHistoryTests {
 
         let h = DaemonHarness(store: store, clock: clock)
         #expect(await h.daemon.engine.activationHistory.isEmpty)
-        let running = await h.run()
+        let running = try await h.run()
         #expect(h.frontend.calls == [.start])
         let logged = await eventually { h.log.contains(.notice, .safety, "a record has an impossible time") }
         #expect(logged)
@@ -85,7 +85,7 @@ struct HelperDaemonHistoryTests {
 
         let h = DaemonHarness(store: store, boot: nil, clock: clock)
         #expect(await h.daemon.engine.activationHistory.isEmpty)
-        let running = await h.run()
+        let running = try await h.run()
         let session = await h.introducedSession()
         _ = await session.acquireOrRenewLease(control: HelperControl.adapterDisabled.rawValue, seconds: 120)
         #expect(await session.setControl(control: HelperControl.adapterDisabled.rawValue, active: true) == .ok)
@@ -99,11 +99,11 @@ struct HelperDaemonHistoryTests {
     }
 
     @Test("A history that cannot be saved is logged once, and the daemon carries on")
-    func saveFailureLoggedOnce() async {
+    func saveFailureLoggedOnce() async throws {
         let store = InMemoryHistoryStore()
         store.failNextSaves(2)
         let h = DaemonHarness(store: store)
-        let running = await h.run()
+        let running = try await h.run()
         let session = await h.introducedSession()
         _ = await session.acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: 900)
         _ = await session.acquireOrRenewLease(control: HelperControl.adapterDisabled.rawValue, seconds: 120)

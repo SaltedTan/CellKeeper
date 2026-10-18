@@ -6,12 +6,13 @@ import Testing
 @Suite("Helper daemon: absolute deadlines")
 struct HelperDaemonDeadlineTests {
     @Test("A deadline's timer that starts late still ends at the original deadline")
-    func lateTimer() async {
+    func lateTimer() async throws {
         let clock = ManualClock()
         let deadline = clock.uptime() + HelperDaemon.terminationDeadline
         // The timer's task starts 3 s late.
         clock.beforeNextSleep { clock.advance(by: 3) }
         let never = Gate()
+        defer { never.open() }
         let finished = Flag()
         let result = Task {
             let value = await withDeadline(at: deadline, on: clock) { await never.wait(); return 1 }
@@ -25,18 +26,18 @@ struct HelperDaemonDeadlineTests {
         clock.advance(by: 5)
         let timedOut = await eventually { finished.value }
         #expect(timedOut)
-        if !timedOut {
-            clock.advance(by: 10)
-        }
-        #expect(await result.value == nil)
-        never.open()
+        // Had the timer not ended the wait, the bound opens the gate, so the
+        // operation ends it.
+        let value = try await bounded(releasing: { never.open() }) { await result.value }
+        #expect(value == nil)
     }
 
     @Test("A relative deadline is fixed when it is set, not when its timer starts")
-    func lateRelativeTimer() async {
+    func lateRelativeTimer() async throws {
         let clock = ManualClock()
         clock.beforeNextSleep { clock.advance(by: 3) }
         let never = Gate()
+        defer { never.open() }
         let finished = Flag()
         let result = Task {
             let value = await withDeadline(HelperDaemon.terminationDeadline, on: clock) { await never.wait(); return 1 }
@@ -48,11 +49,10 @@ struct HelperDaemonDeadlineTests {
         clock.advance(by: 5)
         let timedOut = await eventually { finished.value }
         #expect(timedOut)
-        if !timedOut {
-            clock.advance(by: 10)
-        }
-        #expect(await result.value == nil)
-        never.open()
+        // Had the timer not ended the wait, the bound opens the gate, so the
+        // operation ends it.
+        let value = try await bounded(releasing: { never.open() }) { await result.value }
+        #expect(value == nil)
     }
 
     @Test("With no time left, the operation is not started")

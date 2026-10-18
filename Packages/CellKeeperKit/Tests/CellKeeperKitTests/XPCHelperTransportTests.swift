@@ -222,7 +222,16 @@ struct XPCHelperTransportTests {
         for _ in 0..<window {
             sendNext()
         }
-        #expect(await eventually(within: 20) { replies.value?.count == count })
+        // Each reply sends the next request, so replies keep coming until
+        // all have. The test waits as long as they keep coming, and fails if
+        // none comes for 10 s: a slow runner takes longer instead of failing.
+        var received = 0
+        while received < count {
+            let progressed = await eventually { (replies.value?.count ?? 0) > received }
+            guard progressed else { break }
+            received = replies.value?.count ?? 0
+        }
+        #expect(received == count)
         #expect(introduced.value == HelperStatus.ok.rawValue)
         #expect(rig.server.openConnectionCount == 1)
 

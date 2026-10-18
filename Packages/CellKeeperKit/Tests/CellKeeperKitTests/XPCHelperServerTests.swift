@@ -75,9 +75,7 @@ struct XPCHelperServerTests {
 
     @Test("Requests sent at the moment of revocation activate nothing, even if NSXPC carries them to a new session")
     func revocationRace() async throws {
-        // The stall below lasts until the test releases it: on success, or
-        // in the defer when a bounded wait fails.
-        let control = StallingChargeControl(givesUp: false)
+        let control = StallingChargeControl()
         defer { control.release() }
         let rig = try await XPCRig(control: control)
         let raw = try rig.raw()
@@ -293,7 +291,7 @@ struct XPCHelperServerTests {
         // Once it runs, the connection and the session end, and nothing
         // admitted was discarded: the stop confirms.
         barriers.releaseAll()
-        let drained = await deadline.value(of: stopping)
+        let drained = try await deadline.value(of: stopping)
         #expect(drained)
         #expect(server.connectionCount == 0)
         #expect(await eventually { client.transportFailure != nil })
@@ -318,7 +316,7 @@ struct XPCHelperServerTests {
         #expect(client.transportFailure == nil)
 
         deadline.expire()
-        let drained = await stopping.value
+        let drained = try await bounded(releasing: { barriers.releaseAll() }) { await stopping.value }
         #expect(!drained)
         // Invalidated by the cut-off: the client sees the connection end,
         // and the engine (responsive) ends the session.
@@ -349,7 +347,7 @@ struct XPCHelperServerTests {
         try #require(await eventually { barriers.heldCount == 1 })
         client.invalidate()
 
-        let drained = await deadline.value(of: stopping)
+        let drained = try await deadline.value(of: stopping)
         #expect(drained)
         #expect(rig.events.contains(.sessionInvalidated(session)))
         #expect(server.connectionCount == 0)
@@ -476,7 +474,7 @@ struct XPCStalledEngineTests {
         #expect(control.isStalled)
 
         control.release()
-        let drained = await never.value(of: stopping)
+        let drained = try await never.value(of: stopping)
         #expect(drained)
         #expect(await inProgress.value == .ok)
         #expect(await queued.value == .ok)
@@ -510,7 +508,7 @@ struct XPCStalledEngineTests {
         try #require(await eventually { server.hasStopped && deadline.isAwaited })
         deadline.expire()
         // It returns without waiting for the request still in the engine.
-        let drained = await stopping.value
+        let drained = try await bounded(releasing: { control.release() }) { await stopping.value }
         #expect(!drained)
         #expect(control.isStalled)
 
@@ -559,7 +557,7 @@ struct XPCStalledEngineTests {
 
         // Every connection ended, its session invalidated, before the
         // deadline; but two admitted requests were discarded.
-        let drained = await deadline.value(of: stopping)
+        let drained = try await deadline.value(of: stopping)
         #expect(!drained)
         #expect(!deadline.hasPassed)
         #expect(await tenth.value == .ok)
@@ -601,7 +599,7 @@ struct XPCStalledEngineTests {
         deadline.pass()
         control.release()
         #expect(await inProgress.value == .ok)
-        let drained = await deadline.value(of: stopping)
+        let drained = try await deadline.value(of: stopping)
         #expect(!drained)
         #expect(server.connectionCount == 0)
     }
@@ -768,11 +766,14 @@ struct XPCStalledEngineTests {
         let call = Task { await clientFailure { _ = try await client.readState() } }
         try #require(await eventually { control.isStalled })
         timeouts.fireAll()
-        #expect(await call.value == .timedOut)
+        // Neither the timed-out call nor the next one waits for the stall.
+        let failure = try await bounded(releasing: { control.release() }) { await call.value }
+        #expect(failure == .timedOut)
         #expect(client.transportFailure == .timedOut)
-        await #expect(throws: HelperXPCError.invalidated) {
-            try await client.restoreDefaults()
+        let next = try await bounded(releasing: { control.release() }) {
+            await clientFailure { _ = try await client.restoreDefaults() }
         }
+        #expect(next == .invalidated)
 
         // The server sees the connection end while the engine is still
         // stalled; the request finishes, its reply has nowhere to go, and the
