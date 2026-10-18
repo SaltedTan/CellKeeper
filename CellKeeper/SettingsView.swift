@@ -492,8 +492,8 @@ private struct ActivityTab: View {
     /// Asks where to save the report in a save panel that runs no modal loop
     /// (a sheet on the Settings window), so the menu stays usable meanwhile.
     /// The report is generated when the user clicks Save, so it shows the
-    /// state at that moment, and only the chosen file is written. It is a few
-    /// kilobytes, written on the main actor.
+    /// state at that moment, and only the chosen file is written. The write
+    /// runs off the main actor, so a slow volume does not hold up the menu.
     private func saveDiagnostics() {
         let panel = NSSavePanel()
         panel.title = "Save Diagnostics"
@@ -520,7 +520,9 @@ private struct ActivityTab: View {
                 return
             }
             do {
-                try DiagnosticsReportFile.write(report, to: url)
+                try await Task.detached(priority: .userInitiated) {
+                    try DiagnosticsReportFile.write(report, to: url)
+                }.value
             } catch {
                 saveFailure = "\(error.localizedDescription) A file this save left there may be incomplete. You can choose another location, or use Copy Diagnostics."
             }
