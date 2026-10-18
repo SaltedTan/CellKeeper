@@ -26,6 +26,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         model.start()
+        // Only now can Shortcuts actions run: start() has queued the
+        // start-up work ahead of anything they send.
+        ShortcutsActionHost.coordinator.attach(model)
     }
 
     /// Gives the controller a bounded chance to restore macOS default charging

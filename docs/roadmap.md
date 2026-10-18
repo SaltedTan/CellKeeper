@@ -235,7 +235,14 @@ and an Apple Developer ID.
 ## Later
 
 - Launch at login (`SMAppService.mainApp`).
-- App Intents / Shortcuts actions for CellKeeper's own controls.
+- App Intents / Shortcuts actions for CellKeeper's own controls. *Done*
+  (owner approval 2026-10-19): five actions, the same commands as the menu
+  (set the limit, start or stop a temporary full charge, turn Manage
+  charging on or off, get the status), and a Siri and Spotlight phrase for
+  the status only (see `architecture.md`, "Shortcuts actions"). Not yet
+  tried in the Shortcuts app on a Mac. A "schedule a full charge" action is
+  left until someone asks: on macOS 26+ a Shortcuts automation at a time
+  of day can run Start CellKeeper Full Charge.
 - Scheduled limits and recurring schedules (a one-shot scheduled full charge
   exists; recurrence needs floating local time with DST rules and a record
   of the last occurrence, so that a clock change cannot fire one twice).

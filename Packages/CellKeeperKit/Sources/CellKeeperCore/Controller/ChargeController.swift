@@ -326,6 +326,14 @@ public actor ChargeController {
 
     /// Starts a temporary full charge. It ends at 100%, when fully charged, on
     /// unplug, or when `duration` elapses, whichever comes first.
+    ///
+    /// While an override is live (its monotonic deadline not passed), a full
+    /// charge or a discharge, started by the user or a schedule, this changes
+    /// nothing: the override keeps its deadline. Several starts queued behind
+    /// one another therefore give one full charge, with the first one's
+    /// deadline. An override whose deadline has passed is replaced, as the
+    /// next evaluation would have ended it. Schedules start their full charge
+    /// by their own rule (``setFullChargeSchedule(_:)``).
     @discardableResult
     public func startFullCharge(duration: TimeInterval = ChargeOverride.defaultFullChargeDuration) async -> ControllerStatus {
         await exclusively {
@@ -333,7 +341,13 @@ public actor ChargeController {
                 record(.override, "Temporary full charge not started: charge management is off.")
                 return
             }
-            let override = ChargeOverride.fullCharge(at: now(), uptime: uptime(), duration: duration)
+            let startUptime = uptime()
+            if let running = activeOverride, running.isLive(atUptime: startUptime) {
+                let what = running.kind == .fullCharge ? "a temporary full charge is already running" : "a discharge to the limit is running"
+                record(.override, "Temporary full charge not started: \(what).")
+                return
+            }
+            let override = ChargeOverride.fullCharge(at: now(), uptime: startUptime, duration: duration)
             activeOverride = override
             record(.override, "Temporary full charge requested (expires \(override.expiresAt.formatted(date: .omitted, time: .shortened))).")
             await performEvaluation(.overrideChanged)

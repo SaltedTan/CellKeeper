@@ -1,6 +1,6 @@
 # CellKeeper architecture
 
-Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit + a one-shot scheduled full charge), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper), the helper's NSXPC transport, tested over an anonymous listener but not used by the app yet, and the helper daemon's executable, which serves its engine over that transport to CellKeeper only, controls no hardware, refuses to listen when built without a team identifier, and is neither installed nor embedded, and the logic that removes the helper only after its restore, tested against fakes. Last reviewed 2026-10-10.
+Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit + a one-shot scheduled full charge + Shortcuts actions for CellKeeper's own controls), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper), the helper's NSXPC transport, tested over an anonymous listener but not used by the app yet, and the helper daemon's executable, which serves its engine over that transport to CellKeeper only, controls no hardware, refuses to listen when built without a team identifier, and is neither installed nor embedded, and the logic that removes the helper only after its restore, tested against fakes. Last reviewed 2026-10-10.
 
 This document describes how CellKeeper is put together and why. Research that
 informed these decisions is in [`docs/research/`](research/README.md); safety
@@ -35,6 +35,7 @@ rules are in [`docs/safety.md`](safety.md).
 ┌──────────────────────────── CellKeeper.app (SwiftUI, MainActor) ────────────────────────────┐
 │  CellKeeperApp / AppDelegate   MenuBarView   SettingsView   Presentation (wording)           │
 │  AppModel: owns the controller, ordered command queue, notifications, sleep/wake, quit path  │
+│  ShortcutsActions: App Intents over `ShortcutsActionCoordinator` (Kit), Siri/Spotlight       │
 └───────────────┬──────────────────────────────────────────────────────────────┬───────────────┘
                 │ uses                                                         │ uses
 ┌───────────────▼──────────────── CellKeeperKit (macOS adapters) ──────────────┐│
@@ -56,6 +57,10 @@ rules are in [`docs/safety.md`](safety.md).
 │  DiagnosticsReportFile     – the saved diagnostics report: name, UTF-8 write  ││
 │  FullChargeScheduleWording – what the menu and Settings say about a schedule  ││
 │  SystemNotificationPoster  – local notifications (UserNotifications), opt-in  ││
+│  ShortcutsActionCoordinator – Shortcuts actions: bounded waits, the           ││
+│                              UI's checks, fixed wording (`FirstValue`)        ││
+│  SettingsChange            – settings changes by source, banner rules,        ││
+│                              `ChargeLimitRequest`, `FullChargeStart`          ││
 └───────────────┬──────────────────────────────────────────────────────────────┘│
                 │ depends on                                                    │
 ┌───────────────▼──────────────── CellKeeperCore (pure Swift, no IOKit) ────────▼───────────────┐
@@ -139,7 +144,7 @@ Requirement → location:
 | macOS UI | `CellKeeper/` app target | Implemented (menu bar + settings) |
 | Scheduler | `FullChargeSchedule`, `FullChargeScheduleStore` (Core), `ChargeController`, `FullChargeScheduleWording` (Kit) | One-shot scheduled temporary full charge implemented; scheduled limits and recurring schedules are future |
 | Notifications | `NotificationPlanner`, `ChargingNotifier` (Core), `SystemNotificationPoster` (Kit) | Implemented, opt-in: planned from `ControllerStatus` transitions (see "Notifications") |
-| Shortcuts/automation | — | Future: App Intents calling `AppModel` intents |
+| Shortcuts/automation | `ShortcutsActions` (app), `ShortcutsActionCoordinator`, `SettingsChange` (Kit) | Five App Intents over `AppModel`'s own commands (see "Shortcuts actions") |
 | Privileged operations | `HelperEngine` (HelperCore), `HelperChargingBackend` (Core), `HelperXPCServer` / `HelperXPCClient` (HelperXPC), `XPCHelperTransport` (Kit), `HelperDaemon` (HelperDaemon), `CellKeeperHelper` | Helper logic and the app's backend implemented, with a simulated control only, in process (the Simulated helper); no hardware control. The NSXPC transport with code-signing requirements on both sides is implemented and tested over an anonymous listener. The removal of the helper (`HelperRemoval`, `ChargeController.removeHelper`) is implemented and tested against fakes. The daemon executable serves its engine over that transport (when signed with a team identifier) and controls nothing; it and its launchd property list are neither embedded nor registered, and the app does not use the transport yet |
 
 ## Data flow
@@ -259,7 +264,15 @@ and unplugging are processed before telemetry validation, so they take effect
 even when the charge reading is unusable.
 
 - **Temporary full charge** — ends at 100% or when macOS reports fully
-  charged.
+  charged. A manual start ("Charge to 100% once", or Start CellKeeper Full
+  Charge) while an override is live (its monotonic deadline not passed), a
+  full charge or a discharge, started by the user or a schedule, changes
+  nothing: the override keeps its identity, source and deadline, and the
+  activity log says the start was ignored. Starts queued behind one
+  another (a double-click, several Shortcuts actions) therefore give one
+  full charge, with the first one's deadline. One whose deadline has
+  passed is replaced. A schedule's start keeps its own rule (below, D82;
+  D91).
 - **Discharge to limit** — a confirmed, one-shot session (never a persistent
   setting). Ends at the limit, and is interrupted before sleep, on temperature
   pause, on lost or stale telemetry, while macOS's own Charge Limit is on or
@@ -2344,9 +2357,30 @@ tested.
     estimated now), which sleep can delay. The help of "Charge to 100%
     once" says the same, and, for a backend that accepts no requests
     (Read-only, an unavailable macOS Charge Limit), that a full charge
-    changes nothing.
+    changes nothing. The button is enabled exactly when
+    `FullChargeStart.refusal` (Kit), which Start CellKeeper Full Charge
+    shares, finds nothing in the way: no override running, Manage charging
+    on, a limit below 100%, and a reading that shows a battery present and
+    external power (D97).
   - **Nothing promises** a charge "ready by" a time or a return to the limit
     at an exact time.
+- **The Settings banner** reports a problem with the user's latest change
+  in Settings. Only changes made in the UI touch it (`SettingsChangeSource`,
+  `SettingsReconciliation`, Kit): when made, a saved change clears it, a
+  refused one shows why, an unchanged value leaves it. After the controller
+  applied a change, the banner is set only when a change made in the UI
+  asked for Manage charging on (on in the settings it carried, whatever
+  else it changed, such as the limit) and the controller kept it off, for
+  example because it had just kept a Charge Limit set outside CellKeeper:
+  the banner then explains the change the user just made, as before. Every
+  other reconciliation leaves the banner as it is: a Shortcuts action's
+  change that the controller kept off (logged instead), and CellKeeper
+  keeping Manage charging off after an outside change found by any command,
+  a Shortcuts action's or a periodic check (D95). A failed
+  save reads "CellKeeper could not save its settings."; the error goes only
+  to the unified log, privately. A limit set in the UI is checked against
+  the limits offered for the backend in charge (`ChargeLimitRequest`), as
+  Set CellKeeper Limit's is.
 - **Notifications.** Settings › Charging has the opt-in, under the
   temperature protection and independent of Manage charging (a fault or an
   unconfirmed restore can happen with management off): one toggle, a line
@@ -2355,6 +2389,136 @@ tested.
   answer, and "Turn Off Notifications" whenever a saved opt-in is not
   shown as on. The menu's warnings about the user's own Charge Limit come from
   `NativeLimitWording` (Core), which the restore notification shares.
+
+## Shortcuts actions
+
+Five App Intents (`CellKeeper/ShortcutsActions.swift`) appear in the
+Shortcuts app under CellKeeper. Each is the UI's own command, with the UI's
+checks; the one deliberate difference is that the limit can be set while
+Manage charging is off (D90).
+
+| Action | Parameter | Same as |
+|---|---|---|
+| Set CellKeeper Limit | Limit (whole percent) | The menu's slider or picker, Settings' limit |
+| Start CellKeeper Full Charge | — | "Charge to 100% once" |
+| Stop CellKeeper Full Charge or Discharge | — | The menu's Cancel next to a running override |
+| Set CellKeeper Manage Charging | On / Off | The Manage charging toggle |
+| Get CellKeeper Status | — | What the menu shows (read only) |
+
+Every title contains "CellKeeper" and none contains "Charge Limit", so they
+are not confused with Apple's Set Charge Limit action or the user's
+"CellKeeper Set Charge Limit" shortcut. Every description says that if
+CellKeeper is not running, it opens and starts managing charging with the
+saved settings, as when opened; Set CellKeeper Limit's says that the limit
+applies only while Manage charging is on.
+
+- **One path.** The intents only call `ShortcutsActionCoordinator` (Kit),
+  which works on the app through a small `@MainActor` protocol
+  (`ShortcutsActionTarget`) that `AppModel` provides: the latest status,
+  the settings, the selected backend, the limits offered, `isTerminating`,
+  the first-status signal, `changeSettings(_:source:)` and the menu's
+  full-charge and cancel commands. The limit goes through
+  `ChargeLimitRequest` (refused, never clamped: outside 20–100 with
+  Settings' own text, or not one of macOS's Charge Limit steps), the start
+  through `FullChargeStart.refusal`, both shared with the UI. A start the
+  controller then ignores (D91) is not a refusal the action can see: its
+  result only acknowledges the request.
+- **Backend context** (D93). Backend-specific checks and qualifiers need a
+  settled context: a first status, no pending backend switch, and the
+  backend in charge being the selected one, which also covers the startup
+  switch (an earlier session's record) and a switch still queued. A fault
+  alone does not unsettle it. Otherwise Set CellKeeper Limit, Start
+  CellKeeper Full Charge and turning Manage charging on refuse; turning it
+  off and Stop are accepted with generic text; the status says CellKeeper
+  is still starting or switching. The context is checked once, after the
+  first status.
+- **Readiness** (D94). `AppDelegate` attaches the model after `start()`,
+  which only queues the startup switch and the launch evaluation ahead of
+  anything an action sends. An action takes one absolute deadline, 10 s
+  ahead on the monotonic clock, and waits against it for the attach and,
+  except Stop and turning management off, for the first status
+  (`FirstValue`, Kit, which records when its value was provided). A value
+  provided after the deadline is refused, also one already there when the
+  action asks, and even if the waiting timer fires late; a cancelled wait
+  resumes once, with nothing. After every wait, and so immediately before
+  anything is changed, the action is admitted again and never on a cached
+  value alone: it refuses once quitting has started, if it was cancelled
+  (also when its value reached it in the same main-actor turn), and once
+  the clock shows the deadline passed, however early the value arrived.
+  After the last admission the action is synchronous on the main actor:
+  check, save, queue, word the result. `openAppWhenRun` keeps
+  its default (false; deprecated from macOS 26 for `supportedModes`, which
+  a macOS 14 target cannot declare).
+- **Launch.** When CellKeeper is not running, macOS launches it to run the
+  action, and it starts exactly as when opened: it may restore an earlier
+  session's record first, then manages charging with the saved settings and
+  backend (with macOS's Charge Limit, that can mean requests), and stays in
+  the menu bar.
+- **No deadlock.** An action never awaits the command queue, the controller
+  or the backend, and the main actor is free while the backend works. A
+  user's shortcut that calls an action while CellKeeper runs the user's
+  "CellKeeper Set Charge Limit" shortcut is answered at once; the same
+  value again is unchanged (nothing queued), and another value is bounded
+  by the restricting budget. On a cold launch whose evaluation is running
+  that shortcut, the 10 s deadline ends the wait.
+- **Results** (D92). A result states only what is certain when the action
+  returns: the saved setting or the queued command ("CellKeeper saved its
+  limit as 70%. Its saved resume threshold is 67%.", "CellKeeper received
+  the request for a temporary full charge.", "CellKeeper will end any
+  temporary full charge or discharge in progress."). What the backend then
+  does is left to the menu ("The menu shows what CellKeeper does with
+  it."; none where the backend accepts no requests). Qualifiers follow,
+  each decided on its own from the settled context with the settings as
+  saved, never from the sentence chosen: Manage charging off (the limit is
+  not applied until it is turned on), "Simulated: nothing on your Mac
+  changes.", a backend that accepts no requests ("Read-only is selected,
+  so CellKeeper changes nothing.", or "<backend> is unavailable right now,
+  so CellKeeper changes nothing; the menu says why."), a fault, deferring
+  to macOS's limit (`ControlStatement.limitNote` with the warning that a
+  restriction of CellKeeper's may remain), a running full charge, and a
+  limit below 50%. All text is in `ShortcutsActionWording` (Kit), built
+  from fixed phrases, numbers, backend names and D89's plain words; never
+  an unavailability reason, report problem, error, path or identifier, in
+  a dialog, a refusal, the status value or a log line.
+- **Refusals** are thrown with their text, which Shortcuts shows before
+  stopping the shortcut: "CellKeeper is still starting or switching how it
+  controls charging. Try again in a moment." (no attach or first status by
+  the deadline, a cancelled action, or an unsettled context); "CellKeeper
+  is quitting."; the limit and start checks above; "CellKeeper could not
+  save its settings." An action never sets or clears the Settings banner,
+  also when the controller later keeps Manage charging off (D95); that is
+  logged as "CellKeeper kept Manage charging off after a Shortcuts settings
+  change." with the controller's reason.
+- **Get CellKeeper Status** (D98) reports the latest status with the time
+  of CellKeeper's latest check and starts no evaluation of its own. Its
+  value (`ShortcutsStatus`, Kit; a transient entity in the app) has the
+  battery charge, macOS's charging status, CellKeeper's state ("not
+  applied" for a backend that accepts no requests, "control backend
+  faulted" while faulted), the backend in charge, whether control is
+  simulated, the limit, Manage charging and the time; its dialog adds the
+  qualifiers and, with macOS's Charge Limit, what macOS reports.
+- **Confirmations** (D96). None of these commands asks for confirmation in
+  the UI, so no action does. Stop ends a discharge too, like the menu's
+  Cancel, and gets no exemption from the rate limit or any safety rule
+  (ending a full charge with macOS's Charge Limit requests the limit
+  again, a restricting change).
+- **Siri and Spotlight.** One App Shortcut, for Get CellKeeper Status only
+  ("Get CellKeeper status", "What is CellKeeper doing"); the phrase sends no
+  control command itself.
+- **Logging.** Each action logs one notice in the `app` category, from the
+  same fixed text. The activity log shows the resulting change as for the
+  UI, without its source.
+- **Where the code lives.** App Intents metadata is extracted from the
+  app's own module, so the intents are in the app target (in a package
+  they would need `AppIntentsPackage`); every decision and word is in Kit
+  and tested there, against a fake app and a clock the tests move. The
+  APIs used exist on macOS 13 or 14. `AppDependencyManager` is not used: a
+  dependency read before it was added fails at run time, and it cannot
+  express "after `start()`". App Intents need no entitlement.
+- **Not verified on a Mac yet:** the actions in the Shortcuts library and
+  search, their dialogs and refusals, launching CellKeeper by running one,
+  the Siri phrase, and a shortcut calling an action while CellKeeper runs
+  "CellKeeper Set Charge Limit". These need the owner's Mac.
 
 ## Known limitations
 
@@ -2466,7 +2630,9 @@ The helper daemon keeps one file, its activation history, under
 changes log at info level (memory only); decisions, requests, results,
 settings changes, and safety fallbacks log at notice level or above so they
 persist. Logged content is limited to battery state, settings values, and
-decisions. Notifications are logged by kind only.
+decisions. Notifications are logged by kind only. Shortcuts actions log
+one notice each, in fixed text. A failed save of the settings logs its
+error privately.
 
 The helper daemon logs under its own subsystem,
 `io.github.saltedtan.CellKeeper.Helper`, in the categories `lifecycle`,
@@ -2490,6 +2656,8 @@ The helper daemon logs under its own subsystem,
   App Sandbox entitlements include none for notifications, and the only
   notification entitlement, `com.apple.developer.aps-environment`, is for
   push (from Apple's documentation; not yet observed on a signed build).
+  Shortcuts actions (App Intents) add no entitlement either; the signed
+  Release app built with them carried exactly the two above (2026-10-19).
 - Contributor builds are ad-hoc signed and need no Apple Developer account.
   Release builds carry the Hardened Runtime flag even when ad-hoc signed;
   Debug builds omit it so the debugger can attach.
@@ -2594,3 +2762,12 @@ The helper daemon logs under its own subsystem,
 | D87 | No replay, and evidence only from usable telemetry. Nothing true in the first status is reported, except faults and restore warnings. Statuses of the user's own commands (settings, overrides, a schedule, a backend switch, refresh, a fault reset) post only faults and restores. A backend change resets all arming and retires a restore warning without a claim. The limit is armed for one limit value. Telemetry the policy rejects (`ChargingPolicy.usableSnapshot`, shared with the native-limit policy) neither arms nor evidences anything. While notifications are off or not shown, statuses still consume transitions (review of PR #81) | Launch, a backend switch, a settings change and turning notifications on must not report conditions that already held. The controller starts every session without a fault and with nothing owed beyond a restore an earlier session left, which it attempts at once, so a failure then is news (the quit alert says CellKeeper will try again at the next start). The native-limit policy keeps its limit on unusable telemetry, so its state alone does not make a reading usable |
 | D88 | Notifications are a side channel with a lifecycle. `AppModel` hands each status to the notifier after its command; the notifier plans at once and posts one at a time, in order. Every asynchronous step belongs to a generation, checked before it acts and after every suspension: posts to the opt-in's `NotificationGeneration`, ended by turning notifications off or on and by quitting (`shutdown()`, called on termination after the restore of normal charging has started); permission reads and requests to their own operation, superseded by any newer one, a change of choice or quitting. Ending a generation never waits; a hand-over checks it immediately before the system call, on the poster's own serial queue. So turning notifications off, or quitting, stops every notification not yet handed to macOS; one being handed over at that moment may still appear; notifications already delivered stay in Notification Center. The center's answer is awaited for at most 30 s or until cancelled, then counted as unknown, never as delivered; a hand-over also checks, right before the system call, that its post has not settled, so one that expired or was cancelled while queued behind a stalled call never reaches macOS later; at most 8 posts wait in the notifier and at most 8 hand-overs are queued or under way in the poster, and a waiting post holds no reference to the notifier. A failed post is logged by kind and numeric code only. Text is built from fixed phrases, numbers and backend names, reusing the policy's reasons, `MacOSChargeLimitWording.releaseState` and the menu's restore wording (`NativeLimitWording`, now shared), never free-form strings. No notification delegate is set (reviews of PR #81) | A notification must never change charging, delay the command queue or block the main thread (R1, R30, D62): waiting for a hand-over in flight would freeze the app, and on quitting would delay the restore, while a hand-over that completes after turning notifications off looks to the user exactly like one that completed just before, and one macOS has accepted is presented anyway. An answer from macOS that was overtaken must not turn the toggle back on, and a system that stops answering must not pile up posts or hand-overs, nor receive a stale one once it answers again. Posting in order keeps a resolution from arriving before its warning. Free-form strings, also in logs, may hold paths or device identifiers (R32). Without a delegate, macOS presents notifications with their own options even while CellKeeper is active (Apple's documentation of `userNotificationCenter(_:willPresent:withCompletionHandler:)`) |
 | D89 | User-facing text (the menu, Settings, notifications and the activity log) names the policy's states, what started an evaluation, modes, power sources and charging statuses in plain words, never by their identifiers. `PolicyState`, `EvaluationTrigger`, `PowerSource` and `ChargingStatus` describe themselves in a switch over every case, so a new case cannot compile until it is worded; `ChargeControlMode` describes itself in the words the menu already used for restrictions ("a charging pause", now "a discharge while plugged in" for `forceDischarge`) and keeps its identifier in `identifier`. A decision reads, for example, "Holding at the limit (at a periodic check): wants a charging pause, action disable charging. …". The diagnostics report adds the identifier in parentheses after the plain words ("State: holding at the limit (holding)"), as it already did for the backend, and its activity section keeps each event's kind as an identifier ("[decision]"). Messages written only to unified logging are unchanged; activity events, which are also written there, carry the plain words. Raw values, storage keys and wire values are unchanged (issue #84; lead's decision, 2026-10-19) | Identifiers such as `temperaturePause` or `externalPower` mean little to most users and read as a defect. In a bug report, an identifier ties the plain words to the code and stays the same when the wording changes. Messages only developers read can keep the names in the code |
+| D90 | Five App Intents in the app target: Set CellKeeper Limit, Start CellKeeper Full Charge, Stop CellKeeper Full Charge or Discharge, Set CellKeeper Manage Charging, Get CellKeeper Status (owner's approval of the feature, 2026-10-19; the titles and the answers to the design's questions are the lead's decisions). Each goes through the same `AppModel` command and Kit checks as the UI (`ChargeLimitRequest`, `FullChargeStart`, `changeSettings`), run by `ShortcutsActionCoordinator` (Kit) over a small protocol the model provides. One deliberate difference: the limit can be set while Manage charging is off (the UI disables it); it is saved, not applied, and the result says so (lead's decision). Titles contain "CellKeeper" and not "Charge Limit" | One path for every change; a value outside the offered limits is refused, never clamped; a shortcut can set the limit before turning management on (with macOS's Charge Limit, turning it on first would apply the old limit and leave the new one to the restricting budget); no confusion with Apple's Set Charge Limit or the user's shortcut |
+| D91 | Admission is decided where commands are serialized: `ChargeController.startFullCharge` while an override is live (a full charge or a discharge, from the user or a schedule) changes nothing and logs that; the override keeps its identity, source, deadline and the ending counters. One whose deadline has passed is replaced. Schedule starts keep D82. An action's Start result acknowledges a queued request (lead's decision, design review, 2026-10-19) | Starts queued behind one another (a double-click, several actions) saw the same status and replaced each other, resetting the deadline or overwriting a schedule's full charge or a discharge |
+| D92 | A Shortcuts action's result states only what is certain when it returns, the saved setting or the queued command; backend effects only as something the menu shows. Qualifiers (Manage charging off, simulated, no requests, a fault, deferring to macOS's limit with the own-restriction warning, a running full charge, a limit below 50%) are each decided from the settled context, never from the sentence. All text is fixed phrases, numbers, backend names and D89's words, with no unavailability reason, report problem, error, path or identifier, in dialogs, refusals, the status value and the log; a failed save reads "CellKeeper could not save its settings." in Settings too, and its error goes only to the unified log, privately (lead's decisions, 2026-10-19) | Actions return before the backend acts, and a queued command can be superseded, refused or rate-limited; Shortcuts can pass the text anywhere |
+| D93 | Backend-specific checks and qualifiers only in a settled context: a first status, no pending backend switch, and the backend in charge being the selected one (also the startup switch and a queued switch). A fault alone does not unsettle it. Otherwise setting the limit, starting a full charge and turning Manage charging on refuse; turning it off and Stop are accepted with generic text | `start()` only queues the startup switch and the launch evaluation; a status from before a switch describes another backend than the one the action's command will meet |
+| D94 | Readiness: the model is attached after `start()`. An action waits for it and, except Stop and turning management off, for the first status, against one absolute 10 s deadline on the monotonic clock. A value provided after the deadline is refused, also one already there (`FirstValue` records when it was provided), even if the timer fires late; a cancelled wait resumes once. The admission decision is made after every wait, so after the last suspension and immediately before any change, never on a cached value alone: it refuses once quitting has started, if the action was cancelled (cancellation wins over a value that reached it in the same main-actor turn), and once the clock shows the deadline passed. `openAppWhenRun` keeps its default (false); launching for an action is a normal start (code review r1, lead's decision, 2026-10-19) | No action runs before start-up queued its work, after it was cancelled, or later than its bound; a bounded wait cannot deadlock, even when a cold launch's evaluation runs the user's shortcut |
+| D95 | Settings changes carry their source (the UI, a Shortcuts action, or CellKeeper keeping Manage charging off after it kept a Charge Limit set outside it). All are reconciled the same way (`handledAdoptionCount`, the controller's adoption checks and the "newer change on its way" guard unchanged), but only the UI's touch the Settings banner. When made, a saved change clears it, a refused one shows it, an unchanged one leaves it. After the controller applied a change, the banner is set only when a UI change asked for Manage charging on (on in the settings it carried, whatever else it changed) and the controller kept it off, as before; every other reconciliation leaves it untouched. An action's refusal is told to the shortcut, and logged; the controller keeping management off after an action's change, and CellKeeper's own change after an adoption found by any command (an action's or a periodic check), are only logged; the menu's notice shows the kept change (lead's decisions, design reviews r1 and r2 and code review r1, 2026-10-19) | The banner reports a problem with the user's latest change in Settings; an action's outcome is told to the shortcut, and an adoption is not the user's change |
+| D96 | No Shortcuts action asks for confirmation, because none of their UI commands does. Stop ends a discharge too, with no confirmation, like the menu's Cancel; it gets no exemption from the rate limit or any safety rule. Discharge, backend switches, the schedule, notifications and the native backend's confirmations stay in the UI only | Confirmation parity with the UI, no more, no less. Ending a full charge with macOS's Charge Limit requests the limit again, a restricting change |
+| D97 | "Charge to 100% once" (the menu and Start CellKeeper Full Charge) needs a reading that shows a battery present and external power (`FullChargeStart`); the menu used to check only the power source (lead's decision, 2026-10-19) | A deliberate tightening: with no battery there is nothing to charge, and the action and the button must agree |
+| D98 | Get CellKeeper Status reports the latest status with the time of the latest check and starts no evaluation of its own; its value is a transient entity (charge, macOS's charging status, state, backend, simulated, limit, Manage charging, checked at). The only App Shortcut (Siri, Spotlight) is for this action, and its phrase sends no control command itself (lead's decision) | A read must not cause backend requests; a phrase works without setup, and a misheard one should not change charging |
