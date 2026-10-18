@@ -113,7 +113,8 @@ enum DiagnosticsFixture {
         return await controller.evaluate(.periodic)
     }
 
-    /// A full charge the user started, with a schedule armed for later.
+    /// A full charge the user started, with a schedule armed for later;
+    /// then, once the user cancelled it, the schedule's own full charge.
     static func overrideAndSchedule() async throws -> (armed: ControllerStatus, started: ControllerStatus) {
         let clock = TestClock()
         let telemetry = StubTelemetry(snapshot(percent: 70), clock: clock)
@@ -170,7 +171,7 @@ enum DiagnosticsFixture {
     }
 
     /// macOS's Charge Limit backend that can read neither the limit nor its
-    /// record, and finds no shortcut.
+    /// record.
     static func nativeLimitUnreadable() async -> ControllerStatus {
         let clock = TestClock()
         let system = FakeChargeLimitSystem(reading: .limit(80), shortcutNames: [])
@@ -189,8 +190,9 @@ enum DiagnosticsFixture {
         return await controller.evaluate(.launch)
     }
 
-    /// ``nativeLimitKeptOutsideChange()``, then a switch to the Simulated
-    /// backend, which waits until the marker is saved.
+    /// Like ``nativeLimitKeptOutsideChange()``, but changed to no limit;
+    /// then a switch to the Simulated backend, which waits until the marker
+    /// is saved.
     static func nativeLimitPendingSwitch() async -> ControllerStatus {
         let clock = TestClock()
         let system = FakeChargeLimitSystem(reading: .limit(80))
