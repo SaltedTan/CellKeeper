@@ -27,11 +27,15 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
 - The hardware gates are unchanged. No private mechanism is tried until a
   dedicated test Mac is available, and no privileged helper ships without an
   Apple Developer ID.
-- Phase 4a was completed on 2026-10-11. Its remaining follow-ups (the
-  request pacer, #67; a removal button and in-app recovery help; three
-  timing-sensitive tests) are listed in
-  [issue #1](https://github.com/SaltedTan/CellKeeper/issues/1). Phases 4b
-  and 4c stay blocked on an Apple Developer ID and a dedicated test Mac.
+- Phase 4a was completed on 2026-10-11, and its follow-ups on
+  2026-10-17: the request pacer (#67) and three timing-sensitive tests
+  ([issue #1](https://github.com/SaltedTan/CellKeeper/issues/1)). Other
+  tests that depend on real time are tracked in
+  [issue #74](https://github.com/SaltedTan/CellKeeper/issues/74). The
+  removal button and in-app recovery help moved to phase 4b (owner
+  decision, 2026-10-18): until a helper is registered, there is nothing
+  real to remove. Phases 4b and 4c stay blocked on an Apple Developer ID
+  and a dedicated test Mac.
 
 ## Milestone 1 — Architecture and vertical slice ✅
 
@@ -150,8 +154,8 @@ hardware.
   helper's restore, and only then unregisters, tested against fakes, and
   the daemon restores defaults on `restoreDefaultsAndExit` and SIGTERM);
   a documented recovery procedure (research rule R31, done in
-  `safety.md`). Still to come for 9: its button (a deferred follow-up
-  tracked in issue #1) and the real unregistration (phase 4b).
+  `safety.md`). Still to come for 9, in phase 4b: its button and the
+  real unregistration.
 - UI: limits at any level with the helper backend, honest status
   (Simulated or Unavailable), and guidance for turning macOS's Charge Limit
   off. Done: the menu and Settings › Control say in one line what controls
@@ -160,9 +164,9 @@ hardware.
   Charge Limit and Optimized Battery Charging off, from the menu's notice
   and in Settings › Control, with Open Battery Settings and Check Again;
   and every whole percentage from 20 to 100 with CellKeeper's own control.
-  Still to come: a way to remove the helper, after which the app switches
-  to the Simulated backend; a backend choice for the real helper waits for
-  phase 4b.
+  Still to come, in phase 4b: a way to remove the helper, after which the
+  app switches to the Simulated backend, and a backend choice for the real
+  helper.
 
 ### Phase 4b — Signed helper (needs an Apple Developer ID)
 
@@ -180,6 +184,12 @@ Tracked in [issue #57](https://github.com/SaltedTan/CellKeeper/issues/57).
   4 of the recovery procedure in `safety.md` (whether turning off the
   background item and `launchctl bootout` stop the helper, and whether its
   exit restore then confirms defaults).
+- A button in Settings that removes the helper through the removal flow
+  built in phase 4a (`ChargeController.removeHelper`), with in-app help
+  for the recovery procedure in `safety.md`. After a removal the app
+  switches to the Simulated backend. Moved here from phase 4a's
+  follow-ups (owner decision, 2026-10-18): before the helper is
+  registered, the button could only remove the Simulated helper.
 
 ### Phase 4c — A verified mechanism (needs a dedicated test Mac)
 
