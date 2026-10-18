@@ -554,14 +554,16 @@ struct CommandLineAdapterTests {
     // In the next three tests the runner reads the test's clock, which
     // stands at 0 until the test moves it, never near the deadline an hour
     // on, and its signals are recorded instead of sent, so the tool runs
-    // until the test releases it.
+    // until the test releases it. Each counts passes from after the change
+    // it waits on (a cancellation or a clock move), so the second of the two
+    // passes it waits for began after that change.
 
     @Test("A cancellation sends SIGTERM at the next pass, and the call then waits for the tool to exit")
     func cancellationWaitsForExit() async throws {
         try await Self.withHeldTool(recordingStops: true) { tool in
             guard await tool.isReady() else { return }
-            let mark = tool.trace.passes
             tool.task.cancel()
+            let mark = tool.trace.passes
             guard await Self.passes(2, after: mark, of: tool) else { return }
             #expect(tool.trace.signals == [SIGTERM])
             // Passes go on after SIGTERM, without SIGKILL as the clock stands
@@ -584,8 +586,8 @@ struct CommandLineAdapterTests {
         let grace = ProcessRunner.stopGracePeriod
         try await Self.withHeldTool(recordingStops: true) { tool in
             guard await tool.isReady() else { return }
-            let mark = tool.trace.passes
             tool.task.cancel()
+            let mark = tool.trace.passes
             guard await Self.passes(2, after: mark, of: tool) else { return }
             #expect(tool.trace.signals == [SIGTERM])
             guard await Self.advance(tool, to: grace.nextDown) else { return }
@@ -600,8 +602,8 @@ struct CommandLineAdapterTests {
         let grace = ProcessRunner.stopGracePeriod
         try await Self.withHeldTool(recordingStops: true) { tool in
             guard await tool.isReady() else { return }
-            let mark = tool.trace.passes
             tool.task.cancel()
+            let mark = tool.trace.passes
             guard await Self.passes(2, after: mark, of: tool), await Self.advance(tool, to: grace) else { return }
             #expect(tool.trace.signals == [SIGTERM, SIGKILL])
             // Just before twice the grace period, passes go on and the call
