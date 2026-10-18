@@ -561,10 +561,12 @@ under their own key, `weeklyFullCharge.v1`, the schema version. Every field
 is required; unknown keys are ignored. A value that is not JSON data,
 unreadable, or not valid (no day, a day outside 1–7 or repeated, a time or
 duration out of range, a record whose day is not a real date, whose start
-is not finite, whose offset is beyond ±18 hours, or whose result is
-unknown) is not used, never affects the settings or Manage charging, and
+is not in years 1–9999, whose offset is beyond ±18 hours, or whose result
+is unknown) is not used, never affects the settings or Manage charging, and
 is removed with a notice; a removal that does not read back is retried
-like any write.
+like any write. Every stored number is checked against its range before
+anything is computed with it, so no stored value can make loading trap
+(an offset of the most negative integer once did, through `abs`).
 
 ### Precedence (highest first)
 
@@ -2531,16 +2533,22 @@ tested.
     external power (D97).
   - **Nothing promises** a charge "ready by" a time or a return to the limit
     at an exact time.
-  - **Dates** in the menu and Settings show their year only when it is not
-    the year of the status shown, judged in the time zone shown
-    (`FullChargeScheduleWording.format(_:timeZone:locale:now:)`; the app
-    passes the status's evaluation time, so the wording is tested without
-    the wall clock).
+  - **Dates** in the menu and Settings are rendered in one calendar, the
+    user's, and show their year only when it is not the year of the status
+    shown in that same calendar and the time zone shown
+    (`FullChargeScheduleWording.format(_:timeZone:locale:calendar:now:)`;
+    the app passes the status's evaluation time, and tests pin the
+    calendar, so the wording is tested without the wall clock or the
+    system's calendar).
 - **Weekly full charge.**
   - **Settings › Charging** has a "Weekly full charge" section after
-    "Scheduled full charge": day toggles in the locale's order, a start
+    "Scheduled full charge": day toggles in the calendar's order, a start
     time, a duration of 1–48 hours, Save (editing needs Manage charging on)
-    and Remove (always enabled). The schedule in use shows its summary
+    and Remove (always enabled). The editor keeps the start as an hour and a
+    minute (`WeeklyFullChargeDraft`, Kit), never as a moment in the Mac's
+    time zone, and its time picker is shown and read on 2001-01-01 in GMT,
+    so a skipped hour or a time zone change cannot move it and saving with
+    the time unchanged writes the same hour and minute. The schedule in use shows its summary
     ("Every Mon and Fri at 7:00 AM, for 12 hours"), its next start, a note
     when skipped time moves that start, an occurrence that is due and why
     it waits, the latest occurrence that started or passed, the latest
