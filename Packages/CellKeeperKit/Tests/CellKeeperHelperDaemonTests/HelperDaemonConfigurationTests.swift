@@ -45,7 +45,7 @@ struct HelperDaemonSystemTests {
         #expect(state.activeControls.controls.isEmpty)
 
         signals.sendSIGTERM()
-        #expect(await running.value == 0)
+        #expect(await daemonExitStatus(of: running, clock: clock) == 0)
         #expect(exits.statuses == [0])
     }
 

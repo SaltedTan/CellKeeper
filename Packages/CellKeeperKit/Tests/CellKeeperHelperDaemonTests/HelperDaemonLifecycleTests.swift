@@ -83,7 +83,8 @@ struct HelperDaemonStartTests {
         let h = DaemonHarness(control: control)
         h.sleep.failToStart()
 
-        let status = try await h.run().value
+        let running = try await h.run()
+        let status = await h.exitStatus(of: running)
         #expect(status == 0)
         #expect(h.exits.statuses == [0])
         #expect(!h.frontend.calls.contains(.start))
@@ -97,7 +98,8 @@ struct HelperDaemonStartTests {
         let h = DaemonHarness()
         h.frontend.onStart { _ in throw NoRequirement() }
 
-        let status = try await h.run().value
+        let running = try await h.run()
+        let status = await h.exitStatus(of: running)
         #expect(status == 0)
         #expect(h.frontend.calls == [.start, .stop])
         #expect(await h.daemon.engine.isSafeToExit)
@@ -140,7 +142,8 @@ struct HelperDaemonTerminationTests {
         h.signals.sendSIGTERM()
 
         let daemon = h.daemon
-        #expect(await daemon.run() == 0)
+        let running = Task { await daemon.run() }
+        #expect(await h.exitStatus(of: running) == 0)
         #expect(h.frontend.calls == [.stop])
         #expect(await h.daemon.engine.isSafeToExit)
     }
@@ -169,7 +172,7 @@ struct HelperDaemonTerminationTests {
             h.clock.advance(by: HelperDaemon.exitPollInterval)
         }
 
-        #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+        #expect(await h.exitStatus(of: running) == HelperDaemon.restoreNotConfirmedExitStatus)
         #expect(h.exits.statuses == [HelperDaemon.restoreNotConfirmedExitStatus])
         #expect(control.activeControls == [.adapterDisabled])
         #expect(control.restoreCount - restoresBefore >= retries)
@@ -198,7 +201,7 @@ struct HelperDaemonTerminationTests {
                 h.clock.advance(by: HelperDaemon.exitPollInterval)
             }
         }
-        #expect(await running.value == 0)
+        #expect(await h.exitStatus(of: running) == 0)
         #expect(control.activeControls.isEmpty)
     }
 
@@ -219,7 +222,7 @@ struct HelperDaemonTerminationTests {
         let ignored = await eventually { h.log.contains(.notice, .lifecycle, "SIGTERM while already shutting down: ignored.") }
         #expect(ignored)
         h.clock.advance(by: HelperDaemon.exitPollInterval)
-        #expect(await running.value == 0)
+        #expect(await h.exitStatus(of: running) == 0)
         #expect(h.exits.statuses == [0])
     }
 }
@@ -235,7 +238,7 @@ struct HelperDaemonClientExitTests {
         #expect(await h.activate(.chargingInhibited, on: session) == .ok)
 
         #expect(await session.restoreDefaultsAndExit() == .ok)
-        #expect(await running.value == 0)
+        #expect(await h.exitStatus(of: running) == 0)
         #expect(h.exits.statuses == [0])
         #expect(h.frontend.calls == [.start, .stop])
         #expect(control.activeControls.isEmpty)
@@ -252,7 +255,7 @@ struct HelperDaemonClientExitTests {
         control.failNextRestores(1)
 
         #expect(await session.restoreDefaultsAndExit() == .hardwareError)
-        #expect(await running.value == 0)
+        #expect(await h.exitStatus(of: running) == 0)
         #expect(control.activeControls.isEmpty)
     }
 }
@@ -281,7 +284,7 @@ struct HelperDaemonFrontendStopTests {
         }
         #expect(control.activeControls.isEmpty)
         #expect(await h.daemon.engine.isSafeToExit)
-        #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+        #expect(await h.exitStatus(of: running) == HelperDaemon.restoreNotConfirmedExitStatus)
         #expect(h.log.contains(.fault, .xpc, "The frontend has not confirmed that it stopped serving"))
         h.frontend.confirmStop()
     }
@@ -308,12 +311,7 @@ struct HelperDaemonFrontendStopTests {
         #expect(h.exits.statuses.isEmpty)
         // The next retry sees it, well before the deadline.
         h.clock.advance(by: HelperDaemon.exitPollInterval)
-        let exited = await eventually { !h.exits.statuses.isEmpty }
-        #expect(exited)
-        if !exited {
-            await h.runClockUntilExit()
-        }
-        #expect(await running.value == 0)
+        #expect(await h.exitStatus(of: running) == 0)
     }
 
     @Test("The frontend's stop gets the shutdown's own deadline, fixed when shutdown began: a slow frontend start does not move it")
@@ -352,7 +350,7 @@ struct HelperDaemonFrontendStopTests {
         h.clock.advance(by: 3)
         let gaveUp = await eventually { h.frontend.stopResults == [false] }
         #expect(gaveUp)
-        #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+        #expect(await h.exitStatus(of: running) == HelperDaemon.restoreNotConfirmedExitStatus)
     }
 
     @Test("A frontend that confirms its stop only after its deadline is not counted: the daemon exits with 75")
@@ -367,7 +365,7 @@ struct HelperDaemonFrontendStopTests {
         h.clock.advance(by: retrying)
         let confirmed = await eventually { h.frontend.stopResults == [true] }
         #expect(confirmed)
-        #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+        #expect(await h.exitStatus(of: running) == HelperDaemon.restoreNotConfirmedExitStatus)
         #expect(await h.daemon.engine.isSafeToExit)
     }
 

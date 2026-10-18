@@ -648,20 +648,61 @@ struct DaemonHarness {
         return session
     }
 
-    /// After a failed expectation, moves the clock on a second at a time
-    /// until the daemon has exited, so that the test ends instead of hanging.
-    func runClockUntilExit() async {
-        for _ in 0..<60 where exits.statuses.isEmpty {
-            clock.advance(by: 1)
-            try? await Task.sleep(for: .milliseconds(20))
-        }
+    /// What `running`, a task running this daemon's `run()`, returns; see
+    /// ``daemonExitStatus(of:clock:)``.
+    func exitStatus(of running: Task<Int32, Never>) async -> Int32? {
+        await daemonExitStatus(of: running, clock: clock)
     }
 
     /// Sends SIGTERM and returns the status the daemon exits with, when the
-    /// engine can confirm defaults at once.
-    func terminate(_ running: Task<Int32, Never>) async -> Int32 {
+    /// engine can confirm defaults at once; see ``exitStatus(of:)``.
+    func terminate(_ running: Task<Int32, Never>) async -> Int32? {
         signals.sendSIGTERM()
-        return await running.value
+        return await exitStatus(of: running)
+    }
+}
+
+/// What `running`, a task running a daemon's `run()`, returns, once the test
+/// expects the daemon to exit without more of `clock`'s time. Every wait is
+/// bounded, and the expiry of each records an issue:
+/// 1. Waits up to `eventually`'s 10 s for it to return.
+/// 2. Then moves `clock` on, a second at a time, for a minute of the
+///    daemon's time: a shutdown that has begun ends by its deadline on that
+///    clock. It waits up to 10 s more.
+/// 3. Then returns nil, and the test goes on without waiting for it.
+///
+/// So a daemon that needs more of its time than the test gave it, or that
+/// does not exit, fails the test instead of hanging it.
+func daemonExitStatus(of running: Task<Int32, Never>, clock: ManualClock) async -> Int32? {
+    let status = ReturnedStatus()
+    Task { status.set(await running.value) }
+    if await eventually({ status.value != nil }) {
+        return status.value
+    }
+    Issue.record("The daemon had not exited 10 s after the test expected it to; moving its clock on.")
+    for _ in 0..<60 where status.value == nil {
+        clock.advance(by: 1)
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+    if await eventually({ status.value != nil }) {
+        return status.value
+    }
+    Issue.record("The daemon had not exited after another minute of its time; no longer waiting for it.")
+    return nil
+}
+
+/// The status a daemon's `run()` returned, set by the task that waits for
+/// it.
+private final class ReturnedStatus: @unchecked Sendable {
+    private let lock = NSLock()
+    private var returned: Int32?
+
+    var value: Int32? {
+        lock.withLock { returned }
+    }
+
+    func set(_ status: Int32) {
+        lock.withLock { returned = status }
     }
 }
 

@@ -26,7 +26,9 @@ struct HelperDaemonDeadlineTests {
         let timedOut = await eventually { finished.value }
         #expect(timedOut)
         if !timedOut {
-            clock.advance(by: 10)
+            // The timer did not end the wait: let the operation end it, so
+            // the wait below ends too.
+            never.open()
         }
         #expect(await result.value == nil)
         never.open()
@@ -49,7 +51,9 @@ struct HelperDaemonDeadlineTests {
         let timedOut = await eventually { finished.value }
         #expect(timedOut)
         if !timedOut {
-            clock.advance(by: 10)
+            // The timer did not end the wait: let the operation end it, so
+            // the wait below ends too.
+            never.open()
         }
         #expect(await result.value == nil)
         never.open()

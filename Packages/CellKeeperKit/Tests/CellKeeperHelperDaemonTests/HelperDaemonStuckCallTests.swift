@@ -34,10 +34,7 @@ struct HelperDaemonStuckCallTests {
         #expect(exited)
         #expect(h.log.isWaiting)
         h.log.release()
-        if !exited {
-            await h.runClockUntilExit()
-        }
-        #expect(await running.value == 0)
+        #expect(await h.exitStatus(of: running) == 0)
         let written = await eventually { h.log.contains(.notice, .xpc, "No client listener is available in this build") }
         #expect(written)
     }
@@ -82,7 +79,7 @@ struct HelperDaemonStuckCallTests {
         #expect(stoppedFrontend)
         control.release()
 
-        #expect(await running.value == 0)
+        #expect(await h.exitStatus(of: running) == 0)
         #expect(h.frontend.calls == [.stop])
         #expect(!h.sleep.isStarted)
     }
@@ -123,7 +120,7 @@ struct HelperDaemonStuckCallTests {
         #expect(h.exits.statuses == [HelperDaemon.restoreNotConfirmedExitStatus])
         h.log.release()
         control.release()
-        #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+        #expect(await h.exitStatus(of: running) == HelperDaemon.restoreNotConfirmedExitStatus)
     }
 
     @Test("With a restore that never succeeds and a log that cannot be written, the daemon still exits by the deadline", arguments: ShutdownPath.allCases)
@@ -166,7 +163,7 @@ struct HelperDaemonStuckCallTests {
         #expect(elapsed <= HelperDaemon.terminationDeadline)
         #expect(h.exits.statuses == [HelperDaemon.restoreNotConfirmedExitStatus])
         h.log.release()
-        #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+        #expect(await h.exitStatus(of: running) == HelperDaemon.restoreNotConfirmedExitStatus)
     }
 
     @Test("A late restore that fails while the log is written is never followed by exit 0 (stop not confirmed)", arguments: ShutdownPath.allCases)
@@ -216,10 +213,7 @@ struct HelperDaemonStuckCallTests {
         #expect(h.exits.statuses == [HelperDaemon.restoreNotConfirmedExitStatus])
         h.log.release()
         h.frontend.confirmStop()
-        if !exited {
-            await h.runClockUntilExit()
-        }
-        #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+        #expect(await h.exitStatus(of: running) == HelperDaemon.restoreNotConfirmedExitStatus)
     }
 
     @Test("The final check comes after the log is written: a change while it is written decides the exit", arguments: ShutdownPath.allCases)
@@ -258,10 +252,7 @@ struct HelperDaemonStuckCallTests {
         #expect(exited)
         #expect(h.exits.statuses == [HelperDaemon.restoreNotConfirmedExitStatus])
         h.log.release()
-        if !exited {
-            await h.runClockUntilExit()
-        }
-        #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+        #expect(await h.exitStatus(of: running) == HelperDaemon.restoreNotConfirmedExitStatus)
     }
 
     @Test("If the engine does not return in time, sleep is acknowledged anyway, once, and a fault is logged")

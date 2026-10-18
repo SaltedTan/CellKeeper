@@ -89,7 +89,7 @@ struct HelperDaemonXPCTests {
 
         // The reply arrives: it was sent before the connection ended.
         #expect(try await client.restoreDefaultsAndExit() == .ok)
-        #expect(await running.value == 0)
+        #expect(await h.exitStatus(of: running) == 0)
         #expect(h.exits.statuses == [0])
         #expect(control.activeControls.isEmpty)
         #expect(h.log.contains(.notice, .lifecycle, "Exit requested by a client"))
@@ -122,7 +122,7 @@ struct HelperDaemonXPCTests {
         control.release()
         // The client gets the reply, not a closed connection.
         #expect(await inFlight.value == .ok)
-        #expect(await running.value == 0)
+        #expect(await h.exitStatus(of: running) == 0)
         // The session ended during the stop, before the daemon exited. (The
         // connection's own close is reported to the log asynchronously, and
         // may come after the daemon has finished its log.)
@@ -164,7 +164,7 @@ struct HelperDaemonXPCTests {
         #expect(h.exits.statuses == [HelperDaemon.restoreNotConfirmedExitStatus])
 
         control.release()
-        #expect(await running.value == HelperDaemon.restoreNotConfirmedExitStatus)
+        #expect(await h.exitStatus(of: running) == HelperDaemon.restoreNotConfirmedExitStatus)
         #expect(connectionFailures.contains(await inFlight.value))
     }
 
@@ -222,7 +222,8 @@ struct HelperDaemonXPCTests {
         )
         let h = DaemonHarness(frontend: frontend)
         let daemon = h.daemon
-        #expect(await daemon.run() == 0)
+        let running = Task { await daemon.run() }
+        #expect(await h.exitStatus(of: running) == 0)
         #expect(h.log.contains(.fault, .xpc, "The frontend could not start (\(HelperCodeSigningRequirementError.noTeamIdentifier))"))
         #expect(!h.log.contains(.notice, .xpc, "Serving CellKeeper over NSXPC"))
         #expect(await frontend.stop(by: HelperDaemonDeadline(uptime: h.clock.uptime() + 1, on: h.clock)))
