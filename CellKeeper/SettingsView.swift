@@ -185,11 +185,12 @@ private struct ScheduledFullChargeSection: View {
 
     var body: some View {
         let status = model.status
+        let now = status?.describedAt ?? Date()
         let isManaged = model.settings.isManagementEnabled
         if let schedule = status?.fullChargeSchedule {
-            LabeledContent("Scheduled", value: FullChargeScheduleWording.window(schedule))
+            LabeledContent("Scheduled", value: FullChargeScheduleWording.window(schedule, now: now))
             if let wait = status?.fullChargeScheduleWait {
-                Label(FullChargeScheduleWording.armedLine(schedule, wait: wait), systemImage: "exclamationmark.triangle")
+                Label(FullChargeScheduleWording.armedLine(schedule, wait: wait, now: now), systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
@@ -218,7 +219,7 @@ private struct ScheduledFullChargeSection: View {
                 .foregroundStyle(.red)
         }
         if let status {
-            Text(FullChargeScheduleWording.explanation(for: status, end: status.fullChargeSchedule?.endsAt ?? end))
+            Text(FullChargeScheduleWording.explanation(for: status, end: status.fullChargeSchedule?.endsAt ?? end, now: now))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if let hint = FullChargeScheduleWording.overnightHint(for: status) {

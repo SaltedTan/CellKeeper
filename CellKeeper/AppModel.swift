@@ -715,7 +715,7 @@ final class AppModel {
                 // armed, but it was set.
                 let wasUsed: Bool = switch newStatus.fullChargeScheduleOutcome {
                 case .started(let used)?, .alreadyFull(let used)?, .windowPassed(let used, _)?,
-                     .extendedRunning(let used)?, .keptRunning(let used)?:
+                     .extendedRunning(let used)?, .keptRunning(let used, _)?:
                     used == schedule
                 case .discarded?, nil:
                     false
@@ -842,5 +842,14 @@ private final class ResumeOnce<Value: Sendable>: @unchecked Sendable {
             return continuation
         }
         pending?.resume(returning: value)
+    }
+}
+
+extension ControllerStatus {
+    /// The time this status describes: its latest check, or now before the
+    /// first. Dates in the menu and Settings show their year only when it
+    /// differs from this one's.
+    var describedAt: Date {
+        lastEvaluation ?? Date()
     }
 }

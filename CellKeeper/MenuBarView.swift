@@ -360,7 +360,7 @@ private struct FullChargeControl: View {
                 HStack {
                     switch override.kind {
                     case .fullCharge:
-                        Label(TemporaryFullChargeWording.line(for: override, status: status, lastResult: status.lastExecution?.result.title), systemImage: "arrow.up.to.line")
+                        Label(TemporaryFullChargeWording.line(for: override, status: status, lastResult: status.lastExecution?.result.title, now: status.describedAt), systemImage: "arrow.up.to.line")
                             .fixedSize(horizontal: false, vertical: true)
                     case .dischargeToLimit:
                         Label(dischargeText(override), systemImage: "minus.plus.batteryblock")
@@ -439,7 +439,7 @@ private struct ScheduledFullChargeLines: View {
     var body: some View {
         if let schedule = status.fullChargeSchedule {
             HStack(alignment: .firstTextBaseline) {
-                Label(FullChargeScheduleWording.armedLine(schedule, wait: status.fullChargeScheduleWait), systemImage: "calendar.badge.clock")
+                Label(FullChargeScheduleWording.armedLine(schedule, wait: status.fullChargeScheduleWait, now: status.describedAt), systemImage: "calendar.badge.clock")
                     .foregroundStyle(status.fullChargeScheduleWait == nil ? Color.primary : Color.orange)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()

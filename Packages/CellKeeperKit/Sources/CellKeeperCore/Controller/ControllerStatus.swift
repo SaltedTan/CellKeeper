@@ -166,6 +166,24 @@ public struct ControllerStatus: Sendable, Equatable {
     /// What became of the latest schedule, until the user dismisses it or
     /// sets a new one.
     public var fullChargeScheduleOutcome: FullChargeScheduleOutcome? = nil
+    /// The weekly full charge in use and the record of the latest occurrence
+    /// handled, if one is in use.
+    public var weeklyFullCharge: WeeklyFullChargeSchedule? = nil
+    /// The weekly occurrence that is due but cannot start yet, and why.
+    /// Never the next one.
+    public var weeklyFullChargeDue: WeeklyFullChargeDue? = nil
+    /// The first weekly occurrence that starts after the latest evaluation,
+    /// computed in the time zone of that evaluation.
+    public var weeklyFullChargeNext: WeeklyFullChargeOccurrence? = nil
+    /// What became of the latest weekly occurrence handled, until the user
+    /// dismisses it or saves a weekly schedule; kept after removal.
+    public var weeklyFullChargeOutcome: WeeklyFullChargeOutcome? = nil
+    /// Set while the stored weekly full charge could not be brought in line
+    /// with the one in use (or its removal); CellKeeper keeps using what is
+    /// in memory and tries again at every check. Until it succeeds, a
+    /// relaunch may lose the latest change, or start an occurrence handled
+    /// in this run once more inside its window.
+    public var weeklyFullChargeStoreProblem: WeeklyFullChargeStoreProblem? = nil
     /// The override that most recently ended by itself in this session, as
     /// it was when it ended, with how: the policy ended it (also a full
     /// charge a schedule started in the same evaluation, in place of the

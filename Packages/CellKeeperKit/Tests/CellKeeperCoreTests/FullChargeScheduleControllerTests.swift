@@ -474,7 +474,7 @@ struct FullChargeScheduleControllerTests {
             let deadline = clock.now.addingTimeInterval(original.expiresAtUptime - clock.uptime)
             #expect(running.expiresAt == deadline)
             #expect(deadline > armed.endsAt)
-            #expect(status.fullChargeScheduleOutcome == .keptRunning(armed))
+            #expect(status.fullChargeScheduleOutcome == .keptRunning(armed, deadline: .later))
         }
         #expect(stored == .none)
     }
