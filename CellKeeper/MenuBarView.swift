@@ -389,6 +389,7 @@ private struct FullChargeControl: View {
                 }
             }
             ScheduledFullChargeLines(model: model, status: status)
+            WeeklyFullChargeLines(model: model, status: status)
         }
     }
 
@@ -455,6 +456,47 @@ private struct ScheduledFullChargeLines: View {
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()
                 Button("OK") { model.dismissFullChargeScheduleOutcome() }
+                    .controlSize(.small)
+            }
+            .font(.caption)
+        }
+    }
+}
+
+/// The menu's lines for the weekly full charge: its next start, always
+/// while one is in use; beneath it, an occurrence that is due but cannot
+/// start yet, and a store that could not keep up; and what became of the
+/// latest occurrence. The wording is `WeeklyFullChargeWording`'s.
+private struct WeeklyFullChargeLines: View {
+    let model: AppModel
+    let status: ControllerStatus
+
+    var body: some View {
+        let now = status.describedAt
+        if status.weeklyFullCharge != nil {
+            Label(WeeklyFullChargeWording.menuLine(status.weeklyFullChargeNext, now: now), systemImage: "calendar.badge.clock")
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+            if let due = status.weeklyFullChargeDue {
+                Label(WeeklyFullChargeWording.dueLine(due, now: now), systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        if let problem = status.weeklyFullChargeStoreProblem {
+            Label(WeeklyFullChargeWording.storeProblemLine(problem), systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if let outcome = status.weeklyFullChargeOutcome, let line = WeeklyFullChargeWording.outcomeLine(outcome, now: now) {
+            HStack(alignment: .firstTextBaseline) {
+                Label(line, systemImage: "calendar")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("OK") { model.dismissWeeklyFullChargeOutcome() }
                     .controlSize(.small)
             }
             .font(.caption)

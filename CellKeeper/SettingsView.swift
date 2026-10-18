@@ -119,6 +119,10 @@ private struct ChargingSettingsTab: View {
                 ScheduledFullChargeSection(model: model)
             }
 
+            Section("Weekly full charge") {
+                WeeklyFullChargeSection(model: model)
+            }
+
             if !isNative {
                 Section("Temperature protection") {
                     TemperatureProtectionControls(model: model)
@@ -231,6 +235,116 @@ private struct ScheduledFullChargeSection: View {
         Text("One temporary full charge, starting at most \(Int(FullChargeSchedule.maximumLeadTime / 86_400)) days ahead, with an end 1–\(Int(FullChargeSchedule.maximumWindow / 3600)) hours after the start. \(FullChargeScheduleWording.startConditions)")
             .font(.caption)
             .foregroundStyle(.secondary)
+    }
+}
+
+/// Settings › Charging's weekly full charge: an editor for the days, the
+/// start time and the duration, with Save; the one in use with its next
+/// start, an occurrence that is due, the latest one handled, and a store
+/// that could not keep up, with Remove (`WeeklyFullChargeWording`). Editing
+/// needs Manage charging on, like the scheduled full charge; removing never
+/// does.
+private struct WeeklyFullChargeSection: View {
+    let model: AppModel
+    @State private var weekdays: Set<Int> = []
+    @State private var start = WeeklyFullChargeSection.time(hour: 7, minute: 0)
+    @State private var hours = WeeklyFullChargePattern.defaultDurationHours
+
+    /// Today at `hour`:`minute`; only the time of day is used.
+    static func time(hour: Int, minute: Int) -> Date {
+        Calendar.current.date(bySettingHour: hour, minute: minute, second: 0, of: Date()) ?? Date()
+    }
+
+    private var draft: WeeklyFullChargePattern {
+        let time = Calendar.current.dateComponents([.hour, .minute], from: start)
+        return WeeklyFullChargePattern(weekdays: weekdays, hour: time.hour ?? 0, minute: time.minute ?? 0, durationHours: hours)
+    }
+
+    var body: some View {
+        let status = model.status
+        let now = status?.describedAt ?? Date()
+        let weekly = status?.weeklyFullCharge
+        Group {
+            if let weekly {
+                LabeledContent("In use", value: WeeklyFullChargeWording.summary(weekly.pattern))
+                if let next = status?.weeklyFullChargeNext {
+                    Text(WeeklyFullChargeWording.nextLine(next, now: now))
+                        .font(.caption)
+                    if let note = WeeklyFullChargeWording.skipNote(next, pattern: weekly.pattern, now: now) {
+                        Text(note)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let due = status?.weeklyFullChargeDue {
+                    Label(WeeklyFullChargeWording.dueLine(due, now: now), systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                if let last = WeeklyFullChargeWording.lastLine(weekly.handled, now: now) {
+                    Text(last)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let problem = status?.weeklyFullChargeStoreProblem {
+                Label(WeeklyFullChargeWording.storeProblemLine(problem), systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Group {
+                LabeledContent("Days") {
+                    HStack(spacing: 4) {
+                        ForEach(WeeklyFullChargeWording.weekdayOrder(), id: \.self) { day in
+                            Toggle(WeeklyFullChargeWording.shortName(of: day), isOn: Binding(
+                                get: { weekdays.contains(day) },
+                                set: { isOn in
+                                    if isOn { weekdays.insert(day) } else { weekdays.remove(day) }
+                                }
+                            ))
+                            .toggleStyle(.button)
+                        }
+                    }
+                }
+                DatePicker("Start", selection: $start, displayedComponents: .hourAndMinute)
+                Stepper(value: $hours, in: WeeklyFullChargePattern.durationHoursRange) {
+                    LabeledContent("Duration", value: hours == 1 ? "1 hour" : "\(hours) hours")
+                }
+                Button(weekly == nil ? "Save Weekly Full Charge" : "Save Changes") { model.setWeeklyFullCharge(draft) }
+                    .disabled(!draft.issues.isEmpty || draft == weekly?.pattern)
+                    .help(WeeklyFullChargeWording.saveHelp)
+            }
+            .disabled(!model.settings.isManagementEnabled)
+            if weekly != nil {
+                Button("Remove Weekly Full Charge") { model.removeWeeklyFullCharge() }
+                    .help("Stops the weekly full charge and clears its record. A full charge it already started is not affected.")
+            }
+            if let outcome = status?.weeklyFullChargeOutcome, let line = WeeklyFullChargeWording.outcomeLine(outcome, now: now) {
+                Label(line, systemImage: "calendar")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let error = model.weeklyError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            Text(WeeklyFullChargeWording.explanation)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(WeeklyFullChargeWording.record)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        // The editor shows the pattern in use once it is known (loaded at
+        // launch, saved, or removed), and keeps the user's edits otherwise.
+        .onChange(of: weekly?.pattern, initial: true) { _, pattern in
+            guard let pattern else { return }
+            weekdays = pattern.weekdays
+            start = Self.time(hour: pattern.hour, minute: pattern.minute)
+            hours = pattern.durationHours
+        }
     }
 }
 
