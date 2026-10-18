@@ -45,7 +45,7 @@ public enum ChargeControlMode: Hashable, Sendable, CustomStringConvertible {
         switch self {
         case .normal: "normal charging"
         case .inhibitCharging: "a charging pause"
-        case .forceDischarge: "a forced discharge"
+        case .forceDischarge: "a discharge while plugged in"
         case .nativeLimit(let percent): "a macOS Charge Limit of \(percent)%"
         }
     }

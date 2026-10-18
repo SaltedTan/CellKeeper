@@ -76,7 +76,7 @@ struct MacOSChargeLimitGuideTests {
         #expect(simulated.contains("The Simulated helper provides no replacement charge limit, so keep macOS's limit on unless you are trying the simulation."))
         let held = MacOSChargeLimitWording.menuSummary(status, ownRestriction: .inEffect(.forceDischarge, own: .forceDischarge), isSimulated: false)
         #expect(sentenceCount(held) == 2)
-        #expect(held.contains("The last read-back still shows CellKeeper's own restriction (a forced discharge) in effect."))
+        #expect(held.contains("The last read-back still shows CellKeeper's own restriction (a discharge while plugged in) in effect."))
         // What is not CellKeeper's is left to Settings' full explanation.
         let other = MacOSChargeLimitWording.menuSummary(status, ownRestriction: .notCellKeepers(.inhibitCharging), isSimulated: false)
         #expect(sentenceCount(other) == 1)
@@ -100,6 +100,6 @@ struct MacOSChargeLimitGuideTests {
             }
         }
         #expect(ChargeControlMode.inhibitCharging.description == "a charging pause")
-        #expect(ChargeControlMode.forceDischarge.description == "a forced discharge")
+        #expect(ChargeControlMode.forceDischarge.description == "a discharge while plugged in")
     }
 }

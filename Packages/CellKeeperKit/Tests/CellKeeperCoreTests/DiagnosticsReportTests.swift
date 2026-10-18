@@ -89,7 +89,7 @@ struct DiagnosticsReportTests {
         let report = DiagnosticsReport.text(status: status, environment: environment, generatedAt: referenceDate)
         let lines = report.split(separator: "\n").map(String.init)
 
-        #expect(lines.contains("Style: switches charging, modes a forced discharge (forceDischarge), a charging pause (inhibitCharging), normal charging (normal)"))
+        #expect(lines.contains("Style: switches charging, modes a discharge while plugged in (forceDischarge), a charging pause (inhibitCharging), normal charging (normal)"))
         #expect(lines.contains("Reported mode: a charging pause (inhibitCharging)"))
         #expect(lines.contains("Power source: external power (externalPower)"))
         #expect(lines.contains("Charging status: not charging (notCharging)"))

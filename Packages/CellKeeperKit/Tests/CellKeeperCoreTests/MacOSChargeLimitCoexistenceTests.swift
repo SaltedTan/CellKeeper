@@ -508,7 +508,7 @@ struct MacOSChargeLimitControllerTests {
         #expect(ended.decision?.notes.contains(.dischargeEndedForMacOSChargeLimit) == true)
         #expect(ended.currentMode == .normal)
         #expect(rig.control.activeControls.isEmpty)
-        #expect(ended.events.contains { $0.kind == .safety && $0.message.contains("while CellKeeper held a restriction of its own: a forced discharge") })
+        #expect(ended.events.contains { $0.kind == .safety && $0.message.contains("while CellKeeper held a restriction of its own: a discharge while plugged in") })
     }
 
     @Test("Checking again reads macOS's limit at once; evaluations within 30 s reuse the reading")
