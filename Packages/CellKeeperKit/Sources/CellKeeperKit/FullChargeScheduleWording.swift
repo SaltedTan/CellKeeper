@@ -120,7 +120,7 @@ public enum FullChargeScheduleWording {
         if capabilities.availability == .simulated {
             return "Simulated: at the start, CellKeeper records a temporary full charge. Nothing on your Mac changes.\(deferring)"
         }
-        return "At the start, CellKeeper allows charging to 100%. \(duration) CellKeeper's \(limit)% limit then applies again from its next check; sleep can delay that.\(deferring)"
+        return "At the start, CellKeeper requests a temporary full charge: it asks for none of its own restrictions, unless a safety rule such as the temperature pause still pauses charging. \(duration) CellKeeper then requests its \(limit)% limit again at its next check; sleep, or a request that fails or is refused, can delay that.\(deferring)"
     }
 
     /// Said with every schedule: when it can start, and what happens if it
@@ -165,19 +165,23 @@ public enum TemporaryFullChargeWording {
         if capabilities.availability == .simulated {
             return "\(name), simulated: nothing on your Mac changes. It ends \(endings)."
         }
-        return "\(name): CellKeeper allows charging to 100%. Its \(limit)% limit applies again \(endings); sleep can delay that."
+        return "\(name): CellKeeper has lifted its own restrictions, confirmed. It requests its \(limit)% limit again \(endings); sleep can delay that."
     }
 
-    /// The help for "Charge to 100% once" with the backend in charge.
+    /// The help for "Charge to 100% once" with the backend in charge. A
+    /// backend that accepts no requests is said to change nothing.
     public static func buttonHelp(for status: ControllerStatus) -> String {
         let hours = Int(ChargeOverride.defaultFullChargeDuration / 3600)
         let endings = "at a check after the battery is full, you unplug, or \(hours) hours pass"
+        if case .unavailable(let reason) = status.capabilities.availability {
+            return "\(status.backend.displayName) is unavailable (\(reason)), so a temporary full charge changes nothing; CellKeeper only shows what it would do."
+        }
         if status.capabilities.isEnforcedByMacOS {
             return "Requests a macOS Charge Limit of 100% once. CellKeeper requests its limit again \(endings)."
         }
         if status.capabilities.availability == .simulated {
             return "Records a temporary full charge, simulated: nothing on your Mac changes. It ends \(endings)."
         }
-        return "Allows charging to 100% once. CellKeeper's limit applies again \(endings)."
+        return "Requests a temporary full charge once: CellKeeper asks for none of its own restrictions, unless a safety rule such as the temperature pause still pauses charging. It requests its limit again \(endings)."
     }
 }

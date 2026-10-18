@@ -69,10 +69,47 @@ struct FullChargeScheduleWordingTests {
         #expect(FullChargeScheduleWording.overnightHint(for: await evaluatedStatus()) == nil)
     }
 
-    @Test("A real backend that switches charging itself allows charging to 100%, and its limit applies again from a later check")
+    @Test("A real backend that switches charging itself: a temporary request that the safety rules still override, and the limit requested again later")
     func realChargingModesBackend() async {
         let text = FullChargeScheduleWording.explanation(for: await evaluatedStatus(realChargingModes, limit: 80), end: nil, timeZone: utc, locale: posix)
-        #expect(text == "At the start, CellKeeper allows charging to 100%. The full charge lasts for the time left until the end you choose when it starts (longer only if a full charge that expires later is already running), or less if the battery is full or you unplug first. CellKeeper's 80% limit then applies again from its next check; sleep can delay that.")
+        #expect(text == "At the start, CellKeeper requests a temporary full charge: it asks for none of its own restrictions, unless a safety rule such as the temperature pause still pauses charging. The full charge lasts for the time left until the end you choose when it starts (longer only if a full charge that expires later is already running), or less if the battery is full or you unplug first. CellKeeper then requests its 80% limit again at its next check; sleep, or a request that fails or is refused, can delay that.")
+    }
+
+    @Test("A schedule that starts during a temperature pause installs its full charge while charging stays paused, and nothing says charging is allowed")
+    func suppressedActivation() async throws {
+        let clock = KitTestClock()
+        let backend = KitExperimentalBackend()
+        let controller = ChargeController(
+            telemetry: KitHotTelemetry(percent: 70, celsius: 45, clock: clock),
+            backend: backend,
+            settings: .default,
+            scheduleStore: FullChargeScheduleStore(defaults: KitMemoryStorage()),
+            now: { clock.now },
+            uptime: { clock.uptime }
+        )
+        await controller.evaluate(.launch)
+        let begin = clock.now.addingTimeInterval(3600)
+        try await controller.setFullChargeSchedule(FullChargeSchedule(startsAt: begin, endsAt: begin.addingTimeInterval(12 * 3600)))
+        clock.advance(by: 3600)
+        let status = await controller.evaluate(.periodic)
+        let override = try #require(status.activeOverride)
+        #expect(override.source == .schedule)
+        #expect(status.decision?.state == .temperaturePause)
+        #expect(status.currentMode == .inhibitCharging)
+        #expect(await backend.currentMode() == .inhibitCharging)
+        var texts = [
+            FullChargeScheduleWording.explanation(for: status, end: nil, timeZone: utc, locale: posix),
+            TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix),
+            TemporaryFullChargeWording.buttonHelp(for: status),
+        ]
+        if let outcome = status.fullChargeScheduleOutcome, let line = FullChargeScheduleWording.outcomeLine(outcome) {
+            texts.append(line)
+        }
+        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix) == "Scheduled full charge requested, not in effect.")
+        for text in texts {
+            #expect(!text.lowercased().contains("allows charging"), "in: \(text)")
+            #expect(!text.lowercased().contains("charging to 100%"), "in: \(text)")
+        }
     }
 
     @Test("Outcomes: the window passed (with the reason only if one was seen), already full, kept, discarded; started and extended are left to the running charge's line")
@@ -167,11 +204,34 @@ struct TemporaryFullChargeWordingTests {
         #expect(TemporaryFullChargeWording.buttonHelp(for: status) == "Requests a macOS Charge Limit of 100% once. CellKeeper requests its limit again at a check after the battery is full, you unplug, or 12 hours pass.")
     }
 
-    @Test("A real backend that switches charging itself: charging allowed to 100%, and the limit applies again from a later check")
+    @Test("A real backend that switches charging itself: its own restrictions lifted and confirmed, and the limit requested again at a later check")
     func realChargingModesBackend() async throws {
         let (override, status) = try await running(KitExperimentalBackend(), limit: 80)
-        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix) == "Temporary full charge: CellKeeper allows charging to 100%. Its 80% limit applies again at a check after the battery is full, you unplug, or it expires (about \(expiry(override))); sleep can delay that.")
-        #expect(TemporaryFullChargeWording.buttonHelp(for: status) == "Allows charging to 100% once. CellKeeper's limit applies again at a check after the battery is full, you unplug, or 12 hours pass.")
+        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix) == "Temporary full charge: CellKeeper has lifted its own restrictions, confirmed. It requests its 80% limit again at a check after the battery is full, you unplug, or it expires (about \(expiry(override))); sleep can delay that.")
+        #expect(TemporaryFullChargeWording.buttonHelp(for: status) == "Requests a temporary full charge once: CellKeeper asks for none of its own restrictions, unless a safety rule such as the temperature pause still pauses charging. It requests its limit again at a check after the battery is full, you unplug, or 12 hours pass.")
+    }
+
+    @Test("A backend that accepts no requests gets help that says nothing changes: Read-only, and an unavailable macOS Charge Limit")
+    func unavailableHelp() async {
+        let clock = KitTestClock()
+        let readOnly = ChargeController(telemetry: KitStubTelemetry(percent: 70, clock: clock), backend: ReadOnlyChargingBackend(reason: "read-only in this test"), settings: .default, now: { clock.now }, uptime: { clock.uptime })
+        let readOnlyStatus = await readOnly.evaluate(.launch)
+        #expect(TemporaryFullChargeWording.buttonHelp(for: readOnlyStatus) == "\(readOnlyStatus.backend.displayName) is unavailable (read-only in this test), so a temporary full charge changes nothing; CellKeeper only shows what it would do.")
+        let system = KitFakeChargeLimit()
+        let native = NativeChargeLimitBackend(runner: system, reader: system, store: KitMemoryRecordStore(), platformIssue: "this Mac cannot use it", now: { clock.now }, uptime: { clock.uptime })
+        let nativeController = ChargeController(telemetry: KitStubTelemetry(percent: 70, clock: clock), backend: native, settings: .default, now: { clock.now }, uptime: { clock.uptime })
+        let nativeStatus = await nativeController.evaluate(.launch)
+        #expect(nativeStatus.capabilities.isEnforcedByMacOS)
+        guard case .unavailable(let reason) = nativeStatus.capabilities.availability else {
+            Issue.record("expected an unavailable macOS Charge Limit, got \(nativeStatus.capabilities.availability)")
+            return
+        }
+        #expect(TemporaryFullChargeWording.buttonHelp(for: nativeStatus) == "\(nativeStatus.backend.displayName) is unavailable (\(reason)), so a temporary full charge changes nothing; CellKeeper only shows what it would do.")
+        for status in [readOnlyStatus, nativeStatus] {
+            let help = TemporaryFullChargeWording.buttonHelp(for: status).lowercased()
+            #expect(!help.contains("allows charging"))
+            #expect(!help.contains("requests"))
+        }
     }
 
     @Test("Not in effect, or with control unavailable, it says only that it was requested")
@@ -219,11 +279,36 @@ struct FullChargeWordingClaimsTests {
         }
         for text in texts {
             let lowered = text.lowercased()
-            for claim in ["ready by", "ready for", "guarantee", "at the latest", "until full", "charging to 100% until", "will be full", "sets it back", "100% by", "never runs past", "never past"] {
+            for claim in ["ready by", "ready for", "guarantee", "at the latest", "until full", "charging to 100% until", "allows charging", "will be full", "sets it back", "100% by", "never runs past", "never past"] {
                 #expect(!lowered.contains(claim), "\(claim) in: \(text)")
             }
         }
     }
+}
+
+/// Telemetry on external power at a fixed charge and battery temperature.
+struct KitHotTelemetry: TelemetryProvider {
+    let percent: Int
+    let celsius: Double
+    let clock: KitTestClock
+
+    func currentSnapshot() async throws -> BatterySnapshot {
+        BatterySnapshot(timestamp: clock.now, chargePercent: percent, powerSource: .externalPower, isCharging: true, isFullyCharged: false, temperatureCelsius: celsius)
+    }
+
+    func powerSourceChanges() -> AsyncStream<Void> {
+        AsyncStream { $0.finish() }
+    }
+}
+
+/// An in-memory ``KeyValueStorage``.
+final class KitMemoryStorage: KeyValueStorage, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: Any] = [:]
+    func data(forKey key: String) -> Data? { lock.withLock { values[key] as? Data } }
+    func string(forKey key: String) -> String? { lock.withLock { values[key] as? String } }
+    func object(forKey key: String) -> Any? { lock.withLock { values[key] } }
+    func set(_ value: Any?, forKey key: String) { lock.withLock { values[key] = value } }
 }
 
 /// A fake macOS Charge Limit and shortcut that sets what it is given.
