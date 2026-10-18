@@ -1,6 +1,7 @@
 @testable import CellKeeperCore
 import CellKeeperHelperCore
 import Foundation
+import Testing
 
 /// Every step the fakes saw, in order, across the controller's backend, the
 /// helper's transport and the registration.
@@ -34,7 +35,6 @@ final class CallLog: @unchecked Sendable {
     /// The waiter is registered before its timeout starts, so the timeout
     /// always finds it (or finds it already resumed); the limit counts from
     /// the call, whenever the timeout task runs.
-    @discardableResult
     func waitFor(_ entry: String, occurrences: Int = 1, within limit: Duration = testWaitLimit) async -> Bool {
         let expiresAt = ContinuousClock.now.advanced(by: limit)
         let id = lock.withLock {
@@ -82,24 +82,40 @@ final class CallLog: @unchecked Sendable {
     }
 }
 
-/// The longest any wait in these tests lasts: a test that goes wrong fails
-/// or moves on instead of hanging the run.
+/// How long a bounded wait in these tests waits for what it expects. One
+/// that gives up reports it, and the test records an issue (see
+/// ``expectLogged(_:_:occurrences:)``), so a test that goes wrong fails
+/// instead of hanging the run.
 let testWaitLimit: Duration = .seconds(10)
 
-/// Holds whoever waits until the test opens it, or until ``testWaitLimit``
-/// has passed, so a stall never outlives a failing test for long.
+/// How long a ``Gate`` holds a call the test has not let through: three
+/// times ``testWaitLimit``, because a test here makes up to two bounded
+/// waits while one of its gates holds a call.
+let gateLimit: Duration = testWaitLimit * 3
+
+/// Holds whoever waits until the test opens it. A call it still holds after
+/// its limit records an issue, which fails the test, and is then let
+/// through, so a failing test does not hang the run: a test that goes on
+/// past a gate it did not open fails.
 final class Gate: @unchecked Sendable {
+    private let limit: Duration
     private let lock = NSLock()
     private var isOpen = false
     private var waiters: [Int: CheckedContinuation<Void, Never>] = [:]
     private var timeouts: [Int: Task<Void, Never>] = [:]
     private var nextWaiter = 0
 
-    /// Returns once the gate is open, or ``testWaitLimit`` after the call.
-    /// The waiter is registered before its timeout starts, so the timeout
-    /// always finds it (or finds it already released).
+    /// - Parameter limit: for the test of the gate itself; otherwise
+    ///   ``gateLimit``.
+    init(limit: Duration = gateLimit) {
+        self.limit = limit
+    }
+
+    /// Returns once the gate is open; or, having recorded an issue, `limit`
+    /// after the call. The waiter is registered before its timeout starts,
+    /// so the timeout always finds it (or finds it already released).
     func wait() async {
-        let expiresAt = ContinuousClock.now.advanced(by: testWaitLimit)
+        let expiresAt = ContinuousClock.now.advanced(by: limit)
         let id = lock.withLock {
             nextWaiter += 1
             return nextWaiter
@@ -116,7 +132,7 @@ final class Gate: @unchecked Sendable {
             }
             let timeout = Task { [weak self] in
                 try? await Task.sleep(until: expiresAt, clock: .continuous)
-                self?.release(id)
+                self?.expire(id)
             }
             let isWaiting = lock.withLock {
                 guard waiters[id] != nil else { return false }
@@ -141,8 +157,12 @@ final class Gate: @unchecked Sendable {
         }
     }
 
-    private func release(_ id: Int) {
-        lock.withLock { waiters.removeValue(forKey: id) }?.resume()
+    /// A waiter the gate still holds at its limit (not one that `open()`
+    /// released meanwhile) fails the test, then goes on.
+    private func expire(_ id: Int) {
+        guard let continuation = lock.withLock({ waiters.removeValue(forKey: id) }) else { return }
+        Issue.record("a gate held a call for \(limit) without being opened; the call was let through so that the run goes on")
+        continuation.resume()
     }
 }
 
@@ -424,7 +444,16 @@ struct RemovalTestConnection: HelperConnection {
 /// A helper engine run in process (``InProcessHelperTransport``) on a
 /// simulated control, reached through a ``RemovalTestTransport``, with a
 /// fake registration; every step goes to one ``CallLog``.
+///
+/// The transport ticks the engine every ``tickInterval``, the first time an
+/// hour after the rig is made at the earliest. The suites that use the rig
+/// have a time limit of a minute, so a test that sees a tick it did not run
+/// itself (``HelperEngine/tick()``) has already failed. A tick matters: one
+/// during shutdown retries a restore that failed, which ends the state a
+/// test checks.
 struct RemovalRig {
+    static let tickInterval: Duration = .seconds(3_600)
+
     let clock = TestClock()
     let log = CallLog()
     let control: SimulatedChargeControl
@@ -443,7 +472,8 @@ struct RemovalRig {
             control: chargeControl ?? control,
             power: StubHelperPower(clock: clock),
             build: 7,
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            tickInterval: Self.tickInterval
         )
         transport = RemovalTestTransport(inner: helper, log: log)
         registration = FakeHelperRegistration(status, log: log)

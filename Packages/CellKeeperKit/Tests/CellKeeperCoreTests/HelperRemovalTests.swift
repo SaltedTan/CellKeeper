@@ -51,7 +51,10 @@ struct ConversationFault: Sendable, CustomStringConvertible {
 /// Safety precondition 9: the helper is unregistered only after it has
 /// confirmed that it restored defaults, and every outcome says only what was
 /// confirmed.
-@Suite("Helper removal")
+///
+/// A test here that runs for a minute has gone wrong. The time limit also
+/// fails it well before ``RemovalRig``'s first tick of its own.
+@Suite("Helper removal", .timeLimit(.minutes(1)))
 struct HelperRemovalTests {
     private static let unregisterSteps: Set<String> = ["helper.restoreDefaultsAndExit", "registration.unregister"]
     private static let deadline: Duration = HelperRemoval.defaultHelperDeadline
@@ -124,6 +127,10 @@ struct HelperRemovalTests {
         // The clock never moves, so the deadline never passes.
         let outcome = await rig.removal(clock: ManualDeadlineClock()).remove()
         #expect(outcome == .removed(.simulated))
+        // The outcome is decided before the connection is closed, so the
+        // close may start only after the removal has returned; it stays
+        // held until the test ends.
+        await expectLogged(rig.log, "helper.invalidate")
         #expect(rig.log.count(of: "helper.invalidate") == 1)
     }
 
@@ -168,7 +175,8 @@ struct HelperRemovalTests {
         let isSafeToExit = await rig.engine.isSafeToExit
         #expect(!isSafeToExit)
         // The helper that was not unregistered is the one that finishes the
-        // restore: its next tick retries it.
+        // restore: its next tick retries it. Within the suite's time limit,
+        // only the test ticks the rig's engine (see ``RemovalRig``).
         await rig.engine.tick()
         let isSafeAfterRetry = await rig.engine.isSafeToExit
         #expect(isSafeAfterRetry)
@@ -468,6 +476,14 @@ struct HelperRemovalTests {
         log.append("logged")
         let isLoggedNow = await log.waitFor("logged", within: .zero)
         #expect(isLoggedNow)
+    }
+
+    @Test("A gate that is not opened in time fails the test before it lets the call through")
+    func unopenedGateFails() async {
+        let gate = Gate(limit: .zero)
+        await withKnownIssue {
+            await gate.wait()
+        }
     }
 
     @Test("A forced removal says what it could not confirm, and what removing the helper gives up")

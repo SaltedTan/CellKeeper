@@ -1,4 +1,4 @@
-import CellKeeperCore
+@testable import CellKeeperCore
 import Foundation
 import Testing
 
@@ -571,13 +571,37 @@ struct ChargeControllerTests {
         await controller.evaluate(.launch)
         await controller.evaluate(.periodic)
         #expect(await backend.totalRequests == 0)
-        await withTaskGroup(of: Void.self) { group in
-            for _ in 0..<20 {
-                group.addTask { await controller.evaluate(.manual) }
+
+        // Each request is held in flight until every evaluation not yet
+        // served waits for the controller: a request any of them made then
+        // would overlap the held one.
+        await backend.holdRequests()
+        let evaluations = Task {
+            await withTaskGroup(of: Void.self) { group in
+                for _ in 0..<20 {
+                    group.addTask { await controller.evaluate(.manual) }
+                }
             }
         }
-        #expect(await backend.totalRequests == 20)
-        #expect(await backend.maximumConcurrentRequests == 1)
+        for served in 1...20 {
+            func isHeldWithTheRestWaiting() async -> Bool {
+                let requests = await backend.totalRequests
+                let held = await backend.heldRequests
+                let waiting = await controller.waitingCallerCount
+                return requests == served && held == 1 && waiting == 20 - served
+            }
+            await eventually("request \(served) is held with \(20 - served) evaluations waiting", isHeldWithTheRestWaiting)
+            guard await isHeldWithTheRestWaiting() else { break }
+            await backend.releaseHeldRequests()
+        }
+        // Lets every request end, also after a failed wait.
+        await backend.stopHolding()
+        await evaluations.value
+
+        let requests = await backend.totalRequests
+        let maximumConcurrentRequests = await backend.maximumConcurrentRequests
+        #expect(requests == 20)
+        #expect(maximumConcurrentRequests == 1)
     }
 
     @Test("The activity log is bounded")
@@ -630,14 +654,22 @@ actor AlternatingTelemetry: TelemetryProvider {
     }
 }
 
-/// Records how many `setMode` calls are in flight at once. Suspends inside
-/// each call so overlapping callers would be observable.
+/// Records how many `setMode` calls are in flight at once. Once told to, it
+/// holds each call in flight until the test lets it end, so a call that
+/// overlapped it would be counted.
 actor ConcurrencyProbeBackend: ChargingBackend {
     nonisolated let descriptor = BackendDescriptor(identifier: "probe", displayName: "Probe", summary: "")
     private var mode: ChargeControlMode = .normal
     private var inFlight = 0
+    private var holdsRequests = false
+    private var held: [CheckedContinuation<Void, Never>] = []
     private(set) var totalRequests = 0
     private(set) var maximumConcurrentRequests = 0
+
+    /// Calls held in flight now.
+    var heldRequests: Int {
+        held.count
+    }
 
     func capabilities() -> ControlCapabilities {
         ControlCapabilities(availability: .simulated, supportedModes: ChargeControlMode.chargingModes)
@@ -649,9 +681,32 @@ actor ConcurrencyProbeBackend: ChargingBackend {
         inFlight += 1
         totalRequests += 1
         maximumConcurrentRequests = max(maximumConcurrentRequests, inFlight)
-        for _ in 0..<5 { await Task.yield() }
+        if holdsRequests {
+            await withCheckedContinuation { held.append($0) }
+        }
         mode = newMode
         inFlight -= 1
         return .simulated
+    }
+
+    /// From now on, each call stays in flight until
+    /// ``releaseHeldRequests()``.
+    func holdRequests() {
+        holdsRequests = true
+    }
+
+    /// Lets the calls held now end.
+    func releaseHeldRequests() {
+        let released = held
+        held = []
+        for continuation in released {
+            continuation.resume()
+        }
+    }
+
+    /// Lets the calls held now end, and holds no more.
+    func stopHolding() {
+        holdsRequests = false
+        releaseHeldRequests()
     }
 }
