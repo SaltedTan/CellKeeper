@@ -225,6 +225,23 @@ extension ChargingStatus {
     }
 }
 
+extension ControlEvent.Kind {
+    /// The label of an event in Settings › Activity. The diagnostics report
+    /// keeps the kind's identifier.
+    var title: String {
+        switch self {
+        case .telemetry: "Battery reading"
+        case .decision: "Decision"
+        case .request: "Request"
+        case .result: "Result"
+        case .failure: "Failure"
+        case .safety: "Safety"
+        case .settings: "Settings"
+        case .override: "Override"
+        }
+    }
+}
+
 enum Format {
     static let unavailable = "Not available"
 

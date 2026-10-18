@@ -508,7 +508,7 @@ struct MacOSChargeLimitControllerTests {
         #expect(ended.decision?.notes.contains(.dischargeEndedForMacOSChargeLimit) == true)
         #expect(ended.currentMode == .normal)
         #expect(rig.control.activeControls.isEmpty)
-        #expect(ended.events.contains { $0.kind == .safety && $0.message.contains("while CellKeeper held forceDischarge") })
+        #expect(ended.events.contains { $0.kind == .safety && $0.message.contains("while CellKeeper held a restriction of its own: a forced discharge") })
     }
 
     @Test("Checking again reads macOS's limit at once; evaluations within 30 s reuse the reading")
@@ -544,7 +544,7 @@ struct MacOSChargeLimitControllerTests {
         #expect(report.contains("; CellKeeper defers to it: it withholds new restrictions and asks for the release of any restriction of its own"))
         #expect(report.contains("Own restriction: The last read-back shows no restriction in effect."))
         #expect(report.contains("macOS Charge Limit read problem: unrecognised report (a limit with reason optimizedBatteryCharging)"))
-        #expect(report.contains("State: deferringToMacOS"))
+        #expect(report.contains("State: deferring to macOS's Charge Limit (deferringToMacOS)"))
     }
 
     @Test("A change of the limit while it stays on is a notice, not a safety event")

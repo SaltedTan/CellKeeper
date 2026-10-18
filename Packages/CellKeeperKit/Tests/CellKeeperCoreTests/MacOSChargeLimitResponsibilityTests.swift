@@ -180,7 +180,7 @@ struct OwnRestrictionResponsibilityTests {
         #expect(rig.control.activeControls == [.chargingInhibited])
         #expect(gated.currentMode == .inhibitCharging)
         #expect(gated.ownRestriction == .inEffect(.inhibitCharging, own: .inhibitCharging))
-        let event = gated.events.last { $0.kind == .safety && $0.message.contains("macOS's Charge Limit was turned on (80%) while CellKeeper held inhibitCharging") }
+        let event = gated.events.last { $0.kind == .safety && $0.message.contains("macOS's Charge Limit was turned on (80%) while CellKeeper held a restriction of its own: a charging pause") }
         #expect(event?.message.contains("No read-back has confirmed that this restriction ended, so it may remain") == true)
         let limit = gated.capabilities.macOSChargeLimit
         let guidance = limit.map { MacOSChargeLimitWording.guidance($0, ownRestriction: gated.ownRestriction, isSimulated: gated.isControlSimulated) } ?? ""
@@ -215,7 +215,7 @@ struct OwnRestrictionResponsibilityTests {
             Issue.record("CellKeeper's own activation reported as someone else's: \(gated.ownRestriction)")
         }
         #expect(gated.ownRestriction.mayBeInEffect)
-        #expect(gated.events.contains { $0.kind == .safety && $0.message.contains("while CellKeeper held inhibitCharging") })
+        #expect(gated.events.contains { $0.kind == .safety && $0.message.contains("while CellKeeper held a restriction of its own: a charging pause") })
     }
 
     @Test("A genuine takeover by another client stays someone else's, by the helper's history")
@@ -303,7 +303,7 @@ struct HelperOwnershipEvidenceTests {
             }
             #expect(status.ownRestriction.mayBeInEffect)
         }
-        #expect(gated.events.contains { $0.kind == .safety && $0.message.contains("macOS's Charge Limit was turned on (80%) while CellKeeper held inhibitCharging") })
+        #expect(gated.events.contains { $0.kind == .safety && $0.message.contains("macOS's Charge Limit was turned on (80%) while CellKeeper held a restriction of its own: a charging pause") })
         // The helper's own restore made the restriction; no outside writer
         // took part, and none is named. The backend still faults.
         #expect(gated.isBackendFaulted)
@@ -342,7 +342,7 @@ struct HelperOwnershipEvidenceTests {
             Issue.record("CellKeeper's hold reported as someone else's after a failed start restore: \(status.ownRestriction)")
         }
         #expect(status.ownRestriction.mayBeInEffect)
-        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("macOS's Charge Limit was turned on (80%) while CellKeeper held inhibitCharging") })
+        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("macOS's Charge Limit was turned on (80%) while CellKeeper held a restriction of its own: a charging pause") })
         // The new helper records the control it found active as changed
         // outside, but reports no outside change, only an owed restore: no
         // writer is named, and the backend still faults.
