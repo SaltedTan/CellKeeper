@@ -135,7 +135,7 @@ jobs:
           # The signed app carries exactly these entitlements, each true: the
           # App Sandbox (remove it from the list only if the app is
           # deliberately shipped without the sandbox) and access to the file
-          # the user picks in a save panel (architecture D80). An entitlement
+          # the user picks in a save panel (architecture D76). An entitlement
           # added to Config/CellKeeper.entitlements must be added here too.
           unexpected="${RUNNER_TEMP}/unexpected-entitlements.plist"
           cp "${entitlements}" "${unexpected}"

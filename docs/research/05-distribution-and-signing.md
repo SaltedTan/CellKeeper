@@ -53,7 +53,7 @@
    - A trailing `#include? "Local.xcconfig"` (git-ignored) lets maintainers inject `DEVELOPMENT_TEAM` and identity. CI can override with `xcodebuild -xcconfig`.
 8. **Homebrew changed in Sept 2026.** Official `homebrew-cask` now disables casks that fail Gatekeeper, so unsigned or un-notarized builds can't ship there (own tap only). [3P]
 9. **Recommendation:**
-   - **Phase 1:** ship with **App Sandbox ON** (verified sufficient; keeps a possible Mac App Store edition open) and **Hardened Runtime ON**, with no other entitlements. Sign ad hoc by default; maintainers use Developer ID for releases. Later (2026-10-18): the app also carries `com.apple.security.files.user-selected.read-write`, so that it can save its diagnostics report through a save panel (architecture D80).
+   - **Phase 1:** ship with **App Sandbox ON** (verified sufficient; keeps a possible Mac App Store edition open) and **Hardened Runtime ON**, with no other entitlements. Sign ad hoc by default; maintainers use Developer ID for releases. Later (2026-10-18): the app also carries `com.apple.security.files.user-selected.read-write`, so that it can save its diagnostics report through a save panel (architecture D76).
    - **Long term:** Developer ID + notarized, stapled DMG on GitHub Releases, plus an optional Homebrew cask. Add a root daemon via `SMAppService.daemon` **only if** a privileged backend is truly needed. If it is, prefer an **unsandboxed app + unsandboxed daemon** (drop the sandbox at that point and migrate preferences) over a sandboxed root daemon.
 
 ---
@@ -400,7 +400,7 @@ codesign -vvv --deep --strict dist/CellKeeper.app
 
 ### Phase 1 (telemetry + mock control)
 
-- **Sandbox:** App Sandbox ON (`ENABLE_APP_SANDBOX = YES`). No other sandbox entitlements: no network, no file access, no temporary exceptions. Later (2026-10-18): access to files the user picks in a save panel was added for saving the diagnostics report (architecture D80); there is still no network access and no temporary exception.
+- **Sandbox:** App Sandbox ON (`ENABLE_APP_SANDBOX = YES`). No other sandbox entitlements: no network, no file access, no temporary exceptions. Later (2026-10-18): access to files the user picks in a save panel was added for saving the diagnostics report (architecture D76); there is still no network access and no temporary exception.
   - Rationale: verified to work; zero cost; limits damage if the GUI is compromised; keeps a possible sandboxed or App Store edition open while workstream 02's control path settles.
   - Store settings behind a small abstraction so a later container migration is easy if the sandbox is dropped.
 - **Hardened Runtime:** ON, with no exceptions.
