@@ -132,12 +132,29 @@ jobs:
           codesign --verify --strict --verbose=2 "${app}"
           codesign --display --entitlements - --xml "${app}" > "${entitlements}"
           plutil -p "${entitlements}"
-          # The App Sandbox entitlement must survive signing. Remove this check
-          # only if the app is deliberately shipped without the sandbox.
-          test "$(plutil -extract 'com\.apple\.security\.app-sandbox' raw -o - "${entitlements}")" = "true"
+          # The signed app carries exactly these entitlements, each true: the
+          # App Sandbox (remove it from the list only if the app is
+          # deliberately shipped without the sandbox) and access to the file
+          # the user picks in a save panel (architecture D76). An entitlement
+          # added to Config/CellKeeper.entitlements must be added here too.
+          unexpected="${RUNNER_TEMP}/unexpected-entitlements.plist"
+          cp "${entitlements}" "${unexpected}"
+          for key in com.apple.security.app-sandbox com.apple.security.files.user-selected.read-write; do
+            keypath=$(printf '%s' "${key}" | sed 's/\./\\./g')
+            if [ "$(plutil -extract "${keypath}" raw -expect bool -o - "${entitlements}")" != "true" ]; then
+              echo "::error::Release build does not carry ${key} = true"
+              exit 1
+            fi
+            plutil -remove "${keypath}" "${unexpected}"
+          done
           # Release builds must not be debuggable.
           if plutil -extract 'com\.apple\.security\.get-task-allow' raw -o - "${entitlements}" >/dev/null 2>&1; then
             echo "::error::Release build carries com.apple.security.get-task-allow"
+            exit 1
+          fi
+          if [ "$(plutil -convert json -o - "${unexpected}")" != "{}" ]; then
+            echo "::error::Release build carries unexpected entitlements:"
+            plutil -p "${unexpected}"
             exit 1
           fi
           lipo -archs "${app}/Contents/MacOS/CellKeeper"

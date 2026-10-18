@@ -24,7 +24,10 @@ disclosure timeline with you.
 
 CellKeeper runs as an ordinary, App-Sandboxed user application with no
 privileged helper. It reads battery telemetry through public and allowlisted
-read-only interfaces, and never writes to hardware itself.
+read-only interfaces, and never writes to hardware itself. Its only
+entitlement besides the sandbox lets it write a file the user chooses in a
+save panel: Settings › Activity › Save Diagnostics… saves the diagnostics
+report there, and nowhere else.
 
 Its only control is opt-in and experimental. With the **macOS Charge Limit**
 backend selected, it changes macOS's own Charge Limit (80–100%) by running
@@ -49,6 +52,8 @@ Issues we especially want to hear about:
   user did not choose, or crash;
 - leaks of device identifiers (serial numbers etc.) into logs, files, or the
   UI;
+- anything that makes CellKeeper read or write a file outside its container
+  other than the one the user chose in its save panel;
 - weaknesses in the build or CI configuration (for example, workflow
   injection).
 

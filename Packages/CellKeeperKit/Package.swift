@@ -9,8 +9,9 @@
 //   CellKeeperHelperCore.
 // - CellKeeperKit: macOS system adapters (read-only IOKit telemetry,
 //   power-source notifications, the `shortcuts` and `pmset` runners, the
-//   Charge Limit record file, the helper's read-only power reading for the
-//   Simulated helper, and the NSXPC helper transport). Depends on
+//   Charge Limit record file, the saved diagnostics report, the helper's
+//   read-only power reading for the Simulated helper, and the NSXPC helper
+//   transport). Depends on
 //   CellKeeperCore, CellKeeperHelperCore and CellKeeperHelperXPC.
 // - CellKeeperHelperCore: the logic of the privileged helper (the wire
 //   vocabulary shared with the app, and the helper engine: sessions,

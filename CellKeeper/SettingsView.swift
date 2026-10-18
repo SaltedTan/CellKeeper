@@ -21,6 +21,13 @@ struct SettingsView: View {
                 .tag(SettingsTab.about)
         }
         .frame(width: 520, height: 460)
+        // Here rather than on the Activity tab, so that a save that fails
+        // after the user moved to another tab is still shown.
+        .alert("The diagnostics report was not saved", isPresented: Binding(get: { model.diagnosticsSaveFailure != nil }, set: { if !$0 { model.dismissDiagnosticsSaveFailure() } }), presenting: model.diagnosticsSaveFailure) { _ in
+            Button("OK") {}
+        } message: { failure in
+            Text(failure)
+        }
     }
 }
 
@@ -439,6 +446,7 @@ private struct ControlDetailsSection: View {
 private struct ActivityTab: View {
     let model: AppModel
     @State private var isCopied = false
+    @State private var settingsWindow = HostingWindow()
 
     var body: some View {
         let events = (model.status?.events ?? []).reversed()
@@ -462,18 +470,24 @@ private struct ActivityTab: View {
                     }
                 }
             }
-            HStack {
+            VStack(alignment: .leading, spacing: 8) {
                 Text("Also written to the unified log (subsystem \(CellKeeperLog.subsystem)).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Spacer()
-                Button(isCopied ? "Copied" : "Copy Diagnostics") { copyDiagnostics() }
-                    .disabled(model.status == nil)
-                    .help("Copies a plain-text report of what CellKeeper sees and does, for a bug report. It contains no serial numbers or other identifiers.")
-                Button("Refresh now") { model.refresh() }
+                HStack {
+                    Button(isCopied ? "Copied" : "Copy Diagnostics") { copyDiagnostics() }
+                        .disabled(model.status == nil)
+                        .help("Copies a plain-text report of what CellKeeper sees and does, for a bug report. It contains no serial numbers or other identifiers.")
+                    Button("Save Diagnostics…") { model.saveDiagnosticsReport(attachingTo: settingsWindow.window) }
+                        .disabled(model.status == nil || model.isSavingDiagnostics)
+                        .help("Saves the same report as a text file where you choose.")
+                    Spacer()
+                    Button("Refresh now") { model.refresh() }
+                }
             }
             .padding([.horizontal, .bottom])
         }
+        .background(HostingWindowReader(hostingWindow: settingsWindow))
     }
 
     private func copyDiagnostics() {
@@ -505,6 +519,31 @@ private struct AboutTab: View {
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// The window a view is in, read when it is needed: the Settings window for
+/// the save panel's sheet. `NSApp.keyWindow` can be another window, such as
+/// the menu's.
+@MainActor
+private final class HostingWindow {
+    weak var view: NSView?
+    var window: NSWindow? { view?.window }
+}
+
+/// An empty AppKit view behind the content, through which ``HostingWindow``
+/// finds the window. It changes no SwiftUI state.
+private struct HostingWindowReader: NSViewRepresentable {
+    let hostingWindow: HostingWindow
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        hostingWindow.view = view
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        hostingWindow.view = view
     }
 }
 

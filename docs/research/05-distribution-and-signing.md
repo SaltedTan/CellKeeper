@@ -53,7 +53,7 @@
    - A trailing `#include? "Local.xcconfig"` (git-ignored) lets maintainers inject `DEVELOPMENT_TEAM` and identity. CI can override with `xcodebuild -xcconfig`.
 8. **Homebrew changed in Sept 2026.** Official `homebrew-cask` now disables casks that fail Gatekeeper, so unsigned or un-notarized builds can't ship there (own tap only). [3P]
 9. **Recommendation:**
-   - **Phase 1:** ship with **App Sandbox ON** (verified sufficient; keeps a possible Mac App Store edition open) and **Hardened Runtime ON**, with no other entitlements. Sign ad hoc by default; maintainers use Developer ID for releases.
+   - **Phase 1:** ship with **App Sandbox ON** (verified sufficient; keeps a possible Mac App Store edition open) and **Hardened Runtime ON**, with no other entitlements. Sign ad hoc by default; maintainers use Developer ID for releases. Later (2026-10-18): the app also carries `com.apple.security.files.user-selected.read-write`, so that it can save its diagnostics report through a save panel (architecture D76).
    - **Long term:** Developer ID + notarized, stapled DMG on GitHub Releases, plus an optional Homebrew cask. Add a root daemon via `SMAppService.daemon` **only if** a privileged backend is truly needed. If it is, prefer an **unsandboxed app + unsandboxed daemon** (drop the sandbox at that point and migrate preferences) over a sandboxed root daemon.
 
 ---
@@ -383,6 +383,7 @@ codesign -vvv --deep --strict dist/CellKeeper.app
 | IOPS reads + `IOPSNotificationCreateRunLoopSource` | 1 | **Yes [Exp]** | Yes (public API) | No entitlement. |
 | IORegistry reads of `AppleSmartBattery` (+ interest/matching notifications) | 1 | **Yes [Exp]** | Likely, but property keys are undocumented (2.5.1 risk low) | No entitlement. |
 | `com.apple.security.get-task-allow` | Debug only | Yes | Must not ship | Notarization rejects it. Export strips it [Doc]. |
+| `com.apple.security.files.user-selected.read-write` | Added 2026-10-18, for saving the diagnostics report | Yes (a sandbox entitlement) | Yes | "Whether the app may have read-write access to files the user has selected using an Open or Save dialog" [Doc]. An `NSSavePanel` in an ad-hoc-signed, sandboxed CellKeeper saved the report into `/private/tmp` on macOS 27.0.1 [Exp, 2026-10-18]. |
 | `com.apple.security.network.client` | Only if sandboxed and checking for updates | Yes | Yes | Not needed in phase 1. |
 | `SMAppService.mainApp` (launch at login) | 1–2 (opt-in) | Yes | Yes, with consent (2.4.5(iii)) | No entitlement. User notified; may need approval. |
 | `SMAppService.daemon` (root helper) | 3+ (only if a privileged backend is required) | Only if the daemon is also sandboxed (macOS 14.2+) | **No** (2.4.5(v)) | Needs admin approval. Header: app must be notarized. Re-register after updates. |
@@ -399,7 +400,7 @@ codesign -vvv --deep --strict dist/CellKeeper.app
 
 ### Phase 1 (telemetry + mock control)
 
-- **Sandbox:** App Sandbox ON (`ENABLE_APP_SANDBOX = YES`). No other sandbox entitlements: no network, no file access, no temporary exceptions.
+- **Sandbox:** App Sandbox ON (`ENABLE_APP_SANDBOX = YES`). No other sandbox entitlements: no network, no file access, no temporary exceptions. Later (2026-10-18): access to files the user picks in a save panel was added for saving the diagnostics report (architecture D76); there is still no network access and no temporary exception.
   - Rationale: verified to work; zero cost; limits damage if the GUI is compromised; keeps a possible sandboxed or App Store edition open while workstream 02's control path settles.
   - Store settings behind a small abstraction so a later container migration is easy if the sandbox is dropped.
 - **Hardened Runtime:** ON, with no exceptions.
