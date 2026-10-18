@@ -66,9 +66,17 @@ user's locale only.
   every check ("Friday 07:00 wherever the Mac is"). A zone change is already
   an evaluation trigger (`clockChanged`, D81). The controller gets the zone
   from an injected provider, read together with `now` after the backend's
-  reads; the app's provider snapshots the system zone per evaluation
-  (whether `TimeZone.current` needs `NSTimeZone.resetSystemTimeZone()` after
-  `NSSystemTimeZoneDidChange` is checked in Phase 2).
+  reads. The app's provider calls `NSTimeZone.resetSystemTimeZone()` and
+  then takes `TimeZone.current`, a fixed value, at every evaluation.
+  Foundation documents the system zone as cached until that reset
+  (`NSTimeZone.h`, `systemTimeZone`), and does not document resetting it
+  itself when `NSSystemTimeZoneDidChange` is posted. A probe that changed
+  only its own `TZ` variable found `TimeZone.current`,
+  `TimeZone.autoupdatingCurrent`, `NSTimeZone.system` and `NSTimeZone.local`
+  all unchanged until the reset, and all updated after it; the reset posted
+  no `NSSystemTimeZoneDidChange` (macOS 27.0). Resetting at every evaluation
+  therefore does not depend on the notification arriving (a change while
+  asleep, a missed post), and cannot loop.
 - **Which occurrence counts.** At each check, only **P**, the latest
   occurrence whose start is at or before `now` (in the current zone), can
   start or pass. Earlier ones are superseded: with equal durations, P's
@@ -85,10 +93,11 @@ user's locale only.
 
 **The record.** The schedule persists `handled`: the local day of the latest
 occurrence that started, passed, or began before the schedule was saved,
-with its start instant, the time zone identifier it was computed in, and a
-result (`started`, `passed`, `beforeSave`). An occurrence is **eligible only
-if its local day is after `handled.day`**. Comparison is by local day only;
-the instant and zone are for display and diagnostics.
+with its start instant, the UTC offset at that start, and a result
+(`started`, `passed`, `beforeSave`). An occurrence is **eligible only if its
+local day is after `handled.day`**. Comparison is by local day only; the
+instant and offset are for display and diagnostics. No time zone identifier
+is stored or reported.
 
 **The check** (`WeeklyFullChargeSchedule.check(_:input:timeZone:)`, pure):
 
@@ -165,14 +174,14 @@ schema version. JSON:
 ```json
 {"weekdays": [6], "hour": 7, "minute": 0, "durationHours": 12,
  "handled": {"year": 2026, "month": 10, "day": 16,
-             "startsAt": 1792130400, "timeZone": "Europe/London",
+             "startsAt": 1792130400, "utcOffset": 3600,
              "result": "started"}}
 ```
 
 Load: a value that is not JSON data, unreadable, or invalid (weekdays empty
 or outside 1–7, hour outside 0–23, minute outside 0–59, duration outside
 1–48, `handled` missing, not a real Gregorian date, a non-finite instant, an
-unknown result) is **removed with a notice** (outcome `.discarded`), never
+offset beyond ±18 h, an unknown result) is **removed with a notice** (outcome `.discarded`), never
 affecting settings or Manage charging; only no value counts as no schedule.
 Unknown keys are ignored. Loaded at the first command, like the one-shot.
 
@@ -232,16 +241,21 @@ change), one line gives the new next occurrence, without guessing why.
 Through PR #88's section model, in the "Decision" section after the
 one-shot's rows, only when a weekly schedule is saved:
 
-- "Weekly full charge": "every Fri at 07:00 for 12 hours (weekdays 6), time
-  zone Europe/London"
-- "Weekly next": "\(time: S) to \(time: E)" plus "; due, waiting: …"
-- "Weekly handled": "2026-10-16, started at \(time:), time zone
-  Europe/London (started)"
+- "Weekly full charge": "every Fri at 07:00 for 12 hours (weekdays 6)"
+- "Weekly next": "2026-10-23T07:00:00+01:00 to 2026-10-23T19:00:00+01:00",
+  plus "; due, waiting: …"
+- "Weekly handled": "2026-10-16, started at 2026-10-16T07:00:00+01:00
+  (started)"
 - "Weekly outcome": as the one-shot's `describe(outcome)`.
 
-Existing goldens stay byte-identical (no weekly schedule in their
-fixtures); new fixtures pin the new rows, deliberately. The time zone
-identifier names a region, not a device (owner question 5).
+**No time zone identifier** (lead's decision): the report promises nothing
+that identifies a person or place, and a zone name is a location. The
+occurrence times are written in ISO 8601 with their UTC offset instead,
+which still shows DST and travel shifts. That needs a new
+`DiagnosticsValue` part, a moment with an offset (the report writes it as
+above; Settings › Diagnostics formats it like any other time), since
+`.time` writes UTC. Existing goldens stay byte-identical (no weekly schedule
+in their fixtures); new fixtures pin the new rows, deliberately.
 
 ## 8. Testing
 
@@ -284,31 +298,27 @@ clock:
 | # | Decision |
 |---|---|
 | D100 | One weekly full charge (owner approval 2026-10-19; shape: lead): weekdays, local start time, 1–48 whole hours; coexists with the one-shot; starts the existing temporary full charge (source `.schedule`); no scheduled limits, no new notification kind or Shortcuts action, no wake |
-| D101 | Floating local time in the zone current at each check, Gregorian weekdays; DST gap → offset before the gap, overlap → first (RFC 5545); duration is elapsed time; computed from `TimeZone` offsets, not `Calendar` matching policies (observed wrong for a 30-minute gap) |
+| D101 | Floating local time in the zone current at each check, Gregorian weekdays; DST gap → offset before the gap, overlap → first (RFC 5545); duration is elapsed time; computed from `TimeZone` offsets, not `Calendar` matching policies (observed wrong for a 30-minute gap); the app resets the cached system zone at every evaluation |
 | D102 | Only the latest occurrence that has started by the clock can start or pass; earlier ones are superseded; its window goes through the one-shot's check and D82's start rules; overlapping windows allowed |
 | D103 | A persisted record of the latest handled local day, saved before the override is installed; an occurrence is eligible only after it; saving counts from the save and never lowers it; removing deletes it; crash limit and clock-forward-and-back skip stated |
 | D104 | Own store `weeklyFullCharge.v1`; invalid or unreadable → removed with a notice, never affects settings; no pause flag |
 | D105 | UI: Settings section with days, time, duration, Save/Remove, Next, Last, DST note; menu "next"/waiting line and the latest outcome only, in memory |
-| D106 | Diagnostics rows through the section model, with the time zone identifier and the record |
+| D106 | Diagnostics rows through the section model: the pattern, the next occurrence and the record, times in ISO 8601 with their UTC offset; no time zone identifier (lead's decision) |
 
-## 10. Owner questions (with recommendations)
+## 10. Owner questions (answered by the lead, 2026-10-19)
 
 1. **Scope:** weekly only, one schedule, whole-hour durations, alongside the
-   one-shot. *Recommend yes.*
-2. **Pause without deleting** (an on/off toggle)? *Recommend no for now:*
-   Remove and re-entering three fields is cheap, and a paused schedule is
-   one more hidden state for the menu to explain. "Skip the next one" would
-   be the better later addition (it is just advancing the record).
-3. **Saving inside today's window** does not start today's occurrence (it
-   counts from the save, like the one-shot's future start). *Recommend yes;*
-   "Charge to 100% once" covers now.
-4. **Menu line always** while a weekly schedule is saved (not only within
-   24 h of the start). *Recommend always:* it is the only reminder that a
-   100% request is coming.
-5. **Time zone identifier in the diagnostics report** (a region, e.g.
-   "Europe/London"). *Recommend yes:* floating-time problems cannot be
-   diagnosed from UTC instants alone; the user sees the report before
-   sharing it.
-6. **Overlapping windows** allowed (duration longer than the gap to the next
-   day). *Recommend allow,* with the D82 extension; restricting the duration
-   by the weekday set would make the stepper's range depend on the days.
+   one-shot. *Adopted.*
+2. **Pause without deleting:** not offered; Remove only. "Skip the next one"
+   (advancing the record) is the better later addition. *Adopted.*
+3. **Saving inside today's window** does not start today's occurrence; it
+   counts from the save, like the one-shot's future start, and "Charge to
+   100% once" covers now. *Adopted.*
+4. **Menu line always** while a weekly schedule is saved, not only within
+   24 h of the start: it is the only reminder that a 100% request is
+   coming. *Adopted.*
+5. **Time zone identifier in the diagnostics report:** *no* (lead). The
+   report names no person or place, and a zone name is a location; times
+   carry their UTC offset instead (section 7).
+6. **Overlapping windows** allowed, with the D82 extension, so the
+   duration's range does not depend on the days chosen. *Adopted.*
