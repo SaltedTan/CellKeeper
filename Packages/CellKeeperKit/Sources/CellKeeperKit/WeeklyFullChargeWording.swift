@@ -7,32 +7,35 @@ import Foundation
 /// by" a time or a return to the limit at a given time, and it never
 /// promises that a full charge cannot start twice: it says that CellKeeper
 /// records each one it handled, and when that record can be lost. Every
-/// date is shown relative to `now`, the time of the status the caller shows
-/// (the year appears only when it differs).
+/// date is shown in `calendar` (the user's) relative to `now`, the time of
+/// the status the caller shows: the year appears only when it differs in
+/// that same calendar.
 public enum WeeklyFullChargeWording {
-    /// Gregorian weekdays (1 = Sunday) in `locale`'s order, its first
+    /// Gregorian weekdays (1 = Sunday) in `calendar`'s order, its first
     /// weekday first.
-    public static func weekdayOrder(locale: Locale = .current) -> [Int] {
-        let first = calendar(locale).firstWeekday
+    public static func weekdayOrder(calendar: Calendar = .current) -> [Int] {
+        let first = calendar.firstWeekday
         return (0..<7).map { (first - 1 + $0) % 7 + 1 }
     }
 
-    /// The short name of `weekday` (1 = Sunday) in `locale`.
-    public static func shortName(of weekday: Int, locale: Locale = .current) -> String {
-        calendar(locale).shortWeekdaySymbols[(weekday - 1) % 7]
+    /// The short name of `weekday` (1 = Sunday) in `calendar`'s locale.
+    public static func shortName(of weekday: Int, calendar: Calendar = .current) -> String {
+        calendar.shortWeekdaySymbols[(weekday - 1) % 7]
     }
 
     /// For example "Every Friday at 7:00 AM, for 12 hours", "Every Mon, Wed,
-    /// and Fri at …", or "Every day at …".
-    public static func summary(_ pattern: WeeklyFullChargePattern, locale: Locale = .current) -> String {
-        let calendar = calendar(locale)
+    /// and Fri at …", or "Every day at …", with day names in `locale` and the
+    /// days in `calendar`'s order.
+    public static func summary(_ pattern: WeeklyFullChargePattern, locale: Locale = .current, calendar: Calendar = .current) -> String {
+        var named = calendar
+        named.locale = locale
         let days: String
         if pattern.weekdays.count == 7 {
             days = "day"
         } else if pattern.weekdays.count == 1, let only = pattern.weekdays.first {
-            days = calendar.weekdaySymbols[(only - 1) % 7]
+            days = named.weekdaySymbols[(only - 1) % 7]
         } else {
-            let names = weekdayOrder(locale: locale).filter(pattern.weekdays.contains).map { calendar.shortWeekdaySymbols[$0 - 1] }
+            let names = weekdayOrder(calendar: calendar).filter(pattern.weekdays.contains).map { named.shortWeekdaySymbols[$0 - 1] }
             days = names.formatted(.list(type: .and).locale(locale))
         }
         let hours = pattern.durationHours == 1 ? "1 hour" : "\(pattern.durationHours) hours"
@@ -41,39 +44,39 @@ public enum WeeklyFullChargeWording {
 
     /// Settings' line for the next occurrence, which is always in the
     /// future.
-    public static func nextLine(_ next: WeeklyFullChargeOccurrence, timeZone: TimeZone = .current, locale: Locale = .current, now: Date) -> String {
-        "Next: \(FullChargeScheduleWording.window(next.window, timeZone: timeZone, locale: locale, now: now))"
+    public static func nextLine(_ next: WeeklyFullChargeOccurrence, timeZone: TimeZone = .current, locale: Locale = .current, calendar: Calendar = .current, now: Date) -> String {
+        "Next: \(FullChargeScheduleWording.window(next.window, timeZone: timeZone, locale: locale, calendar: calendar, now: now))"
     }
 
     /// The menu's line for the next occurrence, shown whenever a weekly full
     /// charge is in use, also while another one is due.
-    public static func menuLine(_ next: WeeklyFullChargeOccurrence?, timeZone: TimeZone = .current, locale: Locale = .current, now: Date) -> String {
+    public static func menuLine(_ next: WeeklyFullChargeOccurrence?, timeZone: TimeZone = .current, locale: Locale = .current, calendar: Calendar = .current, now: Date) -> String {
         guard let next else { return "Weekly full charge: no next start found" }
-        return "Weekly full charge: next \(FullChargeScheduleWording.window(next.window, timeZone: timeZone, locale: locale, now: now))"
+        return "Weekly full charge: next \(FullChargeScheduleWording.window(next.window, timeZone: timeZone, locale: locale, calendar: calendar, now: now))"
     }
 
     /// When a change of offset skipped the start time on the occurrence's
     /// day, so that it starts later: what it starts at instead. Nil
     /// otherwise.
-    public static func skipNote(_ occurrence: WeeklyFullChargeOccurrence, pattern: WeeklyFullChargePattern, timeZone: TimeZone = .current, locale: Locale = .current, now: Date) -> String? {
+    public static func skipNote(_ occurrence: WeeklyFullChargeOccurrence, pattern: WeeklyFullChargePattern, timeZone: TimeZone = .current, locale: Locale = .current, calendar: Calendar = .current, now: Date) -> String? {
         guard occurrence.startShift > 0 else { return nil }
         let time = timeOfDay(hour: pattern.hour, minute: pattern.minute, locale: locale)
-        let day = nominalDay(occurrence.day, locale: locale, now: now, timeZone: timeZone)
-        let start = FullChargeScheduleWording.format(occurrence.startsAt, timeZone: timeZone, locale: locale, now: now)
+        let day = nominalDay(occurrence.day, locale: locale, calendar: calendar, now: now, timeZone: timeZone)
+        let start = FullChargeScheduleWording.format(occurrence.startsAt, timeZone: timeZone, locale: locale, calendar: calendar, now: now)
         return "\(time) does not occur on \(day) (the clocks go forward), so it starts at \(start)."
     }
 
     /// The line for an occurrence that is due but cannot start yet, shown
     /// beneath the next one.
-    public static func dueLine(_ due: WeeklyFullChargeDue, timeZone: TimeZone = .current, locale: Locale = .current, now: Date) -> String {
-        let end = FullChargeScheduleWording.format(due.occurrence.endsAt, timeZone: timeZone, locale: locale, now: now)
+    public static func dueLine(_ due: WeeklyFullChargeDue, timeZone: TimeZone = .current, locale: Locale = .current, calendar: Calendar = .current, now: Date) -> String {
+        let end = FullChargeScheduleWording.format(due.occurrence.endsAt, timeZone: timeZone, locale: locale, calendar: calendar, now: now)
         return "Weekly full charge is due but cannot start yet: \(FullChargeScheduleWording.waitText(due.wait)). It can still start until \(end)."
     }
 
     /// Settings' line for the latest occurrence that started or passed; nil
     /// for one that began before the schedule was saved.
-    public static func lastLine(_ record: WeeklyFullChargeRecord, timeZone: TimeZone = .current, locale: Locale = .current, now: Date) -> String? {
-        let start = FullChargeScheduleWording.format(record.startsAt, timeZone: timeZone, locale: locale, now: now)
+    public static func lastLine(_ record: WeeklyFullChargeRecord, timeZone: TimeZone = .current, locale: Locale = .current, calendar: Calendar = .current, now: Date) -> String? {
+        let start = FullChargeScheduleWording.format(record.startsAt, timeZone: timeZone, locale: locale, calendar: calendar, now: now)
         switch record.result {
         case .started: return "Last: \(start), started"
         case .passed: return "Last: \(start), passed before it could start"
@@ -93,9 +96,9 @@ public enum WeeklyFullChargeWording {
 
     /// The menu's line for what became of the latest occurrence, or nil
     /// where the running full charge's own line says it.
-    public static func outcomeLine(_ outcome: WeeklyFullChargeOutcome, timeZone: TimeZone = .current, locale: Locale = .current, now: Date) -> String? {
+    public static func outcomeLine(_ outcome: WeeklyFullChargeOutcome, timeZone: TimeZone = .current, locale: Locale = .current, calendar: Calendar = .current, now: Date) -> String? {
         func start(_ occurrence: WeeklyFullChargeOccurrence) -> String {
-            FullChargeScheduleWording.format(occurrence.startsAt, timeZone: timeZone, locale: locale, now: now)
+            FullChargeScheduleWording.format(occurrence.startsAt, timeZone: timeZone, locale: locale, calendar: calendar, now: now)
         }
         switch outcome {
         case .started, .extendedRunning:
@@ -125,37 +128,35 @@ public enum WeeklyFullChargeWording {
 
     // MARK: - Formatting
 
-    /// A Gregorian calendar in `locale`, for weekday names and order.
-    private static func calendar(_ locale: Locale) -> Calendar {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.locale = locale
-        return calendar
-    }
-
-    /// `hour`:`minute` as `locale` writes a time of day.
+    /// `hour`:`minute` as `locale` writes a time of day, read on the editor's
+    /// fixed day in GMT, so no time zone or calendar changes it.
     static func timeOfDay(hour: Int, minute: Int, locale: Locale) -> String {
         var style = Date.FormatStyle.dateTime.hour().minute()
-        style.timeZone = TimeZone(secondsFromGMT: 0)!
-        return Date(timeIntervalSince1970: TimeInterval(hour * 3600 + minute * 60)).formatted(style.locale(locale))
+        style.timeZone = WeeklyFullChargeDraft.pickerTimeZone
+        style.calendar = WeeklyFullChargeDraft.pickerCalendar
+        return WeeklyFullChargeDraft(hour: hour, minute: minute).pickerTime.formatted(style.locale(locale))
     }
 
-    /// A nominal day as `locale` writes a date (weekday, day and month, with
-    /// the year when it is not `now`'s in `timeZone`).
-    static func nominalDay(_ day: LocalDay, locale: Locale, now: Date, timeZone: TimeZone) -> String {
+    /// A nominal day as `locale` writes a date in `calendar` (weekday, day
+    /// and month, with the year when it is not `now`'s year in that calendar
+    /// and `timeZone`).
+    static func nominalDay(_ day: LocalDay, locale: Locale, calendar: Calendar, now: Date, timeZone: TimeZone) -> String {
         let utc = TimeZone(secondsFromGMT: 0)!
-        // Noon UTC on the day reads as that day in UTC.
+        // Noon UTC on the day reads as that day in UTC, in any calendar.
         var gregorian = Calendar(identifier: .gregorian)
         gregorian.timeZone = utc
         let noon = gregorian.date(from: DateComponents(year: day.year, month: day.month, day: day.day, hour: 12)) ?? now
         var style = Date.FormatStyle.dateTime.weekday(.abbreviated).day().month(.abbreviated)
-        var nowCalendar = locale.calendar
-        nowCalendar.timeZone = timeZone
-        var dayCalendar = locale.calendar
+        var dayCalendar = calendar
         dayCalendar.timeZone = utc
-        if dayCalendar.component(.year, from: noon) != nowCalendar.component(.year, from: now) {
+        var nowCalendar = calendar
+        nowCalendar.timeZone = timeZone
+        if dayCalendar.component(.year, from: noon) != nowCalendar.component(.year, from: now)
+            || dayCalendar.component(.era, from: noon) != nowCalendar.component(.era, from: now) {
             style = style.year()
         }
         style.timeZone = utc
+        style.calendar = calendar
         return noon.formatted(style.locale(locale))
     }
 }

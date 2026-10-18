@@ -5,6 +5,8 @@ import Testing
 
 private let utc = TimeZone(identifier: "UTC")!
 private let posix = Locale(identifier: "en_US_POSIX")
+/// Pinned, so no test depends on the system's calendar.
+private let gregorian = Calendar(identifier: .gregorian)
 /// The time the statuses describe (the test clocks' start, 2027-01-15),
 /// the reference for whether a date shows its year.
 private let now = Date(timeIntervalSince1970: 1_800_000_000)
@@ -48,23 +50,23 @@ struct FullChargeScheduleWordingTests {
 
     @Test("Simulated controls are said to change nothing")
     func simulated() async {
-        let text = FullChargeScheduleWording.explanation(for: await evaluatedStatus(), end: schedule.endsAt, timeZone: utc, locale: posix, now: now)
+        let text = FullChargeScheduleWording.explanation(for: await evaluatedStatus(), end: schedule.endsAt, timeZone: utc, locale: posix, calendar: gregorian, now: now)
         #expect(text == "Simulated: at the start, CellKeeper records a temporary full charge. Nothing on your Mac changes.")
-        let deferring = FullChargeScheduleWording.explanation(for: await evaluatedStatus(macOSLimitOn), end: nil, timeZone: utc, locale: posix, now: now)
+        let deferring = FullChargeScheduleWording.explanation(for: await evaluatedStatus(macOSLimitOn), end: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now)
         #expect(deferring.hasSuffix("While macOS's Charge Limit is on, it stays in charge and the full charge has no effect."))
     }
 
     @Test("An unavailable backend is said to change nothing")
     func unavailable() async {
-        let text = FullChargeScheduleWording.explanation(for: await evaluatedStatus(.unavailable("no shortcut")), end: nil, timeZone: utc, locale: posix, now: now)
+        let text = FullChargeScheduleWording.explanation(for: await evaluatedStatus(.unavailable("no shortcut")), end: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now)
         #expect(text == "Simulated is unavailable (no shortcut), so a scheduled full charge changes nothing; CellKeeper only shows what it would do.")
     }
 
     @Test("With macOS's Charge Limit: CellKeeper requests 100%, the end gives only the duration at the start, and the return to the limit is a later request that can be delayed")
     func nativeLimit() async {
         let status = await evaluatedStatus(nativeSteps, limit: 85)
-        let end = FullChargeScheduleWording.format(schedule.endsAt, timeZone: utc, locale: posix, now: now)
-        let text = FullChargeScheduleWording.explanation(for: status, end: schedule.endsAt, timeZone: utc, locale: posix, now: now)
+        let end = FullChargeScheduleWording.format(schedule.endsAt, timeZone: utc, locale: posix, calendar: gregorian, now: now)
+        let text = FullChargeScheduleWording.explanation(for: status, end: schedule.endsAt, timeZone: utc, locale: posix, calendar: gregorian, now: now)
         #expect(text == "At the start, CellKeeper requests a macOS Charge Limit of 100%. The full charge lasts for the time left until \(end) when it starts (longer only if a full charge that expires later is already running), or less if the battery is full or you unplug first. CellKeeper then requests its 85% limit again at its next check; sleep, or a request that is refused, can delay that. macOS may still hold charging, for battery health or when the battery is warm.")
         #expect(FullChargeScheduleWording.overnightHint(for: status) == "To charge overnight, schedule a start while your Mac is awake and wait until the menu shows macOS enforcing 100%. Returning to your limit can wait until your Mac wakes.")
         let unavailableNative = await evaluatedStatus(.unavailable("no shortcut", style: .nativeLimit(steps: NativeChargeLimitBackend.supportedLimits)))
@@ -74,7 +76,7 @@ struct FullChargeScheduleWordingTests {
 
     @Test("A real backend that switches charging itself: a temporary request that the safety rules still override, and the limit requested again later")
     func realChargingModesBackend() async {
-        let text = FullChargeScheduleWording.explanation(for: await evaluatedStatus(realChargingModes, limit: 80), end: nil, timeZone: utc, locale: posix, now: now)
+        let text = FullChargeScheduleWording.explanation(for: await evaluatedStatus(realChargingModes, limit: 80), end: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now)
         #expect(text == "At the start, CellKeeper requests a temporary full charge: it asks for none of its own restrictions, unless a safety rule such as the temperature pause still pauses charging. The full charge lasts for the time left until the end you choose when it starts (longer only if a full charge that expires later is already running), or less if the battery is full or you unplug first. CellKeeper then requests its 80% limit again at its next check; sleep, or a request that fails or is refused, can delay that.")
     }
 
@@ -101,8 +103,8 @@ struct FullChargeScheduleWordingTests {
         #expect(status.currentMode == .inhibitCharging)
         #expect(await backend.currentMode() == .inhibitCharging)
         var texts = [
-            FullChargeScheduleWording.explanation(for: status, end: nil, timeZone: utc, locale: posix, now: now),
-            TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, now: now),
+            FullChargeScheduleWording.explanation(for: status, end: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now),
+            TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now),
             TemporaryFullChargeWording.buttonHelp(for: status),
         ]
         if let outcome = status.fullChargeScheduleOutcome, let line = FullChargeScheduleWording.outcomeLine(outcome) {
@@ -111,10 +113,10 @@ struct FullChargeScheduleWordingTests {
         #expect(status.decision?.notes.contains(.fullChargeSuppressed(by: .temperaturePause)) == true)
         // The rule that takes precedence is the explanation, even when the
         // last request (the pause) succeeded.
-        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: "Applied and confirmed", timeZone: utc, locale: posix, now: now) == "Scheduled full charge requested, not in effect: temperature protection takes precedence.")
+        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: "Applied and confirmed", timeZone: utc, locale: posix, calendar: gregorian, now: now) == "Scheduled full charge requested, not in effect: temperature protection takes precedence.")
         var manual = override
         manual.source = .user
-        #expect(TemporaryFullChargeWording.line(for: manual, status: status, lastResult: nil, timeZone: utc, locale: posix, now: now) == "Temporary full charge requested, not in effect: temperature protection takes precedence.")
+        #expect(TemporaryFullChargeWording.line(for: manual, status: status, lastResult: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now) == "Temporary full charge requested, not in effect: temperature protection takes precedence.")
         #expect(status.decision?.notes.map(\.description).contains("Temporary full charge is not in effect: temperature protection takes precedence.") == true)
         for text in texts {
             #expect(!text.lowercased().contains("allows charging"), "in: \(text)")
@@ -128,7 +130,7 @@ struct FullChargeScheduleWordingTests {
         let override = try #require(status.activeOverride)
         // A last result is passed to show that the rule, not the result, is
         // the explanation.
-        return [TemporaryFullChargeWording.line(for: override, status: status, lastResult: "Refused", timeZone: utc, locale: posix, now: now)]
+        return [TemporaryFullChargeWording.line(for: override, status: status, lastResult: "Refused", timeZone: utc, locale: posix, calendar: gregorian, now: now)]
             + (status.decision?.notes.map(\.description) ?? [])
     }
 
@@ -221,18 +223,18 @@ struct FullChargeScheduleWordingTests {
 
     @Test("The armed line shows the window, or why a due schedule cannot start yet")
     func armedLine() {
-        let window = FullChargeScheduleWording.window(schedule, timeZone: utc, locale: posix, now: now)
-        let begin = FullChargeScheduleWording.format(schedule.startsAt, timeZone: utc, locale: posix, now: now)
-        let end = FullChargeScheduleWording.format(schedule.endsAt, timeZone: utc, locale: posix, now: now)
+        let window = FullChargeScheduleWording.window(schedule, timeZone: utc, locale: posix, calendar: gregorian, now: now)
+        let begin = FullChargeScheduleWording.format(schedule.startsAt, timeZone: utc, locale: posix, calendar: gregorian, now: now)
+        let end = FullChargeScheduleWording.format(schedule.endsAt, timeZone: utc, locale: posix, calendar: gregorian, now: now)
         #expect(window == "\(begin) – \(end)")
-        #expect(FullChargeScheduleWording.armedLine(schedule, wait: nil, timeZone: utc, locale: posix, now: now) == "Full charge scheduled: \(window)")
-        #expect(FullChargeScheduleWording.armedLine(schedule, wait: .managementOff, timeZone: utc, locale: posix, now: now) == "Scheduled full charge is due but cannot start yet: Manage charging is off. It can still start until \(end).")
+        #expect(FullChargeScheduleWording.armedLine(schedule, wait: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now) == "Full charge scheduled: \(window)")
+        #expect(FullChargeScheduleWording.armedLine(schedule, wait: .managementOff, timeZone: utc, locale: posix, calendar: gregorian, now: now) == "Scheduled full charge is due but cannot start yet: Manage charging is off. It can still start until \(end).")
     }
 
     @Test("Times are shown in the time zone given, so a time-zone change only changes what is displayed")
     func timeZones() {
         let tokyo = TimeZone(identifier: "Asia/Tokyo")!
-        #expect(FullChargeScheduleWording.format(start, timeZone: utc, locale: posix, now: now) != FullChargeScheduleWording.format(start, timeZone: tokyo, locale: posix, now: now))
+        #expect(FullChargeScheduleWording.format(start, timeZone: utc, locale: posix, calendar: gregorian, now: now) != FullChargeScheduleWording.format(start, timeZone: tokyo, locale: posix, calendar: gregorian, now: now))
     }
 
     @Test("In the hour a daylight-saving change repeats, times carry the time zone, so the two ends of a window never read the same")
@@ -246,14 +248,14 @@ struct FullChargeScheduleWordingTests {
         // Shown in the same year, so without it.
         let now = first
         let ambiguous = FullChargeSchedule(startsAt: first, endsAt: second)
-        #expect(plain(FullChargeScheduleWording.window(ambiguous, timeZone: newYork, locale: posix, now: now)) == "Sun, Nov 1 at 1:30 AM EDT – Sun, Nov 1 at 1:30 AM EST")
-        #expect(plain(FullChargeScheduleWording.format(first, timeZone: newYork, locale: posix, now: now)) == "Sun, Nov 1 at 1:30 AM EDT")
+        #expect(plain(FullChargeScheduleWording.window(ambiguous, timeZone: newYork, locale: posix, calendar: gregorian, now: now)) == "Sun, Nov 1 at 1:30 AM EDT – Sun, Nov 1 at 1:30 AM EST")
+        #expect(plain(FullChargeScheduleWording.format(first, timeZone: newYork, locale: posix, calendar: gregorian, now: now)) == "Sun, Nov 1 at 1:30 AM EDT")
         // An hour before and after the repeated hour, nothing is ambiguous.
-        #expect(plain(FullChargeScheduleWording.format(first.addingTimeInterval(-3600), timeZone: newYork, locale: posix, now: now)) == "Sun, Nov 1 at 12:30 AM")
-        #expect(plain(FullChargeScheduleWording.format(second.addingTimeInterval(3600), timeZone: newYork, locale: posix, now: now)) == "Sun, Nov 1 at 2:30 AM")
+        #expect(plain(FullChargeScheduleWording.format(first.addingTimeInterval(-3600), timeZone: newYork, locale: posix, calendar: gregorian, now: now)) == "Sun, Nov 1 at 12:30 AM")
+        #expect(plain(FullChargeScheduleWording.format(second.addingTimeInterval(3600), timeZone: newYork, locale: posix, calendar: gregorian, now: now)) == "Sun, Nov 1 at 2:30 AM")
         // A window whose ends are not ambiguous shows no time zone.
         let july = FullChargeSchedule(startsAt: Date(timeIntervalSince1970: 1_784_000_000), endsAt: Date(timeIntervalSince1970: 1_784_000_000 + 7200))
-        #expect(!FullChargeScheduleWording.window(july, timeZone: newYork, locale: posix, now: now).contains("EDT"))
+        #expect(!FullChargeScheduleWording.window(july, timeZone: newYork, locale: posix, calendar: gregorian, now: now).contains("EDT"))
     }
 }
 
@@ -277,16 +279,16 @@ struct TemporaryFullChargeWordingTests {
     }
 
     private func expiry(_ override: ChargeOverride) -> String {
-        FullChargeScheduleWording.format(override.expiresAt, timeZone: utc, locale: posix, now: now)
+        FullChargeScheduleWording.format(override.expiresAt, timeZone: utc, locale: posix, calendar: gregorian, now: now)
     }
 
     @Test("Simulated: nothing on the Mac changes, and it ends at a check after full, unplugging or its expiry")
     func simulated() async throws {
         let (override, status) = try await running(MockChargingBackend())
-        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, now: now) == "Temporary full charge, simulated: nothing on your Mac changes. It ends at a check after the battery is full, you unplug, or it expires (about \(expiry(override))).")
+        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now) == "Temporary full charge, simulated: nothing on your Mac changes. It ends at a check after the battery is full, you unplug, or it expires (about \(expiry(override))).")
         var scheduled = override
         scheduled.source = .schedule
-        #expect(TemporaryFullChargeWording.line(for: scheduled, status: status, lastResult: nil, timeZone: utc, locale: posix, now: now).hasPrefix("Scheduled full charge, simulated:"))
+        #expect(TemporaryFullChargeWording.line(for: scheduled, status: status, lastResult: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now).hasPrefix("Scheduled full charge, simulated:"))
         #expect(TemporaryFullChargeWording.buttonHelp(for: status) == "Records a temporary full charge, simulated: nothing on your Mac changes. It ends at a check after the battery is full, you unplug, or 12 hours pass.")
     }
 
@@ -297,14 +299,14 @@ struct TemporaryFullChargeWordingTests {
         let backend = NativeChargeLimitBackend(runner: system, reader: system, store: KitMemoryRecordStore(), platformIssue: nil, now: { clock.now }, uptime: { clock.uptime })
         let (override, status) = try await running(backend, limit: 85, settle: 60)
         #expect(status.currentMode == .nativeLimit(percent: 100))
-        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, now: now) == "Temporary full charge: macOS's Charge Limit is at 100%, confirmed. CellKeeper requests its 85% limit again at a check after the battery is full, you unplug, or it expires (about \(expiry(override))); sleep can delay that.")
+        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now) == "Temporary full charge: macOS's Charge Limit is at 100%, confirmed. CellKeeper requests its 85% limit again at a check after the battery is full, you unplug, or it expires (about \(expiry(override))); sleep can delay that.")
         #expect(TemporaryFullChargeWording.buttonHelp(for: status) == "Requests a macOS Charge Limit of 100% once. CellKeeper requests its limit again at a check after the battery is full, you unplug, or 12 hours pass.")
     }
 
     @Test("A real backend that switches charging itself: its own restrictions lifted and confirmed, and the limit requested again at a later check")
     func realChargingModesBackend() async throws {
         let (override, status) = try await running(KitExperimentalBackend(), limit: 80)
-        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, now: now) == "Temporary full charge: CellKeeper has lifted its own restrictions, confirmed. It requests its 80% limit again at a check after the battery is full, you unplug, or it expires (about \(expiry(override))); sleep can delay that.")
+        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now) == "Temporary full charge: CellKeeper has lifted its own restrictions, confirmed. It requests its 80% limit again at a check after the battery is full, you unplug, or it expires (about \(expiry(override))); sleep can delay that.")
         #expect(TemporaryFullChargeWording.buttonHelp(for: status) == "Requests a temporary full charge once: CellKeeper asks for none of its own restrictions, unless a safety rule such as the temperature pause still pauses charging. It requests its limit again at a check after the battery is full, you unplug, or 12 hours pass.")
     }
 
@@ -335,10 +337,10 @@ struct TemporaryFullChargeWordingTests {
     func notInEffect() async throws {
         var (override, status) = try await running(MockChargingBackend())
         status.currentMode = .inhibitCharging
-        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: "Refused", timeZone: utc, locale: posix, now: now) == "Temporary full charge requested, not in effect (Refused).")
+        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: "Refused", timeZone: utc, locale: posix, calendar: gregorian, now: now) == "Temporary full charge requested, not in effect (Refused).")
         status.capabilities = .unavailable("x")
         override.source = .schedule
-        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, now: now) == "Scheduled full charge requested, but charging control is unavailable.")
+        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now) == "Scheduled full charge requested, but charging control is unavailable.")
     }
 }
 
@@ -351,7 +353,7 @@ struct FullChargeWordingClaimsTests {
         var texts = [FullChargeScheduleWording.startConditions]
         for capabilities in [nil, macOSLimitOn, nativeSteps, realChargingModes, .unavailable("x")] {
             let current = await evaluatedStatus(capabilities)
-            texts.append(FullChargeScheduleWording.explanation(for: current, end: schedule.endsAt, timeZone: utc, locale: posix, now: now))
+            texts.append(FullChargeScheduleWording.explanation(for: current, end: schedule.endsAt, timeZone: utc, locale: posix, calendar: gregorian, now: now))
             texts.append(FullChargeScheduleWording.overnightHint(for: current) ?? "")
             texts.append(TemporaryFullChargeWording.buttonHelp(for: current))
         }
@@ -372,7 +374,7 @@ struct FullChargeWordingClaimsTests {
             clock.advance(by: 60)
             let status = await controller.startFullCharge()
             let override = try #require(status.activeOverride)
-            texts.append(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, now: now))
+            texts.append(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now))
         }
         for text in texts {
             let lowered = text.lowercased()
