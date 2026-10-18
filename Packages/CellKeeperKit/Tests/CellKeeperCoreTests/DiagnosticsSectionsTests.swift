@@ -66,21 +66,12 @@ struct DiagnosticsSectionsTests {
 
     @Test("In every fixture, each plain value is the report's value without its identifiers, with the caller's moments")
     func plainIsReportWithoutIdentifiers() async throws {
-        let (armed, started) = try await DiagnosticsFixture.overrideAndSchedule()
-        let (waiting, passed) = try await DiagnosticsFixture.scheduleWaitingThenPassed()
-        let statuses = [
-            await DiagnosticsFixture.simulated(), await DiagnosticsFixture.nativeLimit(),
-            await DiagnosticsFixture.nativeLimitKeptOutsideChange(), await DiagnosticsFixture.noTelemetry(),
-            await DiagnosticsFixture.noBattery(), await DiagnosticsFixture.deferringToMacOS(), armed, started,
-            await DiagnosticsFixture.faulted(), await DiagnosticsFixture.readOnlyConfirming(),
-            await DiagnosticsFixture.discharging(), await DiagnosticsFixture.nativeLimitUnreadable(),
-            await DiagnosticsFixture.nativeLimitPendingSwitch(), await DiagnosticsFixture.macOSLimitUnreadable(), waiting, passed,
-        ]
+        let fixtures = try await DiagnosticsFixture.all()
         let modes = ["normal", "inhibitCharging", "forceDischarge"] + NativeChargeLimitBackend.supportedLimits.map { "nativeLimit(\($0)%)" }
         let vocabulary = modes + PolicyState.allCases.map(\.rawValue) + PowerSource.allCases.map(\.rawValue) + ChargingStatus.allCases.map(\.rawValue)
         var withIdentifiers = 0
         var withMoments = 0
-        for status in statuses {
+        for (name, status) in fixtures {
             let identifiers = vocabulary + [status.backend.identifier]
             for section in DiagnosticsReport.sections(status: status, environment: environment) {
                 for row in section.rows {
@@ -96,14 +87,15 @@ struct DiagnosticsSectionsTests {
                         let date = try Date.ISO8601FormatStyle().parse(String(words[moment.range]))
                         words.replaceSubrange(moment.range, with: Self.offset(date))
                     }
-                    #expect(row.value.plainText(formattingTime: Self.offset) == words, "\(section.title ?? "top"): \(row.label)")
+                    #expect(row.value.plainText(formattingTime: Self.offset) == words, "\(name), \(section.title ?? "top"): \(row.label)")
                 }
             }
         }
-        // Not vacuous: every status names its backend with an identifier and
-        // has a moment (at least the last evaluation).
-        #expect(withIdentifiers >= statuses.count)
-        #expect(withMoments >= statuses.count)
+        // Not vacuous: every status names its backend with an identifier,
+        // and every evaluated one has a moment (at least the last
+        // evaluation).
+        #expect(withIdentifiers >= fixtures.count)
+        #expect(withMoments >= fixtures.filter { $0.status.lastEvaluation != nil }.count)
     }
 
     @Test("Plain text does not name the macOS account either")
