@@ -264,20 +264,29 @@ and unplugging are processed before telemetry validation, so they take effect
 even when the charge reading is unusable.
 
 - **Temporary full charge** — ends at 100% or when macOS reports fully
-  charged. A manual start ("Charge to 100% once", or Start CellKeeper Full
-  Charge) while an override is live (its monotonic deadline not passed), a
-  full charge or a discharge, started by the user or a schedule, changes
-  nothing: the override keeps its identity, source and deadline, and the
-  activity log says the start was ignored. Starts queued behind one
-  another (a double-click, several Shortcuts actions) therefore give one
-  full charge, with the first one's deadline. One whose deadline has
-  passed is replaced. A schedule's start keeps its own rule (below, D82;
-  D91).
+  charged.
 - **Discharge to limit** — a confirmed, one-shot session (never a persistent
   setting). Ends at the limit, and is interrupted before sleep, on temperature
   pause, on lost or stale telemetry, while macOS's own Charge Limit is on or
   unreadable, when the backend cannot discharge, or if its confirmed target
   is outside 20–95%. After it ends it never restarts by itself.
+
+**Starting one while another runs.** A manual start of either ("Charge to
+100% once" or Start CellKeeper Full Charge; Settings' Discharge Now…,
+confirmed) while an override is live (its monotonic deadline not passed),
+a full charge or a discharge, started by the user or a schedule, changes
+nothing: the override keeps its identity, source and deadline, and the
+activity log says the start was ignored ("Temporary full charge not
+started: …", "Discharge not started: …"). Starts queued behind one
+another (a double-click, or several Shortcuts actions for a full charge)
+therefore give one full charge or one discharge, with the first one's
+deadline, and a discharge confirmed after a full charge started meanwhile
+(Settings checks for a running override only when it offers the
+confirmation) leaves that full charge running. One whose deadline has
+passed is replaced. Each start's own requirements are checked first, with
+their own message: Manage charging on, and for a discharge a limit of
+20–95%. A schedule's start keeps its own rule (below, D82): it extends or
+keeps a running full charge and replaces a discharge (D91, D108).
 
 ### Scheduled full charge
 
@@ -2781,3 +2790,4 @@ The helper daemon logs under its own subsystem,
 | D97 | "Charge to 100% once" (the menu and Start CellKeeper Full Charge) needs a reading that shows a battery present and external power (`FullChargeStart`); the menu used to check only the power source (lead's decision, 2026-10-19) | A deliberate tightening: with no battery there is nothing to charge, and the action and the button must agree |
 | D98 | Get CellKeeper Status reports the latest status with the time of the latest check and starts no evaluation of its own; its value is a transient entity (charge, macOS's charging status, state, backend, simulated, limit, Manage charging, checked at). The only App Shortcut (Siri, Spotlight) is for this action, and its phrase sends no control command itself (lead's decision) | A read must not cause backend requests; a phrase works without setup, and a misheard one should not change charging |
 | D99 | Settings › Diagnostics, a tab between Activity and About, shows the diagnostics report's sections from the latest status, updated with each new status; it starts no evaluation and makes no controller call. The tab and the report are built from one section model in Core (`DiagnosticsReport.sections`, whose values keep plain words, identifiers and moments apart), and the report's text is rendered from it, byte for byte the same as before (golden tests on sixteen statuses). The tab shows plain words only, with moments in local time; identifiers (D89) and the activity log appear only in the copied or saved report. It replaces the account name in paths as the report does and shows nothing the report does not contain. Copy Diagnostics and Save Diagnostics… move from Settings › Activity to this tab, with D76's behaviour unchanged; Activity keeps its log and Refresh now (owner-approved feature; the design is the lead's, 2026-10-19) | Milestone 3's diagnostics view. One model keeps what the view shows and what a bug report says from drifting apart. Identifiers tie a bug report to the code but read as defects to users (D89); ISO 8601 suits a report, local time suits a reader. The report's actions belong next to what it says |
+| D108 | Discharge starts follow D91: `ChargeController.startDischargeToLimit` while an override is live (a full charge or a discharge, from the user or a schedule) changes nothing and logs that ("Discharge not started: a temporary full charge is running." or "…: a discharge to the limit is already running."); the override keeps its identity, source, deadline and the ending counters. One whose deadline has passed is replaced. Manage charging and the limit's range are checked first, with their message unchanged. As for an ignored full charge, the app shows nothing more: the menu keeps showing the override that runs. Schedule starts keep D82, so a scheduled full charge still replaces a discharge (lead's decision, 2026-10-19) | Discharge starts queued behind one another (a double-click) reset the deadline, and a discharge confirmed in Settings after a full charge started meanwhile, for example a schedule's while the confirmation was open, silently replaced it: Settings checks for a running override only when it asks for confirmation. A schedule's start differs on purpose: it is unattended at a time the user chose (D82), and `forceDischarge → normal` relaxes, while a discharge replacing a full charge would undo a relaxation the user or a schedule asked for |

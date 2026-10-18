@@ -358,6 +358,17 @@ public actor ChargeController {
     /// at the limit, on unplug, before sleep, on temperature pause, on lost
     /// telemetry, or when `duration` elapses. Requires management to be on
     /// and a limit within ``ChargingPolicy/dischargeTargetRange``.
+    ///
+    /// Admission follows ``startFullCharge(duration:)``: while an override
+    /// is live (its monotonic deadline not passed), a full charge or a
+    /// discharge, started by the user or a schedule, this changes nothing
+    /// and logs that: the override keeps its deadline. Several starts queued
+    /// behind one another therefore give one discharge, with the first one's
+    /// deadline, and a start confirmed after a full charge began meanwhile
+    /// leaves that full charge running. An override whose deadline has
+    /// passed is replaced, as the next evaluation would have ended it. A
+    /// schedule that starts its full charge while a discharge is live
+    /// replaces the discharge by its own rule (``setFullChargeSchedule(_:)``).
     @discardableResult
     public func startDischargeToLimit(duration: TimeInterval = ChargeOverride.defaultDischargeDuration) async -> ControllerStatus {
         await exclusively {
@@ -365,7 +376,13 @@ public actor ChargeController {
                 record(.override, "Discharge not started: requires charge management on and a limit of \(ChargingPolicy.dischargeTargetRange.lowerBound)–\(ChargingPolicy.dischargeTargetRange.upperBound)%.", level: .default)
                 return
             }
-            let override = ChargeOverride.dischargeToLimit(target: settings.chargeLimit, at: now(), uptime: uptime(), duration: duration)
+            let startUptime = uptime()
+            if let running = activeOverride, running.isLive(atUptime: startUptime) {
+                let what = running.kind == .fullCharge ? "a temporary full charge is running" : "a discharge to the limit is already running"
+                record(.override, "Discharge not started: \(what).")
+                return
+            }
+            let override = ChargeOverride.dischargeToLimit(target: settings.chargeLimit, at: now(), uptime: startUptime, duration: duration)
             activeOverride = override
             record(.override, "Discharge to \(settings.chargeLimit)% requested (expires \(override.expiresAt.formatted(date: .omitted, time: .shortened))).")
             await performEvaluation(.overrideChanged)
