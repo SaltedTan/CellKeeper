@@ -26,6 +26,29 @@ struct DiagnosticsReportTests {
         #expect(!lines.contains("== macOS Charge Limit"))
     }
 
+    @Test("The report shows an armed schedule, why a due one waits, a scheduled full charge, and the schedule's outcome")
+    func scheduledFullCharge() async throws {
+        let clock = clock
+        let telemetry = StubTelemetry(snapshot(percent: 70, source: .battery), clock: clock)
+        let controller = ChargeController(telemetry: telemetry, backend: MockChargingBackend(), settings: .default, scheduleStore: FullChargeScheduleStore(defaults: InMemoryStorage()), now: { clock.now }, uptime: { clock.uptime })
+        let start = clock.now.addingTimeInterval(3600)
+        let schedule = FullChargeSchedule(startsAt: start, endsAt: start.addingTimeInterval(7200))
+        let armed = try await controller.setFullChargeSchedule(schedule)
+        let window = "\(start.formatted(.iso8601)) to \(schedule.endsAt.formatted(.iso8601))"
+        #expect(DiagnosticsReport.text(status: armed, environment: environment, generatedAt: referenceDate).contains("Scheduled full charge: \(window)\n"))
+
+        clock.advance(by: 3600)
+        let waiting = await controller.evaluate(.periodic)
+        #expect(DiagnosticsReport.text(status: waiting, environment: environment, generatedAt: referenceDate).contains("Scheduled full charge: \(window); due, waiting: the Mac is on battery"))
+
+        await telemetry.set(snapshot(percent: 70))
+        let started = await controller.evaluate(.powerSourceChanged)
+        let report = DiagnosticsReport.text(status: started, environment: environment, generatedAt: referenceDate)
+        #expect(report.contains("Override: Scheduled full charge, started"))
+        #expect(report.contains("Schedule outcome: started (window \(window))"))
+        #expect(!report.contains("Scheduled full charge: "))
+    }
+
     @Test("The report shows the backend, settings, battery, decision and activity")
     func content() async {
         let telemetry = StubTelemetry(snapshot(percent: 78, charging: true), clock: clock)

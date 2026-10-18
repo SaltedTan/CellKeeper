@@ -40,6 +40,16 @@ public enum FullChargeScheduleWording {
         }
     }
 
+    /// Why a schedule last waited, once its window has passed.
+    static func lastCheckedText(_ wait: FullChargeScheduleWait) -> String {
+        switch wait {
+        case .settingsInvalid: "the settings were not valid"
+        case .managementOff: "Manage charging was off"
+        case .noUsableReading: "there was no usable battery reading"
+        case .onBattery: "the Mac was on battery"
+        }
+    }
+
     /// The menu's line for what became of the latest schedule, or nil where
     /// the running full charge's own line says it.
     public static func outcomeLine(_ outcome: FullChargeScheduleOutcome, timeZone: TimeZone = .current, locale: Locale = .current) -> String? {
@@ -51,7 +61,7 @@ public enum FullChargeScheduleWording {
         case .keptRunning(_, let deadline):
             return "A temporary full charge was already running, until \(format(deadline, timeZone: timeZone, locale: locale)), so the scheduled one changed nothing."
         case .windowPassed(_, let lastWait):
-            let lastChecked = lastWait.map { " Last checked: \(waitText($0))." } ?? ""
+            let lastChecked = lastWait.map { " Last checked: \(lastCheckedText($0))." } ?? ""
             return "The scheduled window passed before the full charge could start.\(lastChecked)"
         case .discarded(let reason):
             return "A saved full-charge schedule was removed: \(reason)."

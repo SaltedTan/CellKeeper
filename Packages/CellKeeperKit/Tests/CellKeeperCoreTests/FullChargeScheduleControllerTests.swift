@@ -201,6 +201,25 @@ struct FullChargeScheduleControllerTests {
         #expect(passed.events.contains { $0.message.contains("Last checked: the Mac is on battery.") })
     }
 
+    @Test("A clock set back before the start stops showing the wait, but the reason seen in this run is still given when the window passes")
+    func waitAcrossBackwardJump() async throws {
+        let (controller, telemetry) = makeController()
+        let armed = schedule()
+        try await controller.setFullChargeSchedule(armed)
+        await telemetry.set(snapshot(percent: 70, source: .battery))
+        clock.advance(by: hour)
+        #expect(await controller.evaluate(.periodic).fullChargeScheduleWait == .onBattery)
+
+        clock.shiftWall(by: -2 * hour)
+        let rewound = await controller.evaluate(.clockChanged)
+        #expect(rewound.fullChargeScheduleWait == nil)
+        #expect(rewound.fullChargeSchedule == armed)
+
+        clock.shiftWall(by: 20 * hour)
+        let passed = await controller.evaluate(.clockChanged)
+        #expect(passed.fullChargeScheduleOutcome == .windowPassed(armed, lastWait: .onBattery))
+    }
+
     @Test("After a relaunch, a window that passed is reported without a wait reason from the earlier run")
     func relaunchAfterWaiting() async throws {
         let (controller, telemetry) = makeController()

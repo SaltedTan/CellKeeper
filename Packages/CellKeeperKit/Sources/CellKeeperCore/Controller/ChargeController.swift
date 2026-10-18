@@ -95,8 +95,12 @@ public actor ChargeController {
     private var hasLoadedSchedule = false
     /// The armed scheduled full charge.
     private var schedule: FullChargeSchedule?
-    /// Why the armed schedule last waited in this run; never persisted.
+    /// Why the armed schedule, now due, cannot start yet; nil while it is
+    /// not due.
     private var scheduleWait: FullChargeScheduleWait?
+    /// Why the armed schedule last waited in this run, for the outcome if
+    /// its window passes; never persisted.
+    private var lastScheduleWait: FullChargeScheduleWait?
     private var scheduleOutcome: FullChargeScheduleOutcome?
     private var memory = PolicyMemory()
     private var snapshot: BatterySnapshot?
@@ -374,6 +378,7 @@ public actor ChargeController {
             let replaced = schedule != nil
             schedule = newSchedule
             scheduleWait = nil
+            lastScheduleWait = nil
             scheduleOutcome = nil
             record(.override, "Scheduled full charge \(replaced ? "changed" : "set"): \(Self.describeWindow(newSchedule)).")
             await performEvaluation(.scheduleChanged)
@@ -390,6 +395,7 @@ public actor ChargeController {
             scheduleStore?.removeSchedule()
             schedule = nil
             scheduleWait = nil
+            lastScheduleWait = nil
             record(.override, "Scheduled full charge cancelled: \(Self.describeWindow(cancelled)).")
             await performEvaluation(.scheduleChanged)
         }
@@ -439,14 +445,16 @@ public actor ChargeController {
                 record(.override, "Scheduled full charge is due but cannot start yet: \(wait).")
             }
             scheduleWait = wait
+            lastScheduleWait = wait
             return false
         case .passed:
             scheduleStore?.removeSchedule()
             schedule = nil
-            scheduleOutcome = .windowPassed(armed, lastWait: scheduleWait)
-            let lastChecked = scheduleWait.map { " Last checked: \($0)." } ?? ""
+            scheduleOutcome = .windowPassed(armed, lastWait: lastScheduleWait)
+            let lastChecked = lastScheduleWait.map { " Last checked: \($0)." } ?? ""
             record(.override, "Scheduled full charge (\(Self.describeWindow(armed))): the scheduled window passed before the full charge could start.\(lastChecked)")
             scheduleWait = nil
+            lastScheduleWait = nil
             return false
         case .start(let remaining):
             guard let candidate = ChargeOverride.scheduledFullCharge(at: input.now, uptime: input.uptime, remaining: remaining) else {
@@ -455,6 +463,7 @@ public actor ChargeController {
             scheduleStore?.removeSchedule()
             schedule = nil
             scheduleWait = nil
+            lastScheduleWait = nil
             let window = Self.describeWindow(armed)
             if var running = activeOverride, running.kind == .fullCharge, running.isLive(atUptime: input.uptime) {
                 // Deadlines compare on the monotonic clock only: a wall-clock
