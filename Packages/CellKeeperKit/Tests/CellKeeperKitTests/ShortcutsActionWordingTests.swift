@@ -126,8 +126,10 @@ struct ShortcutsActionWordingTests {
     func stopQueued() async {
         let generic = "CellKeeper will end any temporary full charge or discharge in progress."
         #expect(ShortcutsActionWording.stopQueued(in: nil) == "\(generic) \(now)")
-        #expect(ShortcutsActionWording.stopQueued(in: context(await evaluatedActionStatus())) == "\(generic) \(simulatedNote) \(now)")
-        #expect(ShortcutsActionWording.stopQueued(in: context(await evaluatedActionStatus(ReadOnlyChargingBackend()))) == "\(generic) \(readOnlyNote)")
+        let simulated = await evaluatedActionStatus()
+        let readOnly = await evaluatedActionStatus(ReadOnlyChargingBackend())
+        #expect(ShortcutsActionWording.stopQueued(in: context(simulated)) == "\(generic) \(simulatedNote) \(now)")
+        #expect(ShortcutsActionWording.stopQueued(in: context(readOnly)) == "\(generic) \(readOnlyNote)")
     }
 
     @Test("Manage charging: saved or already so, with the qualifiers of the context")
