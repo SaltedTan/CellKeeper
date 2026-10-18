@@ -3,8 +3,10 @@ import Foundation
 /// The latest occurrence of a weekly full charge that CellKeeper handled:
 /// it started, its window passed, or it began before the schedule was
 /// saved. An occurrence can start only if its nominal day is after this
-/// one's, so a handled occurrence is not started again, whatever the clock
-/// or the time zone does afterwards.
+/// one's, so while this record is in force a handled occurrence is not
+/// started again, whatever the clock or the time zone does. The controller
+/// keeps it in memory for the run; a relaunch reads it from the store,
+/// which may not have it (``WeeklyFullChargeStore``).
 public struct WeeklyFullChargeRecord: Sendable, Equatable {
     public enum Result: String, Sendable, Equatable, CaseIterable {
         /// It started a full charge (or extended or kept a running one).

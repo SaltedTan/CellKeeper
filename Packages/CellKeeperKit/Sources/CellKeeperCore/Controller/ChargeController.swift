@@ -70,10 +70,11 @@ import os
 ///   charge. Its guarantees assume one controlling instance.
 /// - A weekly full charge (``WeeklyFullChargeSchedule``) starts the same
 ///   full charge by the same rules, after the one-shot schedule in the same
-///   evaluation. Its record of the occurrence handled is written and read
-///   back before the override is installed, or before a passed occurrence
-///   is reported; if that fails, nothing changes and the next evaluation
-///   tries again.
+///   evaluation. Its record of the occurrence handled is moved in memory
+///   first, where the rest of the run reads it, so no occurrence starts or
+///   passes twice in a run; the store is then brought in line and read
+///   back, and a write that fails delays nothing and is retried at every
+///   evaluation.
 public actor ChargeController {
     public static let maximumConsecutiveFailures = 3
     /// A failure-free period of this length resets the failure count.
