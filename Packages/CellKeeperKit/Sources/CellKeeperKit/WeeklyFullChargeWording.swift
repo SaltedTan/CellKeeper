@@ -120,8 +120,13 @@ public enum WeeklyFullChargeWording {
     /// Said with the weekly full charge in Settings.
     public static let explanation = "Each start requests the same temporary full charge as a scheduled full charge, above, for the time left until the end of its window. Times follow your Mac's time zone wherever it is; the duration is elapsed time, so a daylight-saving change during it moves the clock time it ends at. Your Mac must be awake, with CellKeeper running, for it to start; CellKeeper cannot wake your Mac or open itself after a restart. If a start passes while it cannot start, it starts at CellKeeper's next check before its end; otherwise the menu says it passed, and it is not made up later. Unplugging ends it."
 
-    /// What CellKeeper records, said with the weekly full charge.
-    public static let record = "CellKeeper records each weekly full charge that starts or passes, so it does not start that one again, even if the clock or the time zone changes. Removing the schedule clears that record."
+    /// What CellKeeper records, said with the weekly full charge: the saved
+    /// record, which Remove deletes, and the days it remembers as handled
+    /// until it quits, which Remove does not forget.
+    public static let record = "CellKeeper records each weekly full charge that starts or passes, so it does not start that one again, even if the clock or the time zone changes. Removing the schedule deletes its saved record, but until CellKeeper quits it still remembers the days it handled, and a weekly full charge saved again does not start on those days."
+
+    /// The help of the Remove button.
+    public static let removeHelp = "Stops the weekly full charge and deletes it and its saved record. Until CellKeeper quits, it still does not start a weekly full charge on a day it already handled. A full charge it already started is not affected."
 
     /// The help of the Save button: when the record can be lost.
     public static let saveHelp = "Saves the weekly full charge. It counts from now: one whose start has already passed does not start. If CellKeeper quits unexpectedly or your Mac loses power just after one starts, its record may not have been saved, and it can start once more when CellKeeper opens again, while its window is open."

@@ -2548,8 +2548,11 @@ tested.
     each start requests the same full charge as a scheduled one, that
     times follow the Mac's time zone and the duration is elapsed time, the
     start conditions, and that CellKeeper records each one that starts or
-    passes so it does not start that one again, which removing clears.
-    Save's help says when that record can be lost
+    passes so it does not start that one again. Removing deletes the saved
+    schedule and its record; until CellKeeper quits it still remembers the
+    days it handled, so one saved again does not start on them, and both
+    the text and Remove's help say so. Save's help says when the record can
+    be lost
     (`WeeklyFullChargeWording`, Kit). Nothing says a full charge cannot
     start twice.
   - **The menu** always shows the next start while a weekly schedule is in

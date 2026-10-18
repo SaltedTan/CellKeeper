@@ -313,7 +313,7 @@ private struct WeeklyFullChargeSection: View {
             .disabled(!model.settings.isManagementEnabled)
             if weekly != nil {
                 Button("Remove Weekly Full Charge") { model.removeWeeklyFullCharge() }
-                    .help("Stops the weekly full charge and clears its record. A full charge it already started is not affected.")
+                    .help(WeeklyFullChargeWording.removeHelp)
             }
             if let outcome = status?.weeklyFullChargeOutcome, let line = WeeklyFullChargeWording.outcomeLine(outcome, now: now) {
                 Label(line, systemImage: "calendar")

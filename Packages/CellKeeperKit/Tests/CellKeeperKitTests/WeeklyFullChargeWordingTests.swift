@@ -103,7 +103,7 @@ struct WeeklyFullChargeWordingTests {
 
     @Test("Nothing promises a ready time, a charge, or that a full charge never starts twice; the ways the record can be lost are said")
     func noOverclaims() {
-        var texts = [WeeklyFullChargeWording.explanation, WeeklyFullChargeWording.record, WeeklyFullChargeWording.saveHelp]
+        var texts = [WeeklyFullChargeWording.explanation, WeeklyFullChargeWording.record, WeeklyFullChargeWording.saveHelp, WeeklyFullChargeWording.removeHelp]
         texts += [WeeklyFullChargeStoreProblem.notSaved, .notRemoved].map(WeeklyFullChargeWording.storeProblemLine)
         let outcomes: [WeeklyFullChargeOutcome] = [.alreadyFull(friday23), .keptRunning(friday23, deadline: .later), .keptRunning(friday23, deadline: .same), .windowPassed(friday23, lastWait: .onBattery), .discarded(reason: "x")]
         texts += outcomes.compactMap { WeeklyFullChargeWording.outcomeLine($0, timeZone: london, locale: posix, calendar: posixGregorian, now: now) }
@@ -115,7 +115,12 @@ struct WeeklyFullChargeWordingTests {
         }
         #expect(WeeklyFullChargeWording.saveHelp.contains("can start once more"))
         #expect(WeeklyFullChargeWording.storeProblemLine(.notSaved).contains("once more"))
-        #expect(WeeklyFullChargeWording.record.contains("Removing the schedule clears that record."))
+        // Remove deletes the saved record, not the days handled in this run.
+        #expect(WeeklyFullChargeWording.record.contains("Removing the schedule deletes its saved record, but until CellKeeper quits it still remembers the days it handled"))
+        #expect(WeeklyFullChargeWording.removeHelp.contains("Until CellKeeper quits, it still does not start a weekly full charge on a day it already handled."))
+        for text in [WeeklyFullChargeWording.record, WeeklyFullChargeWording.removeHelp] {
+            #expect(!text.contains("clears"), "\(text)")
+        }
     }
 }
 
