@@ -87,12 +87,15 @@ struct HelperEngineStartTests {
 
     @Test("The shared uptime clock is the system's: it counts from boot, including sleep, in every process")
     func continuousUptime() {
+        // Uptime without sleep can only be smaller, and it is read first, so
+        // time that passes between the readings only adds to the margin.
+        // The millisecond allows for the two clocks' rounding. A clock that
+        // started with this process would be far below it.
+        let awake = ProcessInfo.processInfo.systemUptime
         let first = HelperEngine.continuousUptime()
         let second = HelperEngine.continuousUptime()
         #expect(second >= first)
-        // Uptime without sleep can only be smaller. A clock that started
-        // with this process would be far below it.
-        #expect(first >= ProcessInfo.processInfo.systemUptime - 1)
+        #expect(first >= awake - 0.001)
     }
 
     @Test("Starting twice changes nothing")

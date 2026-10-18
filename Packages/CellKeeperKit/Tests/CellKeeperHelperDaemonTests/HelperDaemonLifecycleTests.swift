@@ -14,7 +14,7 @@ struct HelperDaemonStartTests {
             atStart.record(writes: control.writes, active: control.activeControls, sleepRegistered: h.sleep.isStarted)
         }
 
-        let running = await h.run()
+        let running = try await h.run()
         #expect(h.frontend.calls == [.start])
         let observed = try #require(atStart.value)
         #expect(observed.writes == [.restoreDefaults])
@@ -30,10 +30,10 @@ struct HelperDaemonStartTests {
     }
 
     @Test("The engine is ticked every 5 seconds")
-    func ticks() async {
+    func ticks() async throws {
         let control = SimulatedChargeControl()
         let h = DaemonHarness(control: control)
-        let running = await h.run()
+        let running = try await h.run()
         let reads = control.readBackCount
 
         h.clock.advance(by: HelperDaemon.tickInterval - 0.5)
@@ -54,9 +54,9 @@ struct HelperDaemonStartTests {
     }
 
     @Test("The engine's events reach the frontend, so it can close a revoked session's connection")
-    func eventsReachFrontend() async {
+    func eventsReachFrontend() async throws {
         let h = DaemonHarness()
-        let running = await h.run()
+        let running = try await h.run()
         let session = await h.introducedSession()
         let forwarded = await eventually { h.frontend.handledEvents.contains(.sessionOpened(session.id)) }
         #expect(forwarded)
@@ -65,9 +65,9 @@ struct HelperDaemonStartTests {
     }
 
     @Test("Start logs what the daemon is and that the engine confirmed defaults")
-    func startLog() async {
+    func startLog() async throws {
         let h = DaemonHarness()
-        let running = await h.run()
+        let running = try await h.run()
         let logged = await eventually {
             h.log.contains(.notice, .lifecycle, "CellKeeperHelper build 7 starting")
                 && h.log.contains(.notice, .lifecycle, "Engine started; defaults confirmed.")
@@ -78,12 +78,12 @@ struct HelperDaemonStartTests {
     }
 
     @Test("If sleep notifications cannot be registered, the daemon restores, serves nobody and exits")
-    func sleepRegistrationFails() async {
+    func sleepRegistrationFails() async throws {
         let control = SimulatedChargeControl()
         let h = DaemonHarness(control: control)
         h.sleep.failToStart()
 
-        let status = await h.run().value
+        let status = try await h.run().value
         #expect(status == 0)
         #expect(h.exits.statuses == [0])
         #expect(!h.frontend.calls.contains(.start))
@@ -92,12 +92,12 @@ struct HelperDaemonStartTests {
     }
 
     @Test("If the frontend refuses to start, the daemon restores and exits")
-    func frontendFails() async {
+    func frontendFails() async throws {
         struct NoRequirement: Error {}
         let h = DaemonHarness()
         h.frontend.onStart { _ in throw NoRequirement() }
 
-        let status = await h.run().value
+        let status = try await h.run().value
         #expect(status == 0)
         #expect(h.frontend.calls == [.start, .stop])
         #expect(await h.daemon.engine.isSafeToExit)
@@ -108,10 +108,10 @@ struct HelperDaemonStartTests {
 @Suite("Helper daemon: SIGTERM")
 struct HelperDaemonTerminationTests {
     @Test("SIGTERM stops the frontend, restores defaults and exits with 0 (R4)")
-    func exitsWhenSafe() async {
+    func exitsWhenSafe() async throws {
         let control = SimulatedChargeControl()
         let h = DaemonHarness(control: control)
-        let running = await h.run()
+        let running = try await h.run()
         let session = await h.introducedSession()
         #expect(await h.activate(.chargingInhibited, on: session) == .ok)
         #expect(control.activeControls == [.chargingInhibited])
@@ -146,10 +146,10 @@ struct HelperDaemonTerminationTests {
     }
 
     @Test("An owed restore is retried about once a second; it stops in time to exit non-zero by the deadline", arguments: ShutdownPath.allCases)
-    func exitsAtDeadline(path: ShutdownPath) async {
+    func exitsAtDeadline(path: ShutdownPath) async throws {
         let control = SimulatedChargeControl()
         let h = DaemonHarness(control: control)
-        let running = await h.run()
+        let running = try await h.run()
         let session = await h.introducedSession()
         #expect(await h.activate(.adapterDisabled, on: session) == .ok)
         control.failNextRestores(1_000)
@@ -178,10 +178,10 @@ struct HelperDaemonTerminationTests {
     }
 
     @Test("A restore that succeeds on a retry exits with 0", arguments: ShutdownPath.allCases)
-    func recoversBeforeDeadline(path: ShutdownPath) async {
+    func recoversBeforeDeadline(path: ShutdownPath) async throws {
         let control = SimulatedChargeControl()
         let h = DaemonHarness(control: control)
-        let running = await h.run()
+        let running = try await h.run()
         let session = await h.introducedSession()
         #expect(await h.activate(.chargingInhibited, on: session) == .ok)
         control.failNextRestores(2)
@@ -203,10 +203,10 @@ struct HelperDaemonTerminationTests {
     }
 
     @Test("A second SIGTERM during shutdown is ignored", arguments: ShutdownPath.allCases)
-    func secondSignal(path: ShutdownPath) async {
+    func secondSignal(path: ShutdownPath) async throws {
         let control = SimulatedChargeControl()
         let h = DaemonHarness(control: control)
-        let running = await h.run()
+        let running = try await h.run()
         let session = await h.introducedSession()
         #expect(await h.activate(.chargingInhibited, on: session) == .ok)
         control.failNextRestores(path.firstDaemonAttempt)
@@ -227,10 +227,10 @@ struct HelperDaemonTerminationTests {
 @Suite("Helper daemon: exit at a client's request")
 struct HelperDaemonClientExitTests {
     @Test("After restoreDefaultsAndExit the daemon stops the frontend and exits with 0")
-    func restoreAndExit() async {
+    func restoreAndExit() async throws {
         let control = SimulatedChargeControl()
         let h = DaemonHarness(control: control)
-        let running = await h.run()
+        let running = try await h.run()
         let session = await h.introducedSession()
         #expect(await h.activate(.chargingInhibited, on: session) == .ok)
 
@@ -243,10 +243,10 @@ struct HelperDaemonClientExitTests {
     }
 
     @Test("If that restore fails, shutdown retries it and exits with 0 once defaults are confirmed")
-    func restoreAndExitAfterRetry() async {
+    func restoreAndExitAfterRetry() async throws {
         let control = SimulatedChargeControl()
         let h = DaemonHarness(control: control)
-        let running = await h.run()
+        let running = try await h.run()
         let session = await h.introducedSession()
         #expect(await h.activate(.chargingInhibited, on: session) == .ok)
         control.failNextRestores(1)
@@ -260,11 +260,11 @@ struct HelperDaemonClientExitTests {
 @Suite("Helper daemon: the frontend's confirmation decides")
 struct HelperDaemonFrontendStopTests {
     @Test("A frontend that has not confirmed its stop never lets the daemon exit with 0", arguments: ShutdownPath.allCases)
-    func unconfirmedStop(path: ShutdownPath) async {
+    func unconfirmedStop(path: ShutdownPath) async throws {
         let control = SimulatedChargeControl()
         let h = DaemonHarness(control: control)
         h.frontend.holdStop()
-        let running = await h.run()
+        let running = try await h.run()
         let session = await h.introducedSession()
         #expect(await h.activate(.chargingInhibited, on: session) == .ok)
 
@@ -287,10 +287,10 @@ struct HelperDaemonFrontendStopTests {
     }
 
     @Test("A frontend that confirms its stop late lets the daemon exit with 0 then")
-    func lateConfirmation() async {
+    func lateConfirmation() async throws {
         let h = DaemonHarness()
         h.frontend.holdStop()
-        let running = await h.run()
+        let running = try await h.run()
         let session = await h.introducedSession()
         #expect(await h.activate(.chargingInhibited, on: session) == .ok)
 
@@ -301,13 +301,17 @@ struct HelperDaemonFrontendStopTests {
         let polling = await eventually { h.clock.waits.count == 3 && h.clock.waits.contains(HelperDaemon.exitPollInterval - 0.001...HelperDaemon.exitPollInterval) }
         #expect(polling)
         h.frontend.confirmStop()
+        // The stop's task records the confirmation before it logs it. Until
+        // the next retry, the daemon keeps waiting.
+        let recorded = await eventually { h.log.contains(.info, .xpc, "The frontend stopped and confirmed") }
+        #expect(recorded)
         #expect(h.exits.statuses.isEmpty)
-        // The next retry sees the confirmation (or the one after, if the
-        // stop's task has not recorded it yet), well before the deadline.
-        for _ in 0..<3 where h.exits.statuses.isEmpty {
-            h.clock.advance(by: HelperDaemon.exitPollInterval)
-            let next = await eventually { !h.exits.statuses.isEmpty || h.clock.waits.count == 3 }
-            #expect(next)
+        // The next retry sees it, well before the deadline.
+        h.clock.advance(by: HelperDaemon.exitPollInterval)
+        let exited = await eventually { !h.exits.statuses.isEmpty }
+        #expect(exited)
+        if !exited {
+            await h.runClockUntilExit()
         }
         #expect(await running.value == 0)
     }
@@ -318,10 +322,11 @@ struct HelperDaemonFrontendStopTests {
         let starting = DispatchSemaphore(value: 0)
         let entered = Flag()
         // The start runs on the daemon's seam queue, never on the
-        // cooperative pool, so it may block there.
+        // cooperative pool, so it may block there, until the test lets it
+        // return, however long that takes.
         h.frontend.onStart { _ in
             entered.set(true)
-            _ = starting.wait(timeout: .now() + 10)
+            starting.wait()
         }
         h.frontend.holdStopUntilDeadline(thenReturn: false)
         let daemon = h.daemon
@@ -351,10 +356,10 @@ struct HelperDaemonFrontendStopTests {
     }
 
     @Test("A frontend that confirms its stop only after its deadline is not counted: the daemon exits with 75")
-    func confirmationAfterDeadline() async {
+    func confirmationAfterDeadline() async throws {
         let h = DaemonHarness()
         h.frontend.holdStopUntilDeadline(thenReturn: true)
-        let running = await h.run()
+        let running = try await h.run()
         h.signals.sendSIGTERM()
         let retrying = HelperDaemon.terminationDeadline - HelperDaemon.finalisationReserve
         let waiting = await eventually { h.clock.waits.filter { (retrying - 0.001...retrying).contains($0) }.count == 2 }
@@ -367,10 +372,10 @@ struct HelperDaemonFrontendStopTests {
     }
 
     @Test("A frontend that reports it could not stop cleanly makes the daemon exit non-zero")
-    func refusedStop() async {
+    func refusedStop() async throws {
         let h = DaemonHarness()
         h.frontend.refuseStop()
-        let running = await h.run()
+        let running = try await h.run()
         #expect(await h.terminate(running) == HelperDaemon.restoreNotConfirmedExitStatus)
         #expect(await h.daemon.engine.isSafeToExit)
         #expect(h.log.contains(.fault, .xpc, "The frontend could not confirm that it stopped serving"))

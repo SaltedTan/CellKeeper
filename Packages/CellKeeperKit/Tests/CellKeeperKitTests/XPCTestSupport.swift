@@ -188,22 +188,17 @@ final class ConnectionEventLog: @unchecked Sendable {
 }
 
 /// A charge control whose read-back can be made to hang until the test lets
-/// it go, to model a helper that does not answer. Tests release it in a
-/// `defer`, and by default the stall ends by itself after 10 s at the
-/// latest, so a failing test cannot hang the run.
+/// it go, to model a helper that does not answer. A stall lasts until
+/// ``release()``, however long that takes: it does not end by itself on a
+/// slow run. Tests release it in a `defer` as well, and bound their own
+/// waits meanwhile; a wait for something that must not wait for the stall
+/// goes through ``bounded(within:releasing:_:)``.
 final class StallingChargeControl: HelperChargeControl, @unchecked Sendable {
     let inner = SimulatedChargeControl()
     private let lock = NSLock()
     private var stallsNextReadBack = false
     private var stalled = false
     private let released = DispatchSemaphore(value: 0)
-    private let givesUp: Bool
-
-    /// - Parameter givesUp: false holds a stall until ``release()``, however
-    ///   long that takes; the test then bounds its own waits meanwhile.
-    init(givesUp: Bool = true) {
-        self.givesUp = givesUp
-    }
 
     /// The next read-back blocks until ``release()``.
     func stallNextReadBack() {
@@ -234,11 +229,7 @@ final class StallingChargeControl: HelperChargeControl, @unchecked Sendable {
             return stallsNextReadBack
         }
         if stalls {
-            if givesUp {
-                _ = released.wait(timeout: .now() + 10)
-            } else {
-                released.wait()
-            }
+            released.wait()
             lock.withLock { stalled = false }
         }
         return try inner.readBack()
@@ -502,8 +493,9 @@ final class OrderedProducer: @unchecked Sendable {
     }
 }
 
-/// Waits until `condition` holds, at most `seconds`; returns whether it did.
-@discardableResult
+/// Waits until `condition` holds, at most `seconds`; returns whether it did,
+/// which the caller checks: a wait that ran out must fail the test, not let
+/// it go on as if the condition held.
 func eventually(within seconds: Double = 10, _ condition: () async -> Bool) async -> Bool {
     let deadline = Date().addingTimeInterval(seconds)
     while Date() < deadline {
@@ -511,6 +503,22 @@ func eventually(within seconds: Double = 10, _ condition: () async -> Bool) asyn
         try? await Task.sleep(for: .milliseconds(2))
     }
     return await condition()
+}
+
+/// Returns what `operation` returns, for an operation awaited while the test
+/// holds a call that, if the behaviour under test is right, the operation
+/// does not wait for. If it has not returned `seconds` after this is called,
+/// records an issue and calls `release`, which ends the hold: an operation
+/// that does wait for the held call fails the test in bounded time instead
+/// of hanging it.
+func bounded<Value>(within seconds: Double = 10, releasing release: @escaping @Sendable () -> Void, _ operation: () async -> Value) async -> Value {
+    let watchdog = Task {
+        try await Task.sleep(for: .seconds(seconds))
+        Issue.record("still waiting after \(seconds) s for something that should not wait for the call the test holds; released the call")
+        release()
+    }
+    defer { watchdog.cancel() }
+    return await operation()
 }
 
 /// Every reply of a helper connection, comparable across transports.

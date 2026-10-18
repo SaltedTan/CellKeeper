@@ -31,15 +31,18 @@ struct HelperDaemonXPCTests {
             harness = DaemonHarness(control: control, frontend: frontend)
         }
 
-        /// Runs the daemon until it serves and its first tick is scheduled.
-        func run() async -> Task<Int32, Never> {
+        /// Runs the daemon until it serves and its first tick is scheduled;
+        /// throws, failing the test, if it does not within `eventually`'s
+        /// bound.
+        func run() async throws -> Task<Int32, Never> {
             let daemon = harness.daemon
             let running = Task { await daemon.run() }
             let harness = harness
-            _ = await eventually {
+            let serving = await eventually {
                 harness.log.contains(.notice, .xpc, "Serving CellKeeper over NSXPC")
                     && harness.clock.waits.contains(HelperDaemon.tickInterval - 0.001...HelperDaemon.tickInterval)
             }
+            try #require(serving, "the daemon did not serve")
             return running
         }
 
@@ -56,7 +59,7 @@ struct HelperDaemonXPCTests {
     func monitorOnly() async throws {
         let served = Served(control: UnknownHardwareChargeControl())
         let h = served.harness
-        let running = await served.run()
+        let running = try await served.run()
         let client = try served.client()
 
         let hello = try await client.hello(clientProtocolVersion: HelperProtocolVersion.current)
@@ -78,7 +81,7 @@ struct HelperDaemonXPCTests {
         let control = SimulatedChargeControl()
         let served = Served(control: control)
         let h = served.harness
-        let running = await served.run()
+        let running = try await served.run()
         let client = try served.client()
         #expect(try await client.hello(clientProtocolVersion: HelperProtocolVersion.current).status == .ok)
         #expect(try await client.acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: 900).status == .ok)
@@ -97,7 +100,7 @@ struct HelperDaemonXPCTests {
         let control = BlockingControl()
         let served = Served(control: control)
         let h = served.harness
-        let running = await served.run()
+        let running = try await served.run()
         let client = try served.client()
         let hello = try await client.hello(clientProtocolVersion: HelperProtocolVersion.current)
         #expect(hello.status == .ok)
@@ -107,8 +110,14 @@ struct HelperDaemonXPCTests {
         let held = await eventually { control.isHolding }
         #expect(held)
         h.signals.sendSIGTERM()
-        let stopping = await eventually { h.log.contains(.notice, .lifecycle, "SIGTERM: stopping the frontend") }
+        // The frontend's stop has begun, with the request still in the
+        // engine, once its timer waits for its deadline: the end of the
+        // retries, 7 s into the shutdown on the daemon's clock, which the
+        // daemon waits for too.
+        let retrying = HelperDaemon.terminationDeadline - HelperDaemon.finalisationReserve
+        let stopping = await eventually { h.clock.waits.filter { (retrying - 0.001...retrying).contains($0) }.count == 2 }
         #expect(stopping)
+        #expect(control.isHolding)
 
         control.release()
         // The client gets the reply, not a closed connection.
@@ -126,7 +135,7 @@ struct HelperDaemonXPCTests {
         let control = BlockingControl()
         let served = Served(control: control)
         let h = served.harness
-        let running = await served.run()
+        let running = try await served.run()
         let client = try served.client()
         #expect(try await client.hello(clientProtocolVersion: HelperProtocolVersion.current).status == .ok)
 
@@ -191,8 +200,10 @@ struct HelperDaemonXPCTests {
         #expect(starting)
         clock.advance(by: 6)
         late.open()
-        // No further time passes: the timer finds its deadline gone.
-        #expect(await stopping.value == false)
+        // No further time passes: the timer finds its deadline gone, and the
+        // stop returns without waiting for the request in the engine.
+        let drained = await bounded(releasing: { control.release() }) { await stopping.value }
+        #expect(!drained)
         #expect(control.isHolding)
 
         control.release()

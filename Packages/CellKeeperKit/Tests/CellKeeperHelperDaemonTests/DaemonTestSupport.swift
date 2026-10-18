@@ -1,6 +1,7 @@
 @testable import CellKeeperHelperDaemon
 import CellKeeperHelperCore
 import Foundation
+import Testing
 
 /// A daemon clock the test moves by hand. Every uptime reading is a
 /// microsecond later than the one before, like a real clock; waits end only
@@ -115,8 +116,9 @@ final class ManualClock: HelperDaemonClock, @unchecked Sendable {
 }
 
 /// Waits, in real time and for at most 10 s, until `condition` holds, and
-/// returns whether it did. Used only to wait for the daemon's own tasks to
-/// catch up; the outcome never depends on timing.
+/// returns whether it did, which the caller checks: a wait that ran out must
+/// fail the test, not let it go on as if the condition held. Used to wait
+/// for the daemon's own tasks to catch up, which takes far less than that.
 func eventually(_ condition: @Sendable () async -> Bool) async -> Bool {
     let deadline = ContinuousClock.now + .seconds(10)
     while ContinuousClock.now < deadline {
@@ -124,6 +126,22 @@ func eventually(_ condition: @Sendable () async -> Bool) async -> Bool {
         try? await Task.sleep(for: .milliseconds(1))
     }
     return await condition()
+}
+
+/// Returns what `operation` returns, for an operation awaited while the test
+/// holds a call that, if the behaviour under test is right, the operation
+/// does not wait for. If it has not returned `seconds` after this is called,
+/// records an issue and calls `release`, which ends the hold: an operation
+/// that does wait for the held call fails the test in bounded time instead
+/// of hanging it.
+func bounded<Value>(within seconds: Double = 10, releasing release: @escaping @Sendable () -> Void, _ operation: () async -> Value) async -> Value {
+    let watchdog = Task {
+        try await Task.sleep(for: .seconds(seconds))
+        Issue.record("still waiting after \(seconds) s for something that should not wait for the call the test holds; released the call")
+        release()
+    }
+    defer { watchdog.cancel() }
+    return await operation()
 }
 
 /// A power state that allows every control, stamped with the clock's time.
@@ -366,7 +384,7 @@ final class InMemoryHistoryStore: ActivationHistoryStore, @unchecked Sendable {
         lock.withLock { failingSaves += count }
     }
 
-    /// Makes the next save wait until ``release()``.
+    /// Makes the next save wait until ``release()``, however long that takes.
     func blockSaves() {
         lock.withLock { gate = DispatchSemaphore(value: 0) }
     }
@@ -387,7 +405,7 @@ final class InMemoryHistoryStore: ActivationHistoryStore, @unchecked Sendable {
 
     func save(_ records: [HelperActivationRecord], boot: BootIdentifier) throws {
         let gate = lock.withLock { self.gate }
-        _ = gate?.wait(timeout: .now() + 10)
+        gate?.wait()
         let data = try ActivationHistoryFormat.encode(records, boot: boot)
         try lock.withLock {
             if failingSaves > 0 {
@@ -401,7 +419,7 @@ final class InMemoryHistoryStore: ActivationHistoryStore, @unchecked Sendable {
 }
 
 /// Collects the daemon's log lines. The test can hold the next write back,
-/// as if writing the log were slow.
+/// as if writing the log were slow, until it releases it.
 final class RecordingLog: HelperDaemonLog, @unchecked Sendable {
     struct Line: Equatable {
         var level: HelperLogLevel
@@ -414,9 +432,13 @@ final class RecordingLog: HelperDaemonLog, @unchecked Sendable {
     private var gate: DispatchSemaphore?
     /// Only a write containing this waits at the gate; nil: the next write.
     private var gatedFragment: String?
-    /// How long a write waits at the gate before it goes through anyway.
-    private var gateLimit: TimeInterval = 10
-    private var waitingAtGate = false
+    /// How long a write waits at the gate before it goes through anyway;
+    /// nil: until ``release()``.
+    private var gateLimit: TimeInterval?
+    /// Writes that took the gate and have not gone through yet. The daemon
+    /// writes from one queue, so there is at most one, unless it writes
+    /// from elsewhere too; ``release()`` lets every one through.
+    private var writesAtGate = 0
 
     var lines: [Line] {
         lock.withLock { recorded }
@@ -426,9 +448,9 @@ final class RecordingLog: HelperDaemonLog, @unchecked Sendable {
         lines.contains { $0.level == level && $0.category == category && $0.message.contains(fragment) }
     }
 
-    /// Makes the next write wait until ``release()``, or for `limit` at
-    /// most, so a test that never releases it cannot hang the run.
-    func block(limit: TimeInterval = 10) {
+    /// Makes the next write wait until ``release()``, however long that
+    /// takes, or for `limit` at most if one is given.
+    func block(limit: TimeInterval? = nil) {
         lock.withLock {
             gate = DispatchSemaphore(value: 0)
             gatedFragment = nil
@@ -437,37 +459,50 @@ final class RecordingLog: HelperDaemonLog, @unchecked Sendable {
     }
 
     /// Makes the first write that contains `fragment` wait until
-    /// ``release()``, or for 10 s at most; the writes before it go through.
+    /// ``release()``, however long that takes; the writes before it go
+    /// through.
     func block(whenMessageContains fragment: String) {
         lock.withLock {
             gate = DispatchSemaphore(value: 0)
             gatedFragment = fragment
-            gateLimit = 10
+            gateLimit = nil
         }
     }
 
     /// True while a write waits for ``release()``.
     var isWaiting: Bool {
-        lock.withLock { waitingAtGate }
+        lock.withLock { writesAtGate > 0 }
     }
 
+    /// Lets every write waiting at the gate through, and stops holding new
+    /// ones.
     func release() {
-        let gate = lock.withLock {
+        let (gate, waiting) = lock.withLock { () -> (DispatchSemaphore?, Int) in
             defer { self.gate = nil }
-            return self.gate
+            return (self.gate, writesAtGate)
         }
-        gate?.signal()
+        for _ in 0..<waiting {
+            gate?.signal()
+        }
     }
 
     func write(_ level: HelperLogLevel, _ category: HelperLogCategory, _ message: String) {
-        let (gate, limit) = lock.withLock { () -> (DispatchSemaphore?, TimeInterval) in
-            guard let held = self.gate, gatedFragment.map({ message.contains($0) }) ?? true else { return (nil, 0) }
-            waitingAtGate = true
+        let (gate, limit) = lock.withLock { () -> (DispatchSemaphore?, TimeInterval?) in
+            guard let held = self.gate, gatedFragment.map({ message.contains($0) }) ?? true else { return (nil, nil) }
+            writesAtGate += 1
             return (held, gateLimit)
         }
-        _ = gate?.wait(timeout: .now() + limit)
+        if let gate {
+            if let limit {
+                _ = gate.wait(timeout: .now() + limit)
+            } else {
+                gate.wait()
+            }
+        }
         lock.withLock {
-            waitingAtGate = false
+            if gate != nil {
+                writesAtGate -= 1
+            }
             recorded.append(Line(level: level, category: category, message: message))
         }
     }
@@ -488,7 +523,7 @@ final class ExitRecorder: @unchecked Sendable {
 }
 
 /// A simulated control whose next read-back can be held, as if the
-/// hardware call hung.
+/// hardware call hung, until the test releases it.
 final class BlockingControl: HelperChargeControl, @unchecked Sendable {
     let simulated: SimulatedChargeControl
     private let lock = NSLock()
@@ -499,7 +534,8 @@ final class BlockingControl: HelperChargeControl, @unchecked Sendable {
         self.simulated = simulated
     }
 
-    /// Makes the next read-back wait until ``release()``.
+    /// Makes the next read-back wait until ``release()``, however long that
+    /// takes.
     func holdNextReadBack() {
         lock.withLock { gate = DispatchSemaphore(value: 0) }
     }
@@ -532,7 +568,7 @@ final class BlockingControl: HelperChargeControl, @unchecked Sendable {
             return held
         }
         if let gate {
-            _ = gate.wait(timeout: .now() + 10)
+            gate.wait()
             lock.withLock { blockedReads -= 1 }
         }
         return try simulated.readBack()
@@ -592,14 +628,16 @@ struct DaemonHarness {
     }
 
     /// Runs the daemon and waits until it serves (the frontend started and
-    /// the first tick is scheduled) or has exited.
-    func run() async -> Task<Int32, Never> {
+    /// the first tick is scheduled) or has exited; throws, failing the test,
+    /// if it has done neither within `eventually`'s bound.
+    func run() async throws -> Task<Int32, Never> {
         let daemon = daemon
         let running = Task { await daemon.run() }
         let clock = clock
         let exits = exits
         let frontend = frontend
-        _ = await eventually { (frontend.calls.contains(.start) && clock.waits.contains(HelperDaemon.tickInterval - 0.001...HelperDaemon.tickInterval)) || !exits.statuses.isEmpty }
+        let settled = await eventually { (frontend.calls.contains(.start) && clock.waits.contains(HelperDaemon.tickInterval - 0.001...HelperDaemon.tickInterval)) || !exits.statuses.isEmpty }
+        try #require(settled, "the daemon neither served nor exited")
         return running
     }
 
