@@ -444,9 +444,16 @@ public struct PolicyMemory: Sendable, Equatable {
 public struct PolicyInput: Sendable, Equatable {
     /// Wall-clock time, used for telemetry age and display.
     public var now: Date
-    /// Monotonic seconds that keep counting during sleep, used for override
-    /// expiry and rate limiting so that clock changes cannot affect them.
+    /// Monotonic seconds that keep counting during sleep, used for rate
+    /// limiting, restore retries and the minimum temperature pause, so that
+    /// clock changes cannot affect them. The controller reads it before the
+    /// backend's reads, which errs toward restricting for these.
     public var uptime: TimeInterval
+    /// Monotonic seconds at which an override's expiry is judged (see
+    /// ``ChargeOverride/isLive(atUptime:)``). The controller reads it
+    /// together with ``now``, after the backend's reads, so an evaluation
+    /// that straddles a deadline ends the override. Defaults to ``uptime``.
+    public var overrideUptime: TimeInterval
     public var settings: ChargingSettings
     /// Latest telemetry, or nil if it could not be read.
     public var snapshot: BatterySnapshot?
@@ -472,6 +479,7 @@ public struct PolicyInput: Sendable, Equatable {
     public init(
         now: Date,
         uptime: TimeInterval,
+        overrideUptime: TimeInterval? = nil,
         settings: ChargingSettings,
         snapshot: BatterySnapshot?,
         activeOverride: ChargeOverride? = nil,
@@ -486,6 +494,7 @@ public struct PolicyInput: Sendable, Equatable {
     ) {
         self.now = now
         self.uptime = uptime
+        self.overrideUptime = overrideUptime ?? uptime
         self.settings = settings
         self.snapshot = snapshot
         self.activeOverride = activeOverride

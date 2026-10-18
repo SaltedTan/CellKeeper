@@ -10,8 +10,8 @@ import Foundation
 ///    backend switch, or a state it set but could not read back) → fail safe
 ///    (macOS default charging).
 /// 2. Management disabled → macOS default charging.
-/// 3. Override expiry and unplugging are processed, even without a valid
-///    charge reading.
+/// 3. Override expiry (judged on ``PolicyInput/overrideUptime``) and
+///    unplugging are processed, even without a valid charge reading.
 /// 4. Telemetry missing, stale (by read time or by the system's own update
 ///    time), without a battery, or with an unknown power source → fail safe.
 ///    A discharge session never survives this.
@@ -100,10 +100,11 @@ public enum ChargingPolicy {
         }
 
         // Endings that do not depend on a valid charge reading come first, so
-        // expiry and unplugging always take effect.
+        // expiry and unplugging always take effect. Expiry is judged on the
+        // monotonic clock read after the backend's reads.
         var overrideEnded: OverrideEnd?
         if let activeOverride = input.activeOverride {
-            if input.uptime >= activeOverride.expiresAtUptime {
+            if !activeOverride.isLive(atUptime: input.overrideUptime) {
                 overrideEnded = .expired
             } else if input.snapshot?.powerSource == .battery {
                 overrideEnded = .unplugged

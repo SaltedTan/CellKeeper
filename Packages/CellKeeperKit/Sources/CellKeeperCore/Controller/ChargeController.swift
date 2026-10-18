@@ -435,13 +435,15 @@ public actor ChargeController {
     /// and `input`, with no suspension point between them. Returns true if
     /// this evaluation installed a new scheduled full charge.
     ///
-    /// `uptimeAtNow` is the monotonic clock read together with
-    /// `input.now`. Everything derived from wall time here (the new full
-    /// charge's deadline, whether a running one is still live, and the
-    /// displayed deadline) uses it, so the backend calls made between
-    /// `input.uptime` and `input.now` neither shorten the new deadline nor
-    /// skew the display.
-    private func applySchedule(to input: inout PolicyInput, uptimeAtNow: TimeInterval) -> Bool {
+    /// Everything here that concerns overrides (the new full charge's
+    /// deadline, whether a running one is still live, and the displayed
+    /// deadline) uses `input.overrideUptime`, the monotonic clock read
+    /// together with `input.now` after the backend's reads, which the policy
+    /// also judges expiry on. The backend calls made between `input.uptime`
+    /// and `input.now` therefore neither shorten the new deadline nor skew
+    /// the display, and the controller and the policy agree on liveness.
+    private func applySchedule(to input: inout PolicyInput) -> Bool {
+        let uptimeAtNow = input.overrideUptime
         guard let armed = schedule else { return false }
         switch FullChargeSchedule.check(armed, input: input) {
         case .notYet:
@@ -511,11 +513,12 @@ public actor ChargeController {
     }
 
     /// Derives the displayed deadline of the running override from its
-    /// monotonic deadline, with `now` and `uptime` read together, so a
-    /// clock change since it started does not leave a stale estimate.
-    private func refreshOverrideDeadlineEstimate(in input: inout PolicyInput, now: Date, uptime: TimeInterval) {
+    /// monotonic deadline, with `input.now` and `input.overrideUptime`,
+    /// which are read together, so a clock change since it started does not
+    /// leave a stale estimate.
+    private func refreshOverrideDeadlineEstimate(in input: inout PolicyInput) {
         guard var running = activeOverride else { return }
-        running.expiresAt = running.deadlineEstimate(now: now, uptime: uptime)
+        running.expiresAt = running.deadlineEstimate(now: input.now, uptime: input.overrideUptime)
         guard running != activeOverride else { return }
         activeOverride = running
         input.activeOverride = running
@@ -782,16 +785,23 @@ public actor ChargeController {
             : isOwnedStateUnverified ? .stateUnverified
             : nil
 
-        // The policy's uptime was read before the backend calls and its wall
-        // time after them, as for every evaluation. What is derived from the
-        // wall time below (a scheduled full charge's deadline, the displayed
-        // deadline of an override) uses the monotonic clock read together
-        // with it instead, so the backend calls' duration does not enter it.
+        // Two monotonic readings, either side of the backend's reads:
+        // - `evaluationUptime`, read before them, times what errs toward
+        //   restricting when read early: the rate limit of restricting
+        //   requests, the spacing of automatic restore retries, the
+        //   temperature pause and its minimum, and the sleep and failure
+        //   memory.
+        // - `uptimeAtNow`, read together with the wall time after them,
+        //   times overrides: whether one has expired (`overrideUptime`), a
+        //   scheduled full charge's deadline, and the displayed deadline.
+        //   An evaluation that straddles a deadline then ends the override,
+        //   and the reads' duration does not shorten a new deadline.
         let evaluationNow = now()
         let uptimeAtNow = uptime()
         var input = PolicyInput(
             now: evaluationNow,
             uptime: evaluationUptime,
+            overrideUptime: uptimeAtNow,
             settings: settings,
             snapshot: snapshot,
             activeOverride: activeOverride,
@@ -809,8 +819,8 @@ public actor ChargeController {
         // After the backend's mode was read, so that an adoption that turned
         // management off in this evaluation is seen, and on the input the
         // policy then evaluates.
-        let startedSchedule = applySchedule(to: &input, uptimeAtNow: uptimeAtNow)
-        refreshOverrideDeadlineEstimate(in: &input, now: evaluationNow, uptime: uptimeAtNow)
+        let startedSchedule = applySchedule(to: &input)
+        refreshOverrideDeadlineEstimate(in: &input)
         restrictingRequests.removeAll { input.uptime - $0.uptime >= 60 * 60 }
         let newDecision = ChargingPolicy.evaluate(input)
         memory = newDecision.memory

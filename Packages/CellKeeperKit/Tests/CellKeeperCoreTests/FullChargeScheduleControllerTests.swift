@@ -108,6 +108,52 @@ struct FullChargeScheduleControllerTests {
         #expect(override.expiresAtUptime - clock.uptime < 12 * hour - lateness)
     }
 
+    /// Begins an evaluation 30 s before `override`'s deadline, with the
+    /// capability and mode reads taking 30 s each, so the evaluation
+    /// straddles the deadline.
+    private func evaluateStraddling(_ override: ChargeOverride, controller: ChargeController, backend: SlowReadingBackend) async -> ControllerStatus {
+        clock.advance(by: override.expiresAtUptime - clock.uptime - 30)
+        await backend.setDelay(30)
+        return await controller.evaluate(.periodic)
+    }
+
+    @Test("An evaluation that straddles a manual full charge's deadline because the backend's reads are slow ends it")
+    func manualExpiresDuringSlowReads() async throws {
+        let backend = SlowReadingBackend(clock: clock, delay: 0)
+        let (controller, _) = makeController(backend: backend)
+        let manual = try #require(await controller.startFullCharge().activeOverride)
+        let status = await evaluateStraddling(manual, controller: controller, backend: backend)
+        #expect(clock.uptime > manual.expiresAtUptime)
+        #expect(status.decision?.overrideEnded == .expired)
+        #expect(status.activeOverride == nil)
+    }
+
+    @Test("An evaluation that straddles a scheduled full charge's deadline because the backend's reads are slow ends it")
+    func scheduledExpiresDuringSlowReads() async throws {
+        let backend = SlowReadingBackend(clock: clock, delay: 0)
+        let (controller, _) = makeController(backend: backend)
+        try await controller.setFullChargeSchedule(schedule(window: 2 * hour))
+        clock.advance(by: hour)
+        let started = try #require(await controller.evaluate(.periodic).activeOverride)
+        #expect(started.source == .schedule)
+        let status = await evaluateStraddling(started, controller: controller, backend: backend)
+        #expect(status.decision?.overrideEnded == .expired)
+        #expect(status.activeOverride == nil)
+    }
+
+    @Test("An evaluation that straddles a discharge session's deadline because the backend's reads are slow ends it, and no longer asks to discharge")
+    func dischargeExpiresDuringSlowReads() async throws {
+        let backend = SlowReadingBackend(clock: clock, delay: 0)
+        let (controller, _) = makeController(percent: 90, backend: backend)
+        await controller.evaluate(.launch)
+        let session = try #require(await controller.startDischargeToLimit().activeOverride)
+        #expect(await controller.status.decision?.desiredMode == .forceDischarge)
+        let status = await evaluateStraddling(session, controller: controller, backend: backend)
+        #expect(status.decision?.overrideEnded == .expired)
+        #expect(status.activeOverride == nil)
+        #expect(status.decision?.desiredMode != .forceDischarge)
+    }
+
     /// Wall-clock changes made while an override runs.
     static let wallJumpsAfterStart: [TimeInterval] = [36_000, -36_000]
 
@@ -781,11 +827,15 @@ struct FullChargeScheduleNativeTests {
 actor SlowReadingBackend: ChargingBackend {
     private let inner = MockChargingBackend()
     private let clock: TestClock
-    private let delay: TimeInterval
+    private var delay: TimeInterval
 
     init(clock: TestClock, delay: TimeInterval) {
         self.clock = clock
         self.delay = delay
+    }
+
+    func setDelay(_ newDelay: TimeInterval) {
+        delay = newDelay
     }
 
     nonisolated var descriptor: BackendDescriptor { inner.descriptor }

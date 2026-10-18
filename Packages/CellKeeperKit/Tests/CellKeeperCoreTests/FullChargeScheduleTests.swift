@@ -131,6 +131,54 @@ struct ScheduledOverrideTests {
     }
 }
 
+@Suite("Override expiry clock")
+struct OverrideExpiryClockTests {
+    let manual = ChargeOverride.fullCharge(at: referenceDate, uptime: 0, duration: 3600)
+
+    @Test("By default an override's expiry is judged on the policy's uptime")
+    func defaultsToUptime() {
+        let plain = input(snapshot(percent: 70), override: manual, uptime: 3600)
+        #expect(plain.overrideUptime == plain.uptime)
+        #expect(ChargingPolicy.evaluate(plain).overrideEnded == .expired)
+        #expect(ChargingPolicy.evaluate(input(snapshot(percent: 70), override: manual, uptime: 3599)).overrideEnded == nil)
+    }
+
+    @Test("An override's expiry is judged on the override clock, read after the backend's reads, not on the earlier uptime")
+    func judgedOnOverrideClock() {
+        var straddling = input(snapshot(percent: 70), override: manual, uptime: 3570)
+        straddling.overrideUptime = 3630
+        #expect(ChargingPolicy.evaluate(straddling).overrideEnded == .expired)
+        var discharge = input(snapshot(percent: 90), override: .dischargeToLimit(target: 80, at: referenceDate, uptime: 0, duration: 3600), uptime: 3570)
+        discharge.overrideUptime = 3630
+        let ended = ChargingPolicy.evaluate(discharge)
+        #expect(ended.overrideEnded == .expired)
+        #expect(ended.desiredMode != .forceDischarge)
+    }
+
+    @Test("The rate limit of restricting requests keeps the earlier uptime")
+    func rateLimitKeepsUptime() {
+        let recent: [TimeInterval] = [10_000 - 30]
+        var holding = input(snapshot(percent: 85), memory: memoryAfterReading(85), recentRestrictingRequests: recent)
+        holding.overrideUptime = 10_100
+        let decision = ChargingPolicy.evaluate(holding)
+        #expect(decision.desiredMode == .inhibitCharging)
+        guard case .refuse(.rateLimited) = decision.action else {
+            Issue.record("expected a rate-limited refusal, got \(decision.action)")
+            return
+        }
+    }
+
+    @Test("The minimum temperature pause keeps the earlier uptime")
+    func temperaturePauseKeepsUptime() {
+        let tripped = PolicyMemory(temperatureTripped: true, temperatureTrippedAtUptime: 10_000 - 200)
+        var cooled = input(snapshot(percent: 70, temperature: 30), memory: tripped)
+        cooled.overrideUptime = 10_200
+        let decision = ChargingPolicy.evaluate(cooled)
+        #expect(decision.state == .temperaturePause)
+        #expect(decision.memory.temperatureTripped)
+    }
+}
+
 @Suite("Scheduled full charge: the policy ignores where an override came from")
 struct ScheduledOverridePolicyParityTests {
     static let cases: [(String, PolicyInput)] = {
