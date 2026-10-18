@@ -62,7 +62,8 @@ from the App Sandbox with no new entitlements; read-back through
 80/85/90/95/100 with unsupported features hidden; a limit changed in
 System Settings is kept as the user's own and management turns off (owner
 decision). Observed on the maintainer's Mac: the walk-through, one sleep run
-and one restart. Still open: shutdown observations, and schedules (below).
+and one restart. A one-shot scheduled full charge is implemented (below).
+Still open: shutdown observations.
 Candidate follow-up: confirm changes through Shortcuts' documented "Get
 charge limit" action instead of `pmset -g battlimit` (note 08, O18).
 
@@ -81,6 +82,12 @@ charge limit" action instead of `pmset -g battlimit` (note 08, O18).
   accept a variable? This is a supported, user-level setting, so testing it
   on a daily-use Mac is acceptable.
 - Use it for schedules ("100% before travel on Friday") without root.
+  *Done as a one-shot scheduled full charge* (owner approval 2026-10-18):
+  one schedule, a start up to 7 days ahead and an end 1–48 h later, that
+  starts the existing temporary full charge (see `architecture.md`,
+  "Scheduled full charge"). It works with every backend, simulated where
+  the backend is, and starts only while the Mac is awake and CellKeeper
+  is running.
 
 ## Milestone 3 — Diagnostics and observability (after phase 4a)
 
@@ -222,8 +229,9 @@ and an Apple Developer ID.
 - Notifications (limit reached, temperature pause, fault, override ended).
 - Launch at login (`SMAppService.mainApp`).
 - App Intents / Shortcuts actions for CellKeeper's own controls.
-- Scheduling of overrides and limits (monotonic-clock expiries, re-evaluated
-  on clock change and wake).
+- Scheduled limits and recurring schedules (a one-shot scheduled full charge
+  exists; recurrence needs floating local time with DST rules and a record
+  of the last occurrence, so that a clock change cannot fire one twice).
 - Calibration workflow (never below 15%, only within 10–40 °C, user-initiated
   and abortable).
 - Battery temperature, if a public source returns or a reviewed source is
