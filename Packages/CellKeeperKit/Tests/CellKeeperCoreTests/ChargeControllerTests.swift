@@ -576,12 +576,14 @@ struct ChargeControllerTests {
         // served waits for the controller: a request any of them made then
         // would overlap the held one.
         await backend.holdRequests()
+        let evaluationsEnded = Observed<Bool>()
         let evaluations = Task {
             await withTaskGroup(of: Void.self) { group in
                 for _ in 0..<20 {
                     group.addTask { await controller.evaluate(.manual) }
                 }
             }
+            evaluationsEnded.value = true
         }
         for served in 1...20 {
             func isHeldWithTheRestWaiting() async -> Bool {
@@ -594,8 +596,12 @@ struct ChargeControllerTests {
             guard await isHeldWithTheRestWaiting() else { break }
             await backend.releaseHeldRequests()
         }
-        // Lets every request end, also after a failed wait.
+        // Lets every request end, also after a failed wait. An evaluation
+        // left waiting for the controller's lock would not end: the wait for
+        // them is bounded, and the task is awaited only once they have.
         await backend.stopHolding()
+        await eventually("every evaluation has ended") { evaluationsEnded.value == true }
+        guard evaluationsEnded.value == true else { return }
         await evaluations.value
 
         let requests = await backend.totalRequests

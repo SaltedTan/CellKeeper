@@ -52,8 +52,7 @@ struct ConversationFault: Sendable, CustomStringConvertible {
 /// confirmed that it restored defaults, and every outcome says only what was
 /// confirmed.
 ///
-/// A test here that runs for a minute has gone wrong. The time limit also
-/// fails it well before ``RemovalRig``'s first tick of its own.
+/// The time limit is only a watchdog for a test that hangs.
 @Suite("Helper removal", .timeLimit(.minutes(1)))
 struct HelperRemovalTests {
     private static let unregisterSteps: Set<String> = ["helper.restoreDefaultsAndExit", "registration.unregister"]
@@ -124,7 +123,7 @@ struct HelperRemovalTests {
         let rig = RemovalRig()
         defer { rig.transport.gate.open() }
         rig.transport.stall(at: .invalidate)
-        // The clock never moves, so the deadline never passes.
+        // The test does not move the clock, so the deadline does not pass.
         let outcome = await rig.removal(clock: ManualDeadlineClock()).remove()
         #expect(outcome == .removed(.simulated))
         // The outcome is decided before the connection is closed, so the
@@ -175,8 +174,8 @@ struct HelperRemovalTests {
         let isSafeToExit = await rig.engine.isSafeToExit
         #expect(!isSafeToExit)
         // The helper that was not unregistered is the one that finishes the
-        // restore: its next tick retries it. Within the suite's time limit,
-        // only the test ticks the rig's engine (see ``RemovalRig``).
+        // restore: its next tick retries it. Nothing but the test ticks the
+        // rig's engine (see ``UntickedHelperTransport``).
         await rig.engine.tick()
         let isSafeAfterRetry = await rig.engine.isSafeToExit
         #expect(isSafeAfterRetry)
@@ -486,6 +485,21 @@ struct HelperRemovalTests {
         }
     }
 
+    @Test("A removal whose evidence never comes fails the test, and ends on its timeouts, once a timer has waited the clock's limit")
+    func stalledRemovalFails() async {
+        let rig = RemovalRig()
+        // Connecting waits until the conversation's deadline cancels it,
+        // and the test never moves the clock.
+        rig.transport.answerOnlyWhenCancelled(at: .connect)
+        let removal = rig.removal(clock: ManualDeadlineClock(limit: .zero))
+        var outcome: HelperRemovalOutcome?
+        await withKnownIssue {
+            outcome = await removal.remove()
+        }
+        #expect(outcome == .restoreUnconfirmed(.noHello(Self.deadline)))
+        #expect(rig.registration.unregisterCount == 0)
+    }
+
     @Test("A forced removal says what it could not confirm, and what removing the helper gives up")
     func forcedRemovalWording() async {
         let rig = RemovalRig()
@@ -533,8 +547,8 @@ struct HelperRemovalTests {
 
         let running = remove(rig.removal(clock: clock), force: false)
         // Only the unregistering is held. Everything before it has answered,
-        // and nothing after it can time out, because the clock moves only
-        // here, once the held call is seen waiting.
+        // and nothing after it times out, because the test moves the clock
+        // only here, once the held call is seen waiting.
         await expectLogged(rig.log, "registration.unregister")
         clock.advance(by: HelperRemoval.defaultRegistrationDeadline)
         let outcome = await running.value
@@ -560,7 +574,7 @@ struct HelperRemovalTests {
         await expectLogged(rig.log, "registration.status")
         clock.advance(by: HelperRemoval.defaultRegistrationDeadline)
         // The helper confirms and the unregistering answers while the clock
-        // stands still, so neither can time out. The status read after is
+        // stands still, so neither times out. The status read after is
         // held too, and only its deadline is passed.
         await expectLogged(rig.log, "registration.status", occurrences: 2)
         clock.advance(by: HelperRemoval.defaultRegistrationDeadline)

@@ -7,8 +7,7 @@ import Testing
 /// restores normal charging first, then the helper restores and exits, then
 /// it is unregistered; a failure stops the sequence at its step.
 ///
-/// A test here that runs for a minute has gone wrong. The time limit also
-/// fails it well before ``RemovalRig``'s first tick of its own.
+/// The time limit is only a watchdog for a test that hangs.
 @Suite("Helper removal from the controller", .timeLimit(.minutes(1)))
 struct HelperRemovalControllerTests {
     private static let steps: Set<String> = ["backend.normal", "helper.restoreDefaultsAndExit", "registration.unregister"]
