@@ -295,6 +295,15 @@ enum Format {
         }
         return "\(full) of \(design) mAh (\(ratio.formatted(.number.precision(.fractionLength(0))))%)"
     }
+
+    /// A moment in Settings › Diagnostics, in local time: the time, with
+    /// the date unless it is today. The diagnostics report writes the same
+    /// moment in ISO 8601.
+    static func moment(_ date: Date) -> String {
+        Calendar.current.isDateInToday(date)
+            ? date.formatted(date: .omitted, time: .standard)
+            : date.formatted(date: .abbreviated, time: .standard)
+    }
 }
 
 extension ControllerStatus {

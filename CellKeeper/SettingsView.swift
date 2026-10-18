@@ -16,12 +16,15 @@ struct SettingsView: View {
             ActivityTab(model: model)
                 .tabItem { Label("Activity", systemImage: "list.bullet.rectangle") }
                 .tag(SettingsTab.activity)
+            DiagnosticsTab(model: model)
+                .tabItem { Label("Diagnostics", systemImage: "stethoscope") }
+                .tag(SettingsTab.diagnostics)
             AboutTab()
                 .tabItem { Label("About", systemImage: "info.circle") }
                 .tag(SettingsTab.about)
         }
         .frame(width: 520, height: 460)
-        // Here rather than on the Activity tab, so that a save that fails
+        // Here rather than on the Diagnostics tab, so that a save that fails
         // after the user moved to another tab is still shown.
         .alert("The diagnostics report was not saved", isPresented: Binding(get: { model.diagnosticsSaveFailure != nil }, set: { if !$0 { model.dismissDiagnosticsSaveFailure() } }), presenting: model.diagnosticsSaveFailure) { _ in
             Button("OK") {}
@@ -565,8 +568,6 @@ private struct ControlDetailsSection: View {
 
 private struct ActivityTab: View {
     let model: AppModel
-    @State private var isCopied = false
-    @State private var settingsWindow = HostingWindow()
 
     var body: some View {
         let events = (model.status?.events ?? []).reversed()
@@ -590,10 +591,58 @@ private struct ActivityTab: View {
                     }
                 }
             }
-            VStack(alignment: .leading, spacing: 8) {
+            HStack {
                 Text("Also written to the unified log (subsystem \(CellKeeperLog.subsystem)).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Spacer()
+                Button("Refresh now") { model.refresh() }
+            }
+            .padding([.horizontal, .bottom])
+        }
+    }
+}
+
+/// What CellKeeper sees and does, in the diagnostics report's sections
+/// (``DiagnosticsReport/sections(status:environment:)``), in plain words:
+/// without the identifiers and the activity log the report adds. It shows
+/// the latest status and starts no evaluation of its own.
+private struct DiagnosticsTab: View {
+    let model: AppModel
+    @State private var isCopied = false
+    @State private var settingsWindow = HostingWindow()
+
+    var body: some View {
+        VStack(alignment: .leading) {
+            if let status = model.status {
+                let sections = DiagnosticsReport.sections(status: status, environment: model.diagnosticsEnvironment)
+                Form {
+                    ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
+                        if let title = section.title {
+                            Section {
+                                rows(of: section)
+                            } header: {
+                                Text(title)
+                                    .accessibilityAddTraits(.isHeader)
+                            }
+                        } else {
+                            Section {
+                                rows(of: section)
+                            }
+                        }
+                    }
+                }
+                .formStyle(.grouped)
+            } else {
+                ContentUnavailableView("No status yet", systemImage: "stethoscope")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                if let evaluated = model.status?.lastEvaluation {
+                    Text("As of the last evaluation, at \(Format.moment(evaluated)).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 HStack {
                     Button(isCopied ? "Copied" : "Copy Diagnostics") { copyDiagnostics() }
                         .disabled(model.status == nil)
@@ -602,12 +651,24 @@ private struct ActivityTab: View {
                         .disabled(model.status == nil || model.isSavingDiagnostics)
                         .help("Saves the same report as a text file where you choose.")
                     Spacer()
-                    Button("Refresh now") { model.refresh() }
                 }
             }
             .padding([.horizontal, .bottom])
         }
         .background(HostingWindowReader(hostingWindow: settingsWindow))
+    }
+
+    /// Each row is one accessibility element made of its label and its
+    /// value; the value can be selected and copied.
+    private func rows(of section: DiagnosticsSection) -> some View {
+        ForEach(Array(section.rows.enumerated()), id: \.offset) { _, row in
+            LabeledContent(row.label) {
+                Text(row.value.plainText(formattingTime: Format.moment))
+                    .multilineTextAlignment(.trailing)
+                    .textSelection(.enabled)
+            }
+            .accessibilityElement(children: .combine)
+        }
     }
 
     private func copyDiagnostics() {

@@ -26,7 +26,7 @@ CellKeeper runs as an ordinary, App-Sandboxed user application with no
 privileged helper. It reads battery telemetry through public and allowlisted
 read-only interfaces, and never writes to hardware itself. Its only
 entitlement besides the sandbox lets it write a file the user chooses in a
-save panel: Settings › Activity › Save Diagnostics… saves the diagnostics
+save panel: Settings › Diagnostics › Save Diagnostics… saves the diagnostics
 report there, and nowhere else.
 
 If you turn notifications on, CellKeeper posts local notifications through
