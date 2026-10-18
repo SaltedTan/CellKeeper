@@ -305,13 +305,7 @@ public enum ChargingPolicy {
             decision(state, mode, reason, memory: PolicyMemory(), input: input, notes: notes, overrideEnded: overrideEnded)
         }
 
-        let usableSnapshot = input.snapshot.flatMap { snapshot -> BatterySnapshot? in
-            guard snapshot.isBatteryPresent, staleness(of: snapshot, now: input.now) == nil,
-                  let percent = snapshot.chargePercent, (0...100).contains(percent),
-                  snapshot.powerSource != .unknown
-            else { return nil }
-            return snapshot
-        }
+        let usableSnapshot = Self.usableSnapshot(input.snapshot, now: input.now)
         if usableSnapshot == nil {
             notes.append(.nativeLimitKeptWithoutTelemetry)
         }
@@ -344,6 +338,19 @@ public enum ChargingPolicy {
     }
 
     // MARK: - Telemetry freshness
+
+    /// `snapshot` if the policy acts on it at `now`: a battery is present,
+    /// the reading is neither stale nor from the future, the charge is a
+    /// percentage and the power source is known (rule 4; the native-limit
+    /// policy's usable telemetry). Nil otherwise. Anything that reports on
+    /// the battery's state uses only such readings.
+    static func usableSnapshot(_ snapshot: BatterySnapshot?, now: Date) -> BatterySnapshot? {
+        guard let snapshot, snapshot.isBatteryPresent, staleness(of: snapshot, now: now) == nil,
+              let percent = snapshot.chargePercent, (0...100).contains(percent),
+              snapshot.powerSource != .unknown
+        else { return nil }
+        return snapshot
+    }
 
     /// The age in seconds if the snapshot is stale, otherwise nil. Checks
     /// both when CellKeeper read it and, where reported, when the system

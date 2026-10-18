@@ -34,7 +34,8 @@ Limit** (80–100%) through a shortcut you create, and macOS enforces it.
 | Discharge to limit while plugged in | **Policy real, control simulated**; a confirmed one-shot session, never automatic; not available with macOS's Charge Limit |
 | Limits at any level (including below 80%), with CellKeeper switching charging itself | **Simulated** — choose **Simulated helper** in Settings › Control to try CellKeeper's own charge control at 20–100%, run through its helper's logic inside the app; nothing on your Mac changes. While macOS's own Charge Limit is on, it withholds new restrictions and asks for the release of any of its own; Settings › Control shows how to turn macOS's limit off (100% in System Settings › Battery) to try it, but the Simulated helper provides no replacement charge limit, so your Mac may then charge to 100%. **No hardware control yet**; the current priority — see [roadmap](docs/roadmap.md) milestone 4 and [issue #1](https://github.com/SaltedTan/CellKeeper/issues/1) |
 | Diagnostics report for bug reports, without serial numbers or other identifiers | **Real** — Settings › Activity › **Copy Diagnostics**, or **Save Diagnostics…** to a text file you choose |
-| Scheduled limits, recurring schedules, calibration, notifications, Shortcuts actions for CellKeeper's own controls, launch at login | Planned |
+| Notifications: charging held at your limit (or, with macOS's Charge Limit, macOS reporting the battery at or above that limit and not charging), a temperature pause, a temporary full charge or discharge ending, a control fault, and a return to normal charging or to your own Charge Limit that CellKeeper cannot confirm (and what resolved it later) | **Real, opt-in** — off by default; turn on in Settings › Charging, and macOS asks for permission; you can turn them off there at any time. They say only what CellKeeper observed, and say so when its control is simulated |
+| Scheduled limits, recurring schedules, calibration, Shortcuts actions for CellKeeper's own controls, launch at login | Planned |
 
 The menu bar always shows which kind of control is in effect: **Available**,
 **Experimental**, **Simulated**, or **Unavailable**.
@@ -158,12 +159,13 @@ log stream --level info --predicate 'subsystem == "io.github.saltedtan.CellKeepe
 ```
 CellKeeper.app (SwiftUI menu bar, settings)
   └── CellKeeperKit   macOS adapters: read-only IOKit telemetry, power
-                      notifications, the shortcuts and pmset runners, and the
-                      record of your own Charge Limit
+                      notifications, the shortcuts and pmset runners, the
+                      record of your own Charge Limit, and local
+                      notifications (opt-in)
         └── CellKeeperCore   pure Swift: settings validation, charging policy
                              state machine, controller, backend protocol,
                              simulated, read-only and native Charge Limit
-                             backends
+                             backends, and what to notify
 ```
 
 - The **charging policy** is a pure, deterministic function: telemetry +

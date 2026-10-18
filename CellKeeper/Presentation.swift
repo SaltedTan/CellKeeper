@@ -234,7 +234,7 @@ enum Format {
 
     /// A Charge Limit value, where 100% means no limit.
     static func chargeLimit(_ value: Int) -> String {
-        value >= 100 ? "100% (no limit)" : "\(value)%"
+        NativeLimitWording.limit(value)
     }
 
     /// Why a backend switch is still waiting: the backend still in charge,

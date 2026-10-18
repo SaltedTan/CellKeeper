@@ -127,6 +127,16 @@ public struct ControllerStatus: Sendable, Equatable {
     public var lastExecution: ExecutionRecord?
     public var consecutiveFailures: Int
     public var isBackendFaulted: Bool
+    /// How many times a backend became faulted in this session, counting
+    /// faults that began and were cleared between two statuses. Only grows.
+    public var faultsRaised: Int
+    /// With a backend that switches charging itself: how many reads in this
+    /// session showed normal charging after a restriction of CellKeeper's
+    /// own may have been in effect, each ending ``ownRestrictionMode``. A
+    /// release confirmed by read-back, counted even if a later request in
+    /// the same command restricted charging again. Only grows; not counted
+    /// for macOS's Charge Limit (see ``NativeLimitStatus/restoresConfirmed``).
+    public var releasesConfirmed: Int
     public var events: [ControlEvent]
     public var lastEvaluation: Date?
     /// The scheduled full charge that is armed, if any. It is removed when
@@ -138,6 +148,29 @@ public struct ControllerStatus: Sendable, Equatable {
     /// What became of the latest schedule, until the user dismisses it or
     /// sets a new one.
     public var fullChargeScheduleOutcome: FullChargeScheduleOutcome? = nil
+    /// The override that most recently ended by itself in this session, as
+    /// it was when it ended, with how: the policy ended it (also a full
+    /// charge a schedule started in the same evaluation, in place of the
+    /// override shown before), or its monotonic deadline had passed when a
+    /// schedule replaced it. A cancellation, turning management off, a kept
+    /// outside change, or a schedule replacing a live override ends one
+    /// without that, and is not recorded here.
+    public var lastEndedOverride: EndedOverride? = nil
+    /// How many overrides have ended by themselves in this session
+    /// (``lastEndedOverride``), counting ones that began and ended between
+    /// two statuses. Only grows.
+    public var overridesEnded: Int = 0
+}
+
+/// An override that ended by itself, and how.
+public struct EndedOverride: Sendable, Equatable {
+    public var override: ChargeOverride
+    public var end: OverrideEnd
+
+    public init(override: ChargeOverride, end: OverrideEnd) {
+        self.override = override
+        self.end = end
+    }
 }
 
 extension ControllerStatus {
