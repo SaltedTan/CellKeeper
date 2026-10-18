@@ -246,19 +246,10 @@ private struct ScheduledFullChargeSection: View {
 /// does.
 private struct WeeklyFullChargeSection: View {
     let model: AppModel
-    @State private var weekdays: Set<Int> = []
-    @State private var start = WeeklyFullChargeSection.time(hour: 7, minute: 0)
-    @State private var hours = WeeklyFullChargePattern.defaultDurationHours
-
-    /// Today at `hour`:`minute`; only the time of day is used.
-    static func time(hour: Int, minute: Int) -> Date {
-        Calendar.current.date(bySettingHour: hour, minute: minute, second: 0, of: Date()) ?? Date()
-    }
-
-    private var draft: WeeklyFullChargePattern {
-        let time = Calendar.current.dateComponents([.hour, .minute], from: start)
-        return WeeklyFullChargePattern(weekdays: weekdays, hour: time.hour ?? 0, minute: time.minute ?? 0, durationHours: hours)
-    }
+    /// The start stays an hour and a minute (`WeeklyFullChargeDraft`), never a
+    /// moment in the Mac's time zone, so a skipped hour or a time zone change
+    /// cannot move it.
+    @State private var draft = WeeklyFullChargeDraft()
 
     var body: some View {
         let status = model.status
@@ -298,21 +289,25 @@ private struct WeeklyFullChargeSection: View {
                     HStack(spacing: 4) {
                         ForEach(WeeklyFullChargeWording.weekdayOrder(), id: \.self) { day in
                             Toggle(WeeklyFullChargeWording.shortName(of: day), isOn: Binding(
-                                get: { weekdays.contains(day) },
+                                get: { draft.weekdays.contains(day) },
                                 set: { isOn in
-                                    if isOn { weekdays.insert(day) } else { weekdays.remove(day) }
+                                    if isOn { draft.weekdays.insert(day) } else { draft.weekdays.remove(day) }
                                 }
                             ))
                             .toggleStyle(.button)
                         }
                     }
                 }
-                DatePicker("Start", selection: $start, displayedComponents: .hourAndMinute)
-                Stepper(value: $hours, in: WeeklyFullChargePattern.durationHoursRange) {
-                    LabeledContent("Duration", value: hours == 1 ? "1 hour" : "\(hours) hours")
+                // Shown and read on a fixed day in GMT, so the picker gives
+                // back exactly the hour and minute it shows.
+                DatePicker("Start", selection: $draft.pickerTime, displayedComponents: .hourAndMinute)
+                    .environment(\.timeZone, WeeklyFullChargeDraft.pickerTimeZone)
+                    .environment(\.calendar, WeeklyFullChargeDraft.pickerCalendar)
+                Stepper(value: $draft.durationHours, in: WeeklyFullChargePattern.durationHoursRange) {
+                    LabeledContent("Duration", value: draft.durationHours == 1 ? "1 hour" : "\(draft.durationHours) hours")
                 }
-                Button(weekly == nil ? "Save Weekly Full Charge" : "Save Changes") { model.setWeeklyFullCharge(draft) }
-                    .disabled(!draft.issues.isEmpty || draft == weekly?.pattern)
+                Button(weekly == nil ? "Save Weekly Full Charge" : "Save Changes") { model.setWeeklyFullCharge(draft.pattern) }
+                    .disabled(!draft.pattern.issues.isEmpty || draft.pattern == weekly?.pattern)
                     .help(WeeklyFullChargeWording.saveHelp)
             }
             .disabled(!model.settings.isManagementEnabled)
@@ -341,9 +336,7 @@ private struct WeeklyFullChargeSection: View {
         // launch, saved, or removed), and keeps the user's edits otherwise.
         .onChange(of: weekly?.pattern, initial: true) { _, pattern in
             guard let pattern else { return }
-            weekdays = pattern.weekdays
-            start = Self.time(hour: pattern.hour, minute: pattern.minute)
-            hours = pattern.durationHours
+            draft = WeeklyFullChargeDraft(pattern)
         }
     }
 }
