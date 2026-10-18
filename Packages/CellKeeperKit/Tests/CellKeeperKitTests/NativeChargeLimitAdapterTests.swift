@@ -285,7 +285,8 @@ struct CommandLineAdapterTests {
         func isReady() async -> Bool {
             let ready = directory.appendingPathComponent("ready")
             var line: String?
-            await eventually(within: 300) {
+            // The guard below checks what the wait found.
+            _ = await eventually(within: 300) {
                 // `echo` may write in parts; the line is whole with its newline.
                 if let text = try? String(contentsOf: ready, encoding: .utf8), text.hasSuffix("\n") {
                     line = String(text.dropLast())
@@ -320,7 +321,8 @@ struct CommandLineAdapterTests {
         /// How the tool ended, waiting up to 60 s; nil if it still runs.
         func outcome() async -> ExitWatch.Outcome? {
             guard let watch = trace.exitWatch else { return nil }
-            await eventually(within: 60) { watch.outcome() != nil }
+            // Nil if the wait ran out, which the caller's check then fails on.
+            _ = await eventually(within: 60) { watch.outcome() != nil }
             return watch.outcome()
         }
 
