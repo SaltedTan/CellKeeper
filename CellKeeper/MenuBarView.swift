@@ -18,7 +18,11 @@ struct MenuBarView: View {
                 })
                 Divider()
                 ChargeLimitControl(model: model)
-                FullChargeControl(model: model, status: status)
+                FullChargeControl(model: model, status: status, openScheduleSettings: {
+                    model.settingsTab = .charging
+                    NSApp.activate()
+                    openSettings()
+                })
                 Divider()
                 TelemetryDetails(snapshot: status.snapshot, thermalState: model.thermalState, isLowPowerModeEnabled: model.isLowPowerModeEnabled)
             } else {
@@ -352,32 +356,45 @@ private struct ManageChargingToggle: View {
 private struct FullChargeControl: View {
     let model: AppModel
     let status: ControllerStatus
+    /// Opens Settings › Charging, where a full charge is scheduled.
+    let openScheduleSettings: () -> Void
 
     var body: some View {
-        if let override = status.activeOverride {
-            HStack {
-                switch override.kind {
-                case .fullCharge:
-                    Label(fullChargeText(override), systemImage: "arrow.up.to.line")
-                case .dischargeToLimit:
-                    Label(dischargeText(override), systemImage: "minus.plus.batteryblock")
-                        .foregroundStyle(.orange)
+        VStack(alignment: .leading, spacing: 6) {
+            if let override = status.activeOverride {
+                HStack {
+                    switch override.kind {
+                    case .fullCharge:
+                        Label(fullChargeText(override), systemImage: "arrow.up.to.line")
+                    case .dischargeToLimit:
+                        Label(dischargeText(override), systemImage: "minus.plus.batteryblock")
+                            .foregroundStyle(.orange)
+                    }
+                    Spacer()
+                    Button("Cancel") { model.cancelOverride() }
+                        .controlSize(.small)
                 }
-                Spacer()
-                Button("Cancel") { model.cancelOverride() }
-                    .controlSize(.small)
+                .font(.caption)
+            } else {
+                HStack {
+                    Button {
+                        model.startFullCharge()
+                    } label: {
+                        Label("Charge to 100% once", systemImage: "arrow.up.to.line")
+                    }
+                    .disabled(!model.settings.isManagementEnabled || model.settings.chargeLimit >= 100 || status.snapshot?.isOnExternalPower != true)
+                    .help(status.capabilities.isEnforcedByMacOS
+                        ? "Raises macOS's Charge Limit to 100% once, then sets your limit again. Ends when full, when unplugged, or after 12 hours."
+                        : "Charges once to 100%, then returns to the limit. Ends when full, when unplugged, or after 12 hours.")
+                    Spacer()
+                    if status.fullChargeSchedule == nil {
+                        Button("Schedule…") { openScheduleSettings() }
+                            .controlSize(.small)
+                            .help("Schedule a temporary full charge in Settings › Charging.")
+                    }
+                }
             }
-            .font(.caption)
-        } else {
-            Button {
-                model.startFullCharge()
-            } label: {
-                Label("Charge to 100% once", systemImage: "arrow.up.to.line")
-            }
-            .disabled(!model.settings.isManagementEnabled || model.settings.chargeLimit >= 100 || status.snapshot?.isOnExternalPower != true)
-            .help(status.capabilities.isEnforcedByMacOS
-                ? "Raises macOS's Charge Limit to 100% once, then sets your limit again. Ends when full, when unplugged, or after 12 hours."
-                : "Charges once to 100%, then returns to the limit. Ends when full, when unplugged, or after 12 hours.")
+            ScheduledFullChargeLines(model: model, status: status)
         }
     }
 
@@ -385,11 +402,12 @@ private struct FullChargeControl: View {
     /// and the backend has confirmed the mode it needs.
     private func fullChargeText(_ override: ChargeOverride) -> String {
         let until = "until full, unplugged, or \(override.expiresAt.formatted(date: .omitted, time: .shortened))"
+        let scheduled = override.source == .schedule ? "Scheduled: " : ""
         switch overrideProgress(runningIn: .fullChargeOverride) {
-        case .unavailable: return "Full charge requested, but charging control is unavailable"
-        case .notInEffect(let why): return "Full charge requested, not in effect\(why)"
-        case .running(simulated: true): return "Simulating a charge to 100% \(until)"
-        case .running(simulated: false): return "Charging to 100% \(until)"
+        case .unavailable: return "\(scheduled)Full charge requested, but charging control is unavailable"
+        case .notInEffect(let why): return "\(scheduled)Full charge requested, not in effect\(why)"
+        case .running(simulated: true): return "\(scheduled)Simulating a charge to 100% \(until)"
+        case .running(simulated: false): return "\(scheduled)Charging to 100% \(until)"
         }
     }
 
@@ -424,6 +442,39 @@ private struct FullChargeControl: View {
             return .notInEffect(why: status.lastExecution.map { " (\($0.result.title))" } ?? "")
         }
         return .running(simulated: status.capabilities.availability == .simulated)
+    }
+}
+
+/// The menu's lines for a scheduled full charge: the armed window (or why a
+/// due one cannot start yet), and what became of the latest one. The wording
+/// is `FullChargeScheduleWording`'s.
+private struct ScheduledFullChargeLines: View {
+    let model: AppModel
+    let status: ControllerStatus
+
+    var body: some View {
+        if let schedule = status.fullChargeSchedule {
+            HStack(alignment: .firstTextBaseline) {
+                Label(FullChargeScheduleWording.armedLine(schedule, wait: status.fullChargeScheduleWait), systemImage: "calendar.badge.clock")
+                    .foregroundStyle(status.fullChargeScheduleWait == nil ? Color.primary : Color.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("Cancel") { model.cancelFullChargeSchedule() }
+                    .controlSize(.small)
+            }
+            .font(.caption)
+        }
+        if let outcome = status.fullChargeScheduleOutcome, let line = FullChargeScheduleWording.outcomeLine(outcome) {
+            HStack(alignment: .firstTextBaseline) {
+                Label(line, systemImage: "calendar")
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("OK") { model.dismissFullChargeScheduleOutcome() }
+                    .controlSize(.small)
+            }
+            .font(.caption)
+        }
     }
 }
 

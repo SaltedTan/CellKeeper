@@ -67,6 +67,8 @@ final class AppModel {
     private(set) var backendChoice: ControlBackendChoice
     /// Validation or persistence problem with the most recent settings change.
     private(set) var settingsError: String?
+    /// Why the most recent scheduled full charge was not set.
+    private(set) var scheduleError: String?
     /// Set when stored settings were unusable and defaults were loaded.
     private(set) var settingsRecoveryMessage: String?
     /// macOS's system-wide thermal state and Low Power Mode, shown for
@@ -97,6 +99,9 @@ final class AppModel {
         case startFullCharge
         case startDischarge
         case cancelOverride
+        case setSchedule(FullChargeSchedule)
+        case cancelSchedule
+        case dismissScheduleOutcome
         case switchBackend(ControlBackendChoice)
         case resetFault
         case recheckBackend
@@ -146,7 +151,11 @@ final class AppModel {
     /// told about sleep and wake.
     @ObservationIgnored private var inProcessHelpers: [WeakInProcessHelper] = []
 
-    init(store: SettingsStore = SettingsStore(), telemetry: any TelemetryProvider = SystemTelemetryProvider()) {
+    init(
+        store: SettingsStore = SettingsStore(),
+        telemetry: any TelemetryProvider = SystemTelemetryProvider(),
+        scheduleStore: any FullChargeScheduleStoring = FullChargeScheduleStore()
+    ) {
         var loaded = store.loadChargingSettings()
         // While an adoption marker exists, CellKeeper kept a Charge Limit
         // changed outside it and the user has not turned management on
@@ -170,7 +179,13 @@ final class AppModel {
         let needsRecovery = choice != .nativeLimit && NativeChargeLimitBackend.hasOutstandingRecord(in: FileOwnershipRecordStore.default)
         self.startupSwitch = needsRecovery ? choice : nil
         let backend = needsRecovery ? ControlBackendChoice.nativeLimit.makeBackend() : choice.makeBackend()
-        self.controller = ChargeController(telemetry: telemetry, backend: backend, settings: loaded.settings, adoptionMarkerStore: FileOwnershipRecordStore.default)
+        self.controller = ChargeController(
+            telemetry: telemetry,
+            backend: backend,
+            settings: loaded.settings,
+            adoptionMarkerStore: FileOwnershipRecordStore.default,
+            scheduleStore: scheduleStore
+        )
         (commands, commandSink) = AsyncStream.makeStream(of: Command.self)
         noteInProcessHelper(of: backend)
     }
@@ -213,6 +228,13 @@ final class AppModel {
         for name in [ProcessInfo.thermalStateDidChangeNotification, Notification.Name.NSProcessInfoPowerStateDidChange] {
             observers.append(defaultCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in self?.readSystemConditions() }
+            })
+        }
+        // A scheduled full charge's window is wall-clock time: check it again
+        // at once when the clock or the time zone changes (research rule R22).
+        for name in [Notification.Name.NSSystemClockDidChange, Notification.Name.NSSystemTimeZoneDidChange] {
+            observers.append(defaultCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in self?.clockDidChange() }
             })
         }
 
@@ -261,6 +283,13 @@ final class AppModel {
                 await event(transport)
             }
         }
+    }
+
+    private func clockDidChange() {
+        // Foundation caches the system time zone; times are then shown in
+        // the new one.
+        NSTimeZone.resetSystemTimeZone()
+        send(.evaluate(.clockChanged))
     }
 
     private func readSystemConditions() {
@@ -367,6 +396,29 @@ final class AppModel {
 
     func cancelOverride() {
         send(.cancelOverride)
+    }
+
+    /// Arms a scheduled full charge from `start` to `end`, replacing any
+    /// armed one. A schedule that is not valid now is not sent, and
+    /// ``scheduleError`` says why.
+    func setFullChargeSchedule(start: Date, end: Date) {
+        let schedule = FullChargeSchedule(startsAt: start, endsAt: end)
+        let issues = schedule.issues(settingAt: Date())
+        guard issues.isEmpty else {
+            scheduleError = issues.map(\.description).joined(separator: " ")
+            return
+        }
+        scheduleError = nil
+        send(.setSchedule(schedule))
+    }
+
+    func cancelFullChargeSchedule() {
+        scheduleError = nil
+        send(.cancelSchedule)
+    }
+
+    func dismissFullChargeScheduleOutcome() {
+        send(.dismissScheduleOutcome)
     }
 
     /// Saves the choice at once: if the switch cannot complete in this
@@ -526,6 +578,29 @@ final class AppModel {
             status = await controller.startDischargeToLimit()
         case .cancelOverride:
             status = await controller.cancelOverride()
+        case .setSchedule(let schedule):
+            do {
+                let newStatus = try await controller.setFullChargeSchedule(schedule)
+                status = newStatus
+                // A schedule that started in the same evaluation is no longer
+                // armed, but it was set.
+                let wasUsed: Bool = switch newStatus.fullChargeScheduleOutcome {
+                case .started(let used)?, .alreadyFull(let used)?, .windowPassed(let used, _)?,
+                     .extendedRunning(let used, _)?, .keptRunning(let used, _)?:
+                    used == schedule
+                case .discarded?, nil:
+                    false
+                }
+                if newStatus.fullChargeSchedule != schedule, !wasUsed {
+                    scheduleError = "The schedule could not be set; Settings › Activity says why."
+                }
+            } catch {
+                scheduleError = "The schedule was not set: \(error)"
+            }
+        case .cancelSchedule:
+            status = await controller.cancelFullChargeSchedule()
+        case .dismissScheduleOutcome:
+            status = await controller.dismissFullChargeScheduleOutcome()
         case .switchBackend(let choice):
             let backend = choice.makeBackend()
             noteInProcessHelper(of: backend)
