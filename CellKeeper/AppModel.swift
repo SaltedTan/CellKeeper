@@ -427,27 +427,28 @@ final class AppModel {
     /// one clears it, a refused one shows why, an unchanged one leaves it.
     @discardableResult
     func changeSettings(_ proposed: ChargingSettings, source: SettingsChangeSource) -> SettingsChangeResult {
-        let result: SettingsChangeResult
-        if proposed == settings {
-            result = .unchanged
-        } else if case let issues = proposed.validationIssues, !issues.isEmpty {
-            result = .refused(issues.map(\.description).joined(separator: "\n"))
-        } else {
-            do {
-                try store.save(proposed)
-                result = .saved(previous: settings)
-                settings = proposed
-                send(.apply(proposed, adoptionsSeen: handledAdoptionCount, source: source))
-            } catch {
-                CellKeeperLog.settings.error("Could not save settings: \(String(describing: error), privacy: .private)")
-                result = .refused(SettingsChangeResult.saveFailed)
-            }
-        }
+        let result = commitSettings(proposed, source: source)
         settingsError = SettingsReconciliation.banner(after: result, source: source).applied(to: settingsError)
         if let message = SettingsReconciliation.logMessage(after: result, source: source) {
             CellKeeperLog.settings.notice("\(message, privacy: .public)")
         }
         return result
+    }
+
+    private func commitSettings(_ proposed: ChargingSettings, source: SettingsChangeSource) -> SettingsChangeResult {
+        guard proposed != settings else { return .unchanged }
+        let issues = proposed.validationIssues
+        guard issues.isEmpty else { return .refused(issues.map(\.description).joined(separator: "\n")) }
+        do {
+            try store.save(proposed)
+        } catch {
+            CellKeeperLog.settings.error("Could not save settings: \(String(describing: error), privacy: .private)")
+            return .refused(SettingsChangeResult.saveFailed)
+        }
+        let previous = settings
+        settings = proposed
+        send(.apply(proposed, adoptionsSeen: handledAdoptionCount, source: source))
+        return .saved(previous: previous)
     }
 
     /// A settings change from the UI. Returns true if the resulting settings
