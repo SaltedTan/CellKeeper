@@ -35,7 +35,8 @@ Limit** (80–100%) through a shortcut you create, and macOS enforces it.
 | Limits at any level (including below 80%), with CellKeeper switching charging itself | **Simulated** — choose **Simulated helper** in Settings › Control to try CellKeeper's own charge control at 20–100%, run through its helper's logic inside the app; nothing on your Mac changes. While macOS's own Charge Limit is on, it withholds new restrictions and asks for the release of any of its own; Settings › Control shows how to turn macOS's limit off (100% in System Settings › Battery) to try it, but the Simulated helper provides no replacement charge limit, so your Mac may then charge to 100%. **No hardware control yet**; the current priority — see [roadmap](docs/roadmap.md) milestone 4 and [issue #1](https://github.com/SaltedTan/CellKeeper/issues/1) |
 | Diagnostics report for bug reports, without serial numbers or other identifiers | **Real** — Settings › Activity › **Copy Diagnostics**, or **Save Diagnostics…** to a text file you choose |
 | Notifications: charging held at your limit (or, with macOS's Charge Limit, macOS reporting the battery at or above that limit and not charging), a temperature pause, a temporary full charge or discharge ending, a control fault, and a return to normal charging or to your own Charge Limit that CellKeeper cannot confirm (and what resolved it later) | **Real, opt-in** — off by default; turn on in Settings › Charging, and macOS asks for permission; you can turn them off there at any time. They say only what CellKeeper observed, and say so when its control is simulated |
-| Scheduled limits, recurring schedules, calibration, Shortcuts actions for CellKeeper's own controls, launch at login | Planned |
+| Shortcuts actions: set CellKeeper's limit, start or stop a temporary full charge, turn Manage charging on or off, get its status | **Implemented, not yet tried in the Shortcuts app on a Mac** — the same commands as the menu, with the same checks; see [Shortcuts actions](#shortcuts-actions) |
+| Scheduled limits, recurring schedules, calibration, launch at login | Planned |
 
 The menu bar always shows which kind of control is in effect: **Available**,
 **Experimental**, **Simulated**, or **Unavailable**.
@@ -106,6 +107,23 @@ next to Charging**. See [docs/safety.md](docs/safety.md#getting-your-own-charge-
 The research behind this backend is in
 [docs/research/08-native-charge-limit.md](docs/research/08-native-charge-limit.md).
 
+## Shortcuts actions
+
+In the Shortcuts app, CellKeeper offers **Set CellKeeper Limit**, **Start
+CellKeeper Full Charge**, **Stop CellKeeper Full Charge or Discharge**,
+**Set CellKeeper Manage Charging** and **Get CellKeeper Status**, and Siri
+and Spotlight know "Get CellKeeper status". They are the same commands as
+the menu, with the same checks: an action refuses, with the reason, what
+the menu would not offer. Set CellKeeper Limit is not Apple's **Set Charge
+Limit** action, nor the "CellKeeper Set Charge Limit" shortcut you may have
+created; it changes CellKeeper's own setting, which applies only while
+**Manage charging** is on.
+
+An action says what CellKeeper saved or was asked to do, not that your
+Mac's charging changed; the menu shows what happens next. If CellKeeper is
+not running, running an action opens it, and it starts managing charging
+with your saved settings, as when you open it.
+
 ## Requirements
 
 - **To run:** macOS 14 Sonoma or later. Telemetry has been verified on an
@@ -157,11 +175,11 @@ log stream --level info --predicate 'subsystem == "io.github.saltedtan.CellKeepe
 ## Architecture
 
 ```
-CellKeeper.app (SwiftUI menu bar, settings)
+CellKeeper.app (SwiftUI menu bar, settings, Shortcuts actions)
   └── CellKeeperKit   macOS adapters: read-only IOKit telemetry, power
                       notifications, the shortcuts and pmset runners, the
-                      record of your own Charge Limit, and local
-                      notifications (opt-in)
+                      record of your own Charge Limit, local notifications
+                      (opt-in), and what Shortcuts actions check and say
         └── CellKeeperCore   pure Swift: settings validation, charging policy
                              state machine, controller, backend protocol,
                              simulated, read-only and native Charge Limit
