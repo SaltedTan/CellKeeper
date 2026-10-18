@@ -1152,7 +1152,7 @@ decision, 2026-10-10). Each step and the outcome (`HelperUninstallOutcome`)
 are recorded in the activity log.
 
 Limitations:
-- The app does not call it yet; the button is a follow-up (issue #1).
+- The app does not call it yet; the button comes with phase 4b.
 - In the app today the registration is `NoHelperRegistration`, so a
   removal ends at its first step with "nothing to remove": nothing is
   restored, no helper is contacted, and the in-process Simulated helper
