@@ -188,8 +188,9 @@ Tracked in [issue #57](https://github.com/SaltedTan/CellKeeper/issues/57).
   built in phase 4a (`ChargeController.removeHelper`), with in-app help
   for the recovery procedure in `safety.md`. After a removal the app
   switches to the Simulated backend. Moved here from phase 4a's
-  follow-ups (owner decision, 2026-10-18): before the helper is
-  registered, the button could only remove the Simulated helper.
+  follow-ups (owner decision, 2026-10-18): until a helper is registered,
+  the removal flow reports "nothing to remove" and leaves the Simulated
+  helper running.
 
 ### Phase 4c — A verified mechanism (needs a dedicated test Mac)
 
