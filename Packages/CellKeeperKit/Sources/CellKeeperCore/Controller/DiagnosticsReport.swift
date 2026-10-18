@@ -320,7 +320,7 @@ public enum DiagnosticsReport {
     /// `date` in ISO 8601 with `utcOffset` ("Z" for zero), or in UTC if the
     /// offset is not one a time zone can have.
     static func timestamp(_ date: Date, utcOffset: Int) -> String {
-        guard let zone = TimeZone(secondsFromGMT: utcOffset) else { return timestamp(date) }
+        guard (-18 * 3600...18 * 3600).contains(utcOffset), let zone = TimeZone(secondsFromGMT: utcOffset) else { return timestamp(date) }
         return date.formatted(Date.ISO8601FormatStyle(timeZoneSeparator: .colon, timeZone: zone))
     }
 

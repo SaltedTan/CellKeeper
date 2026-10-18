@@ -38,15 +38,20 @@ public enum WeeklyFullChargeStoreError: Error, Sendable, Equatable {
 ///   key that is not JSON data, an unreadable record, or one that is not
 ///   valid (no day or a day outside 1–7, repeated days, a time of day or a
 ///   duration out of range, a record whose day is not a real date, whose
-///   start is not finite, whose offset is beyond ±18 hours, or whose result
-///   is unknown) is unusable; only no value at all counts as none.
+///   start is not in years 1–9999, whose offset is beyond ±18 hours, or
+///   whose result is unknown) is unusable; only no value at all counts as
+///   none. Every number is checked against its range before anything is
+///   computed with it, so no stored value can make loading trap.
 /// - Writes are read back and compared. That confirms what this process
 ///   reads, not that `UserDefaults` has reached the disk: after a crash or
 ///   power loss, the last write may be missing at the next launch.
 public final class WeeklyFullChargeStore: WeeklyFullChargeStoring, @unchecked Sendable {
     public static let key = "weeklyFullCharge.v1"
     /// Real offsets are within ±14 hours; anything beyond ±18 is not one.
-    static let maximumOffset = 18 * 3600
+    static let offsets = -18 * 3600...18 * 3600
+    /// A start in years 1–9999 (UTC), as a day can be (``LocalDay``), in
+    /// seconds since 1970.
+    static let starts = -62_135_596_800.0...253_402_300_799.0
 
     private struct Record: Codable {
         struct Handled: Codable {
@@ -99,9 +104,10 @@ public final class WeeklyFullChargeStore: WeeklyFullChargeStoring, @unchecked Se
                 return .unusable(reason: issue.description)
             }
             let handled = record.handled
+            // Ranges only: `abs` would trap on the most negative integer.
             guard let day = LocalDay(year: handled.year, month: handled.month, day: handled.day),
-                  handled.startsAt.isFinite,
-                  abs(handled.utcOffset) <= Self.maximumOffset,
+                  Self.starts.contains(handled.startsAt),
+                  Self.offsets.contains(handled.utcOffset),
                   let result = WeeklyFullChargeRecord.Result(rawValue: handled.result)
             else {
                 return .unusable(reason: "its record of the last weekly full charge is not valid")

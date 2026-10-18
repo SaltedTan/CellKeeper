@@ -280,6 +280,43 @@ struct WeeklyFullChargeStoreTests {
         #expect(store(changes) == .unusable(reason: reason))
     }
 
+    @Test("Extreme numbers in every numeric field are refused, never trapping", arguments: [
+        (["handled.utcOffset": "-9223372036854775808"], "its record of the last weekly full charge is not valid"),
+        (["handled.utcOffset": "9223372036854775807"], "its record of the last weekly full charge is not valid"),
+        (["handled.utcOffset": "64801"], "its record of the last weekly full charge is not valid"),
+        (["handled.startsAt": "1e300"], "its record of the last weekly full charge is not valid"),
+        (["handled.startsAt": "-1e300"], "its record of the last weekly full charge is not valid"),
+        (["handled.year": "-9223372036854775808"], "its record of the last weekly full charge is not valid"),
+        (["handled.year": "9223372036854775807"], "its record of the last weekly full charge is not valid"),
+        (["handled.month": "-9223372036854775808"], "its record of the last weekly full charge is not valid"),
+        (["handled.day": "9223372036854775807"], "its record of the last weekly full charge is not valid"),
+        (["hour": "-9223372036854775808"], "The start time is not valid."),
+        (["hour": "9223372036854775807"], "The start time is not valid."),
+        (["minute": "-9223372036854775808"], "The start time is not valid."),
+        (["minute": "9223372036854775807"], "The start time is not valid."),
+        (["durationHours": "-9223372036854775808"], "The duration must be 1–48 hours."),
+        (["durationHours": "9223372036854775807"], "The duration must be 1–48 hours."),
+        (["weekdays": "[-9223372036854775808]"], "The days are not valid."),
+        (["weekdays": "[9223372036854775807]"], "The days are not valid."),
+    ] as [([String: String], String)])
+    func extremes(changes: [String: String], reason: String) {
+        #expect(store(changes) == .unusable(reason: reason))
+    }
+
+    @Test("The offsets ±18 hours, and starts at the ends of years 1 and 9999, are accepted")
+    func bounds() throws {
+        for offset in ["-64800", "64800"] {
+            guard case .schedule(let loaded) = store(["handled.utcOffset": offset]) else {
+                Issue.record("offset \(offset) refused")
+                continue
+            }
+            #expect(loaded.handled.utcOffset == Int(offset))
+        }
+        #expect(store(["handled.startsAt": "-62135596800"]) != .unusable(reason: "its record of the last weekly full charge is not valid"))
+        #expect(store(["handled.startsAt": "253402300799"]) != .unusable(reason: "its record of the last weekly full charge is not valid"))
+        #expect(store(["handled.startsAt": "253402300800"]) == .unusable(reason: "its record of the last weekly full charge is not valid"))
+    }
+
     @Test("A missing field, a value that is not JSON, and one of another type cannot be used")
     func unreadable() {
         storage.set(try! JSONSerialization.data(withJSONObject: ["weekdays": [6], "hour": 7, "minute": 0, "durationHours": 12]), forKey: WeeklyFullChargeStore.key)
