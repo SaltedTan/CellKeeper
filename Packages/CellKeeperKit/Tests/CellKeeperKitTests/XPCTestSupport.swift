@@ -505,20 +505,113 @@ func eventually(within seconds: Double = 10, _ condition: () async -> Bool) asyn
     return await condition()
 }
 
+/// Thrown by ``bounded(within:releasing:_:)`` when its operation has not
+/// returned in time.
+struct WaitExpired: Error, CustomStringConvertible {
+    let seconds: Double
+
+    var description: String {
+        "gave up waiting after \(seconds) s"
+    }
+}
+
 /// Returns what `operation` returns, for an operation awaited while the test
 /// holds a call that, if the behaviour under test is right, the operation
-/// does not wait for. If it has not returned `seconds` after this is called,
-/// records an issue and calls `release`, which ends the hold: an operation
-/// that does wait for the held call fails the test in bounded time instead
-/// of hanging it.
-func bounded<Value>(within seconds: Double = 10, releasing release: @escaping @Sendable () -> Void, _ operation: () async -> Value) async -> Value {
-    let watchdog = Task {
-        try await Task.sleep(for: .seconds(seconds))
-        Issue.record("still waiting after \(seconds) s for something that should not wait for the call the test holds; released the call")
-        release()
+/// does not wait for. The operation runs in a task of its own. If it has not
+/// returned `seconds` after this is called, this records an issue, calls
+/// `release`, which ends the hold, and throws ``WaitExpired`` at once,
+/// without waiting for the operation any longer: an operation that waits for
+/// the held call, or for anything else, fails the test in bounded time
+/// instead of hanging it. The caller's cleanup belongs in `defer`s, which
+/// run when this throws.
+///
+/// The operation's task is cancelled then, but may run on, even after the
+/// test has returned, until what it waits for ends (`release` should end
+/// it). So an operation keeps alive what it uses by capturing it, records
+/// no issue, and uses nothing that another test uses: each caller's
+/// operation only awaits its own test's tasks, client, engine or daemon.
+func bounded<Value: Sendable>(
+    within seconds: Double = 10,
+    releasing release: @escaping @Sendable () -> Void,
+    _ operation: @escaping @Sendable () async -> Value
+) async throws -> Value {
+    let wait = BoundedWait<Value>()
+    return try await withCheckedThrowingContinuation { continuation in
+        wait.begin(continuation)
+        let work = Task {
+            wait.finish(returning: await operation())
+        }
+        let timer = Task {
+            do {
+                try await Task.sleep(for: .seconds(seconds))
+            } catch {
+                return
+            }
+            wait.expire(after: seconds) {
+                Issue.record("Gave up after \(seconds) s waiting for something that should not wait for the call the test holds; released the call.")
+                release()
+            }
+        }
+        wait.adopt([work, timer])
     }
-    defer { watchdog.cancel() }
-    return await operation()
+}
+
+/// The two sides of ``bounded(within:releasing:_:)``: the first to finish
+/// resumes the caller, and both tasks are then cancelled. The operation's
+/// task may run on; nothing waits for it.
+private final class BoundedWait<Value: Sendable>: @unchecked Sendable {
+    // @unchecked Sendable: all state is guarded by `lock`.
+
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Value, any Error>?
+    private var tasks: [Task<Void, Never>] = []
+
+    func begin(_ continuation: CheckedContinuation<Value, any Error>) {
+        lock.withLock { self.continuation = continuation }
+    }
+
+    func adopt(_ tasks: [Task<Void, Never>]) {
+        let isFinished = lock.withLock { () -> Bool in
+            guard continuation != nil else { return true }
+            self.tasks = tasks
+            return false
+        }
+        if isFinished {
+            for task in tasks {
+                task.cancel()
+            }
+        }
+    }
+
+    func finish(returning value: Value) {
+        guard let (continuation, tasks) = take() else { return }
+        for task in tasks {
+            task.cancel()
+        }
+        continuation.resume(returning: value)
+    }
+
+    /// Runs `giveUp` and throws to the caller, unless the operation has
+    /// returned.
+    func expire(after seconds: Double, _ giveUp: () -> Void) {
+        guard let (continuation, tasks) = take() else { return }
+        giveUp()
+        for task in tasks {
+            task.cancel()
+        }
+        continuation.resume(throwing: WaitExpired(seconds: seconds))
+    }
+
+    /// The caller's continuation and both tasks, for the first side to
+    /// finish; nil for the other.
+    private func take() -> (CheckedContinuation<Value, any Error>, [Task<Void, Never>])? {
+        lock.withLock {
+            guard let continuation else { return nil }
+            self.continuation = nil
+            defer { tasks = [] }
+            return (continuation, tasks)
+        }
+    }
 }
 
 /// Every reply of a helper connection, comparable across transports.
@@ -678,18 +771,12 @@ final class TestDeadline: @unchecked Sendable {
     }
 
     /// Returns what `stop`, a stop by this deadline, returned. If it has not
-    /// returned `seconds` after this is called, records an issue and
-    /// expires the deadline, which makes the stop cut off what remains and
-    /// return: a stop that would wait forever fails the test in bounded
-    /// time instead.
-    func value(of stop: Task<Bool, Never>, within seconds: Double = 10) async -> Bool {
-        let watchdog = Task {
-            try await Task.sleep(for: .seconds(seconds))
-            Issue.record("the stop had not returned after \(seconds) s, so its deadline was expired")
-            expire()
-        }
-        defer { watchdog.cancel() }
-        return await stop.value
+    /// returned `seconds` after this is called, records an issue, expires
+    /// the deadline (which should make the stop cut off what remains and
+    /// return), and throws ``WaitExpired`` without waiting for the stop any
+    /// longer: see ``bounded(within:releasing:_:)``.
+    func value(of stop: Task<Bool, Never>, within seconds: Double = 10) async throws -> Bool {
+        try await bounded(within: seconds, releasing: { [self] in expire() }) { await stop.value }
     }
 
     /// Returns once ``expire()`` has been called, or when the task is
@@ -777,5 +864,40 @@ final class Flag: @unchecked Sendable {
 
     func set() {
         lock.withLock { isSet = true }
+    }
+}
+
+@Suite("Test support: bounded waits")
+struct BoundedWaitTests {
+    @Test("A bounded wait that runs out records an issue, releases the hold and throws without waiting for its operation, which ends once what it waits for does")
+    func expiry() async {
+        let never = XPCGate()
+        let released = Flag()
+        let operationReturned = Flag()
+        let gaveUp = Flag()
+        await withKnownIssue("the bound records an issue when it runs out") {
+            do {
+                try await bounded(within: 0.05, releasing: { released.set() }) {
+                    await never.wait()
+                    operationReturned.set()
+                }
+            } catch is WaitExpired {
+                gaveUp.set()
+            }
+        }
+        #expect(gaveUp.value)
+        #expect(released.value)
+        #expect(!operationReturned.value)
+        // Left running, the operation ends once what it waits for does,
+        // before this test returns.
+        never.open()
+        let ended = await eventually { operationReturned.value }
+        #expect(ended)
+    }
+
+    @Test("A bounded wait returns what its operation returns")
+    func value() async throws {
+        let value = try await bounded(releasing: {}) { 42 }
+        #expect(value == 42)
     }
 }

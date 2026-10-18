@@ -184,6 +184,7 @@ struct HelperDaemonXPCTests {
         )
         #expect(try await client.hello(clientProtocolVersion: HelperProtocolVersion.current).status == .ok)
         control.holdNextReadBack()
+        defer { control.release() }
         let inFlight = Task { await clientFailure { _ = try await client.readState() } }
         let held = await eventually { control.isHolding }
         #expect(held)
@@ -202,7 +203,7 @@ struct HelperDaemonXPCTests {
         late.open()
         // No further time passes: the timer finds its deadline gone, and the
         // stop returns without waiting for the request in the engine.
-        let drained = await bounded(releasing: { control.release() }) { await stopping.value }
+        let drained = try await bounded(releasing: { control.release() }) { await stopping.value }
         #expect(!drained)
         #expect(control.isHolding)
 

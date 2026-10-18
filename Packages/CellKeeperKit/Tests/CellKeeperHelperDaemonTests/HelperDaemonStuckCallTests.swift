@@ -134,10 +134,11 @@ struct HelperDaemonStuckCallTests {
         let restoresBefore = control.restoreCount
         h.log.block()
         let log = h.log
+        defer { log.release() }
 
         // The engine answers while the log is held: its sink does not wait
         // for the log (see sinkDoesNotWait).
-        await bounded(releasing: { log.release() }) { await h.beginShutdown(path, on: session) }
+        try await bounded(releasing: { log.release() }) { await h.beginShutdown(path, on: session) }
         var elapsed: TimeInterval = 0
         let retries = Int(HelperDaemon.terminationDeadline - HelperDaemon.finalisationReserve)
         for second in 0..<retries {
@@ -178,10 +179,15 @@ struct HelperDaemonStuckCallTests {
         #expect(await h.activate(.chargingInhibited, on: session) == .ok)
         h.log.block()
         let log = h.log
+        let frontend = h.frontend
+        defer {
+            log.release()
+            frontend.confirmStop()
+        }
 
         // The engine answers while the log is held: its sink does not wait
         // for the log (see sinkDoesNotWait).
-        await bounded(releasing: { log.release() }) { await h.beginShutdown(path, on: session) }
+        try await bounded(releasing: { log.release() }) { await h.beginShutdown(path, on: session) }
         let retries = Int(HelperDaemon.terminationDeadline - HelperDaemon.finalisationReserve)
         for _ in 0..<retries {
             let waiting = await eventually { h.clock.waits.count == 3 }
@@ -192,11 +198,11 @@ struct HelperDaemonStuckCallTests {
         // then a late request makes a restore owed again.
         let flushing = await eventually { h.clock.waits.contains(HelperDaemon.logFlushTimeout - 0.001...HelperDaemon.logFlushTimeout) }
         #expect(flushing)
-        let safe = await bounded(releasing: { log.release() }) { await h.daemon.engine.isSafeToExit }
+        let safe = try await bounded(releasing: { log.release() }) { await h.daemon.engine.isSafeToExit }
         #expect(safe)
         control.simulateOutsideChange(.chargingInhibited, active: true)
         control.failNextRestores(1)
-        let (restored, owed) = await bounded(releasing: { log.release() }) {
+        let (restored, owed) = try await bounded(releasing: { log.release() }) {
             let restored = await late.restoreDefaults()
             return (restored, await h.daemon.engine.isSafeToExit)
         }
@@ -228,19 +234,20 @@ struct HelperDaemonStuckCallTests {
         #expect(await h.activate(.chargingInhibited, on: session) == .ok)
         h.log.block()
         let log = h.log
+        defer { log.release() }
 
         // The engine answers while the log is held: its sink does not wait
         // for the log (see sinkDoesNotWait).
-        await bounded(releasing: { log.release() }) { await h.beginShutdown(path, on: session) }
+        try await bounded(releasing: { log.release() }) { await h.beginShutdown(path, on: session) }
         // The frontend confirmed and defaults are confirmed at once; the
         // daemon now waits for the log.
         let flushing = await eventually { h.clock.waits.contains(HelperDaemon.logFlushTimeout - 0.001...HelperDaemon.logFlushTimeout) }
         #expect(flushing)
-        let safe = await bounded(releasing: { log.release() }) { await h.daemon.engine.isSafeToExit }
+        let safe = try await bounded(releasing: { log.release() }) { await h.daemon.engine.isSafeToExit }
         #expect(safe)
         control.simulateOutsideChange(.chargingInhibited, active: true)
         control.failNextRestores(1)
-        let restored = await bounded(releasing: { log.release() }) { await rogue.restoreDefaults() }
+        let restored = try await bounded(releasing: { log.release() }) { await rogue.restoreDefaults() }
         #expect(restored == .hardwareError)
 
         h.clock.advance(by: HelperDaemon.logFlushTimeout)
@@ -304,12 +311,13 @@ struct HelperDaemonStuckCallTests {
             log.release()
             store.release()
         }
-        let session = await bounded(releasing: releaseBoth) { await h.introducedSession() }
+        defer { releaseBoth() }
+        let session = try await bounded(releasing: releaseBoth) { await h.introducedSession() }
         let held = await eventually { h.log.isWaiting }
         #expect(held)
         // The engine keeps serving: each call delivers its events to the
         // sink and returns while the log is still held.
-        let (activation, active) = await bounded(releasing: releaseBoth) {
+        let (activation, active) = try await bounded(releasing: releaseBoth) {
             _ = await session.acquireOrRenewLease(control: HelperControl.chargingInhibited.rawValue, seconds: 900)
             let activation = await session.setControl(control: HelperControl.chargingInhibited.rawValue, active: true)
             return (activation, await session.readState().activeControls.controls)
