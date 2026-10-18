@@ -1,6 +1,7 @@
 @testable import CellKeeperCore
 import CellKeeperHelperCore
 import Foundation
+import Testing
 
 /// Every step the fakes saw, in order, across the controller's backend, the
 /// helper's transport and the registration.
@@ -34,9 +35,8 @@ final class CallLog: @unchecked Sendable {
     /// The waiter is registered before its timeout starts, so the timeout
     /// always finds it (or finds it already resumed); the limit counts from
     /// the call, whenever the timeout task runs.
-    @discardableResult
     func waitFor(_ entry: String, occurrences: Int = 1, within limit: Duration = testWaitLimit) async -> Bool {
-        let expiresAt = ContinuousClock.now.advanced(by: limit)
+        let expiresAt = SuspendingClock.now.advanced(by: limit)
         let id = lock.withLock {
             nextWaiter += 1
             return nextWaiter
@@ -52,7 +52,7 @@ final class CallLog: @unchecked Sendable {
                 return
             }
             let timeout = Task { [weak self] in
-                try? await Task.sleep(until: expiresAt, clock: .continuous)
+                try? await Task.sleep(until: expiresAt, clock: .suspending)
                 self?.giveUp(id)
             }
             let isWaiting = lock.withLock {
@@ -82,24 +82,42 @@ final class CallLog: @unchecked Sendable {
     }
 }
 
-/// The longest any wait in these tests lasts: a test that goes wrong fails
-/// or moves on instead of hanging the run.
+/// How long a bounded wait in these tests waits for what it expects. One
+/// that gives up reports it, and the test records an issue (see
+/// ``expectLogged(_:_:occurrences:)``), so a test that goes wrong fails
+/// instead of hanging the run. The limits here are measured on
+/// `SuspendingClock`: time the Mac spends asleep is not a hang.
 let testWaitLimit: Duration = .seconds(10)
 
-/// Holds whoever waits until the test opens it, or until ``testWaitLimit``
-/// has passed, so a stall never outlives a failing test for long.
+/// How long a ``Gate`` holds a call the test has not let through, and how
+/// long a ``ManualDeadlineClock`` timer waits for the test to move the
+/// clock: three times ``testWaitLimit``, because a test here makes up to
+/// two bounded waits while it holds a call or a timer waits for it.
+let gateLimit: Duration = testWaitLimit * 3
+
+/// Holds whoever waits until the test opens it. A call it still holds after
+/// its limit records an issue, which fails the test, and is then let
+/// through, so a failing test does not hang the run: a test that goes on
+/// past a gate it did not open fails.
 final class Gate: @unchecked Sendable {
+    private let limit: Duration
     private let lock = NSLock()
     private var isOpen = false
     private var waiters: [Int: CheckedContinuation<Void, Never>] = [:]
     private var timeouts: [Int: Task<Void, Never>] = [:]
     private var nextWaiter = 0
 
-    /// Returns once the gate is open, or ``testWaitLimit`` after the call.
-    /// The waiter is registered before its timeout starts, so the timeout
-    /// always finds it (or finds it already released).
+    /// - Parameter limit: for the test of the gate itself; otherwise
+    ///   ``gateLimit``.
+    init(limit: Duration = gateLimit) {
+        self.limit = limit
+    }
+
+    /// Returns once the gate is open; or, having recorded an issue, `limit`
+    /// after the call. The waiter is registered before its timeout starts,
+    /// so the timeout always finds it (or finds it already released).
     func wait() async {
-        let expiresAt = ContinuousClock.now.advanced(by: testWaitLimit)
+        let expiresAt = SuspendingClock.now.advanced(by: limit)
         let id = lock.withLock {
             nextWaiter += 1
             return nextWaiter
@@ -115,8 +133,8 @@ final class Gate: @unchecked Sendable {
                 return
             }
             let timeout = Task { [weak self] in
-                try? await Task.sleep(until: expiresAt, clock: .continuous)
-                self?.release(id)
+                try? await Task.sleep(until: expiresAt, clock: .suspending)
+                self?.expire(id)
             }
             let isWaiting = lock.withLock {
                 guard waiters[id] != nil else { return false }
@@ -141,8 +159,12 @@ final class Gate: @unchecked Sendable {
         }
     }
 
-    private func release(_ id: Int) {
-        lock.withLock { waiters.removeValue(forKey: id) }?.resume()
+    /// A waiter the gate still holds at its limit (not one that `open()`
+    /// released meanwhile) fails the test, then goes on.
+    private func expire(_ id: Int) {
+        guard let continuation = lock.withLock({ waiters.removeValue(forKey: id) }) else { return }
+        Issue.record("a gate held a call for \(limit) without being opened; the call was let through so that the run goes on")
+        continuation.resume()
     }
 }
 
@@ -421,14 +443,42 @@ struct RemovalTestConnection: HelperConnection {
     }
 }
 
-/// A helper engine run in process (``InProcessHelperTransport``) on a
+/// Connects to a helper engine in process as ``InProcessHelperTransport``
+/// does: the engine is started before it serves a session, and a session it
+/// revokes is a closed connection (``InProcessHelperConnection``). Unlike
+/// that transport it has no ticker, so the engine is ticked only when a
+/// test calls ``HelperEngine/tick()``.
+struct UntickedHelperTransport: HelperTransport {
+    let engine: HelperEngine
+    private let revoked: RevokedSessions
+
+    init(control: any HelperChargeControl, power: any HelperPowerReading, build: Int, uptime: @escaping @Sendable () -> TimeInterval) {
+        let revoked = RevokedSessions()
+        engine = HelperEngine(control: control, power: power, build: build, uptime: uptime, events: { event in
+            if case .sessionRevoked(let id) = event {
+                revoked.insert(id)
+            }
+        })
+        self.revoked = revoked
+    }
+
+    func connect() async throws -> any HelperConnection {
+        await engine.start()
+        return InProcessHelperConnection(session: await engine.openSession(), revoked: revoked)
+    }
+}
+
+/// A helper engine run in process (``UntickedHelperTransport``) on a
 /// simulated control, reached through a ``RemovalTestTransport``, with a
 /// fake registration; every step goes to one ``CallLog``.
+///
+/// Only the test ticks the engine. That matters: a tick during shutdown
+/// retries a restore that failed, which ends the state a test checks.
 struct RemovalRig {
     let clock = TestClock()
     let log = CallLog()
     let control: SimulatedChargeControl
-    let helper: InProcessHelperTransport
+    let helper: UntickedHelperTransport
     let transport: RemovalTestTransport
     let registration: FakeHelperRegistration
 
@@ -439,7 +489,7 @@ struct RemovalRig {
         let control = SimulatedChargeControl()
         self.control = control
         let clock = clock
-        helper = InProcessHelperTransport(
+        helper = UntickedHelperTransport(
             control: chargeControl ?? control,
             power: StubHelperPower(clock: clock),
             build: 7,
@@ -454,10 +504,11 @@ struct RemovalRig {
     }
 
     /// A removal whose deadlines are judged on `clock`, whose timers wake
-    /// only when the test advances it. By default the clock never moves, so
-    /// no call can time out: only a call the test holds, and only once the
-    /// test advances the clock after seeing that call wait, ever does. A
-    /// test therefore never depends on how fast the scheduler runs.
+    /// only when the test advances it. By default the test never advances
+    /// it, so in a passing test a call times out only if the test holds it
+    /// and advances the clock after seeing it wait. Otherwise a call times
+    /// out only once a timer has waited past the clock's limit, which fails
+    /// the test.
     func removal(
         helperDeadline: Duration = HelperRemoval.defaultHelperDeadline,
         registrationDeadline: Duration = HelperRemoval.defaultRegistrationDeadline,
@@ -543,31 +594,54 @@ final class Observed<Value: Sendable>: @unchecked Sendable {
 }
 
 /// A monotonic clock for deadline tests. Time moves only when the test
-/// advances it, and a timer wakes once its time has come, unless the test
-/// holds the timers back: then the deadline has passed by the clock, but no
-/// timer has woken to check it.
+/// advances it (or once the clock has run out, below), and a timer wakes
+/// once its time has come, unless the test holds the timers back: then the
+/// deadline has passed by the clock, but no timer has woken to check it.
 ///
 /// A timer checks its deadline once before it first waits, so holding the
 /// timers keeps one from deciding only once it waits. A test that holds
 /// the timers therefore first awaits ``waitForSuspendedTimer(dueIn:)``.
+///
+/// A timer that waits longer than its limit for the test to move the clock
+/// fails the test, and the clock runs out (see ``runOut(ifStillWaiting:)``),
+/// so a removal whose evidence never comes ends instead of hanging the test.
 final class ManualDeadlineClock: @unchecked Sendable {
+    /// How far each reading moves a clock that has run out: more than any
+    /// deadline here.
+    private static let runOutStep: Duration = .seconds(86_400)
+
+    private let limit: Duration
     private let lock = NSLock()
     private let origin = ContinuousClock.now
     private var elapsed: Duration = .zero
     private var isHeld = false
+    private var hasRunOut = false
     private var sleepers: [Int: (due: Duration, continuation: CheckedContinuation<Void, Never>)] = [:]
     private var cancelledSleepers: Set<Int> = []
+    private var watchdogs: [Int: Task<Void, Never>] = [:]
     private var nextSleeper = 0
     private var suspensionWaiters: [Int: (due: Duration, continuation: CheckedContinuation<Bool, Never>)] = [:]
     private var suspensionTimeouts: [Int: Task<Void, Never>] = [:]
     private var nextSuspensionWaiter = 0
+
+    /// - Parameter limit: how long a timer waits for the test to move the
+    ///   clock before the clock runs out; for the test of the clock itself,
+    ///   otherwise ``gateLimit``.
+    init(limit: Duration = gateLimit) {
+        self.limit = limit
+    }
 
     var removalClock: RemovalClock {
         RemovalClock(now: { self.now() }, wake: { await self.wake(at: $0) })
     }
 
     func now() -> ContinuousClock.Instant {
-        lock.withLock { origin.advanced(by: elapsed) }
+        lock.withLock {
+            if hasRunOut {
+                elapsed += Self.runOutStep
+            }
+            return origin.advanced(by: elapsed)
+        }
     }
 
     /// Moves time on, and wakes the timers now due unless they are held.
@@ -603,7 +677,7 @@ final class ManualDeadlineClock: @unchecked Sendable {
     /// ``testWaitLimit``. The waiter is registered before its timeout
     /// starts, so the timeout always finds it.
     func waitForSuspendedTimer(dueIn duration: Duration) async -> Bool {
-        let expiresAt = ContinuousClock.now.advanced(by: testWaitLimit)
+        let expiresAt = SuspendingClock.now.advanced(by: testWaitLimit)
         let (id, due) = lock.withLock {
             nextSuspensionWaiter += 1
             return (nextSuspensionWaiter, elapsed + duration)
@@ -619,7 +693,7 @@ final class ManualDeadlineClock: @unchecked Sendable {
                 return
             }
             let timeout = Task { [weak self] in
-                try? await Task.sleep(until: expiresAt, clock: .continuous)
+                try? await Task.sleep(until: expiresAt, clock: .suspending)
                 self?.giveUpWaitingForSuspension(id)
             }
             let isWaiting = lock.withLock {
@@ -647,10 +721,31 @@ final class ManualDeadlineClock: @unchecked Sendable {
         return ready.values.map(\.continuation)
     }
 
+    /// A timer that has waited `limit` for the test to move the clock fails
+    /// the test, and the clock runs out: from then on every reading is a day
+    /// after the one before and every timer wakes at once. A deadline, also
+    /// one set after that, has then passed whenever it is checked, so the
+    /// removal ends.
+    private func runOut(ifStillWaiting id: Int) {
+        let woken: [CheckedContinuation<Void, Never>]? = lock.withLock {
+            guard sleepers[id] != nil else { return nil }
+            hasRunOut = true
+            defer { sleepers = [:] }
+            return sleepers.values.map(\.continuation)
+        }
+        guard let woken else { return }
+        Issue.record("a deadline's timer waited \(limit) for the test to move the clock; the clock ran out so that the removal ends")
+        for continuation in woken {
+            continuation.resume()
+        }
+    }
+
     /// Returns once the clock has reached `instant` and timers are not
-    /// held, or when the calling task is cancelled.
+    /// held, or when the calling task is cancelled, or once the clock has
+    /// run out.
     private func wake(at instant: ContinuousClock.Instant) async {
         let due = origin.duration(to: instant)
+        let watchdogExpiry = SuspendingClock.now.advanced(by: limit)
         let id = lock.withLock {
             nextSleeper += 1
             return nextSleeper
@@ -659,13 +754,28 @@ final class ManualDeadlineClock: @unchecked Sendable {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 let (wakesNow, suspended): (Bool, [CheckedContinuation<Bool, Never>]) = lock.withLock {
                     if cancelledSleepers.remove(id) != nil { return (true, []) }
-                    if !isHeld, due <= elapsed { return (true, []) }
+                    if hasRunOut || (!isHeld && due <= elapsed) { return (true, []) }
                     sleepers[id] = (due, continuation)
                     let ids = suspensionWaiters.filter { $0.value.due == due }.map(\.key)
                     return (false, ids.compactMap { suspensionWaiters.removeValue(forKey: $0)?.continuation })
                 }
                 if wakesNow {
                     continuation.resume()
+                } else {
+                    // Registered after the sleeper, so it always finds it
+                    // (or finds it already woken).
+                    let watchdog = Task { [weak self] in
+                        try? await Task.sleep(until: watchdogExpiry, clock: .suspending)
+                        self?.runOut(ifStillWaiting: id)
+                    }
+                    let isWaiting = lock.withLock {
+                        guard sleepers[id] != nil else { return false }
+                        watchdogs[id] = watchdog
+                        return true
+                    }
+                    if !isWaiting {
+                        watchdog.cancel()
+                    }
                 }
                 for waiter in suspended {
                     waiter.resume(returning: true)
@@ -681,12 +791,14 @@ final class ManualDeadlineClock: @unchecked Sendable {
             }
             continuation?.resume()
         }
+        lock.withLock { watchdogs.removeValue(forKey: id) }?.cancel()
     }
 }
 
-/// A removal whose deadlines are judged on a clock that never moves, so no
-/// call can time out: for tests that hold nothing and must not depend on
-/// how fast the scheduler runs.
+/// A removal whose deadlines are judged on a ``ManualDeadlineClock`` the
+/// test never advances, so no call times out unless a timer waits past the
+/// clock's limit, which fails the test: for tests that hold nothing and
+/// must not depend on how fast the scheduler runs.
 func removalThatNeverTimesOut(transport: any HelperTransport, registration: any HelperRegistration) -> HelperRemoval {
     HelperRemoval(
         transport: transport,

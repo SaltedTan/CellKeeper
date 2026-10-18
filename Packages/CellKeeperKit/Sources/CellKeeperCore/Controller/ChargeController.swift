@@ -1334,6 +1334,12 @@ public actor ChargeController {
         }
     }
 
+    /// Callers waiting for the lock now; for tests that hold one caller's
+    /// backend request and need every other caller queued behind it.
+    var waitingCallerCount: Int {
+        waiters.count
+    }
+
     // MARK: - Event log
 
     /// Records an event in the activity log and unified logging. Telemetry

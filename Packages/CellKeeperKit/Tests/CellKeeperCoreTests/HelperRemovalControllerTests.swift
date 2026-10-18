@@ -6,7 +6,9 @@ import Testing
 /// The order across CellKeeper's own state and the helper: CellKeeper
 /// restores normal charging first, then the helper restores and exits, then
 /// it is unregistered; a failure stops the sequence at its step.
-@Suite("Helper removal from the controller")
+///
+/// The time limit is only a watchdog for a test that hangs.
+@Suite("Helper removal from the controller", .timeLimit(.minutes(1)))
 struct HelperRemovalControllerTests {
     private static let steps: Set<String> = ["backend.normal", "helper.restoreDefaultsAndExit", "registration.unregister"]
 
