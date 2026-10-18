@@ -149,6 +149,7 @@ struct WeeklyOccurrenceTests {
         #expect(occurrence.startsAt == utc("2026-10-23T06:00:00Z"))
         #expect(occurrence.endsAt == utc("2026-10-23T18:00:00Z"))
         #expect(occurrence.startUTCOffset == 3600)
+        #expect(occurrence.endUTCOffset == 3600)
         #expect(occurrence.startShift == 0)
         #expect(occurrence.window == FullChargeSchedule(startsAt: utc("2026-10-23T06:00:00Z"), endsAt: utc("2026-10-23T18:00:00Z")))
         #expect(occurrence.window.windowIssues.isEmpty)
@@ -175,7 +176,8 @@ struct WeeklyOccurrenceTests {
         let saturdayEvening = try #require(weekly([saturday], 20).occurrence(on: day(2026, 10, 31), in: newYork))
         #expect(saturdayEvening.startsAt == utc("2026-11-01T00:00:00Z"))
         #expect(saturdayEvening.endsAt == utc("2026-11-01T12:00:00Z"))
-        #expect(newYork.secondsFromGMT(for: saturdayEvening.endsAt) == -5 * 3600)
+        #expect(saturdayEvening.startUTCOffset == -4 * 3600)
+        #expect(saturdayEvening.endUTCOffset == -5 * 3600)
         // 48 hours from Saturday 07:00 BST end Monday 06:00 GMT.
         let long = try #require(weekly([saturday], 7, hours: 48).occurrence(on: day(2026, 10, 24), in: london))
         #expect(long.endsAt == utc("2026-10-26T06:00:00Z"))
@@ -207,11 +209,13 @@ struct WeeklyOccurrenceTests {
         #expect(repeated.latestOccurrence(startingAtOrBefore: utc("2026-11-01T06:30:00Z"), in: newYork)?.startsAt == utc("2026-11-01T05:30:00Z"))
     }
 
-    @Test("The first occurrence after now skips the days up to the handled one")
+    @Test("The first occurrence after now is strictly after it, and skips the days up to the handled one")
     func next() {
         let fridays = weekly([friday], 7)
         let beforeStart = utc("2026-10-23T05:00:00Z")
         #expect(fridays.firstOccurrence(startingAfter: beforeStart, onDayAfter: nil, in: london)?.day == day(2026, 10, 23))
+        // At the very start it is due, not next.
+        #expect(fridays.firstOccurrence(startingAfter: utc("2026-10-23T06:00:00Z"), onDayAfter: nil, in: london)?.day == day(2026, 10, 30))
         #expect(fridays.firstOccurrence(startingAfter: beforeStart, onDayAfter: day(2026, 10, 16), in: london)?.day == day(2026, 10, 23))
         // Friday was handled (the clock went back after it started).
         #expect(fridays.firstOccurrence(startingAfter: beforeStart, onDayAfter: day(2026, 10, 23), in: london)?.day == day(2026, 10, 30))
@@ -219,6 +223,15 @@ struct WeeklyOccurrenceTests {
         #expect(fridays.firstOccurrence(startingAfter: utc("2026-10-23T07:00:00Z"), onDayAfter: day(2026, 10, 16), in: london)?.day == day(2026, 10, 30))
         // A record three weeks ahead of the clock.
         #expect(fridays.firstOccurrence(startingAfter: beforeStart, onDayAfter: day(2026, 11, 13), in: london)?.startsAt == utc("2026-11-20T07:00:00Z"))
+    }
+
+    @Test("Just after a Monday-only start, the next is the following Monday: counted from yesterday, at offset 8")
+    func searchReachesTheFollowingWeek() {
+        let mondays = weekly([monday], 7)
+        // Monday 2026-10-19 07:00:01 BST; the following Monday is in GMT.
+        let justAfter = utc("2026-10-19T06:00:01Z")
+        #expect(mondays.firstOccurrence(startingAfter: justAfter, onDayAfter: nil, in: london)?.startsAt == utc("2026-10-26T07:00:00Z"))
+        #expect(mondays.firstOccurrence(startingAfter: justAfter, onDayAfter: day(2026, 10, 19), in: london)?.startsAt == utc("2026-10-26T07:00:00Z"))
     }
 
     @Test("Across time zones the same instant has different occurrences, and the handled day still counts")
@@ -254,6 +267,66 @@ struct WeeklyOccurrenceTests {
         let infinite = Date(timeIntervalSinceReferenceDate: .infinity)
         #expect(weekly([friday], 7).latestOccurrence(startingAtOrBefore: infinite, in: london) == nil)
         #expect(weekly([friday], 7).firstOccurrence(startingAfter: infinite, onDayAfter: nil, in: london) == nil)
+    }
+}
+
+/// Apia went from UTC−10 to UTC+14 at 2011-12-30 10:00Z: local 2011-12-29
+/// 24:00 became 2011-12-31 00:00, and Friday the 30th did not happen there.
+@Suite("Weekly full charge: a skipped day")
+struct SkippedDayTests {
+    let apia = TimeZone(identifier: "Pacific/Apia")!
+    let fridaysAndSaturdays = weekly([friday, saturday], 7)
+
+    @Test("The fixture is a real skipped day")
+    func fixture() {
+        #expect(apia.secondsFromGMT(for: utc("2011-12-30T09:59:59Z")) == -10 * 3600)
+        #expect(apia.secondsFromGMT(for: utc("2011-12-30T10:00:00Z")) == 14 * 3600)
+        #expect(LocalDay(containing: utc("2011-12-30T09:59:59Z"), in: apia) == day(2011, 12, 29))
+        #expect(LocalDay(containing: utc("2011-12-30T10:00:00Z"), in: apia) == day(2011, 12, 31))
+    }
+
+    @Test("Days are counted without the zone, so the skipped day is still the Friday between Thursday and Saturday")
+    func enumeration() {
+        #expect(day(2011, 12, 29).adding(days: 1) == day(2011, 12, 30))
+        #expect(day(2011, 12, 30).weekday == friday)
+        #expect(day(2011, 12, 31).weekday == saturday)
+    }
+
+    @Test("The skipped Friday's 07:00 is read with the offset before the skip, and starts with Saturday's")
+    func collision() throws {
+        let skipped = try #require(fridaysAndSaturdays.occurrence(on: day(2011, 12, 30), in: apia))
+        let saturdayThe31st = try #require(fridaysAndSaturdays.occurrence(on: day(2011, 12, 31), in: apia))
+        #expect(skipped.startsAt == utc("2011-12-30T17:00:00Z"))
+        #expect(saturdayThe31st.startsAt == utc("2011-12-30T17:00:00Z"))
+        #expect(skipped.startShift == 24 * hour)
+        #expect(saturdayThe31st.startShift == 0)
+    }
+
+    @Test("Of two occurrences that start together, the greater nominal day wins, both as the latest and as the next")
+    func greatestDayWins() {
+        let before = utc("2011-12-30T09:00:00Z")
+        let atStart = utc("2011-12-30T17:00:00Z")
+        #expect(fridaysAndSaturdays.latestOccurrence(startingAtOrBefore: atStart, in: apia)?.day == day(2011, 12, 31))
+        #expect(fridaysAndSaturdays.latestOccurrence(startingAtOrBefore: atStart.addingTimeInterval(-1), in: apia)?.day == day(2011, 12, 24))
+        #expect(fridaysAndSaturdays.firstOccurrence(startingAfter: before, onDayAfter: nil, in: apia)?.day == day(2011, 12, 31))
+        #expect(fridaysAndSaturdays.firstOccurrence(startingAfter: before, onDayAfter: day(2011, 12, 24), in: apia)?.day == day(2011, 12, 31))
+        let everyDay = weekly(Set(1...7), 7)
+        #expect(everyDay.latestOccurrence(startingAtOrBefore: atStart, in: apia)?.day == day(2011, 12, 31))
+        #expect(everyDay.firstOccurrence(startingAfter: utc("2011-12-29T18:00:00Z"), onDayAfter: day(2011, 12, 29), in: apia)?.day == day(2011, 12, 31))
+    }
+
+    @Test("Counting from just before or just after the shared start, the skipped Friday never comes after the 31st")
+    func aroundTheSkip() {
+        // Counted from just before: the latest started is Saturday the 24th, so the 31st comes next.
+        let beforeStart = utc("2011-12-30T16:00:00Z")
+        let handledBefore = fridaysAndSaturdays.latestOccurrence(startingAtOrBefore: beforeStart, in: apia)?.day
+        #expect(handledBefore == day(2011, 12, 24))
+        #expect(fridaysAndSaturdays.firstOccurrence(startingAfter: beforeStart, onDayAfter: handledBefore, in: apia)?.day == day(2011, 12, 31))
+        // Counted from just after: the 31st is the latest, so the next is Friday 2012-01-06 07:00 (+14).
+        let afterStart = utc("2011-12-30T18:00:00Z")
+        let handledAfter = fridaysAndSaturdays.latestOccurrence(startingAtOrBefore: afterStart, in: apia)?.day
+        #expect(handledAfter == day(2011, 12, 31))
+        #expect(fridaysAndSaturdays.firstOccurrence(startingAfter: afterStart, onDayAfter: handledAfter, in: apia)?.startsAt == utc("2012-01-05T17:00:00Z"))
     }
 }
 

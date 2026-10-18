@@ -1,8 +1,10 @@
 import Foundation
 
 /// A calendar day with no time zone: a floating Gregorian date, such as the
-/// Friday a weekly full charge belongs to. It identifies an occurrence of a
-/// ``WeeklyFullChargePattern`` wherever the Mac is.
+/// Friday a weekly full charge belongs to. As an occurrence's nominal day it
+/// identifies an occurrence of a ``WeeklyFullChargePattern`` wherever the
+/// Mac is. Days are counted and their weekdays found without any time zone,
+/// so a day a zone skips (Apia's 2011-12-30) is still a day.
 public struct LocalDay: Sendable, Hashable, Comparable, CustomStringConvertible {
     public let year: Int
     public let month: Int
@@ -102,7 +104,7 @@ public struct LocalDay: Sendable, Hashable, Comparable, CustomStringConvertible 
 ///
 /// Times are floating local times: "Friday 07:00" is 07:00 on a Friday in
 /// whatever time zone the Mac is in when it is checked. Each occurrence
-/// belongs to one local day (``LocalDay``), and each day has at most one.
+/// belongs to one nominal day (``LocalDay``), and each day has at most one.
 /// The duration is elapsed time, so a daylight-saving change inside a window
 /// moves the clock time it ends at.
 public struct WeeklyFullChargePattern: Sendable, Equatable {
@@ -152,13 +154,15 @@ public struct WeeklyFullChargePattern: Sendable, Equatable {
     public func occurrence(on day: LocalDay, in timeZone: TimeZone) -> WeeklyFullChargeOccurrence? {
         guard issues.isEmpty, weekdays.contains(day.weekday) else { return nil }
         let start = day.instant(hour: hour, minute: minute, in: timeZone)
+        let end = start.addingTimeInterval(duration)
         let offset = timeZone.secondsFromGMT(for: start)
         let asWritten = day.utcMidnight.addingTimeInterval(TimeInterval(hour * 3600 + minute * 60))
         return WeeklyFullChargeOccurrence(
             day: day,
             startsAt: start,
-            endsAt: start.addingTimeInterval(duration),
+            endsAt: end,
             startUTCOffset: offset,
+            endUTCOffset: timeZone.secondsFromGMT(for: end),
             startShift: start.addingTimeInterval(TimeInterval(offset)).timeIntervalSince(asWritten)
         )
     }
@@ -166,7 +170,10 @@ public struct WeeklyFullChargePattern: Sendable, Equatable {
     /// The latest occurrence whose start is at or before `now` in
     /// `timeZone`, or nil if the pattern is not valid or `now` not finite.
     /// It is the only occurrence that can still start or pass: an earlier
-    /// one started earlier and, with the same duration, ends earlier.
+    /// one started earlier and, with the same duration, ends earlier. Of
+    /// occurrences that start at the same instant (a skipped day, such as
+    /// Apia's 2011-12-30, starts with the next one), the one with the
+    /// greatest nominal day wins.
     public func latestOccurrence(startingAtOrBefore now: Date, in timeZone: TimeZone) -> WeeklyFullChargeOccurrence? {
         guard let today = LocalDay(containing: now, in: timeZone) else { return nil }
         // A week back always holds every weekday; a day either side covers
@@ -176,16 +183,20 @@ public struct WeeklyFullChargePattern: Sendable, Equatable {
             .max { ($0.startsAt, $0.day) < ($1.startsAt, $1.day) }
     }
 
-    /// The first occurrence that starts after `now` in `timeZone` on a day
-    /// after `handled` (any day if nil), or nil if the pattern is not valid
-    /// or `now` not finite.
+    /// The first occurrence that starts strictly after `now` in `timeZone`
+    /// on a nominal day after `handled` (any day if nil), or nil if the
+    /// pattern is not valid or `now` not finite. Of occurrences that start
+    /// at the same instant, the one with the greatest nominal day wins, as
+    /// in ``latestOccurrence(startingAtOrBefore:in:)``.
     public func firstOccurrence(startingAfter now: Date, onDayAfter handled: LocalDay?, in timeZone: TimeZone) -> WeeklyFullChargeOccurrence? {
         guard let today = LocalDay(containing: now, in: timeZone), let yesterday = today.adding(days: -1) else { return nil }
         let first = handled.flatMap { $0.adding(days: 1) }.map { max($0, yesterday) } ?? yesterday
-        // Nine days from yesterday always reach every weekday after today.
-        return occurrences(from: first, through: first.adding(days: 9), in: timeZone)
+        // Offsets 0 through 8 reach every weekday after today: counted from
+        // yesterday, a day whose start has just passed comes again at 8.
+        return occurrences(from: first, through: first.adding(days: 8), in: timeZone)
             .filter { $0.startsAt > now }
-            .min { ($0.startsAt, $0.day) < ($1.startsAt, $1.day) }
+            // The earliest start; at equal starts, the greater day first.
+            .min { $0.startsAt < $1.startsAt || ($0.startsAt == $1.startsAt && $0.day > $1.day) }
     }
 
     private func occurrences(from first: LocalDay?, through last: LocalDay?, in timeZone: TimeZone) -> [WeeklyFullChargeOccurrence] {
@@ -202,26 +213,32 @@ public struct WeeklyFullChargePattern: Sendable, Equatable {
     }
 }
 
-/// One occurrence of a ``WeeklyFullChargePattern``: its local day and its
+/// One occurrence of a ``WeeklyFullChargePattern``: its nominal day and its
 /// window, computed in the time zone current when it was checked.
 public struct WeeklyFullChargeOccurrence: Sendable, Equatable {
-    /// The local day it belongs to, which identifies it.
+    /// The nominal day it belongs to, which identifies it. Its start can
+    /// fall on another local day when a change of offset skips the time,
+    /// or the whole day.
     public var day: LocalDay
     public var startsAt: Date
     /// ``startsAt`` plus the pattern's duration, in elapsed time.
     public var endsAt: Date
     /// The offset from UTC in force at the start, in seconds.
     public var startUTCOffset: Int
-    /// How much later than the pattern's time it starts, because that time
-    /// does not exist on its day (clocks went forward over it); zero
-    /// otherwise.
+    /// The offset from UTC in force at the end, in seconds. It differs from
+    /// ``startUTCOffset`` when the window spans a change of offset.
+    public var endUTCOffset: Int
+    /// How much later than the pattern's time on its nominal day it starts,
+    /// because that time does not exist there (clocks went forward over
+    /// it); zero otherwise.
     public var startShift: TimeInterval
 
-    public init(day: LocalDay, startsAt: Date, endsAt: Date, startUTCOffset: Int, startShift: TimeInterval) {
+    public init(day: LocalDay, startsAt: Date, endsAt: Date, startUTCOffset: Int, endUTCOffset: Int, startShift: TimeInterval) {
         self.day = day
         self.startsAt = startsAt
         self.endsAt = endsAt
         self.startUTCOffset = startUTCOffset
+        self.endUTCOffset = endUTCOffset
         self.startShift = startShift
     }
 
