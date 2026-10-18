@@ -178,3 +178,32 @@ struct DiagnosticsReportTests {
         #expect(report.contains("Manage charging: off"))
     }
 }
+
+@Suite("Diagnostics report: moments with their UTC offset")
+struct DiagnosticsOffsetTimeTests {
+    private let date = try! Date("2026-10-23T06:00:00Z", strategy: .iso8601)
+
+    private func report(_ value: DiagnosticsValue) -> String {
+        value.reportText
+    }
+
+    @Test("A moment with its offset reads as ISO 8601 with that offset, \"Z\" for none; a moment without one stays in UTC")
+    func offsets() {
+        #expect(report("\(time: date, utcOffset: 3600)") == "2026-10-23T07:00:00+01:00")
+        #expect(report("\(time: date, utcOffset: -4 * 3600)") == "2026-10-23T02:00:00-04:00")
+        #expect(report("\(time: date, utcOffset: 19_800)") == "2026-10-23T11:30:00+05:30")
+        #expect(report("\(time: date, utcOffset: 0)") == "2026-10-23T06:00:00Z")
+        #expect(report("\(time: date)") == "2026-10-23T06:00:00Z")
+    }
+
+    @Test("An offset no time zone can have is written in UTC")
+    func impossibleOffset() {
+        #expect(report("\(time: date, utcOffset: 100_000)") == "2026-10-23T06:00:00Z")
+    }
+
+    @Test("Plain text formats it like any other moment")
+    func plain() {
+        let value: DiagnosticsValue = "from \(time: date, utcOffset: 3600)"
+        #expect(value.plainText(formattingTime: { $0 == date ? "<start>" : "<other>" }) == "from <start>")
+    }
+}

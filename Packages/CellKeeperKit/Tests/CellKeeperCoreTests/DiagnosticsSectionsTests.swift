@@ -69,8 +69,13 @@ struct DiagnosticsSectionsTests {
         let fixtures = try await DiagnosticsFixture.all()
         let modes = ["normal", "inhibitCharging", "forceDischarge"] + NativeChargeLimitBackend.supportedLimits.map { "nativeLimit(\($0)%)" }
         let vocabulary = modes + PolicyState.allCases.map(\.rawValue) + PowerSource.allCases.map(\.rawValue) + ChargingStatus.allCases.map(\.rawValue)
+            + WeeklyFullChargeRecord.Result.allCases.map(\.rawValue) + ["notSaved", "notRemoved"]
+        // Accepts both UTC ("Z") and an offset ("+01:00").
+        let parser = ISO8601DateFormatter()
+        parser.formatOptions = [.withInternetDateTime]
         var withIdentifiers = 0
         var withMoments = 0
+        var withOffsetMoments = 0
         for (name, status) in fixtures {
             let identifiers = vocabulary + [status.backend.identifier]
             for section in DiagnosticsReport.sections(status: status, environment: environment) {
@@ -81,10 +86,11 @@ struct DiagnosticsSectionsTests {
                         words = words.replacingOccurrences(of: " (\(identifier))", with: "")
                     }
                     if words != report { withIdentifiers += 1 }
-                    let moments = words.matches(of: /\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ/)
+                    let moments = words.matches(of: /\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(Z|[+-]\d\d:\d\d)/)
                     withMoments += moments.isEmpty ? 0 : 1
+                    withOffsetMoments += moments.contains { !words[$0.range].hasSuffix("Z") } ? 1 : 0
                     for moment in moments.reversed() {
-                        let date = try Date.ISO8601FormatStyle().parse(String(words[moment.range]))
+                        let date = try #require(parser.date(from: String(words[moment.range])))
                         words.replaceSubrange(moment.range, with: Self.offset(date))
                     }
                     #expect(row.value.plainText(formattingTime: Self.offset) == words, "\(name), \(section.title ?? "top"): \(row.label)")
@@ -96,6 +102,8 @@ struct DiagnosticsSectionsTests {
         // evaluation).
         #expect(withIdentifiers >= fixtures.count)
         #expect(withMoments >= fixtures.filter { $0.status.lastEvaluation != nil }.count)
+        // The weekly rows' moments carry their UTC offset.
+        #expect(withOffsetMoments >= 4)
     }
 
     @Test("Plain text does not name the macOS account either")

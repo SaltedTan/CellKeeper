@@ -42,8 +42,13 @@ public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpol
         /// or a charging status, and the identifier the report adds in
         /// parentheses after them ("holding at the limit (holding)").
         case identified(String, identifier: String)
-        /// A moment, which the report writes in ISO 8601.
+        /// A moment, which the report writes in ISO 8601, in UTC.
         case time(Date)
+        /// A moment with the offset from UTC in force at it where it was
+        /// computed, which the report writes in ISO 8601 with that offset
+        /// ("2026-10-23T07:00:00+01:00"), so that a change of offset shows
+        /// without naming a time zone.
+        case offsetTime(Date, utcOffset: Int)
     }
 
     let parts: [Part]
@@ -69,6 +74,7 @@ public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpol
             case .text(let text): text
             case .identified(let words, let identifier): "\(words) (\(identifier))"
             case .time(let date): DiagnosticsReport.timestamp(date)
+            case .offsetTime(let date, let utcOffset): DiagnosticsReport.timestamp(date, utcOffset: utcOffset)
             }
         }.joined())
     }
@@ -81,7 +87,7 @@ public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpol
             switch part {
             case .text(let text): text
             case .identified(let words, _): words
-            case .time(let date): formatTime(date)
+            case .time(let date), .offsetTime(let date, _): formatTime(date)
             }
         }.joined())
     }
@@ -110,6 +116,10 @@ public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpol
 
         public mutating func appendInterpolation(time: Date) {
             parts.append(.time(time))
+        }
+
+        public mutating func appendInterpolation(time: Date, utcOffset: Int) {
+            parts.append(.offsetTime(time, utcOffset: utcOffset))
         }
     }
 }
@@ -257,6 +267,7 @@ public enum DiagnosticsReport {
         if let outcome = status.fullChargeScheduleOutcome {
             field("Schedule outcome", describe(outcome))
         }
+        rows.append(contentsOf: weeklyRows(status))
         if let execution = status.lastExecution {
             field("Last action", "\(time: execution.date) \(ChargeController.describe(execution.action, nativeLimit: capabilities.isEnforcedByMacOS)): \(describe(execution.result))")
         }
@@ -304,6 +315,13 @@ public enum DiagnosticsReport {
 
     static func timestamp(_ date: Date) -> String {
         date.formatted(.iso8601)
+    }
+
+    /// `date` in ISO 8601 with `utcOffset` ("Z" for zero), or in UTC if the
+    /// offset is not one a time zone can have.
+    static func timestamp(_ date: Date, utcOffset: Int) -> String {
+        guard let zone = TimeZone(secondsFromGMT: utcOffset) else { return timestamp(date) }
+        return date.formatted(Date.ISO8601FormatStyle(timeZoneSeparator: .colon, timeZone: zone))
     }
 
     private static func batteryRows(_ snapshot: BatterySnapshot) -> [DiagnosticsRow] {
@@ -369,12 +387,75 @@ public enum DiagnosticsReport {
             "already full at the start (window \(time: schedule.startsAt) to \(time: schedule.endsAt))"
         case .extendedRunning:
             "extended the deadline of a running full charge"
-        case .keptRunning:
-            "a running full charge already had a later deadline"
+        case .keptRunning(_, let deadline):
+            "a running full charge already had \(describe(deadline))"
         case .windowPassed(let schedule, let lastWait):
             "window passed before it could start (\(time: schedule.startsAt) to \(time: schedule.endsAt))\(lastWait.map { "; last checked: \($0)" } ?? "")"
         case .discarded(let reason):
             "a saved schedule was removed: \(reason)"
+        }
+    }
+
+    private static func describe(_ deadline: RunningDeadline) -> String {
+        switch deadline {
+        case .later: "a later deadline"
+        case .same: "the same deadline"
+        }
+    }
+
+    /// The weekly full charge's rows: the pattern, the occurrence that is
+    /// due, the next one and the record while one is in use; a store that
+    /// is not in line; the latest outcome, also after removal. Times carry
+    /// the UTC offset they were computed with, never a time zone's name.
+    private static func weeklyRows(_ status: ControllerStatus) -> [DiagnosticsRow] {
+        var rows: [DiagnosticsRow] = []
+        func field(_ name: String, _ value: DiagnosticsValue) {
+            rows.append(DiagnosticsRow(label: name, value: value))
+        }
+        func window(_ occurrence: WeeklyFullChargeOccurrence) -> DiagnosticsValue {
+            "\(occurrence.day) (nominal), \(time: occurrence.startsAt, utcOffset: occurrence.startUTCOffset) to \(time: occurrence.endsAt, utcOffset: occurrence.endUTCOffset)"
+        }
+        if let weekly = status.weeklyFullCharge {
+            field("Weekly full charge", "\(ChargeController.describe(weekly.pattern))")
+        }
+        if let due = status.weeklyFullChargeDue {
+            field("Weekly due", "\(window(due.occurrence)); waiting: \(due.wait)")
+        }
+        if let next = status.weeklyFullChargeNext {
+            field("Weekly next", window(next))
+        }
+        if let handled = status.weeklyFullCharge?.handled {
+            field("Weekly handled", "\(handled.day) (nominal), \(ChargeController.describe(handled.result), identifier: handled.result.rawValue), starting \(time: handled.startsAt, utcOffset: handled.utcOffset)")
+        }
+        if let problem = status.weeklyFullChargeStoreProblem {
+            switch problem {
+            case .notSaved: field("Weekly store", "\("not saved; the weekly full charge in use differs from the stored one", identifier: "notSaved")")
+            case .notRemoved: field("Weekly store", "\("removal not saved; a weekly full charge may still be stored", identifier: "notRemoved")")
+            }
+        }
+        if let outcome = status.weeklyFullChargeOutcome {
+            field("Weekly outcome", describe(outcome))
+        }
+        return rows
+    }
+
+    private static func describe(_ outcome: WeeklyFullChargeOutcome) -> DiagnosticsValue {
+        func window(_ occurrence: WeeklyFullChargeOccurrence) -> DiagnosticsValue {
+            "\(time: occurrence.startsAt, utcOffset: occurrence.startUTCOffset) to \(time: occurrence.endsAt, utcOffset: occurrence.endUTCOffset)"
+        }
+        return switch outcome {
+        case .started(let occurrence):
+            "started (window \(window(occurrence)))"
+        case .alreadyFull(let occurrence):
+            "already full at the start (window \(window(occurrence)))"
+        case .extendedRunning:
+            "extended the deadline of a running full charge"
+        case .keptRunning(_, let deadline):
+            "a running full charge already had \(describe(deadline))"
+        case .windowPassed(let occurrence, let lastWait):
+            "window passed before it could start (\(window(occurrence)))\(lastWait.map { "; last checked: \($0)" } ?? "")"
+        case .discarded(let reason):
+            "a saved weekly full charge could not be used and is removed: \(reason)"
         }
     }
 }

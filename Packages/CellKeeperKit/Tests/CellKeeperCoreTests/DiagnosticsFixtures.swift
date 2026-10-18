@@ -420,6 +420,80 @@ enum DiagnosticsFixture {
         return await controller.evaluate(.periodic)
     }
 
+    /// A schedule that starts while a full charge the user started is
+    /// running with exactly the deadline the schedule would give, which
+    /// continues unchanged.
+    static func scheduleKeptRunningSameDeadline() async throws -> ControllerStatus {
+        let clock = TestClock()
+        let (controller, _) = scheduleController(clock: clock, reading: snapshot(percent: 70))
+        let start = clock.now.addingTimeInterval(3600)
+        try await controller.setFullChargeSchedule(FullChargeSchedule(startsAt: start, endsAt: start.addingTimeInterval(7200)))
+        await controller.startFullCharge(duration: 3 * 3600)
+        clock.advance(by: 3600)
+        return await controller.evaluate(.periodic)
+    }
+
+    // MARK: - Weekly full charge
+
+    private static func utc(_ text: String) -> Date {
+        try! Date(text, strategy: .iso8601)
+    }
+
+    /// Saturdays at 20:00 for 12 hours in New York, due on Saturday
+    /// 2026-10-31 while the Mac is on battery: its window runs from EDT into
+    /// EST, so its two ends carry different offsets.
+    static func weeklyDueAcrossOffsetChange() async throws -> ControllerStatus {
+        let clock = TestClock(utc("2026-10-30T16:00:00Z"))
+        let (controller, _) = weeklyController(clock: clock, zone: FixtureZone(TimeZone(identifier: "America/New_York")!), reading: snapshot(percent: 70, source: .battery))
+        try await controller.setWeeklyFullCharge(WeeklyFullChargePattern(weekdays: [7], hour: 20, minute: 0, durationHours: 12))
+        clock.advance(by: utc("2026-11-01T00:30:00Z").timeIntervalSince(clock.now))
+        return await controller.evaluate(.periodic)
+    }
+
+    /// Fridays at 07:00, started in London; then the Mac is in New York, so
+    /// the record's offset differs from the next occurrence's.
+    static func weeklyStartedThenTravelled() async throws -> ControllerStatus {
+        let clock = TestClock(utc("2026-10-22T12:00:00Z"))
+        let zone = FixtureZone(TimeZone(identifier: "Europe/London")!)
+        let (controller, _) = weeklyController(clock: clock, zone: zone, reading: snapshot(percent: 70))
+        try await controller.setWeeklyFullCharge(WeeklyFullChargePattern(weekdays: [6], hour: 7, minute: 0, durationHours: 12))
+        clock.advance(by: utc("2026-10-23T06:00:30Z").timeIntervalSince(clock.now))
+        await controller.evaluate(.periodic)
+        zone.current = TimeZone(identifier: "America/New_York")!
+        return await controller.evaluate(.clockChanged)
+    }
+
+    /// A weekly full charge saved while its store drops every write.
+    static func weeklyStoreNotSaved() async throws -> ControllerStatus {
+        let clock = TestClock(utc("2026-10-22T12:00:00Z"))
+        let storage = FlakyStorage()
+        storage.set(mode: .droppingWrites)
+        let (controller, _) = weeklyController(clock: clock, zone: FixtureZone(TimeZone(identifier: "Europe/London")!), reading: snapshot(percent: 70), storage: storage)
+        return try await controller.setWeeklyFullCharge(WeeklyFullChargePattern(weekdays: [2, 4, 6], hour: 7, minute: 30, durationHours: 1))
+    }
+
+    /// A weekly full charge whose window passed, then removed: only the
+    /// outcome is left.
+    static func weeklyRemovedAfterPassing() async throws -> ControllerStatus {
+        let clock = TestClock(utc("2026-10-22T12:00:00Z"))
+        let (controller, _) = weeklyController(clock: clock, zone: FixtureZone(TimeZone(identifier: "Europe/London")!), reading: snapshot(percent: 70))
+        try await controller.setWeeklyFullCharge(WeeklyFullChargePattern(weekdays: [6], hour: 7, minute: 0, durationHours: 12))
+        clock.advance(by: utc("2026-10-23T19:00:00Z").timeIntervalSince(clock.now))
+        await controller.evaluate(.didWake)
+        return await controller.removeWeeklyFullCharge()
+    }
+
+    /// The one-shot and the weekly full charge due together with the same
+    /// end: the one-shot starts a full charge, which the weekly one keeps.
+    static func bothDueSameDeadline() async throws -> ControllerStatus {
+        let clock = TestClock(utc("2026-10-22T12:00:00Z"))
+        let (controller, _) = weeklyController(clock: clock, zone: FixtureZone(TimeZone(identifier: "Europe/London")!), reading: snapshot(percent: 70), withOneShot: true)
+        try await controller.setWeeklyFullCharge(WeeklyFullChargePattern(weekdays: [6], hour: 7, minute: 0, durationHours: 12))
+        try await controller.setFullChargeSchedule(FullChargeSchedule(startsAt: utc("2026-10-23T06:00:00Z"), endsAt: utc("2026-10-23T18:00:00Z")))
+        clock.advance(by: utc("2026-10-23T06:00:30Z").timeIntervalSince(clock.now))
+        return await controller.evaluate(.periodic)
+    }
+
     /// Every fixture's status, named, for tests that check them all.
     static func all() async throws -> [(name: String, status: ControllerStatus)] {
         let (armed, started) = try await overrideAndSchedule()
@@ -457,7 +531,31 @@ enum DiagnosticsFixture {
             ("scheduleKeptRunning", try await scheduleKeptRunning()),
             ("scheduleDiscarded", await scheduleDiscarded()),
             ("scheduleWindowPassedUnseen", try await scheduleWindowPassedUnseen()),
+            ("scheduleKeptRunningSameDeadline", try await scheduleKeptRunningSameDeadline()),
+            ("weeklyDueAcrossOffsetChange", try await weeklyDueAcrossOffsetChange()),
+            ("weeklyStartedThenTravelled", try await weeklyStartedThenTravelled()),
+            ("weeklyStoreNotSaved", try await weeklyStoreNotSaved()),
+            ("weeklyRemovedAfterPassing", try await weeklyRemovedAfterPassing()),
+            ("bothDueSameDeadline", try await bothDueSameDeadline()),
         ]
+    }
+
+    /// A controller on the Simulated backend with a weekly store over
+    /// `storage`, reading its local times in `zone`, and a one-shot schedule
+    /// store if `withOneShot`.
+    private static func weeklyController(clock: TestClock, zone: FixtureZone, reading: BatterySnapshot, storage: any KeyValueStorage = InMemoryStorage(), withOneShot: Bool = false) -> (ChargeController, StubTelemetry) {
+        let telemetry = StubTelemetry(reading, clock: clock)
+        let controller = ChargeController(
+            telemetry: telemetry,
+            backend: MockChargingBackend(),
+            settings: .default,
+            scheduleStore: withOneShot ? FullChargeScheduleStore(defaults: InMemoryStorage()) : nil,
+            weeklyStore: WeeklyFullChargeStore(defaults: storage),
+            now: { clock.now },
+            timeZone: { zone.current },
+            uptime: { clock.uptime }
+        )
+        return (controller, telemetry)
     }
 
     /// A controller on macOS's Charge Limit backend with the adoption marker
@@ -527,5 +625,19 @@ actor UnreadNativeLimitBackend: ChargingBackend {
 
     func nativeLimitStatus() -> NativeLimitStatus? {
         NativeLimitStatus()
+    }
+}
+
+/// The time zone a fixture's controller reads, which the fixture may
+/// change between evaluations.
+final class FixtureZone: @unchecked Sendable {
+    private let lock = NSLock()
+    private var zone: TimeZone
+
+    init(_ zone: TimeZone) { self.zone = zone }
+
+    var current: TimeZone {
+        get { lock.withLock { zone } }
+        set { lock.withLock { zone = newValue } }
     }
 }
