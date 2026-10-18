@@ -37,6 +37,23 @@ struct DiagnosticsReportFileTests {
         }
     }
 
+    @Test("Saving from a task writes the same bytes, and a failure reaches the caller")
+    func asyncSave() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CellKeeperKitTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("report.txt")
+        let report = "CellKeeper diagnostics\nPause at 35 °C\n"
+        try await DiagnosticsReportFile.save(report, to: url)
+        let written = try Data(contentsOf: url)
+        #expect(written == Data(report.utf8))
+        let missing = directory.appendingPathComponent("missing", isDirectory: true).appendingPathComponent("report.txt")
+        await #expect(throws: (any Error).self) {
+            try await DiagnosticsReportFile.save(report, to: missing)
+        }
+    }
+
     @Test("Saving over a file rewrites that file in place and leaves nothing of the old content")
     func replacesInPlace() throws {
         try withDirectory { directory in

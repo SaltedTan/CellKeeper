@@ -466,9 +466,7 @@ final class AppModel {
                 return
             }
             do {
-                try await Task.detached(priority: .userInitiated) {
-                    try DiagnosticsReportFile.write(report, to: url)
-                }.value
+                try await DiagnosticsReportFile.save(report, to: url)
             } catch {
                 diagnosticsSaveFailure = "\(error.localizedDescription) A file this save left there may be incomplete. You can choose another location, or use Copy Diagnostics."
             }

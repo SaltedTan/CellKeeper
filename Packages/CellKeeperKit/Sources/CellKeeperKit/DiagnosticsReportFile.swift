@@ -33,4 +33,15 @@ public enum DiagnosticsReportFile {
     public static func write(_ report: String, to url: URL) throws {
         try Data(report.utf8).write(to: url)
     }
+
+    /// ``write(_:to:)`` on a dispatch queue: a write to a slow or stalled
+    /// volume blocks its thread, so it is kept off both the main actor and
+    /// Swift's cooperative thread pool.
+    public static func save(_ report: String, to url: URL) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(with: Result { try write(report, to: url) })
+            }
+        }
+    }
 }
