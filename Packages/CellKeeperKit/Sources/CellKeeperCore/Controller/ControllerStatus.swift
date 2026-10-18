@@ -16,14 +16,19 @@ public enum EvaluationTrigger: String, Sendable {
     /// valid again. Unlike ``didWake`` it never clears a sleep announcement:
     /// the Mac may have been told to sleep again since it woke.
     case postWakeReread
+    /// The system clock or time zone changed, so a scheduled full charge's
+    /// window is checked again at once.
+    case clockChanged
+    /// The user set or cancelled a scheduled full charge.
+    case scheduleChanged
     case manual
 
     /// True for evaluations the system started, as opposed to a user action.
     /// Only automatic evaluations wait before retrying a failed restore.
     public var isAutomatic: Bool {
         switch self {
-        case .launch, .powerSourceChanged, .periodic, .willSleep, .didWake, .postWakeReread: true
-        case .settingsChanged, .overrideChanged, .backendChanged, .manual: false
+        case .launch, .powerSourceChanged, .periodic, .willSleep, .didWake, .postWakeReread, .clockChanged: true
+        case .settingsChanged, .overrideChanged, .backendChanged, .scheduleChanged, .manual: false
         }
     }
 }
@@ -124,6 +129,15 @@ public struct ControllerStatus: Sendable, Equatable {
     public var isBackendFaulted: Bool
     public var events: [ControlEvent]
     public var lastEvaluation: Date?
+    /// The scheduled full charge that is armed, if any. It is removed when
+    /// it starts, when its window passes, and when the user cancels it.
+    public var fullChargeSchedule: FullChargeSchedule? = nil
+    /// Why the armed schedule, now due, cannot start yet; nil if it is not
+    /// due or no reason was seen in this run.
+    public var fullChargeScheduleWait: FullChargeScheduleWait? = nil
+    /// What became of the latest schedule, until the user dismisses it or
+    /// sets a new one.
+    public var fullChargeScheduleOutcome: FullChargeScheduleOutcome? = nil
 }
 
 extension ControllerStatus {

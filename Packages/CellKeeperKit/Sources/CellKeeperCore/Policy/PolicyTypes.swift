@@ -295,6 +295,16 @@ public struct ChargeOverride: Sendable, Equatable {
         case dischargeToLimit
     }
 
+    /// Who started the override, for display and the activity log only. The
+    /// policy never reads it.
+    public enum Source: String, Sendable, Equatable {
+        /// The user, from the menu or Settings.
+        case user
+        /// A scheduled full charge (``FullChargeSchedule``), including a
+        /// running full charge whose deadline a schedule extended.
+        case schedule
+    }
+
     public var kind: Kind
     /// For a discharge session, the percentage confirmed by the user when it
     /// started. The session never discharges below it, nor below the current
@@ -306,23 +316,53 @@ public struct ChargeOverride: Sendable, Equatable {
     public var expiresAt: Date
     /// Monotonic expiry used by the policy (see ``PolicyInput/uptime``).
     public var expiresAtUptime: TimeInterval
+    /// Who started it; display only.
+    public var source: Source
 
     public static let defaultFullChargeDuration: TimeInterval = 12 * 60 * 60
     public static let defaultDischargeDuration: TimeInterval = 6 * 60 * 60
     public static let minimumDuration: TimeInterval = 60 * 60
     public static let maximumDuration: TimeInterval = 48 * 60 * 60
 
-    public init(kind: Kind, targetPercent: Int? = nil, startedAt: Date, uptime: TimeInterval, duration: TimeInterval) {
+    public init(kind: Kind, targetPercent: Int? = nil, startedAt: Date, uptime: TimeInterval, duration: TimeInterval, source: Source = .user) {
         let clamped = min(max(duration.isFinite ? duration : 0, Self.minimumDuration), Self.maximumDuration)
+        self.init(kind: kind, targetPercent: targetPercent, startedAt: startedAt, uptime: uptime, clampedDuration: clamped, source: source)
+    }
+
+    private init(kind: Kind, targetPercent: Int?, startedAt: Date, uptime: TimeInterval, clampedDuration: TimeInterval, source: Source) {
         self.kind = kind
         self.targetPercent = targetPercent
         self.startedAt = startedAt
-        self.expiresAt = startedAt.addingTimeInterval(clamped)
-        self.expiresAtUptime = uptime + clamped
+        self.expiresAt = startedAt.addingTimeInterval(clampedDuration)
+        self.expiresAtUptime = uptime + clampedDuration
+        self.source = source
     }
 
     public static func fullCharge(at start: Date, uptime: TimeInterval, duration: TimeInterval = defaultFullChargeDuration) -> ChargeOverride {
         ChargeOverride(kind: .fullCharge, startedAt: start, uptime: uptime, duration: duration)
+    }
+
+    /// A temporary full charge started by a schedule. Its monotonic deadline
+    /// is `remaining` seconds after `uptime`, at most ``maximumDuration``.
+    /// Unlike a full charge the user starts, it has no minimum duration, so a
+    /// schedule started late never runs past the end the user chose. Nil
+    /// unless `remaining` is positive and `start`, `uptime` and `remaining`
+    /// are finite.
+    public static func scheduledFullCharge(at start: Date, uptime: TimeInterval, remaining: TimeInterval) -> ChargeOverride? {
+        guard start.timeIntervalSinceReferenceDate.isFinite, uptime.isFinite, remaining.isFinite, remaining > 0 else { return nil }
+        return ChargeOverride(kind: .fullCharge, targetPercent: nil, startedAt: start, uptime: uptime, clampedDuration: min(remaining, maximumDuration), source: .schedule)
+    }
+
+    /// True while its monotonic deadline has not passed at `uptime`.
+    public func isLive(atUptime uptime: TimeInterval) -> Bool {
+        uptime < expiresAtUptime
+    }
+
+    /// The wall-clock estimate of its deadline as seen at `now` and
+    /// `uptime`, derived from the monotonic deadline, so that a clock change
+    /// since it started does not mislead the display.
+    public func deadlineEstimate(now: Date, uptime: TimeInterval) -> Date {
+        now.addingTimeInterval(expiresAtUptime - uptime)
     }
 
     public static func dischargeToLimit(target: Int, at start: Date, uptime: TimeInterval, duration: TimeInterval = defaultDischargeDuration) -> ChargeOverride {

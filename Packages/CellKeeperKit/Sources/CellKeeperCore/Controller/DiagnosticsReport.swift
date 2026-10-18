@@ -104,7 +104,14 @@ public enum DiagnosticsReport {
         }
         if let override = status.activeOverride {
             let target = override.targetPercent.map { " to \($0)%" } ?? ""
-            field("Override", "\(ChargeController.describe(override.kind))\(target), started \(timestamp(override.startedAt)), expires \(timestamp(override.expiresAt))")
+            field("Override", "\(ChargeController.describe(override))\(target), started \(timestamp(override.startedAt)), expires \(timestamp(override.expiresAt))")
+        }
+        if let schedule = status.fullChargeSchedule {
+            let waiting = status.fullChargeScheduleWait.map { "; due, waiting: \($0)" } ?? ""
+            field("Scheduled full charge", "\(timestamp(schedule.startsAt)) to \(timestamp(schedule.endsAt))\(waiting)")
+        }
+        if let outcome = status.fullChargeScheduleOutcome {
+            field("Schedule outcome", describe(outcome))
         }
         if let execution = status.lastExecution {
             field("Last action", "\(timestamp(execution.date)) \(ChargeController.describe(execution.action, nativeLimit: capabilities.isEnforcedByMacOS)): \(describe(execution.result))")
@@ -207,5 +214,22 @@ public enum DiagnosticsReport {
 
     private static func timestamp(_ date: Date) -> String {
         date.formatted(.iso8601)
+    }
+
+    private static func describe(_ outcome: FullChargeScheduleOutcome) -> String {
+        switch outcome {
+        case .started(let schedule):
+            "started (window \(timestamp(schedule.startsAt)) to \(timestamp(schedule.endsAt)))"
+        case .alreadyFull(let schedule):
+            "already full at the start (window \(timestamp(schedule.startsAt)) to \(timestamp(schedule.endsAt)))"
+        case .extendedRunning(_, let deadline):
+            "extended a running full charge to \(timestamp(deadline))"
+        case .keptRunning(_, let deadline):
+            "a full charge was already running until \(timestamp(deadline))"
+        case .windowPassed(let schedule, let lastWait):
+            "window passed before it could start (\(timestamp(schedule.startsAt)) to \(timestamp(schedule.endsAt)))" + (lastWait.map { "; last checked: \($0)" } ?? "")
+        case .discarded(let reason):
+            "a saved schedule was removed: \(reason)"
+        }
     }
 }
