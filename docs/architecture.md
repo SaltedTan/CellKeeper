@@ -2277,8 +2277,8 @@ tested.
   macOS reports and that CellKeeper withholds its own restrictions, then,
   only where they apply, that a restriction of CellKeeper's may remain and
   the simulation's caution; Settings › Control has the full explanation.
-  Restrictions are named in words ("a charging pause", "a forced
-  discharge") here as everywhere else (D89). "Open Battery Settings" opens
+  Restrictions are named in words ("a charging pause", "a discharge
+  while plugged in") here as everywhere else (D89). "Open Battery Settings" opens
   `x-apple.systempreferences:com.apple.Battery-Settings.extension`
   (`BatterySettingsLink`; Apple does not document the pane identifier, and
   it was observed to open System Settings › Battery on macOS 27.0.1), or

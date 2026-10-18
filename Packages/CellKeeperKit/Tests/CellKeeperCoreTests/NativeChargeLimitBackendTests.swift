@@ -295,8 +295,13 @@ struct NativeChargeLimitBackendTests {
         let backend = makeBackend()
         _ = try await backend.setMode(.nativeLimit(percent: 90))
         system.runBehaviour = .hasNoEffect
-        await #expect(throws: BackendError.self) {
-            try await backend.setMode(.normal)
+        // It names the user's own limit, not normal charging.
+        do {
+            _ = try await backend.setMode(.normal)
+            Issue.record("The restore had no effect, yet did not fail")
+        } catch let failure as BackendError {
+            #expect(failure == .verificationFailed(expected: .nativeLimit(percent: 80), actual: .nativeLimit(percent: 90)))
+            #expect(failure.description == "Read-back mismatch: expected a macOS Charge Limit of 80%, got a macOS Charge Limit of 90%")
         }
         #expect(await backend.nativeLimitStatus()?.ownerLimit == 80)
         system.runBehaviour = .applies
