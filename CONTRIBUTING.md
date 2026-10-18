@@ -69,7 +69,7 @@ provisioning profiles, or other credentials.
 |---|---|
 | `CellKeeper/` | SwiftUI app (menu bar, settings, app model) |
 | `Packages/CellKeeperKit/Sources/CellKeeperCore/` | Pure domain logic: policy, controller, settings, backend protocol and backends (simulated, read-only, native Charge Limit, helper), and the in-process helper transport |
-| `Packages/CellKeeperKit/Sources/CellKeeperKit/` | macOS adapters (read-only telemetry, notifications, the `shortcuts` and `pmset` runners, the Charge Limit record file, the helper's read-only power reading and the Simulated helper) |
+| `Packages/CellKeeperKit/Sources/CellKeeperKit/` | macOS adapters (read-only telemetry, notifications, the `shortcuts` and `pmset` runners, the Charge Limit record file, the saved diagnostics report, the helper's read-only power reading and the Simulated helper) |
 | `Packages/CellKeeperKit/Sources/CellKeeperHelperCore/` | Logic of the future privileged helper: wire vocabulary, the helper engine (leases, rate limits, interlocks), simulated and monitor-only controls. Foundation only, no hardware access; the app runs it in process for the Simulated helper |
 | `Packages/CellKeeperKit/Sources/CellKeeperHelperDaemon/` | The helper daemon's host: start, ticks, SIGTERM, acknowledged sleep, its own read-only power reading, the activation history file and the audit log, each behind a protocol with a test fake. Depends on `CellKeeperHelperCore` only |
 | `Packages/CellKeeperKit/Sources/CellKeeperHelper/` | The daemon executable (`main.swift`). No hardware control; not installed or embedded in this phase |

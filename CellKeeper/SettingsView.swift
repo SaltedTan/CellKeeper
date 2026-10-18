@@ -1,6 +1,7 @@
 import CellKeeperCore
 import CellKeeperKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     let model: AppModel
@@ -439,6 +440,8 @@ private struct ControlDetailsSection: View {
 private struct ActivityTab: View {
     let model: AppModel
     @State private var isCopied = false
+    /// Why the last save failed, for the alert.
+    @State private var saveFailure: String?
 
     var body: some View {
         let events = (model.status?.events ?? []).reversed()
@@ -462,17 +465,65 @@ private struct ActivityTab: View {
                     }
                 }
             }
-            HStack {
+            VStack(alignment: .leading, spacing: 8) {
                 Text("Also written to the unified log (subsystem \(CellKeeperLog.subsystem)).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Spacer()
-                Button(isCopied ? "Copied" : "Copy Diagnostics") { copyDiagnostics() }
-                    .disabled(model.status == nil)
-                    .help("Copies a plain-text report of what CellKeeper sees and does, for a bug report. It contains no serial numbers or other identifiers.")
-                Button("Refresh now") { model.refresh() }
+                HStack {
+                    Button(isCopied ? "Copied" : "Copy Diagnostics") { copyDiagnostics() }
+                        .disabled(model.status == nil)
+                        .help("Copies a plain-text report of what CellKeeper sees and does, for a bug report. It contains no serial numbers or other identifiers.")
+                    Button("Save Diagnostics…") { saveDiagnostics() }
+                        .disabled(model.status == nil)
+                        .help("Saves the same report as a text file where you choose.")
+                    Spacer()
+                    Button("Refresh now") { model.refresh() }
+                }
             }
             .padding([.horizontal, .bottom])
+        }
+        .alert("The diagnostics report was not saved", isPresented: Binding(get: { saveFailure != nil }, set: { if !$0 { saveFailure = nil } }), presenting: saveFailure) { _ in
+            Button("OK") {}
+        } message: { failure in
+            Text(failure)
+        }
+    }
+
+    /// Asks where to save the report in a save panel that runs no modal loop
+    /// (a sheet on the Settings window), so the menu stays usable meanwhile.
+    /// The report is generated when the user clicks Save, so it shows the
+    /// state at that moment, and only the chosen file is written. It is a few
+    /// kilobytes, written on the main actor.
+    private func saveDiagnostics() {
+        let panel = NSSavePanel()
+        panel.title = "Save Diagnostics"
+        panel.message = "A plain-text report of what CellKeeper sees and does, for a bug report. It contains no serial numbers or other identifiers."
+        panel.nameFieldStringValue = DiagnosticsReportFile.suggestedName(for: Date())
+        panel.allowedContentTypes = [.plainText]
+        panel.isExtensionHidden = false
+        panel.canCreateDirectories = true
+        // A click on the button makes Settings the key window. Without one
+        // (pressed through Accessibility, say), the panel is a window of its own.
+        let window = NSApp.keyWindow
+        Task {
+            let response: NSApplication.ModalResponse
+            if let window {
+                response = await panel.beginSheetModal(for: window)
+            } else {
+                response = await panel.begin()
+            }
+            guard response == .OK, let url = panel.url else { return }
+            guard let report = model.diagnosticsReport() else {
+                // Not reachable while the button needs a status, which stays
+                // once set.
+                saveFailure = "CellKeeper has not finished its first check yet. Try again in a moment."
+                return
+            }
+            do {
+                try DiagnosticsReportFile.write(report, to: url)
+            } catch {
+                saveFailure = "\(error.localizedDescription) A file this save left there may be incomplete. You can choose another location, or use Copy Diagnostics."
+            }
         }
     }
 
