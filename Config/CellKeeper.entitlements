@@ -9,10 +9,10 @@
 	     entitlements; CI checks that the signed app carries exactly these. -->
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
-	<!-- For Settings › Activity › Save Diagnostics…: CellKeeper may show
+	<!-- For Settings › Diagnostics › Save Diagnostics…: CellKeeper may show
 	     a save panel and write the file the user chooses there. It grants
 	     access only to files the user picks in an open or save panel, and
-	     CellKeeper shows no other (docs/architecture.md, D76). -->
+	     CellKeeper shows no other (docs/architecture.md, D76, D99). -->
 	<key>com.apple.security.files.user-selected.read-write</key>
 	<true/>
 </dict>

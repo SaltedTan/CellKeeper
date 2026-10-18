@@ -1,6 +1,6 @@
 import Foundation
 
-/// The diagnostics report saved as a file (Settings › Activity › Save
+/// The diagnostics report saved as a file (Settings › Diagnostics › Save
 /// Diagnostics…): plain UTF-8 text, written only to the file the user chose
 /// in a save panel.
 public enum DiagnosticsReportFile {

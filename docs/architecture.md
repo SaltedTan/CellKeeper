@@ -2307,14 +2307,23 @@ tested.
   also keeps the warning that a restriction of its own may remain until a
   read-back shows it ended (`ControlStatement.limitNote`); in the menu, the
   macOS Charge Limit notice gives that warning.
-- **Diagnostics report.** Settings › Activity offers the plain-text report
-  that `DiagnosticsReport` (Core) builds, which carries no device
-  identifiers and replaces the account name in paths. It names the policy's
-  state, modes, the power source and the charging status in plain words
-  followed by their identifiers, as it names the backend ("State: holding
-  at the limit (holding)"), and its activity section keeps each event's
-  kind as an identifier ("[decision]"). Copy Diagnostics puts
-  it on the clipboard; Save Diagnostics… writes it as UTF-8 to a file the
+- **Diagnostics view and report.** Settings › Diagnostics shows what
+  CellKeeper sees and does, and offers it as the plain-text report that
+  `DiagnosticsReport` (Core) builds, which carries no device identifiers
+  and replaces the account name in paths. The tab and the report come from
+  one section model (`DiagnosticsReport.sections`: the app, macOS and the
+  model, then Control, Settings, Battery, Decision and, with macOS's Charge
+  Limit backend, macOS Charge Limit), whose values keep plain words,
+  identifiers and moments apart (`DiagnosticsValue`; D99). The report
+  names the backend, the policy's state, modes, the power source and the
+  charging status in plain words followed by their identifiers ("State:
+  holding at the limit (holding)"), writes moments in ISO 8601, and adds
+  the time it was generated and the activity log, whose lines keep each
+  event's kind as an identifier ("[decision]"). The tab shows the same
+  rows in plain words only, with moments in local time, from the latest
+  status: it starts no evaluation, says when that status was evaluated,
+  and shows "No status yet" before the first. Copy Diagnostics puts the
+  report on the clipboard; Save Diagnostics… writes it as UTF-8 to a file the
   user chooses in a save panel (`DiagnosticsReportFile`, Kit; D76). The
   panel suggests a name made only of the local date and time ("CellKeeper
   Diagnostics 2026-10-18 1432.txt"). The report is generated when the user
@@ -2771,3 +2780,4 @@ The helper daemon logs under its own subsystem,
 | D96 | No Shortcuts action asks for confirmation, because none of their UI commands does. Stop ends a discharge too, with no confirmation, like the menu's Cancel; it gets no exemption from the rate limit or any safety rule. Discharge, backend switches, the schedule, notifications and the native backend's confirmations stay in the UI only | Confirmation parity with the UI, no more, no less. Ending a full charge with macOS's Charge Limit requests the limit again, a restricting change |
 | D97 | "Charge to 100% once" (the menu and Start CellKeeper Full Charge) needs a reading that shows a battery present and external power (`FullChargeStart`); the menu used to check only the power source (lead's decision, 2026-10-19) | A deliberate tightening: with no battery there is nothing to charge, and the action and the button must agree |
 | D98 | Get CellKeeper Status reports the latest status with the time of the latest check and starts no evaluation of its own; its value is a transient entity (charge, macOS's charging status, state, backend, simulated, limit, Manage charging, checked at). The only App Shortcut (Siri, Spotlight) is for this action, and its phrase sends no control command itself (lead's decision) | A read must not cause backend requests; a phrase works without setup, and a misheard one should not change charging |
+| D99 | Settings › Diagnostics, a tab between Activity and About, shows the diagnostics report's sections from the latest status, updated with each new status; it starts no evaluation and makes no controller call. The tab and the report are built from one section model in Core (`DiagnosticsReport.sections`, whose values keep plain words, identifiers and moments apart), and the report's text is rendered from it, byte for byte the same as before (golden tests on sixteen statuses). The tab shows plain words only, with moments in local time; identifiers (D89) and the activity log appear only in the copied or saved report. It replaces the account name in paths as the report does and shows nothing the report does not contain. Copy Diagnostics and Save Diagnostics… move from Settings › Activity to this tab, with D76's behaviour unchanged; Activity keeps its log and Refresh now (owner-approved feature; the design is the lead's, 2026-10-19) | Milestone 3's diagnostics view. One model keeps what the view shows and what a bug report says from drifting apart. Identifiers tie a bug report to the code but read as defects to users (D89); ISO 8601 suits a report, local time suits a reader. The report's actions belong next to what it says |

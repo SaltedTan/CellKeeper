@@ -64,6 +64,7 @@ enum SettingsTab: Hashable {
     case charging
     case control
     case activity
+    case diagnostics
     case about
 }
 
@@ -106,6 +107,10 @@ final class AppModel {
     private(set) var isTerminating = false
     /// Provided with the first status, for Shortcuts actions that need one.
     @ObservationIgnored let firstStatus = FirstValue<Bool>()
+    /// The app's version, macOS and the model, read once: none of them
+    /// changes while the app runs. The diagnostics report and Settings ›
+    /// Diagnostics both use it.
+    @ObservationIgnored let diagnosticsEnvironment = DiagnosticsEnvironment.current()
 
     private enum Command: Sendable {
         case evaluate(EvaluationTrigger)
@@ -585,7 +590,7 @@ final class AppModel {
     /// It contains no serial numbers or other device identifiers.
     func diagnosticsReport() -> String? {
         guard let status else { return nil }
-        return DiagnosticsReport.text(status: status, environment: .current(), generatedAt: Date())
+        return DiagnosticsReport.text(status: status, environment: diagnosticsEnvironment, generatedAt: Date())
     }
 
     /// Asks where to save the diagnostics report, then writes it there. Does

@@ -98,8 +98,8 @@ private struct ControlSummary: View {
 
     var body: some View {
         // When macOS's Charge Limit is settled, its summary says it all; the
-        // details return as soon as anything differs (Settings › Control and
-        // Activity always have them).
+        // details return as soon as anything differs (Settings › Control,
+        // Activity and Diagnostics always have them).
         let isSettled = status.isNativeLimitSettled
         VStack(alignment: .leading, spacing: 6) {
             HStack {

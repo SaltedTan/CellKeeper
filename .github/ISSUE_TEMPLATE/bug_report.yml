@@ -77,5 +77,5 @@ body:
     id: logs
     attributes:
       label: Diagnostics report or log excerpt
-      description: Settings › Activity › Copy Diagnostics (a plain-text report without serial numbers or other identifiers; Save Diagnostics… saves the same report to a file), or `log show --last 30m --predicate 'subsystem == "io.github.saltedtan.CellKeeper"'`. Remove anything you consider private.
+      description: Settings › Diagnostics › Copy Diagnostics (a plain-text report without serial numbers or other identifiers; Save Diagnostics… saves the same report to a file), or `log show --last 30m --predicate 'subsystem == "io.github.saltedtan.CellKeeper"'`. Remove anything you consider private.
       render: text
