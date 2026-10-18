@@ -29,13 +29,17 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
   Apple Developer ID.
 - Phase 4a was completed on 2026-10-11, and its follow-ups on
   2026-10-17: the request pacer (#67) and three timing-sensitive tests
-  ([issue #1](https://github.com/SaltedTan/CellKeeper/issues/1)). Other
-  tests that depend on real time are tracked in
-  [issue #74](https://github.com/SaltedTan/CellKeeper/issues/74). The
+  ([issue #1](https://github.com/SaltedTan/CellKeeper/issues/1)). The
+  other tests that depended on real time were fixed by 2026-10-18
+  ([issue #74](https://github.com/SaltedTan/CellKeeper/issues/74)). The
   removal button and in-app recovery help moved to phase 4b (owner
   decision, 2026-10-18): until a helper is registered, there is nothing
   real to remove. Phases 4b and 4c stay blocked on an Apple Developer ID
   and a dedicated test Mac.
+- While they are blocked, the owner approved three smaller features on
+  2026-10-18, all done: Save Diagnostics… (milestone 3), opt-in
+  notifications (milestone 3) and a one-shot scheduled full charge
+  (milestone 2).
 
 ## Milestone 1 — Architecture and vertical slice ✅
 
