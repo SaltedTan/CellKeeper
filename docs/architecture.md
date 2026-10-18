@@ -56,6 +56,7 @@ rules are in [`docs/safety.md`](safety.md).
 │  NoHelperRegistration      – the helper's registration: none in phase 4a      ││
 │  DiagnosticsReportFile     – the saved diagnostics report: name, UTF-8 write  ││
 │  FullChargeScheduleWording – what the menu and Settings say about a schedule  ││
+│  WeeklyFullChargeWording   – what they say about the weekly full charge       ││
 │  SystemNotificationPoster  – local notifications (UserNotifications), opt-in  ││
 │  ShortcutsActionCoordinator – Shortcuts actions: bounded waits, the           ││
 │                              UI's checks, fixed wording (`FirstValue`)        ││
@@ -67,6 +68,7 @@ rules are in [`docs/safety.md`](safety.md).
 │  Telemetry:  BatterySnapshot, BatteryHealth, TelemetryProvider (protocol)                      │
 │  Settings:   ChargingSettings (+ validation), SettingsStore (UserDefaults JSON)                │
 │  Schedule:   FullChargeSchedule (window, pure check), FullChargeScheduleStore (own key)        │
+│              WeeklyFullChargeSchedule (floating local time, record), WeeklyFullChargeStore     │
 │  Policy:     ChargingPolicy (pure state machine), PolicyInput/Decision/Memory, ChargeOverride  │
 │  Control:    ChargingBackend (protocol), MockChargingBackend, ReadOnlyChargingBackend,         │
 │              NativeChargeLimitBackend (+ ShortcutRunning / ChargeLimitReading /                │
@@ -142,7 +144,7 @@ Requirement → location:
 | Orchestration & safety fallbacks | `ChargeController` (Core) | Implemented |
 | Persistence/settings | `ChargingSettings`, `SettingsStore` (Core) | Implemented |
 | macOS UI | `CellKeeper/` app target | Implemented (menu bar + settings) |
-| Scheduler | `FullChargeSchedule`, `FullChargeScheduleStore` (Core), `ChargeController`, `FullChargeScheduleWording` (Kit) | One-shot scheduled temporary full charge implemented; scheduled limits and recurring schedules are future |
+| Scheduler | `FullChargeSchedule`, `FullChargeScheduleStore`, `WeeklyFullChargeSchedule`, `WeeklyFullChargeStore` (Core), `ChargeController`, `FullChargeScheduleWording`, `WeeklyFullChargeWording` (Kit) | One-shot and weekly scheduled temporary full charges implemented; scheduled limits and other recurrences are future |
 | Notifications | `NotificationPlanner`, `ChargingNotifier` (Core), `SystemNotificationPoster` (Kit) | Implemented, opt-in: planned from `ControllerStatus` transitions (see "Notifications") |
 | Shortcuts/automation | `ShortcutsActions` (app), `ShortcutsActionCoordinator`, `SettingsChange` (Kit) | Five App Intents over `AppModel`'s own commands (see "Shortcuts actions") |
 | Privileged operations | `HelperEngine` (HelperCore), `HelperChargingBackend` (Core), `HelperXPCServer` / `HelperXPCClient` (HelperXPC), `XPCHelperTransport` (Kit), `HelperDaemon` (HelperDaemon), `CellKeeperHelper` | Helper logic and the app's backend implemented, with a simulated control only, in process (the Simulated helper); no hardware control. The NSXPC transport with code-signing requirements on both sides is implemented and tested over an anonymous listener. The removal of the helper (`HelperRemoval`, `ChargeController.removeHelper`) is implemented and tested against fakes. The daemon executable serves its engine over that transport (when signed with a team identifier) and controls nothing; it and its launchd property list are neither embedded nor registered, and the app does not use the transport yet |
@@ -180,8 +182,10 @@ Requirement → location:
     when the wait ran out), an alert says which value to set by hand before
     the app exits, and the next launch retries (see "Native Charge Limit
     backend").
-- **Time.** Wall-clock time is used for telemetry age, display, and the
-  window of a scheduled full charge. Override expiry, rate limiting and the
+- **Time.** Wall-clock time is used for telemetry age, display, the
+  window of a scheduled full charge and the occurrences of a weekly one,
+  whose local times are read in the time zone current at each evaluation
+  (see "Weekly full charge"). Override expiry, rate limiting and the
   minimum temperature pause use a monotonic clock (`ContinuousClock`, which
   keeps counting during sleep), so changing the system clock cannot extend
   a temporary override or a pause, or block restrictions. Each evaluation
@@ -296,7 +300,8 @@ It starts the existing one, so rows 8 and N3 below, completion, unplugging
 and expiry are unchanged. `ChargeOverride.source` (`.user` or `.schedule`)
 is for display only, and the policy never reads it (a test checks the
 decisions are identical). A schedule never changes settings, Manage
-charging or the backend, never starts a discharge, and does not recur.
+charging or the backend, never starts a discharge, and does not recur (a
+weekly full charge, below, does).
 
 Three things are kept apart:
 
@@ -375,6 +380,12 @@ and those rows and the action table decide.
 - A full charge whose monotonic deadline has passed counts as expired,
   however late its wall-clock estimate looks, and is replaced.
 - A discharge session is replaced: `forceDischarge → normal` relaxes.
+- The outcome of a full charge it kept says whether that one's deadline
+  was later than the schedule's or the same (D105).
+- If the full charge it started, extended or kept completes in the same
+  evaluation, its outcome says it found the battery already full; with a
+  weekly full charge due in the same evaluation, see "Weekly full
+  charge".
 
 **When the window passes before it could start**, the schedule is removed,
 never replayed. The menu says "The scheduled window passed before the full
@@ -419,6 +430,140 @@ than CellKeeper's configured limit (own 80%, CellKeeper 95%). With a
 faulted backend the action table decides as usual: the 100% request is
 refused while the user's own limit is in effect, and `.normal` is requested
 while anything else is or may be.
+
+### Weekly full charge
+
+One weekly schedule (`WeeklyFullChargeSchedule`, D100) starts the same
+temporary full charge on chosen days of the week: a set of weekdays, a
+local start time (hour and minute) and a duration of 1–48 whole hours
+(default 12), for example "Fridays at 07:00 for 12 hours" before a weekly
+trip. It coexists with the one-shot schedule. Scheduled limits, other
+recurrences, a second weekly schedule, pausing or skipping one occurrence,
+a new notification kind and a Shortcuts action are out of scope. A full
+charge it starts is named "Scheduled full charge" while it runs, in the
+menu, the log and the override-ended notification.
+
+**Floating local time** (D101). "Friday 07:00" is 07:00 on a Friday
+wherever the Mac is.
+- Each occurrence belongs to a **nominal day** (`LocalDay`), a Gregorian
+  date with no time zone, which identifies it; each day has at most one.
+  Days are counted and their weekdays found without a time zone (a
+  Gregorian calendar in UTC), so a day a zone skips is still a day.
+- Its start is the nominal day at the start time, read in the time zone
+  current at the check, by RFC 5545 §3.3.5's interpretation of a local
+  DATE-TIME. A time that a change of offset skips is read with the offset
+  in force before the change, so it starts later by the skip's length
+  (New York, 2026-03-08 02:30 → 03:30 EDT; Lord Howe, 2026-10-04 02:10 →
+  02:40). A time that occurs twice is the first (New York, 2026-11-01
+  01:30 → 01:30 EDT). RFC 5545 §3.3.10 ignores recurrence instances at a
+  nonexistent time; CellKeeper moves them rather than drop a week's charge.
+  A whole skipped day (Apia, 2011-12-30) therefore starts with the next
+  one; of occurrences that start at the same instant, the greatest nominal
+  day wins, both as the occurrence that can start and as the next one.
+- The instant is computed from `TimeZone.secondsFromGMT(for:)` only:
+  `Calendar.nextDate(after:matching:matchingPolicy:…)` moved Lord Howe's
+  02:10 on 2026-10-04 to the next day (observed on macOS 27.0), and
+  `date(from:)` documents no rule for skipped or repeated times.
+- Its end is the start plus the duration in elapsed time, so a change of
+  offset inside a window moves the clock time it ends at.
+- The controller reads the time zone through an injected provider at every
+  evaluation, together with `now` after the backend's reads, and when a
+  weekly schedule is saved; never once at init. The app's provider calls
+  `NSTimeZone.resetSystemTimeZone()` and then reads `TimeZone.current`.
+  Foundation documents the system zone as cached until that reset
+  (`NSTimeZone.h`) and documents no reset of its own; a probe that changed
+  only its own `TZ` variable found `TimeZone.current`,
+  `TimeZone.autoupdatingCurrent`, `NSTimeZone.system` and
+  `NSTimeZone.local` all unchanged until the reset, and the reset posted
+  no `NSSystemTimeZoneDidChange` (macOS 27.0). So a change made while the
+  Mac slept, or a missed notification, is still seen, and resetting cannot
+  loop. `clockDidChange()` keeps its own reset before it queues
+  `.clockChanged`.
+
+**Which occurrence counts** (D102). At each check only one occurrence can
+start or pass: the one with the latest start at or before now in the
+current zone, and only if its nominal day is after the record's. Earlier
+ones are superseded: with equal durations it ends last, so starting it
+never gives less. Its window goes through the one-shot's own check
+(`FullChargeSchedule.check`), so it starts under the same conditions
+(valid settings, Manage charging on, a usable reading on external power)
+or waits (`WeeklyFullChargeDue`), and through D82's rules: a live full
+charge keeps the later monotonic deadline, an expired one is replaced, a
+discharge session is replaced. Windows may overlap (a duration longer than
+the gap to the next chosen day): the later occurrence then extends a full
+charge still running. The next occurrence is the first that starts
+strictly after now on a day after the record's; a due occurrence is never
+the next one.
+
+**The record** (D103). `handled` is the nominal day of the latest
+occurrence that started (or extended or kept a running full charge),
+passed, or began before the schedule was saved, with its start and UTC
+offset for display. An occurrence can start only if its day is after it.
+- **In memory, the record decides the run.** It is moved in memory first,
+  where every later check of the run reads it, and the latest record of
+  the run is kept even across a removal; it only moves forward. So in one
+  run no occurrence starts or passes twice, whatever the store, the clock
+  or the time zone does: a rewind into its window or weeks back, London to
+  New York on the same Friday, Tokyo to Honolulu repeating Friday.
+- **The store is brought in line.** After each change the store is written
+  and read back (`WeeklyFullChargeStore`). A failure delays nothing (a
+  start is a relaxation the user scheduled), is shown in fixed words in
+  the menu, Settings and the diagnostics (`WeeklyFullChargeStoreProblem`;
+  the error goes only to the unified log, privately), and is retried at
+  every evaluation until a write reads back as made. A read-back confirms
+  what this process reads, not that `UserDefaults` has reached the disk.
+- **Across a relaunch** the store is read again. If CellKeeper could not
+  save the record, or quit or lost power before macOS wrote it to disk, it
+  may start that occurrence once more inside its window (with macOS's
+  Charge Limit, another 100% request inside the window the user
+  scheduled); a removal that was not saved may bring the schedule back.
+  A started full charge is not resumed: quitting ends it (D79). One
+  controlling instance is assumed.
+- **Missed occurrences** are recorded as passed and reported once (only
+  the latest), never replayed. Launching or waking inside an unhandled
+  occurrence's window starts it, for the time left.
+- **Clock jumps are level-triggered.** Fridays at 07:00 for 48 hours: a
+  jump to Sunday 06:00 starts Friday's for its last hour; at Sunday 07:00
+  it has passed; a rewind does not bring it back. A clock set far ahead and
+  then back skips the days in between (Next shows the date).
+- **Saving counts from the save**, inside the serialized command with the
+  time and zone read then: the record becomes the later of the run's record
+  and the new pattern's latest occurrence that started at or before now.
+  So a save never makes a handled day eligible again, and an occurrence
+  whose start has passed does not start ("Charge to 100% once" covers
+  now). A running full charge is not changed by an edit. Removing deletes
+  the pattern and the stored record; a weekly schedule saved again in the
+  same run still counts from the run's record.
+- **Wait evidence**, the reason an occurrence last waited, is kept in
+  memory with its nominal day: a passed outcome says "Last checked: …"
+  only for that same occurrence, a later occurrence's wait replaces it,
+  and a rewind keeps it.
+
+**With the one-shot schedule and the rest** (D105). In one evaluation the
+one-shot is applied first, then the weekly schedule; if both start, the
+second meets the first's full charge and extends it or keeps it (with a
+later or the same deadline). After the one policy evaluation, each
+schedule that started, extended or kept the full charge says "already
+full" if it completed there: one override, one completion (an expired full
+charge that a schedule replaced in the same evaluation is a separate,
+earlier ending). D91 holds: a manual start is ignored while a full charge a
+weekly occurrence started is live. With Manage charging off an occurrence
+waits, and passes with "Last checked: Manage charging was off" (D80).
+Backend switches, faults, Read-only, unavailable and simulated backends
+are as for the one-shot. No notification kind is added: a full charge it
+started that ends by itself is the existing override-ended notification,
+and a passed occurrence notifies nothing. No Shortcuts action is added,
+and Get CellKeeper Status reports no schedules.
+
+**Store** (D104). `WeeklyFullChargeStore` keeps the pattern and the record
+under their own key, `weeklyFullCharge.v1`, the schema version. Every field
+is required; unknown keys are ignored. A value that is not JSON data,
+unreadable, or not valid (no day, a day outside 1–7 or repeated, a time or
+duration out of range, a record whose day is not a real date, whose start
+is not finite, whose offset is beyond ±18 hours, or whose result is
+unknown) is not used, never affects the settings or Manage charging, and
+is removed with a notice; a removal that does not read back is retried
+like any write.
 
 ### Precedence (highest first)
 
@@ -2164,8 +2309,8 @@ channel: they report what statuses establish and never affect charging.
   now and then); a temporary full charge or a discharge that ended by
   itself, with how (`OverrideEnd`) but not how long it ran (its wall-clock
   times are estimates a clock change can move, D83), and a full charge a
-  schedule started or extended named "Scheduled full charge", as in the
-  menu and the log; a backend that became faulted; a
+  schedule (one-shot or weekly) started or extended named "Scheduled full
+  charge", as in the menu and the log; a backend that became faulted; a
   restriction of CellKeeper's that may remain although it asked for its
   release (`OwnRestrictionState`), or the user's own Charge Limit not
   confirmed back (`isOwnLimitRestorePending`, an unreadable record); and,
@@ -2323,7 +2468,10 @@ tested.
   one section model (`DiagnosticsReport.sections`: the app, macOS and the
   model, then Control, Settings, Battery, Decision and, with macOS's Charge
   Limit backend, macOS Charge Limit), whose values keep plain words,
-  identifiers and moments apart (`DiagnosticsValue`; D99). The report
+  identifiers and moments apart (`DiagnosticsValue`; D99). The weekly full
+  charge's rows write their moments with the UTC offset they were computed
+  with (`.offsetTime`, ISO 8601 with the offset, never a time zone's name;
+  D107). The report
   names the backend, the policy's state, modes, the power source and the
   charging status in plain words followed by their identifiers ("State:
   holding at the limit (holding)"), writes moments in ISO 8601, and adds
@@ -2382,6 +2530,30 @@ tested.
     external power (D97).
   - **Nothing promises** a charge "ready by" a time or a return to the limit
     at an exact time.
+  - **Dates** in the menu and Settings show their year only when it is not
+    the year of the status shown, judged in the time zone shown
+    (`FullChargeScheduleWording.format(_:timeZone:locale:now:)`; the app
+    passes the status's evaluation time, so the wording is tested without
+    the wall clock).
+- **Weekly full charge.**
+  - **Settings › Charging** has a "Weekly full charge" section after
+    "Scheduled full charge": day toggles in the locale's order, a start
+    time, a duration of 1–48 hours, Save (editing needs Manage charging on)
+    and Remove (always enabled). The schedule in use shows its summary
+    ("Every Mon and Fri at 7:00 AM, for 12 hours"), its next start, a note
+    when skipped time moves that start, an occurrence that is due and why
+    it waits, the latest occurrence that started or passed, the latest
+    outcome, and a line while the store cannot keep up. Below, it says that
+    each start requests the same full charge as a scheduled one, that
+    times follow the Mac's time zone and the duration is elapsed time, the
+    start conditions, and that CellKeeper records each one that starts or
+    passes so it does not start that one again, which removing clears.
+    Save's help says when that record can be lost
+    (`WeeklyFullChargeWording`, Kit). Nothing says a full charge cannot
+    start twice.
+  - **The menu** always shows the next start while a weekly schedule is in
+    use, with an occurrence that is due or a store problem beneath it, and
+    the latest outcome with OK (in memory only, kept after removal).
 - **The Settings banner** reports a problem with the user's latest change
   in Settings. Only changes made in the UI touch it (`SettingsChangeSource`,
   `SettingsReconciliation`, Kit): when made, a saved change clears it, a
@@ -2638,6 +2810,11 @@ A scheduled full charge is stored on its own, under `fullChargeSchedule.v1`
 with a notice and never makes the settings invalid or turns management off
 (see "Scheduled full charge").
 
+The weekly full charge and its record are stored on their own, under
+`weeklyFullCharge.v1` (`WeeklyFullChargeStore`). Each write is read back;
+the one in memory decides the run, and the store is brought in line with it
+and retried while that fails (see "Weekly full charge").
+
 The helper daemon keeps one file, its activation history, under
 `/Library/Application Support/CellKeeper/Helper/` (see "Helper daemon").
 
@@ -2649,8 +2826,9 @@ changes log at info level (memory only); decisions, requests, results,
 settings changes, and safety fallbacks log at notice level or above so they
 persist. Logged content is limited to battery state, settings values, and
 decisions. Notifications are logged by kind only. Shortcuts actions log
-one notice each, in fixed text. A failed save of the settings logs its
-error privately.
+one notice each, in fixed text. A failed save of the settings, or a write
+of the weekly full charge that did not read back, logs its error
+privately.
 
 The helper daemon logs under its own subsystem,
 `io.github.saltedtan.CellKeeper.Helper`, in the categories `lifecycle`,
@@ -2790,4 +2968,12 @@ The helper daemon logs under its own subsystem,
 | D97 | "Charge to 100% once" (the menu and Start CellKeeper Full Charge) needs a reading that shows a battery present and external power (`FullChargeStart`); the menu used to check only the power source (lead's decision, 2026-10-19) | A deliberate tightening: with no battery there is nothing to charge, and the action and the button must agree |
 | D98 | Get CellKeeper Status reports the latest status with the time of the latest check and starts no evaluation of its own; its value is a transient entity (charge, macOS's charging status, state, backend, simulated, limit, Manage charging, checked at). The only App Shortcut (Siri, Spotlight) is for this action, and its phrase sends no control command itself (lead's decision) | A read must not cause backend requests; a phrase works without setup, and a misheard one should not change charging |
 | D99 | Settings › Diagnostics, a tab between Activity and About, shows the diagnostics report's sections from the latest status, updated with each new status; it starts no evaluation and makes no controller call. The tab and the report are built from one section model in Core (`DiagnosticsReport.sections`, whose values keep plain words, identifiers and moments apart), and the report's text is rendered from it, byte for byte the same as before (golden tests on sixteen statuses). The tab shows plain words only, with moments in local time; identifiers (D89) and the activity log appear only in the copied or saved report. It replaces the account name in paths as the report does and shows nothing the report does not contain. Copy Diagnostics and Save Diagnostics… move from Settings › Activity to this tab, with D76's behaviour unchanged; Activity keeps its log and Refresh now (owner-approved feature; the design is the lead's, 2026-10-19) | Milestone 3's diagnostics view. One model keeps what the view shows and what a bug report says from drifting apart. Identifiers tie a bug report to the code but read as defects to users (D89); ISO 8601 suits a report, local time suits a reader. The report's actions belong next to what it says |
+| D100 | One weekly full charge (owner approval of recurring schedules, 2026-10-19; shape and answers to the owner questions: lead): a set of weekdays, a local start time and 1–48 whole hours, alongside the one-shot schedule; it starts the existing temporary full charge (source `.schedule`). No scheduled limits, other recurrences, second weekly schedule, pause or skip of one occurrence, new notification kind or Shortcuts action; it does not wake the Mac | The weekly-trip case needs a full charge on the same day each week. Scheduled limits would change the policy's input, not only an override. Removing covers a pause; a skip can come later as advancing the record |
+| D101 | Floating local time: occurrences belong to nominal Gregorian days counted without a time zone; the start is read in the time zone current at each evaluation (read fresh, after resetting Foundation's cached system zone) by RFC 5545 §3.3.5 (a skipped time with the offset before the change, a repeated time as the first), not dropped as §3.3.10 would; of equal starts, the greatest nominal day wins; the duration is elapsed time; instants come from `TimeZone` offsets, not `Calendar` matching policies | "Friday 07:00 wherever the Mac is" is what a user means. A calendar in the zone turns a skipped day into the next one (Apia, 2011-12-30); dropping a skipped instance would silently lose a week's charge; `Calendar.nextDate` moved a time in Lord Howe's 30-minute skip to the next day (observed), and `date(from:)` documents no rule. The system zone stays cached until reset, and the change notification can be missed |
+| D102 | Only the occurrence with the latest start at or before now can start or pass; earlier ones are superseded. Its window goes through the one-shot's check and D82's rules; overlapping windows are allowed, the later occurrence extending a running full charge; the next occurrence is strictly in the future | With equal durations the latest start ends last, so starting it never gives less. One check keeps one set of start conditions. A due occurrence shown as "next" would read as not yet started |
+| D103 | A record of the latest handled nominal day. In memory it decides the run: it only moves forward and survives a removal in the run. The store is brought in line with it, each write read back and retried at every evaluation while it fails; a failure delays no start or pass, is shown in fixed words, and its error goes only to the unified log, privately. Saving counts from the save, read inside the command, and never lowers the record. Across a relaunch, a record that was not saved (or not yet on disk) may let that occurrence start once more inside its window, and a removal that was not saved may bring the schedule back; the UI says so (lead's decision, design review r2) | Making a start wait for a confirmed write gave no real guarantee: a store can accept a write and fail its read-back, and the disk can still lose it later, while undoing a change on failure could leave memory and store disagreeing either way. What is in memory is what the run uses, so it alone decides the run. A repeated start is a relaxation the user scheduled, the same limit the one-shot accepts (D79) |
+| D104 | Its own store, `weeklyFullCharge.v1`, the schema version; every field required; an invalid or unreadable value is not used, never affects the settings or Manage charging, and is removed with a notice | As D80 for the one-shot: a broken schedule must never be what turns management off or makes the settings invalid |
+| D105 | Wait evidence belongs to its occurrence. Both schedules are applied in one evaluation, the one-shot first; after the one policy evaluation, each one that started, extended or kept the full charge says "already full" if it completed there, with one override and one completion (an expired predecessor is a separate ending). A kept full charge's outcome says whether its deadline was later or the same (design reviews r1 and r2) | One flag turned only the first start into "already full", so a second schedule could describe a full charge that had already ended. "Later" is false for equal deadlines, which two schedules ending together produce. A reason one occurrence waited says nothing about another |
+| D106 | Settings › Charging's "Weekly full charge" section (days, time, duration, Save, Remove, the schedule in use, Next, a skip note, Due, Last, the outcome, a store problem); the menu always shows Next while one is in use, with Due or a store problem beneath it, and the latest outcome with OK, in memory. Dates show their year only when it is not the year of the status shown, with that time passed in, also for the one-shot. No text says a full charge cannot start twice (lead's answers, 2026-10-19; design review r2) | The menu line is the only reminder that a 100% request is coming, and a due occurrence must not hide the next. The record can be lost (D103), so the text says what CellKeeper records and when that can fail. Passing the status's time keeps the wording testable without the wall clock |
+| D107 | Diagnostics, through the section model: the weekly pattern, the due occurrence, the next one and the record while one is in use, a store problem, and the latest outcome, also after removal. Their moments carry the UTC offset they were computed with (`DiagnosticsValue.offsetTime`, ISO 8601 with the offset), never a time zone's name; existing goldens are unchanged (lead's decision) | Problems with floating time show in the offsets. A time zone's name is a location, which the report does not include |
 | D108 | Discharge starts follow D91: `ChargeController.startDischargeToLimit` while an override is live (a full charge or a discharge, from the user or a schedule) changes nothing and logs that ("Discharge not started: a temporary full charge is running." or "…: a discharge to the limit is already running."); the override keeps its identity, source, deadline and the ending counters. One whose deadline has passed is replaced. Manage charging and the limit's range are checked first, with their message unchanged. As for an ignored full charge, the app shows nothing more: the menu keeps showing the override that runs. Schedule starts keep D82, so a scheduled full charge still replaces a discharge (lead's decision, 2026-10-19) | Discharge starts queued behind one another (a double-click) reset the deadline, and a discharge confirmed in Settings after a full charge started meanwhile, for example a schedule's while the confirmation was open, silently replaced it: Settings checks for a running override only when it asks for confirmation. A schedule's start differs on purpose: it is unattended at a time the user chose (D82), and `forceDischarge → normal` relaxes, while a discharge replacing a full charge would undo a relaxation the user or a schedule asked for |
