@@ -249,7 +249,11 @@ public enum PolicyNote: Sendable, Equatable, CustomStringConvertible {
         case .dischargeUnsupported:
             "The current backend cannot discharge while plugged in."
         case .fullChargeSuppressed(let state):
-            "Temporary full charge is not in effect: \(Self.fullChargeSuppression(by: state))."
+            if let rule = Self.fullChargeSuppression(by: state) {
+                "Temporary full charge is not in effect: \(rule)."
+            } else {
+                "Temporary full charge is not in effect."
+            }
         case .nativeLimitKeptWithoutTelemetry:
             "Battery telemetry is unavailable. macOS keeps enforcing its Charge Limit from its own measurements, so CellKeeper leaves it unchanged."
         case .confirmingLimit:
@@ -259,23 +263,22 @@ public enum PolicyNote: Sendable, Equatable, CustomStringConvertible {
         }
     }
 
-    /// Why a temporary full charge is not in effect while the policy is in
-    /// `state`, in plain words, for ``fullChargeSuppressed(by:)`` and the
-    /// menu. Today only the temperature pause adds that note; every state
-    /// has words so none is ever shown by its identifier.
-    public static func fullChargeSuppression(by state: PolicyState) -> String {
+    /// The rule that takes precedence over a temporary full charge while the
+    /// policy is in `state`, in plain words, for ``fullChargeSuppressed(by:)``
+    /// and the menu; nil for a state that comes after the full charge in
+    /// precedence and so cannot keep it from taking effect. It names the
+    /// rule only: whether charging is actually paused is shown elsewhere,
+    /// with its own confirmation. Today only the temperature pause adds that
+    /// note; no state is ever shown by its identifier.
+    public static func fullChargeSuppression(by state: PolicyState) -> String? {
         switch state {
-        case .unmanaged: "charge management is off"
-        case .failSafe: "CellKeeper is using macOS default charging"
-        case .safetyFloor: "the safety floor applies"
-        case .onBattery: "the Mac is on battery"
-        case .temperaturePause: "charging is paused for battery temperature"
-        case .fullChargeOverride: "a temporary full charge is already in effect"
-        case .charging: "CellKeeper is charging toward its limit"
-        case .holding: "charging is paused at the limit"
-        case .discharging: "a discharge session is running"
-        case .osEnforcedLimit: "macOS enforces its Charge Limit"
-        case .deferringToMacOS: "macOS's Charge Limit is in charge"
+        case .unmanaged: "the Manage charging setting takes precedence"
+        case .failSafe: "CellKeeper's fail-safe takes precedence"
+        case .deferringToMacOS: "deferring to macOS's Charge Limit takes precedence"
+        case .safetyFloor: "the safety floor takes precedence"
+        case .onBattery: "the rule for battery power takes precedence"
+        case .temperaturePause: "temperature protection takes precedence"
+        case .fullChargeOverride, .charging, .holding, .discharging, .osEnforcedLimit: nil
         }
     }
 }

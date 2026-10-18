@@ -26,28 +26,38 @@ struct DecisionReasonTests {
         #expect(reason.description(restoring: "anything") == reason.description)
     }
 
-    static let suppressions: [(PolicyState, String)] = [
-        (.unmanaged, "charge management is off"),
-        (.failSafe, "CellKeeper is using macOS default charging"),
-        (.safetyFloor, "the safety floor applies"),
-        (.onBattery, "the Mac is on battery"),
-        (.temperaturePause, "charging is paused for battery temperature"),
-        (.fullChargeOverride, "a temporary full charge is already in effect"),
-        (.charging, "CellKeeper is charging toward its limit"),
-        (.holding, "charging is paused at the limit"),
-        (.discharging, "a discharge session is running"),
-        (.osEnforcedLimit, "macOS enforces its Charge Limit"),
-        (.deferringToMacOS, "macOS's Charge Limit is in charge"),
+    /// Every state, with the rule it names when it takes precedence over a
+    /// full charge, or nil when it comes after the full charge in
+    /// precedence and cannot keep it from taking effect.
+    static let suppressions: [(PolicyState, String?)] = [
+        (.unmanaged, "the Manage charging setting takes precedence"),
+        (.failSafe, "CellKeeper's fail-safe takes precedence"),
+        (.deferringToMacOS, "deferring to macOS's Charge Limit takes precedence"),
+        (.safetyFloor, "the safety floor takes precedence"),
+        (.onBattery, "the rule for battery power takes precedence"),
+        (.temperaturePause, "temperature protection takes precedence"),
+        (.fullChargeOverride, nil),
+        (.charging, nil),
+        (.holding, nil),
+        (.discharging, nil),
+        (.osEnforcedLimit, nil),
     ]
 
-    @Test("A suppressed full charge is explained in plain words for every state, never by its identifier", arguments: suppressions)
-    func fullChargeSuppression(state: PolicyState, words: String) {
-        #expect(PolicyNote.fullChargeSuppression(by: state) == words)
-        #expect(PolicyNote.fullChargeSuppressed(by: state).description == "Temporary full charge is not in effect: \(words).")
-        // A multi-word identifier such as "temperaturePause" is never shown;
-        // single words such as "charging" are plain words already.
+    @Test("A suppressed full charge names the rule that takes precedence, never an applied state or an identifier; states that cannot suppress one name nothing", arguments: suppressions)
+    func fullChargeSuppression(state: PolicyState, rule: String?) {
+        #expect(PolicyNote.fullChargeSuppression(by: state) == rule)
+        let note = PolicyNote.fullChargeSuppressed(by: state).description
+        if let rule {
+            #expect(note == "Temporary full charge is not in effect: \(rule).")
+        } else {
+            #expect(note == "Temporary full charge is not in effect.")
+        }
+        for claim in ["paused", "confirmed", "applied"] {
+            #expect(!note.lowercased().contains(claim), "\(claim) in: \(note)")
+        }
+        // A multi-word identifier such as "temperaturePause" is never shown.
         if state.rawValue.contains(where: \.isUppercase) {
-            #expect(!PolicyNote.fullChargeSuppressed(by: state).description.contains(state.rawValue))
+            #expect(!note.contains(state.rawValue))
         }
     }
 }

@@ -106,16 +106,100 @@ struct FullChargeScheduleWordingTests {
             texts.append(line)
         }
         #expect(status.decision?.notes.contains(.fullChargeSuppressed(by: .temperaturePause)) == true)
-        // The safety rule is the explanation, even when the last request (the
-        // pause) succeeded.
-        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: "Applied and confirmed", timeZone: utc, locale: posix) == "Scheduled full charge requested, not in effect: charging is paused for battery temperature.")
+        // The rule that takes precedence is the explanation, even when the
+        // last request (the pause) succeeded.
+        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: "Applied and confirmed", timeZone: utc, locale: posix) == "Scheduled full charge requested, not in effect: temperature protection takes precedence.")
         var manual = override
         manual.source = .user
-        #expect(TemporaryFullChargeWording.line(for: manual, status: status, lastResult: nil, timeZone: utc, locale: posix) == "Temporary full charge requested, not in effect: charging is paused for battery temperature.")
-        #expect(status.decision?.notes.map(\.description).contains("Temporary full charge is not in effect: charging is paused for battery temperature.") == true)
+        #expect(TemporaryFullChargeWording.line(for: manual, status: status, lastResult: nil, timeZone: utc, locale: posix) == "Temporary full charge requested, not in effect: temperature protection takes precedence.")
+        #expect(status.decision?.notes.map(\.description).contains("Temporary full charge is not in effect: temperature protection takes precedence.") == true)
         for text in texts {
             #expect(!text.lowercased().contains("allows charging"), "in: \(text)")
             #expect(!text.lowercased().contains("charging to 100%"), "in: \(text)")
+        }
+    }
+
+    /// The menu line and the policy's notes for a full charge that
+    /// temperature protection takes precedence over.
+    private func suppressionTexts(_ status: ControllerStatus) throws -> [String] {
+        let override = try #require(status.activeOverride)
+        // A last result is passed to show that the rule, not the result, is
+        // the explanation.
+        return [TemporaryFullChargeWording.line(for: override, status: status, lastResult: "Refused", timeZone: utc, locale: posix)]
+            + (status.decision?.notes.map(\.description) ?? [])
+    }
+
+    @Test("While the pause that temperature protection asks for is refused and normal charging reads back, nothing says charging is paused, confirmed or applied")
+    func suppressionWhilePauseRefused() async throws {
+        let clock = KitTestClock()
+        let telemetry = KitMutableTelemetry(percent: 85, celsius: 30, clock: clock)
+        let backend = KitExperimentalBackend()
+        let controller = ChargeController(
+            telemetry: telemetry,
+            backend: backend,
+            settings: .default,
+            scheduleStore: FullChargeScheduleStore(defaults: KitMemoryStorage()),
+            now: { clock.now },
+            uptime: { clock.uptime }
+        )
+        // The limit is confirmed by a second reading and charging is held,
+        // a restricting change that starts the rate limit.
+        await controller.evaluate(.launch)
+        clock.advance(by: 60)
+        #expect(await controller.evaluate(.periodic).currentMode == .inhibitCharging)
+        let begin = clock.now.addingTimeInterval(1)
+        try await controller.setFullChargeSchedule(FullChargeSchedule(startsAt: begin, endsAt: begin.addingTimeInterval(2 * 3600)))
+        // The schedule starts, and its full charge releases the hold.
+        await telemetry.set(percent: 70, celsius: 30)
+        clock.advance(by: 10)
+        let started = await controller.evaluate(.periodic)
+        #expect(started.activeOverride?.source == .schedule)
+        #expect(started.currentMode == .normal)
+        // Hot: temperature protection takes precedence, but its pause is a
+        // restricting change within a minute of the last one, so it is refused.
+        await telemetry.set(percent: 70, celsius: 45)
+        clock.advance(by: 10)
+        let status = await controller.evaluate(.periodic)
+        #expect(status.decision?.state == .temperaturePause)
+        #expect(status.currentMode == .normal)
+        #expect(await backend.currentMode() == .normal)
+        guard case .refused(.rateLimited)? = status.lastExecution?.result else {
+            Issue.record("expected a rate-limited refusal, got \(String(describing: status.lastExecution?.result))")
+            return
+        }
+        let texts = try suppressionTexts(status)
+        #expect(texts.first == "Scheduled full charge requested, not in effect: temperature protection takes precedence.")
+        for text in texts {
+            for claim in ["paused", "confirmed", "applied"] {
+                #expect(!text.lowercased().contains(claim), "\(claim) in: \(text)")
+            }
+        }
+    }
+
+    @Test("With the simulated backend, temperature protection taking precedence is named without saying charging is paused, confirmed or applied")
+    func suppressionSimulated() async throws {
+        let clock = KitTestClock()
+        let controller = ChargeController(
+            telemetry: KitHotTelemetry(percent: 70, celsius: 45, clock: clock),
+            backend: MockChargingBackend(),
+            settings: .default,
+            scheduleStore: FullChargeScheduleStore(defaults: KitMemoryStorage()),
+            now: { clock.now },
+            uptime: { clock.uptime }
+        )
+        await controller.evaluate(.launch)
+        let begin = clock.now.addingTimeInterval(3600)
+        try await controller.setFullChargeSchedule(FullChargeSchedule(startsAt: begin, endsAt: begin.addingTimeInterval(2 * 3600)))
+        clock.advance(by: 3600)
+        let status = await controller.evaluate(.periodic)
+        #expect(status.decision?.state == .temperaturePause)
+        #expect(status.capabilities.availability == .simulated)
+        let texts = try suppressionTexts(status)
+        #expect(texts.first == "Scheduled full charge requested, not in effect: temperature protection takes precedence.")
+        for text in texts {
+            for claim in ["paused", "confirmed", "applied"] {
+                #expect(!text.lowercased().contains(claim), "\(claim) in: \(text)")
+            }
         }
     }
 
@@ -304,6 +388,32 @@ struct KitHotTelemetry: TelemetryProvider {
     }
 
     func powerSourceChanges() -> AsyncStream<Void> {
+        AsyncStream { $0.finish() }
+    }
+}
+
+/// Telemetry on external power whose charge and temperature the test sets.
+actor KitMutableTelemetry: TelemetryProvider {
+    private var percent: Int
+    private var celsius: Double
+    private let clock: KitTestClock
+
+    init(percent: Int, celsius: Double, clock: KitTestClock) {
+        self.percent = percent
+        self.celsius = celsius
+        self.clock = clock
+    }
+
+    func set(percent: Int, celsius: Double) {
+        self.percent = percent
+        self.celsius = celsius
+    }
+
+    func currentSnapshot() -> BatterySnapshot {
+        BatterySnapshot(timestamp: clock.now, chargePercent: percent, powerSource: .externalPower, isCharging: true, isFullyCharged: false, temperatureCelsius: celsius)
+    }
+
+    nonisolated func powerSourceChanges() -> AsyncStream<Void> {
         AsyncStream { $0.finish() }
     }
 }
