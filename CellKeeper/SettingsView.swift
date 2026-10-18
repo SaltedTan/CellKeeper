@@ -1,7 +1,6 @@
 import CellKeeperCore
 import CellKeeperKit
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct SettingsView: View {
     let model: AppModel
@@ -22,6 +21,13 @@ struct SettingsView: View {
                 .tag(SettingsTab.about)
         }
         .frame(width: 520, height: 460)
+        // Here rather than on the Activity tab, so that a save that fails
+        // after the user moved to another tab is still shown.
+        .alert("The diagnostics report was not saved", isPresented: Binding(get: { model.diagnosticsSaveFailure != nil }, set: { if !$0 { model.dismissDiagnosticsSaveFailure() } }), presenting: model.diagnosticsSaveFailure) { _ in
+            Button("OK") {}
+        } message: { failure in
+            Text(failure)
+        }
     }
 }
 
@@ -440,8 +446,7 @@ private struct ControlDetailsSection: View {
 private struct ActivityTab: View {
     let model: AppModel
     @State private var isCopied = false
-    /// Why the last save failed, for the alert.
-    @State private var saveFailure: String?
+    @State private var settingsWindow = HostingWindow()
 
     var body: some View {
         let events = (model.status?.events ?? []).reversed()
@@ -473,8 +478,8 @@ private struct ActivityTab: View {
                     Button(isCopied ? "Copied" : "Copy Diagnostics") { copyDiagnostics() }
                         .disabled(model.status == nil)
                         .help("Copies a plain-text report of what CellKeeper sees and does, for a bug report. It contains no serial numbers or other identifiers.")
-                    Button("Save Diagnostics…") { saveDiagnostics() }
-                        .disabled(model.status == nil)
+                    Button("Save Diagnostics…") { model.saveDiagnosticsReport(attachingTo: settingsWindow.window) }
+                        .disabled(model.status == nil || model.isSavingDiagnostics)
                         .help("Saves the same report as a text file where you choose.")
                     Spacer()
                     Button("Refresh now") { model.refresh() }
@@ -482,51 +487,7 @@ private struct ActivityTab: View {
             }
             .padding([.horizontal, .bottom])
         }
-        .alert("The diagnostics report was not saved", isPresented: Binding(get: { saveFailure != nil }, set: { if !$0 { saveFailure = nil } }), presenting: saveFailure) { _ in
-            Button("OK") {}
-        } message: { failure in
-            Text(failure)
-        }
-    }
-
-    /// Asks where to save the report in a save panel that runs no modal loop
-    /// (a sheet on the Settings window), so the menu stays usable meanwhile.
-    /// The report is generated when the user clicks Save, so it shows the
-    /// state at that moment, and only the chosen file is written. The write
-    /// runs off the main actor, so a slow volume does not hold up the menu.
-    private func saveDiagnostics() {
-        let panel = NSSavePanel()
-        panel.title = "Save Diagnostics"
-        panel.message = "A plain-text report of what CellKeeper sees and does, for a bug report. It contains no serial numbers or other identifiers."
-        panel.nameFieldStringValue = DiagnosticsReportFile.suggestedName(for: Date())
-        panel.allowedContentTypes = [.plainText]
-        panel.isExtensionHidden = false
-        panel.canCreateDirectories = true
-        // A click on the button makes Settings the key window. Without one
-        // (pressed through Accessibility, say), the panel is a window of its own.
-        let window = NSApp.keyWindow
-        Task {
-            let response: NSApplication.ModalResponse
-            if let window {
-                response = await panel.beginSheetModal(for: window)
-            } else {
-                response = await panel.begin()
-            }
-            guard response == .OK, let url = panel.url else { return }
-            guard let report = model.diagnosticsReport() else {
-                // Not reachable while the button needs a status, which stays
-                // once set.
-                saveFailure = "CellKeeper has not finished its first check yet. Try again in a moment."
-                return
-            }
-            do {
-                try await Task.detached(priority: .userInitiated) {
-                    try DiagnosticsReportFile.write(report, to: url)
-                }.value
-            } catch {
-                saveFailure = "\(error.localizedDescription) A file this save left there may be incomplete. You can choose another location, or use Copy Diagnostics."
-            }
-        }
+        .background(HostingWindowReader(hostingWindow: settingsWindow))
     }
 
     private func copyDiagnostics() {
@@ -558,6 +519,31 @@ private struct AboutTab: View {
             .padding()
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// The window a view is in, read when it is needed: the Settings window for
+/// the save panel's sheet. `NSApp.keyWindow` can be another window, such as
+/// the menu's.
+@MainActor
+private final class HostingWindow {
+    weak var view: NSView?
+    var window: NSWindow? { view?.window }
+}
+
+/// An empty AppKit view behind the content, through which ``HostingWindow``
+/// finds the window. It changes no SwiftUI state.
+private struct HostingWindowReader: NSViewRepresentable {
+    let hostingWindow: HostingWindow
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        hostingWindow.view = view
+        return view
+    }
+
+    func updateNSView(_ view: NSView, context: Context) {
+        hostingWindow.view = view
     }
 }
 

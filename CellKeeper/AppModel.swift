@@ -2,6 +2,7 @@ import AppKit
 import CellKeeperCore
 import CellKeeperKit
 import Observation
+import UniformTypeIdentifiers
 
 /// The control backends selectable in this build. Real control backends are
 /// added here only once implemented and verified, and are opt-in.
@@ -79,6 +80,14 @@ final class AppModel {
     /// Whether Settings › Control shows the steps for turning macOS's Charge
     /// Limit off.
     var isMacOSLimitGuideExpanded = false
+    /// True from the moment Save Diagnostics… opens its panel until its write
+    /// has ended, whatever the outcome; no second save starts meanwhile. Two
+    /// saves at once could let an older report overwrite a newer one, or mix
+    /// two direct writes in one file. Kept here, not in the view, so that it
+    /// outlives the Settings view.
+    private(set) var isSavingDiagnostics = false
+    /// Why the last diagnostics save failed, until the user dismisses it.
+    private(set) var diagnosticsSaveFailure: String?
 
     private enum Command: Sendable {
         case evaluate(EvaluationTrigger)
@@ -412,6 +421,62 @@ final class AppModel {
     func diagnosticsReport() -> String? {
         guard let status else { return nil }
         return DiagnosticsReport.text(status: status, environment: .current(), generatedAt: Date())
+    }
+
+    /// Asks where to save the diagnostics report, then writes it there. Does
+    /// nothing while another save is under way.
+    ///
+    /// The save panel runs no modal loop, so the menu stays usable: it is a
+    /// sheet on `settingsWindow`, the window that holds the button, while
+    /// that window is on screen, and a window of its own otherwise. The
+    /// report is generated when the user clicks Save, so it shows the state
+    /// at that moment. Only the chosen file is written, off the main actor,
+    /// so a slow volume does not hold up the menu.
+    func saveDiagnosticsReport(attachingTo settingsWindow: NSWindow?) {
+        guard !isSavingDiagnostics, status != nil else { return }
+        isSavingDiagnostics = true
+        let panel = NSSavePanel()
+        panel.title = "Save Diagnostics"
+        panel.message = "A plain-text report of what CellKeeper sees and does, for a bug report. It contains no serial numbers or other identifiers."
+        panel.nameFieldStringValue = DiagnosticsReportFile.suggestedName(for: Date())
+        panel.allowedContentTypes = [.plainText]
+        panel.isExtensionHidden = false
+        panel.canCreateDirectories = true
+        Task {
+            defer { isSavingDiagnostics = false }
+            let response: NSApplication.ModalResponse
+            if let settingsWindow, settingsWindow.isVisible {
+                response = await panel.beginSheetModal(for: settingsWindow)
+            } else {
+                response = await panel.begin()
+            }
+            guard response == .OK, let url = panel.url else { return }
+            // macOS starts security-scoped access on a URL a save panel
+            // returns, as if the app had called
+            // startAccessingSecurityScopedResource(), and the app stops it
+            // when it has finished (Apple, "Accessing files from the macOS
+            // App Sandbox"). Access never stopped leaks kernel resources, and
+            // enough leaks keep the app from adding locations to its sandbox
+            // until it is relaunched (that method's documentation). Stopped
+            // once the write has ended, whatever the outcome.
+            defer { url.stopAccessingSecurityScopedResource() }
+            guard let report = diagnosticsReport() else {
+                // Not reachable: the button needs a status, which stays once set.
+                diagnosticsSaveFailure = "CellKeeper has not finished its first check yet. Try again in a moment."
+                return
+            }
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try DiagnosticsReportFile.write(report, to: url)
+                }.value
+            } catch {
+                diagnosticsSaveFailure = "\(error.localizedDescription) A file this save left there may be incomplete. You can choose another location, or use Copy Diagnostics."
+            }
+        }
+    }
+
+    func dismissDiagnosticsSaveFailure() {
+        diagnosticsSaveFailure = nil
     }
 
     /// The charge limits the UI offers for the backend in charge: every
