@@ -1,362 +1,300 @@
-# Design: scheduled full charge (draft)
+# Design: scheduled full charge (draft, revised)
 
-Status: design for review, 2026-10-18. Nothing here is implemented. Scope
-(owner, 2026-10-18): a scheduled **temporary full charge** only; no
-scheduled limits, no scheduled discharge (R20), no recurring schedules.
-Roadmap: milestone 2 "Use it for schedules ('100% before travel on
-Friday') without root" and "Later: Scheduling of overrides and limits".
-Rules cited: research note 06 R20, R22, R23, hazard H14; decisions D12,
-D16, D22, D24.
+Status: revised 2026-10-18 after GPT-6.1-Sol's review ("revise first"),
+with the lead's decisions on each finding. Scope (owner, 2026-10-18): a
+scheduled **temporary full charge** only. No scheduled limits, no scheduled
+discharge (R20), no recurring schedules. Rules cited: research note 06 R20,
+R22, R23, hazard H14; decisions D12, D16, D22, D24. "Lead decision" marks
+the §9 recommendations, which the lead adopted; they are not owner
+decisions.
 
 ## 1. User model
 
-**What the user sets: a start and an end, not a "ready by" time.**
-"Ready by" would need CellKeeper to predict how long a charge takes. That
-depends on the adapter's wattage, temperature, battery age, how macOS slows
-charging above about 80%, and Optimized Battery Charging. IOPowerSources
-only gives a time-to-full while charging, and it is invalid for 30 s after
-wake. A wrong estimate either misses the deadline or leaves the battery at
-100% for longer than needed, and either way CellKeeper would be claiming
-something it cannot deliver. A start time is what CellKeeper can actually
-honour. The end bounds the attempt and doubles as the window for a late
-start (§3). The user picks:
+**What the user sets: a start and an end, not "ready by".** A charge-time
+estimate cannot be made honestly. It depends on the adapter, temperature,
+battery age, macOS slowing charging above about 80%, and Optimized Battery
+Charging, and IOPowerSources' time-to-full is only given while charging. A
+start time is what CellKeeper can honour.
 
-- **Start**: date and time, to the minute. It must be in the future when
-  set, and at most 7 days ahead (owner question Q3).
-- **End at the latest**: 1–48 h after the start, the existing override
-  bounds (R23). It defaults to start + 12 h, the manual full charge's
-  expiry.
+- **Start**: date and time to the minute. It must be in the future when set
+  and at most 7 days ahead (lead decision).
+- **End**: 1–48 h after the start (the override bounds, R23); default start
+  + 12 h. The end bounds the attempt and the window for a late start.
 
-**One-shot, and only one schedule.** Recurring schedules are not nearly
-free. They need floating local times (DST gaps and overlaps, which
-occurrence counts after a time-zone change), `NSCalendarDayChanged`, a rule
-for missed occurrences, and a persisted "last occurrence fired" so a
-backward clock change cannot fire one twice (H14). A routine full charge
-also works against the limit, and macOS already does its own occasional
-calibration charge (R23). A second schedule would need conflict rules the
-travel case does not call for.
+**One schedule, one-shot** (lead decision). Recurrence is not nearly free:
+- floating local time, with DST and time-zone rules;
+- `NSCalendarDayChanged`;
+- a rule for missed occurrences;
+- a persisted "last occurrence", so a backward clock change cannot fire
+  one twice (H14).
 
-**Editing and cancelling.** The editor goes in Settings › Charging, in a new
-section "Scheduled full charge" with two date pickers and a Schedule button
-(Q7). It is editable only while Manage charging is on, the same rule as the
-manual button. Setting a new schedule replaces the old one. "Cancel
-Schedule" is in Settings and in the menu, and is always enabled.
+A routine full charge also works against the limit (R23).
 
-**What the menu shows** (`FullChargeControl`, `MenuBarView.swift`), as one
-extra line under "Charge to 100% once":
+**Editing and cancelling.** The editor is a section in Settings › Charging
+(lead decision): start and end date pickers, a Schedule button, and the
+explanation. It is editable only while Manage charging is on. A new
+schedule replaces the old one. Cancel Schedule is in Settings and in the
+menu and is always enabled. The menu adds one line under "Charge to 100%
+once":
+- a "Schedule…" button when nothing is armed;
+- the armed window;
+- "waiting: <reason>" while it is due but cannot start;
+- or an outcome sentence with OK.
 
-| Schedule state | Menu line |
-|---|---|
-| None | "Schedule…" (small button; opens Settings › Charging) |
-| Armed | "Full charge scheduled: Fri 24 Oct 22:00 – Sat 10:00" · Cancel |
-| Due but waiting | "Scheduled full charge waiting: connect power" / "…: Manage charging is off" / "…: no battery reading" · Cancel |
-| Started | The existing override line (`fullChargeText`), labelled "Scheduled"; its Cancel cancels the running charge (the schedule has already been used) |
-| Missed / already full / discarded | One sentence saying what happened (§3, §4) · OK (dismiss) |
+A running scheduled charge uses the existing override line, labelled
+"Scheduled".
 
 ## 2. Semantics
 
 **The schedule starts the existing temporary full charge.** There is no new
 override kind:
-- `ChargeOverride.Kind.fullCharge`, with precedence rows 8 and N3, expiry,
-  unplugging and completion all unchanged.
-- The only additions to `ChargeOverride` are:
-  - a display-only `source` (`.user` by default, or `.schedule`), which the
-    policy never reads;
-  - a factory `scheduledFullCharge(at:uptime:until end:)`. Its duration is
-    `min(end − start, 48 h)` with no 1-hour floor, so a late start never
-    runs past the end. It returns nil if `end ≤ start` or a value is not
-    finite.
+- `ChargeOverride.Kind.fullCharge`, with rows 8 and N3, completion,
+  unplugging and expiry all unchanged.
+- `ChargeOverride` gains a display-only `source` (`.user`, `.schedule`),
+  which the policy never reads.
+- It also gains a factory `scheduledFullCharge(at:uptime:remaining:)`: a
+  monotonic deadline `remaining` seconds after the start, at most 48 h,
+  with no 1-hour floor. It returns nil unless `remaining` is positive and
+  finite.
 - The schedule never turns management on, selects a backend, changes a
   setting, or starts a discharge.
 
-**When it starts.** At the first evaluation with `now` (wall clock) in
-`[start, end)` where:
-- Manage charging is on, **and**
-- the snapshot is usable by the policy's own rules (battery present, not
-  stale by `ChargingPolicy.staleness`, a known percentage) **and** shows
-  `externalPower`.
+**Eligibility, the schedule's own rules.** At the first evaluation with
+`now` in `[start, end)` where:
+1. the settings are valid and Manage charging is on;
+2. there is a usable reading: battery present, not stale by
+   `ChargingPolicy.staleness`, a percentage, a known power source;
+3. that reading shows `externalPower`.
 
-These are the manual button's enabling conditions. They exist because
-starting otherwise would throw the schedule away: unplugging ends a full
-charge at once (`OverrideEnd.unplugged`), and the controller refuses a full
-charge while management is off. While a condition is not met, the schedule
-**waits** (`ScheduleWait`: `.managementOff`, `.onBattery`,
-`.noUsableReading`). Everything else is left to the unchanged policy, as for
-a manual full charge:
+Otherwise it waits (`.settingsInvalid`, `.managementOff`,
+`.noUsableReading`, `.onBattery`). Starting earlier would only waste it:
+unplugging ends a full charge at once, and management off cancels one.
+Unlike the menu's manual button (management on, limit < 100%, external
+power), the schedule **may start when the limit is already 100%**. It then
+changes nothing unless the limit is lowered before it ends. Everything
+else is left to the unchanged policy:
 
-| Situation at start | Result |
+| Situation at the start | Result |
 |---|---|
-| On battery; no usable reading; management off | Waits until the condition is met or `end`, then it is missed (§3) |
-| Already 100% or fully charged | Starts, and the policy ends it `completed` in the same evaluation. The outcome says "already full" |
-| A manual full charge is running | It is kept, and its expiry is moved to `end` if that is later; a running charge is never shortened. The schedule is used up |
-| A discharge session is running | Replaced by the full charge: `forceDischarge → normal` is a relaxing change. Logged as ended by the schedule (Q4) |
-| Row 1: release required (pending backend switch, unfinished restore, unverified state) | Starts. Row 1 keeps `.normal` (with native: the user's own limit) until the release completes; the expiry keeps counting |
-| Row 4: macOS's Charge Limit on or unreadable (backends that switch charging themselves) | Starts. Rows 4 and 8 both want `.normal`, so nothing changes. It runs if the user turns macOS's limit off before `end`, and the menu says "not in effect" until then |
-| Row 5 safety floor; row 7 temperature pause | Starts. The higher rows still win (note `fullChargeSuppressed`); the schedule cannot bypass the floor or temperature (R22) |
-| Limit already 100% | Starts. It changes nothing unless the limit is lowered before it ends |
-| Backend unavailable, read-only or faulted | Starts. The action is refused exactly as for a manual full charge, and the menu says "not in effect" |
-| Native, limit not a step (N2) | Starts. N2 wins (`.normal`) until the limit is fixed or the charge expires |
-| Native (N3) | Wants `nativeLimit(100)`. Needs ownership of the user's limit first, and is rate-limited and refused while faulted (§5) |
+| Already full | Starts; the policy completes it in the same evaluation; outcome "already full" |
+| A full charge is running and still live (`input.uptime < expiresAtUptime`) | Kept, with deadline `max(existing.expiresAtUptime, candidate.expiresAtUptime)`, monotonic only. **Extended**: `source` becomes `.schedule`, outcome "extended". **Kept**: `source` unchanged, outcome "a full charge was already running". The displayed deadline is derived from the retained monotonic deadline (`now + (expiresAtUptime − uptime)`), even when it is beyond the schedule's end |
+| A full charge whose monotonic deadline has passed | Treated as expired (logged), never kept because its wall-clock estimate looks later; the scheduled charge replaces it |
+| A discharge session is running | Replaced (`forceDischarge → normal` relaxes; lead decision); logged as ended by the schedule |
+| Rows 1, 4, 5, 7; N2; backend unavailable or faulted | Starts. The higher rows and the action table decide exactly as for a manual full charge (with macOS's limit on: "not in effect") |
 
-**Once started, it is an ordinary temporary full charge.** It ends at
-100%/fully charged, on unplug, at `end`, when cancelled, when management is
-turned off, or on adoption of an outside Charge Limit change. Plugging in
-again does not restart it (R23).
+**Native recovery is unchanged, so the invariant is qualified.** A
+*successful* scheduled request (`nativeLimit(100)`) never lowers the limit.
+A *failed* one keeps the existing recovery: the controller restores
+`.normal`, which is the user's own limit, and that can be **lower** than
+CellKeeper's configured limit (owner 80%, CellKeeper 95% → 80%). A faulted
+backend is handled by the action table as today:
+- current mode `.normal`: the 100% request is refused;
+- current mode non-normal or unknown: `.normal` is requested actively.
+
+Schedules get no exemption from either.
 
 ## 3. Time
 
-**Wall-clock window, monotonic expiry** (R22, D12):
-- Before the start, the schedule is a wall-clock interval, checked
-  level-triggered at every evaluation against `PolicyInput.now`.
-- At the start, its expiry becomes monotonic:
-  `expiresAtUptime = input.uptime + (end − input.now)`, at most 48 h.
-- Clock changes after the start cannot move that expiry. The controller
-  reads `uptime` before the backend calls and `now` after them, so the
-  charge can end up to that read time **early**, never late.
+Three things are kept apart:
+1. **Activation window** `[start, end)`: wall clock, checked
+   level-triggered against `PolicyInput.now` at every evaluation (R22).
+2. **Override deadline**: monotonic, `input.uptime + (end − input.now)` at
+   activation, at most 48 h. Like every override expiry, it is **processed
+   only during an evaluation** (`ChargingPolicy.evaluate`). If the Mac
+   sleeps across it, nothing happens until the first evaluation after wake;
+   with macOS's Charge Limit, macOS keeps 100% until then. A forward clock
+   change after activation does not move it (D12).
+3. **Confirmed setting change**: what a read-back shows. A request may be
+   rate-limited, refused or fail, and the return to the limit may be
+   delayed in the same ways.
 
-**The policy stays pure.** A new pure function
-`FullChargeSchedule.check(_:input:) -> ScheduleCheck` (`.notYet`,
-`.start(remaining:)`, `.waiting(ScheduleWait)`, `.missed`) reads time,
-settings and the snapshot only from the same `PolicyInput` the evaluation
-then passes to `ChargingPolicy.evaluate`. `ChargingPolicy` and its tables
-do not change.
-
-In `ChargeController.performEvaluation`:
-1. Telemetry, `capabilities()` and `observeBackendMode()` run as today.
-   An adoption that turns management off therefore comes first, and the
-   check sees it.
-2. Build the input, then run the check.
-3. On `.start`, the schedule is removed from its store and the override is
-   set, with no suspension point between the two. Then the policy runs on
-   that input with the override.
-
-This is a single evaluation, and it keeps its trigger, so automatic
-evaluations still wait out a failed restore (`restoreRetryNotBefore`).
-
-**How the app gets an evaluation at the start time: no new timer.** The
-existing triggers bound the lateness while the Mac is awake:
-- the 60 s periodic evaluation (macOS may defer the timers of an idle app in
-  App Nap; that delays every evaluation, not only this one);
-- wake and the re-read 35 s after it;
-- power events (plugging in starts a waiting schedule at once);
-- a new automatic trigger `EvaluationTrigger.clockChanged`, sent on
-  `NSSystemClockDidChange` and `NSSystemTimeZoneDidChange` (the app also
+Wording therefore says that CellKeeper *requests* 100% and then *requests*
+its limit again at its next check after the battery is full, you unplug, or
+the charge expires, and that sleep can delay that request. No lateness bound
+is claimed. Evaluations come from:
+- the 60 s periodic timer, which App Nap can defer;
+- the ordered command queue, which other commands and backend calls can
+  occupy;
+- wake and the post-wake re-read;
+- power events;
+- a new automatic trigger `EvaluationTrigger.clockChanged`, on
+  `NSSystemClockDidChange` and `NSSystemTimeZoneDidChange` (the app first
   resets the cached system time zone).
 
-`NSCalendarDayChanged` is not needed: it matters only for recurring
-schedules. A timer aligned to the start would save at most one periodic
-interval, and would have to be re-armed on every clock, time-zone and wake
-event.
+No aligned timer is added.
 
-**Not a wake alarm.** CellKeeper cannot wake the Mac. That needs
-`IOPMSchedulePowerEvent` or `pmset schedule` (root, and a pmset change,
-which CellKeeper never makes). If the Mac is asleep or CellKeeper is not
-running at the start, the charge starts at the first evaluation after that,
-if it is still before `end`. Two consequences:
-- With macOS's Charge Limit, macOS keeps enforcing the limit in effect while
-  the Mac sleeps. A charge meant for overnight must therefore **start while
-  the Mac is awake** (for example 22:00). macOS then enforces 100% during
-  sleep, though it may still hold charging for battery health.
-- CellKeeper has no launch at login yet (#38), so after a restart the user
-  must open it.
+**The pure check.** `FullChargeSchedule.check(_:input:)` returns
+`.notYet`, `.start(remaining:)`, `.waiting(_)` or `.passed`. It reads time,
+settings and the snapshot only from the `PolicyInput` the evaluation then
+gives `ChargingPolicy.evaluate`.
 
-**Missed means dropped, never replayed** (R22, H14). If no evaluation could
-start the schedule before `end`, it is removed. The outcome then says
-either:
-- "was missed: CellKeeper was not running or your Mac was asleep", when no
-  evaluation fell inside the window; or
-- "was skipped: <last wait reason>" (the Mac was on battery, Manage
-  charging was off, no battery reading).
+In `performEvaluation`, the check runs after `observeBackendMode()`, so an
+adoption that turns management off in the same evaluation is seen. On
+`.start`, the schedule is removed from its store and the override installed
+with no suspension point between the two. The same evaluation then runs the
+policy, and it keeps its trigger.
 
-The outcome is shown in the menu until dismissed and is logged as an
-`.override` event. A system notification can be added with the planned
-Notifications feature.
+**Not a wake alarm.** Waking the Mac needs root (`IOPMSchedulePowerEvent`,
+`pmset schedule`), which CellKeeper never uses. There is no launch at login
+(#38).
 
-**Clock and time-zone changes:**
+**Missed.** When the window passes before the charge could start:
+- the schedule is removed, never replayed;
+- the outcome reads "The scheduled window passed before the full charge
+  could start.";
+- it adds "Last checked: <wait reason>" only if a wait reason was observed
+  in this run. Wait reasons are not persisted.
 
-| Change | Effect |
+It is shown in the menu until dismissed and logged as an `.override` event.
+
+| Clock or time-zone change | Effect |
 |---|---|
-| Forward into the window | Starts at the next evaluation (prompt via `clockChanged`) |
-| Forward past `end` | Missed, reported |
-| Backward before `start`, schedule unused | Waits for the wall clock to reach `start` again |
-| Backward after the start | No second start: the schedule was removed when it started |
-| Any change while it runs | Its expiry is monotonic and does not move. The displayed `expiresAt` is an estimate, as for manual overrides |
-| Time-zone change, DST | Start and end are **absolute instants**, so the start does not move in real time and only the displayed local time changes (Q6). DST is resolved once, when the time is entered: the date picker turns local time into an instant, and the confirmation shows the resolved time. The 48 h bound is real time |
+| Forward into the window | Starts at the next evaluation |
+| Forward past `end` | Window passed |
+| Backward, unused schedule | Waits for `start` again |
+| Backward after the start | No second start: the schedule was removed |
+| During the run | Deadline unchanged |
+| Time zone, DST | Absolute instants (lead decision): only the displayed local time changes. DST is resolved once, when the time is entered |
 
 ## 4. Persistence
 
-**A separate store, not `ChargingSettings`.** `FullChargeScheduleStore` is a
-`Sendable` protocol in Core. Its implementation uses the same
-`KeyValueStorage` as `SettingsStore`, under its own key
-`fullChargeSchedule.v1`, as versioned JSON (`version`, `startsAt`, `endsAt`,
-`createdAt`). Decoding tolerates missing keys. The controller is given the
-store, as it is given `adoptionMarkerStore`, so it can remove the schedule
-before it starts the charge.
+**Its own store.** `FullChargeScheduleStoring` (Core, `Sendable`) is backed
+by the same `KeyValueStorage` as `SettingsStore`.
+- **Key and schema.** The key `fullChargeSchedule.v1` is the schema version.
+  A later format uses a new key, which this version never reads or
+  removes.
+- **Fields.** The record is `{"startsAt": <s since 1970>, "endsAt": …}`.
+  Both are required; a record missing either is unreadable. Unknown keys are
+  ignored. There is no optional metadata (`createdAt` is dropped).
+- **Load.** An unreadable record, or one whose window is not finite or not
+  1–48 h, is removed with a notice. It never touches `ChargingSettings`, its
+  recovery or Manage charging. A record whose window has passed is reported
+  by the first check. The 7-day lead time is checked only when a schedule is
+  set.
 
-**At launch**, and whenever a stored schedule is loaded:
-- **Unreadable or invalid** (not finite, end not 1–48 h after start): the
-  schedule is removed, with the notice "A saved full-charge schedule could
-  not be read and was removed".
-- **`now ≥ end`**: missed, removed, and reported as above.
-- **Valid**: kept, and checked by the launch evaluation.
+**The no-second-start contract** (narrowed). There is no second start:
+- within a run;
+- after a backward clock change;
+- after a relaunch that follows a **persisted** removal.
 
-The 7-day horizon is checked only when a schedule is set, so a backward
-clock change cannot invalidate a stored one. None of this touches
-`ChargingSettings`, its recovery path, or Manage charging: a bad schedule
-can never be what turns management off.
+UserDefaults persists asynchronously, so after a crash or power loss right
+after a start, the schedule may start once more inside the user's own
+window. That is a relaxation the user asked for; with the native backend it
+is another 100% request inside the window the user authorised. Crash
+durability is not claimed.
 
-**Durability.** UserDefaults persists asynchronously. A power loss right
-after a start could bring the schedule back, and the next launch could
-then start it once more inside the user's own window. That repeats a
-relaxation the user asked for and costs nothing they own. An fsync'd file
-(D22) is warranted only where losing the write loses the user's own limit.
+**One controlling instance.** The guarantees assume one CellKeeper instance
+controls charging. Two instances could both load the armed schedule, but
+overlapping instances already break native ownership more broadly. There is
+no atomic claim.
 
-**Not resumed after relaunch.** A started charge is not persisted. Quitting
-restores `.normal` and ends it, as for a manual charge. Monotonic time does
-not survive the process, and resuming on wall-clock time would break D12.
+**Not resumed.** A started charge is not persisted. Quitting ends it, as for
+a manual one.
 
 ## 5. Safety
 
-Rows 1–7 keep their precedence. The schedule adds no row and changes no
-latch, debounce, floor or temperature rule. It only ever creates the same
+Rows 1–7 keep their precedence. There is no new row, and no latch,
+debounce, floor or temperature rule changes; the schedule creates only the
 override the user could start by hand.
 
 - **Backends that switch charging themselves:** a full charge asks only for
-  `.normal` (row 8). That is a relaxation: never rate-limited, never
-  blocked by a fault. Its end hands back to the ordinary policy, whose
-  restrictions are debounced and rate-limited exactly as after a manual
-  full charge.
-- **Native backend: called out explicitly.** `nativeLimit(100)` is a
-  **restricting** change in CellKeeper's terms (`isRestricting`:
-  `restrictionLevel` 1 versus `.normal`, or one CellKeeper-set limit
-  replacing another). It therefore uses the restricting budget (60 s / 20
-  per hour), is refused while faulted, and needs the user's own limit read
-  and recorded first (D16). Its end (100 → limit) is restricting too, so a
-  refused end leaves 100% in place until a later evaluation. The schedule
-  gets **no exemption**: a refused start is retried by the next evaluation,
-  as a manual one is today. In charging terms it is never stricter than
-  what it replaces, because 100% is at or above every step.
-- **Cases where a schedule could be more restrictive than no schedule:**
-  - Shortening a running manual full charge: excluded, since a running
-    charge is only ever extended.
-  - Its end returning to a hold: this is identical to a manual charge's end,
-    and comes no later than the user chose.
+  `.normal`. That relaxes, and is never rate-limited.
+- **Native backend:** `nativeLimit(100)` is a restricting change
+  (`isRestricting`). It uses the budget, is refused while faulted, and needs
+  ownership (D16); its return is restricting too.
+- **The qualified invariant:**
+  - a successful scheduled target never lowers the limit;
+  - a running full charge is never shortened;
+  - failures keep the existing owner-limit recovery, which can be lower
+    than the configured limit (§2).
 
-  No other case was found.
-- **Fails toward the current behaviour.** A schedule that cannot start (a
-  condition unmet, data unreadable, the window passed) leaves the policy
-  exactly as it would be without it.
-
-## 6. Honest wording
+## 6. Wording
 
 The wording lives in Kit (`FullChargeScheduleWording`) and is tested.
-Nothing promises "ready by" or "guaranteed 100%".
 
-| Backend | Editor and armed-line text |
+| Backend | Explanation |
 |---|---|
-| Simulated, Simulated helper | "Simulated: at the start, CellKeeper records a full charge. Nothing on your Mac changes." |
-| Read-only | "CellKeeper will show what it would do; it changes nothing." |
-| macOS Charge Limit | "At the start, CellKeeper sets macOS's Charge Limit to 100%, and sets it back to <limit>% when the battery is full, when you unplug, or at <end> at the latest. macOS may still hold charging, for battery health or when the battery is warm." |
-| macOS limit on (row 4) | Adds: "While macOS's Charge Limit is on, it stays in charge and the full charge has no effect." |
-| Always | "Your Mac must be awake, with CellKeeper running, at the start. CellKeeper cannot wake your Mac or open itself after a restart. If it misses the start, the full charge starts when CellKeeper next runs before <end>; otherwise it is skipped and the menu says so. Unplugging ends it." |
+| macOS Charge Limit | "At the start, CellKeeper requests a macOS Charge Limit of 100%. After the battery is full, you unplug, or the charge expires (<end>), it requests its <limit>% limit again at its next check; while your Mac sleeps, that waits until it wakes. macOS may still hold charging, for battery health or when the battery is warm." Plus the hint (lead decision on Q10): "To charge overnight, schedule a start while your Mac is awake and wait until the menu shows macOS enforcing 100%. Returning to your limit can wait until your Mac wakes." |
+| Simulated, Simulated helper | "Simulated: at the start, CellKeeper records a temporary full charge. Nothing on your Mac changes." While macOS's limit may be limiting: "macOS's Charge Limit stays in charge." |
+| Read-only, unavailable | "<backend> changes nothing; CellKeeper only shows what it would do." |
+| Real charging-mode backend (future) | "At the start, CellKeeper allows charging to 100%; it applies its limit again at its next check after the battery is full, you unplug, or the charge expires (<end>)." |
+| Always | "Your Mac must be awake, with CellKeeper running, for the full charge to start; CellKeeper cannot wake your Mac or open itself after a restart. If the start passes while it cannot start, it starts at CellKeeper's next check before <end>; otherwise the menu says the window passed. Unplugging ends it." |
 
 ## 7. Tests
 
-All tests are deterministic and use injected time only: `TestClock`, plus a
-`shiftWall(by:)` that moves the wall clock without moving uptime;
-`InMemoryStorage`; and an in-memory schedule store. No real clocks, sleeps
-or timers.
+All deterministic: `TestClock` with a new `shiftWall(by:)` (moves the wall
+clock only), `InMemoryStorage`, no real clocks.
 
-- **Pure check (`FullChargeScheduleTests`):** before start → `.notYet`;
-  `[start, end)` → `.start(remaining: end − now)`; at `end` → `.missed`;
-  each wait reason (management off; on battery; nil, stale, no-battery and
-  unknown-source snapshots); validation (order, 1–48 h, not finite, past,
-  beyond 7 days); the factory (expiry `≤ end`, no 1-hour floor, at most
-  48 h, nil for `end ≤ now`). **Policy parity:** identical decisions for
-  `source` `.user` and `.schedule` across rows 1–13 and N1–N4.
-- **Store:** round trip; missing keys; garbage → nil plus a recovery
-  reason; its key is separate from `chargingSettings.v1`, and a corrupt
-  schedule leaves `SettingsStore.loadChargingSettings()` unchanged.
-- **Controller (`FullChargeScheduleControllerTests`):**
-  - The first periodic evaluation at or after the start starts it: expiry
-    at `end` in uptime, store cleared, state `fullChargeOverride` in that
-    evaluation.
-  - It never starts twice, neither after a backward wall shift nor after a
-    relaunch (a new controller on the same storage). A forward shift past
-    `end` → missed, no override. A wall shift during the run leaves the
-    expiry unchanged.
-  - Waits: on battery, then plugged in inside the window → starts; never
-    plugged in → skipped with `.onBattery`. Management off, then on →
-    starts; an adoption in the same evaluation → no start.
-  - Already full → starts and completes in one evaluation. A running manual
-    charge is extended, never shortened; a running discharge is replaced and
-    logged. Temperature pause and the safety floor still win. Helper backend
-    with macOS's limit on → no restricting request.
-  - Native: sets 100 through the fake shortcut; within 60 s of a restricting
-    change → `rateLimited`, then started at the next periodic evaluation;
-    faulted → refused, override kept; the end sets the limit again.
-  - Launch with a past or invalid stored schedule → outcome plus removal,
-    settings untouched. After `shutdown`, set and cancel are no-ops and the
-    store is untouched. `.clockChanged` is automatic.
-- **Kit:** wording per backend availability: the simulated wording says
-  nothing changes, and no "ready" or "guarantee" claim appears.
-- **App:** offscreen render harness PNGs of the Settings section and of the
-  menu line in each state.
+- **Pure check:**
+  - each result and each wait reason, including stale, no-battery and
+    unknown-source readings and invalid settings;
+  - start allowed at a 100% limit;
+  - validation and the factory (no 1-hour floor, at most 48 h, nil for
+    non-positive remaining);
+  - policy parity for `.user` and `.schedule`.
+- **Store:**
+  - round trip;
+  - partial records → unreadable and removed;
+  - a record under `fullChargeSchedule.v2` is neither read nor removed;
+  - settings recovery is independent.
+- **Controller, scheduling:**
+  - start at the first periodic evaluation in the window: store cleared,
+    deadline at `end` in uptime, `fullChargeOverride` in that evaluation;
+  - no second start within a run, after a backward shift, or after a
+    relaunch that follows the persisted removal;
+  - forward jump past `end`, and a relaunch after waiting: neither shows
+    "Last checked";
+  - waiting on battery or with management off, then starting;
+  - an adoption in the same evaluation: no start;
+  - already full.
+- **Controller, running charges:** extending or keeping a running full
+  charge on monotonic deadlines, with the wall clock jumped forward and
+  backward; an expired one replaced; a discharge replaced.
+- **Controller, deadlines:**
+  - sleep across the deadline: nothing until the next evaluation, then
+    expired and the limit requested;
+  - native, a return write that is rate-limited (stays 100% until the
+    retry) and one that fails (owner limit restored).
+- **Controller, native recovery:**
+  - a scheduled 100% request that fails, with the owner limit below the
+    configured limit (→ owner limit) and above it;
+  - faulted with current mode normal (refused), non-normal (`.normal`
+    requested) and unknown (`.normal` requested).
+- **Controller, other rules:**
+  - temperature pause and safety floor still win;
+  - helper with macOS's limit on: no restricting request;
+  - a stored record that is invalid, or whose window has passed, at launch;
+  - after shutdown, commands are inert;
+  - `.clockChanged` is automatic.
+- **Kit:** wording per backend, with no "ready" or "guarantee" claims.
+- **App:** offscreen render-harness PNGs.
 
-## 8. Decision-log rows (provisional) and doc changes
+## 8. Decision-log rows (provisional D90–D95)
 
-| # | Decision | Rationale |
+| # | Decision |
+|---|---|
+| D90 | One one-shot scheduled full charge, a start (≤ 7 days ahead) and an end 1–48 h later, as absolute instants. It starts the existing temporary full charge (rows 8, N3 unchanged; display-only `source`). It never changes settings, management or the backend, never discharges, and does not recur |
+| D91 | The activation window `[start, end)` is checked level-triggered against `PolicyInput.now` (R22). It starts with valid settings, management on and a usable reading on external power, and may start at a 100% limit; otherwise it waits. Its monotonic deadline `end − now` at activation (≤ 48 h, no 1-hour floor) is processed only at evaluations, so sleep, refusals and failures can delay the return to the limit, and the wording says CellKeeper requests. A passed window is reported and never replayed |
+| D92 | The schedule is removed from its store before the override is installed, with no suspension point. No second start within a run, after a backward clock change, or after a relaunch that follows a persisted removal; after a crash or power loss right after a start it may start once more inside the user's window. One controlling instance is assumed |
+| D93 | Its own store, `fullChargeSchedule.v1`; the key is the schema version and both endpoints are required. An unreadable or invalid record is removed with a notice and never affects `ChargingSettings` or Manage charging. Management off keeps the schedule without starting it |
+| D94 | No dedicated timer and no wake. A new automatic `clockChanged` trigger joins the existing triggers; no lateness bound is claimed. CellKeeper is not a wake alarm |
+| D95 | At the start, a live full charge keeps the later monotonic deadline (never shortened; display derived from it); an expired one is replaced; a discharge is replaced. On the native backend the start is restricting, with no exemption, and failures keep the owner-limit recovery, which can be lower than the configured limit |
+
+The design folds into `architecture.md`, `safety.md` and `roadmap.md` and
+the diagnostics report in the implementation branch, and this file is then
+removed.
+
+## 9. Lead decisions (from the recommendations)
+
+| # | Question | Decision |
 |---|---|---|
-| D90 | One one-shot scheduled full charge: a start (future, ≤ 7 days ahead) and an end (1–48 h later), stored as absolute instants. It starts the existing temporary full charge (rows 8, N3 unchanged; display-only `source`). It never changes settings, management or the backend, never discharges, and does not recur | The travel case needs one charge. "Ready by" needs a charge-time estimate CellKeeper cannot make honestly. Recurrence needs floating local time, DST rules and more double-fire protection, and routine full charges work against the limit |
-| D91 | Level-triggered against `PolicyInput.now` over `[start, end)` (R22). It starts at the first evaluation with management on and a usable reading showing external power, otherwise it waits. The expiry is monotonic, `end − now` at the start (≤ 48 h, no 1-hour floor), so it never runs past `end`. If nothing can start it before `end`, it is reported missed and never replayed | Starting on battery or with management off would only throw it away. A wall-clock change can delay a start but never extend a running charge (D12) |
-| D92 | The schedule is removed from its store before the override is set, with no suspension point between them. A running scheduled charge ends on quit like a manual one and is not resumed | A relaunch, crash or backward clock change cannot start it twice (H14). Monotonic time does not survive a relaunch, and resuming on wall time would break D12 |
-| D93 | Its own store (`fullChargeSchedule.v1`, versioned JSON). An unreadable, invalid or past schedule is removed with a notice and never affects `ChargingSettings` or Manage charging. Turning management off keeps the schedule, but it does not start while management is off. UserDefaults durability is accepted | A stale schedule must not turn management off. Losing a removal can only repeat a relaxation inside the user's window, unlike D22 |
-| D94 | No dedicated timer and no wake. The triggers are the periodic evaluation, wake and post-wake re-read, power events, and a new automatic `clockChanged` trigger (system clock and time-zone change). CellKeeper is not a wake alarm | Lateness while awake is one periodic interval. Waking needs root or a pmset change, which CellKeeper never makes |
-| D95 | At the start, a running full charge is kept or extended to `end` (never shortened), and a discharge session is replaced. On the native backend the start is a restricting change (budget, fault, ownership), with no exemption | A schedule must never make charging stricter than without it. `forceDischarge → normal` relaxes. Exempting `nativeLimit(100)` would weaken the rate limit for an unattended write |
-
-Doc changes:
-- **architecture.md:**
-  - Overrides: add a "Scheduled full charge" paragraph.
-  - Data flow: new triggers.
-  - Requirement table: the Scheduler row becomes implemented.
-  - Persistence: the new key.
-  - User interface: the schedule section and menu line.
-  - Decision log.
-- **safety.md:**
-  - A safeguards row: the window, monotonic expiry, no double start, cannot
-    bypass the floor or temperature, not a wake alarm.
-  - Validation ranges: schedule start ≤ 7 days ahead, window 1–48 h.
-  - Note that the overrides row covers scheduled starts.
-- **roadmap.md:** the milestone 2 schedules bullet becomes done (one-shot
-  full charge), and the Later item narrows to scheduled limits and
-  recurrence.
-- **DiagnosticsReport:** a schedule line.
-
-## 9. Open questions for the owner (with recommendations)
-
-1. **Start + end, or "ready by"?** Recommend start + end (§1).
-2. **One-shot only?** Recommend yes; reconsider recurrence only with real
-   demand.
-3. **How far ahead?** Recommend at most 7 days ("this Friday"). It keeps a
-   forgotten schedule unlikely, and the menu always shows it.
-4. **A discharge session running at the start?** Recommend replacing it (a
-   relaxation the user scheduled; logged). The alternative is skipping the
-   schedule.
-5. **Management turned off while armed?** Recommend keeping it: it does not
-   start while management is off, and is reported skipped if still off at
-   `end`. The alternative is cancelling it, as management-off cancels a
-   running override.
-6. **Travel across time zones?** Recommend absolute instants: it fires at the
-   same real moment and the menu shows the new local time. The alternative
-   is floating local time ("05:00 wherever I am").
-7. **Where to edit?** Recommend Settings › Charging, with the menu showing
-   status, Cancel and "Schedule…". This keeps the 340 pt menu small (see
-   #4).
-8. **How to report started, missed or already full?** Recommend a menu line
-   until dismissed, plus the activity log; a system notification once the
-   Notifications feature lands.
-9. **Native-only?** Recommend every backend, as with "Charge to 100% once",
-   with honest simulated wording.
-10. **Hint for overnight charging with macOS's Charge Limit?** Recommend one
-    line in the editor: "To charge overnight, start it before you close the
-    lid: macOS applies the 100% limit while your Mac sleeps."
+| Q1 | Start + end, or "ready by"? | Start + end |
+| Q2 | One-shot? | One-shot only |
+| Q3 | How far ahead? | At most 7 days |
+| Q4 | Discharge session running at the start? | Replaced |
+| Q5 | Management turned off while armed? | Kept, not started while off |
+| Q6 | Travel across time zones? | Absolute instants |
+| Q7 | Where to edit? | Settings › Charging; the menu has status, Cancel and "Schedule…" |
+| Q8 | How to report outcomes? | Menu line until dismissed, plus the activity log; notifications later |
+| Q9 | Which backends? | Every backend, with honest simulated wording |
+| Q10 | Overnight hint? | Wait until the menu shows macOS enforcing 100%; the return can wait until wake |
