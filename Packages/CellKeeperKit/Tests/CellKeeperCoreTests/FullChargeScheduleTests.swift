@@ -170,7 +170,9 @@ struct ScheduledNativeActionTests {
 
     @Test("Its 100% limit is a restricting change, so it waits for the rate limit")
     func rateLimited() {
-        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 70), override: scheduled, capabilities: nativeCapabilities, currentMode: .nativeLimit(percent: 80), recentRestrictingRequests: [10_000 - 30]))
+        // A restricting change 30 s before this evaluation's uptime.
+        let recent: [TimeInterval] = [9_970]
+        let decision = ChargingPolicy.evaluate(input(snapshot(percent: 70), override: scheduled, capabilities: nativeCapabilities, currentMode: .nativeLimit(percent: 80), recentRestrictingRequests: recent))
         #expect(decision.state == .fullChargeOverride)
         #expect(decision.desiredMode == .nativeLimit(percent: 100))
         guard case .refuse(.rateLimited) = decision.action else {
