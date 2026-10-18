@@ -293,9 +293,19 @@ final class PlannerScenario {
             backend: backend,
             settings: settings,
             adoptionMarkerStore: adoptionMarkerStore,
+            scheduleStore: FullChargeScheduleStore(defaults: InMemoryStorage()),
             now: { clock.now },
             uptime: { clock.uptime }
         )
+    }
+
+    /// Arms a scheduled full charge starting `lead` from now, as the app
+    /// does for the user, and plans with the trigger the app gives it.
+    @discardableResult
+    func setSchedule(startingIn lead: TimeInterval, window: TimeInterval) async throws -> [PlannedNotification] {
+        let start = clock.now.addingTimeInterval(lead)
+        let status = try await controller.setFullChargeSchedule(FullChargeSchedule(startsAt: start, endsAt: start.addingTimeInterval(window)))
+        return feed(status, .scheduleChanged)
     }
 
     /// Sets the next reading. `sourceAge`: how old the driver's own update

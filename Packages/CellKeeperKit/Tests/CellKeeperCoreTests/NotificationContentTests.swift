@@ -47,7 +47,11 @@ struct NotificationContentTests {
 
     /// Every notification each kind of backend can produce for `status`.
     private func everyNotification(_ status: ControllerStatus) -> [PlannedNotification] {
-        let override = ChargeOverride.dischargeToLimit(target: 80, at: referenceDate, uptime: 10_000)
+        let overrides = [
+            ChargeOverride.fullCharge(at: referenceDate, uptime: 10_000),
+            ChargeOverride.scheduledFullCharge(at: referenceDate, uptime: 10_000, remaining: 7200),
+            ChargeOverride.dischargeToLimit(target: 80, at: referenceDate, uptime: 10_000),
+        ].compactMap { $0 }
         var all = [
             NotificationWording.limitReached(status, limit: 80, percent: 85),
             NotificationWording.temperaturePause(status),
@@ -58,9 +62,9 @@ struct NotificationContentTests {
         for resolution in [RestoreResolution.restored(limit: 80), .restored(limit: nil), .released, .keptOutsideChange(change), .keptOutsideChange(nil), .recordDiscarded] {
             all.append(NotificationWording.restoreResolved(resolution, status))
         }
-        for kind in [ChargeOverride.Kind.fullCharge, .dischargeToLimit] {
+        for override in overrides {
             for ended in [OverrideEnd.completed, .expired, .unplugged, .interrupted] {
-                all.append(NotificationWording.overrideEnded(kind, ended, override: override, status: status))
+                all.append(NotificationWording.overrideEnded(override, ended, status: status))
             }
         }
         return all

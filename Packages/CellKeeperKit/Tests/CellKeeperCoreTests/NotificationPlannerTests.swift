@@ -2,6 +2,8 @@ import CellKeeperCore
 import Foundation
 import Testing
 
+private let hour: TimeInterval = 3600
+
 /// Which notifications the controller's statuses call for, and when none.
 @Suite("Notification planner")
 struct NotificationPlannerTests {
@@ -438,7 +440,7 @@ struct NotificationPlannerTests {
         await expiring.evaluate(.launch)
         await expiring.command(.overrideChanged) { await $0.startFullCharge() }
         let expired = await expiring.evaluate(after: ChargeOverride.defaultFullChargeDuration)
-        #expect(expired.filter { $0.kind == .overrideEnded }.map(\.body) == ["Temporary full charge expired after 12 hours. \(Self.simulatedNote)"])
+        #expect(expired.filter { $0.kind == .overrideEnded }.map(\.body) == ["Temporary full charge expired. \(Self.simulatedNote)"])
 
         let unplugging = PlannerScenario(percent: 85)
         await unplugging.evaluate(.launch)
@@ -509,18 +511,205 @@ struct NotificationPlannerTests {
     }
 
     @Test("A discharge ended by a policy note says what the note says")
-    func dischargeEndedByNote() async {
+    func dischargeEndedByNote() async throws {
         let scenario = PlannerScenario(percent: 90)
         await scenario.evaluate(.launch)
         let running = await scenario.command(.overrideChanged) { await $0.startDischargeToLimit() }
         #expect(running.isEmpty)
         var status = await scenario.status
         var planner = scenario.planner
+        let session = try #require(status.activeOverride)
         status.activeOverride = nil
         status.decision?.overrideEnded = .interrupted
+        status.lastEndedOverride = EndedOverride(override: session, end: .interrupted)
+        status.overridesEnded += 1
         status.decision?.notes = [.dischargeUnsupported]
         let ended = planner.plan(status, trigger: .periodic, uptime: scenario.clock.uptime + 60, isDelivering: true)
         #expect(ended.map(\.body) == ["Discharge to limit stopped by a safety rule. \(PolicyNote.dischargeUnsupported.description) \(Self.simulatedNote)"])
+    }
+
+    // MARK: - Scheduled full charge
+
+    /// How a scheduled full charge ends by itself.
+    enum ScheduledEnd: CaseIterable {
+        case expired, completed, unplugged
+    }
+
+    @Test("A scheduled full charge that ends by itself posts how it ended, named as in the menu; setting it and its start post nothing", arguments: ScheduledEnd.allCases)
+    func scheduledFullChargeEnds(end: ScheduledEnd) async throws {
+        // Above the limit, so no hold is armed.
+        let scenario = PlannerScenario(percent: 85)
+        await scenario.evaluate(.launch)
+        let set = try await scenario.setSchedule(startingIn: hour, window: 2 * hour)
+        #expect(set.isEmpty)
+        let started = await scenario.evaluate(after: hour + 60)
+        #expect(started.isEmpty)
+        let running = await scenario.status
+        #expect(running.activeOverride?.source == .schedule)
+
+        let ended: [PlannedNotification]
+        let body: String
+        switch end {
+        case .expired:
+            ended = await scenario.evaluate(after: 2 * hour)
+            body = "Scheduled full charge expired."
+        case .completed:
+            await scenario.read(100, charging: false, fullyCharged: true)
+            ended = await scenario.evaluate()
+            body = "Scheduled full charge completed. macOS reports the battery fully charged."
+        case .unplugged:
+            await scenario.read(85, source: .battery)
+            ended = await scenario.evaluate(.powerSourceChanged)
+            body = "Scheduled full charge ended: a battery reading showed the Mac on battery power."
+        }
+        #expect(ended == [PlannedNotification(
+            kind: .overrideEnded,
+            title: "Simulated: scheduled full charge ended",
+            body: "\(body) \(Self.simulatedNote)"
+        )])
+        let after = await scenario.evaluate()
+        #expect(after.isEmpty)
+    }
+
+    @Test("A scheduled full charge the user cancels, or a schedule cancelled before it starts, posts nothing")
+    func scheduledFullChargeCancelled() async throws {
+        let running = PlannerScenario(percent: 85)
+        await running.evaluate(.launch)
+        try await running.setSchedule(startingIn: hour, window: 2 * hour)
+        await running.evaluate(after: hour + 60)
+        let started = await running.status
+        #expect(started.activeOverride?.source == .schedule)
+        await running.command(.overrideChanged) { await $0.cancelOverride() }
+        await running.evaluate(after: 2 * hour)
+        #expect(running.all.isEmpty)
+
+        let armed = PlannerScenario(percent: 85)
+        await armed.evaluate(.launch)
+        try await armed.setSchedule(startingIn: hour, window: 2 * hour)
+        await armed.command(.scheduleChanged) { await $0.cancelFullChargeSchedule() }
+        await armed.evaluate(after: hour + 60)
+        await armed.evaluate(after: 2 * hour)
+        #expect(armed.all.isEmpty)
+    }
+
+    @Test("A temporary full charge a schedule extended is named a scheduled full charge when it ends, as in the menu and the log")
+    func extendedFullChargeEnds() async throws {
+        let scenario = PlannerScenario(percent: 85)
+        await scenario.evaluate(.launch)
+        await scenario.command(.overrideChanged) { await $0.startFullCharge() }
+        // The schedule ends after the manual charge's 12 hours.
+        try await scenario.setSchedule(startingIn: hour, window: 14 * hour)
+        await scenario.evaluate(after: hour + 60)
+        let extended = await scenario.status
+        #expect(extended.activeOverride?.source == .schedule)
+        // Past the manual charge's own deadline, it still runs.
+        let midway = await scenario.evaluate(after: 12 * hour)
+        #expect(midway.isEmpty)
+        let ended = await scenario.evaluate(after: 2 * hour)
+        #expect(ended.map(\.body) == ["Scheduled full charge expired. \(Self.simulatedNote)"])
+    }
+
+    @Test("A scheduled full charge that replaces a discharge and completes in the same evaluation is the one named, not the discharge")
+    func scheduleReplacesDischarge() async throws {
+        let scenario = PlannerScenario(percent: 90)
+        await scenario.evaluate(.launch)
+        await scenario.command(.overrideChanged) { await $0.startDischargeToLimit() }
+        try await scenario.setSchedule(startingIn: hour, window: 2 * hour)
+        // The simulated discharge changes nothing; the battery reads full
+        // when the schedule starts.
+        await scenario.read(100, charging: false, fullyCharged: true)
+        let ended = await scenario.evaluate(after: hour + 60)
+        #expect(ended == [PlannedNotification(
+            kind: .overrideEnded,
+            title: "Simulated: scheduled full charge ended",
+            body: "Scheduled full charge completed. macOS reports the battery fully charged. \(Self.simulatedNote)"
+        )])
+        let status = await scenario.status
+        #expect(status.events.contains { $0.message == "Discharge to limit ended: the scheduled full charge started." })
+    }
+
+    @Test("A temporary full charge whose deadline passed before the evaluation that starts a schedule posts that it expired, as the log says")
+    func expiredFullChargeReplaced() async throws {
+        let scenario = PlannerScenario(percent: 85)
+        await scenario.evaluate(.launch)
+        await scenario.command(.overrideChanged) { await $0.startFullCharge() }
+        try await scenario.setSchedule(startingIn: 12.5 * hour, window: 2 * hour)
+        // Asleep past the manual charge's deadline and the schedule's start.
+        let woke = await scenario.evaluate(.didWake, after: 12.5 * hour + 60)
+        #expect(woke.map(\.body) == ["Temporary full charge expired. \(Self.simulatedNote)"])
+        let status = await scenario.status
+        #expect(status.activeOverride?.source == .schedule)
+        let ended = await scenario.evaluate(after: 2 * hour)
+        #expect(ended.map(\.body) == ["Scheduled full charge expired. \(Self.simulatedNote)"])
+    }
+
+    @Test("A schedule that starts during a temperature pause posts nothing more: the pause wins, and no notification says the full charge runs")
+    func scheduleDuringTemperaturePause() async throws {
+        let scenario = PlannerScenario(percent: 70)
+        await scenario.evaluate(.launch)
+        try await scenario.setSchedule(startingIn: hour, window: 3 * hour)
+        await scenario.read(70, temperature: 41)
+        let paused = await scenario.evaluate()
+        #expect(paused.map(\.kind) == [.temperaturePause])
+
+        let started = await scenario.evaluate(after: hour)
+        #expect(started.isEmpty)
+        let status = await scenario.status
+        #expect(status.activeOverride?.source == .schedule)
+        #expect(status.decision?.state == .temperaturePause)
+        #expect(status.decision?.notes.contains(.fullChargeSuppressed(by: .temperaturePause)) == true)
+
+        // Cooled, the scheduled full charge goes on; its end is posted.
+        await scenario.read(70, temperature: 30)
+        let resumed = await scenario.evaluate()
+        #expect(resumed.isEmpty)
+        let charging = await scenario.status
+        #expect(charging.decision?.state == .fullChargeOverride)
+        await scenario.read(100, charging: false, fullyCharged: true)
+        let ended = await scenario.evaluate()
+        #expect(ended.map(\.kind) == [.overrideEnded])
+
+        // The pause beginning in the evaluation the schedule starts in posts
+        // only the pause.
+        let together = PlannerScenario(percent: 70)
+        await together.evaluate(.launch)
+        try await together.setSchedule(startingIn: hour, window: 3 * hour)
+        await together.read(70, temperature: 41)
+        await together.evaluate(after: hour + 60)
+        await together.evaluate()
+        #expect(together.all.map(\.kind) == [.temperaturePause])
+        #expect(together.all.allSatisfy { !$0.body.contains("full charge") })
+    }
+
+    @Test("Clock changes post nothing new: a hold is not reported again, a running scheduled full charge ends once on the monotonic clock, and a window a jump passes posts nothing")
+    func clockChanges() async throws {
+        let scenario = PlannerScenario(percent: 76)
+        let held = await chargeToLimit(scenario)
+        #expect(held.map(\.kind) == [.limitReached])
+        for jump in [10 * hour, -10 * hour] {
+            scenario.clock.shiftWall(by: jump)
+            await scenario.evaluate(.clockChanged)
+        }
+
+        try await scenario.setSchedule(startingIn: hour, window: 2 * hour)
+        await scenario.evaluate(after: hour + 60)
+        for jump in [10 * hour, -10 * hour] {
+            scenario.clock.shiftWall(by: jump)
+            await scenario.evaluate(.clockChanged)
+            let running = await scenario.status
+            #expect(running.activeOverride?.source == .schedule)
+        }
+        let ended = await scenario.evaluate(after: 2 * hour)
+        #expect(ended.map(\.body) == ["Scheduled full charge expired. \(Self.simulatedNote)"])
+        scenario.clock.shiftWall(by: hour)
+        await scenario.evaluate(.clockChanged)
+
+        try await scenario.setSchedule(startingIn: hour, window: 2 * hour)
+        scenario.clock.shiftWall(by: 10 * hour)
+        await scenario.evaluate(.clockChanged)
+        let passed = await scenario.status
+        #expect(passed.fullChargeScheduleOutcome.map { if case .windowPassed = $0 { true } else { false } } == true)
+        #expect(scenario.all.map(\.kind) == [.limitReached, .overrideEnded])
     }
 
     // MARK: - Faults

@@ -148,6 +148,29 @@ public struct ControllerStatus: Sendable, Equatable {
     /// What became of the latest schedule, until the user dismisses it or
     /// sets a new one.
     public var fullChargeScheduleOutcome: FullChargeScheduleOutcome? = nil
+    /// The override that most recently ended by itself in this session, as
+    /// it was when it ended, with how: the policy ended it (also a full
+    /// charge a schedule started in the same evaluation, in place of the
+    /// override shown before), or its monotonic deadline had passed when a
+    /// schedule replaced it. A cancellation, turning management off, a kept
+    /// outside change, or a schedule replacing a live override ends one
+    /// without that, and is not recorded here.
+    public var lastEndedOverride: EndedOverride? = nil
+    /// How many overrides have ended by themselves in this session
+    /// (``lastEndedOverride``), counting ones that began and ended between
+    /// two statuses. Only grows.
+    public var overridesEnded: Int = 0
+}
+
+/// An override that ended by itself, and how.
+public struct EndedOverride: Sendable, Equatable {
+    public var override: ChargeOverride
+    public var end: OverrideEnd
+
+    public init(override: ChargeOverride, end: OverrideEnd) {
+        self.override = override
+        self.end = end
+    }
 }
 
 extension ControllerStatus {

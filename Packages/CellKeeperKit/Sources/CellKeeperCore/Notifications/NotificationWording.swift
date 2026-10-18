@@ -47,8 +47,11 @@ public enum NotificationWording {
         return PlannedNotification(kind: .temperaturePause, title: titled("Charging paused because the battery is warm", status), body: noted(reason, status))
     }
 
-    static func overrideEnded(_ kind: ChargeOverride.Kind, _ ended: OverrideEnd, override: ChargeOverride, status: ControllerStatus) -> PlannedNotification {
-        let name = ChargeController.describe(kind)
+    /// `override` is the one the policy ended; a full charge a schedule
+    /// started or extended is named so, as in the menu and the log.
+    static func overrideEnded(_ override: ChargeOverride, _ ended: OverrideEnd, status: ControllerStatus) -> PlannedNotification {
+        let kind = override.kind
+        let name = ChargeController.describe(override)
         var sentences: [String]
         switch ended {
         case .completed:
@@ -61,8 +64,10 @@ public enum NotificationWording {
                 sentences.append("macOS reports the battery at \(percent)%.")
             }
         case .expired:
-            let hours = max(1, Int((override.expiresAt.timeIntervalSince(override.startedAt) / 3600).rounded()))
-            sentences = ["\(name) \(ended) after \(hours) \(hours == 1 ? "hour" : "hours")."]
+            // Its monotonic deadline passed; how long it ran is not said,
+            // since the wall-clock times it carries are estimates a clock
+            // change can move.
+            sentences = ["\(name) \(ended)."]
         case .unplugged:
             // The policy ends an override on any reading of battery power,
             // even one too old to act on otherwise; say what it saw.
@@ -75,7 +80,7 @@ public enum NotificationWording {
                 sentences.append("The menu shows what CellKeeper does now.")
             }
         }
-        let title = kind == .fullCharge ? "Temporary full charge ended" : "Discharge ended"
+        let title = kind == .fullCharge ? "\(name) ended" : "Discharge ended"
         return PlannedNotification(kind: .overrideEnded, title: titled(title, status), body: noted(sentences.joined(separator: " "), status))
     }
 

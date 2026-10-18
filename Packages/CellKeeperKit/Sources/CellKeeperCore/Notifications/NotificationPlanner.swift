@@ -9,7 +9,8 @@ public enum NotificationKind: String, Sendable, CaseIterable {
     case limitReached
     /// A temperature pause is in effect, as a read-back shows.
     case temperaturePause
-    /// A temporary full charge or a discharge session ended by itself.
+    /// A temporary full charge (also one a schedule started) or a discharge
+    /// session ended by itself (``ControllerStatus/lastEndedOverride``).
     case overrideEnded
     /// The control backend became faulted.
     case backendFault
@@ -93,9 +94,12 @@ public struct PlannedNotification: Sendable, Equatable {
 ///   is neither evidence nor arming input. The wording states observations,
 ///   never a likely cause.
 /// - **Episodes.** A kind is posted when an episode of its condition
-///   begins, never because it still holds. Faults and restores are
-///   followed through monotonic counters in the status, so an episode that
-///   began or ended between two statuses (inside one command) is not lost.
+///   begins, never because it still holds. Faults, restores and overrides'
+///   ends are followed through monotonic counters in the status, so an
+///   episode that began or ended between two statuses (inside one command)
+///   is not lost; of several overrides that ended between two statuses,
+///   only the latest is posted, as it would replace the others in
+///   Notification Center anyway.
 ///   A hold or a pause is armed again only once the opposite has been seen
 ///   on telemetry the policy accepts: charging toward that limit from below
 ///   it, or a known temperature with the latch clear and protection on. So
@@ -107,9 +111,9 @@ public struct PlannedNotification: Sendable, Equatable {
 ///   backends; a transition within it is dropped, not delayed.
 /// - **No replay.** Nothing true in the first status is reported, except
 ///   the safety kinds (``NotificationKind/isSafety``). Statuses of the
-///   user's own commands (settings, overrides, backend switch, refresh) and
-///   a change of backend post only safety kinds, never a hold, a pause or an
-///   override's end. A change of backend resets all arming and retires a
+///   user's own commands (settings, overrides, a schedule, backend switch,
+///   refresh) and a change of backend post only safety kinds, never a hold,
+///   a pause or an override's end. A change of backend resets all arming and retires a
 ///   restore warning without a claim about how it ended. The limit is armed
 ///   only for the limit in force when charging toward it was seen, so
 ///   lowering it below the charge posts nothing.
@@ -141,6 +145,9 @@ public struct NotificationPlanner: Sendable {
     private var isTemperaturePauseArmed = false
     /// ``ControllerStatus/faultsRaised`` when last seen.
     private var faultsSeen = 0
+    /// ``ControllerStatus/overridesEnded`` when last seen; nil before the
+    /// first status, which only sets it.
+    private var overridesEndedSeen: Int?
     /// The evidence when the restore episode in progress was first seen; nil
     /// while none is.
     private var restoreEpisode: RestoreEvidence?
@@ -183,9 +190,13 @@ public struct NotificationPlanner: Sendable {
             return true
         }
 
-        if let before = previous?.activeOverride, let ended = Self.endedOverride(before, in: status) {
-            _ = offer(.overrideEnded, NotificationWording.overrideEnded(before.kind, ended, override: before, status: status))
+        // The override that ended, as the controller recorded it: so a full
+        // charge a schedule started in place of the override shown before,
+        // and ended in the same evaluation, is the one named.
+        if let seen = overridesEndedSeen, status.overridesEnded != seen, let ended = status.lastEndedOverride {
+            _ = offer(.overrideEnded, NotificationWording.overrideEnded(ended.override, ended.end, status: status))
         }
+        overridesEndedSeen = status.overridesEnded
 
         if let held = Self.heldLimit(status) {
             if limitArmedAt == held.limit {
@@ -242,15 +253,6 @@ public struct NotificationPlanner: Sendable {
     }
 
     // MARK: - Conditions
-
-    /// How the override active in the previous status ended, if `status`
-    /// shows it ended by itself in its latest evaluation. A cancellation, a
-    /// settings change or a kept outside change ends it without an
-    /// ``PolicyDecision/overrideEnded``, so it is not reported.
-    static func endedOverride(_ before: ChargeOverride, in status: ControllerStatus) -> OverrideEnd? {
-        guard status.activeOverride != before, let ended = status.decision?.overrideEnded else { return nil }
-        return ended
-    }
 
     /// The telemetry of the status's latest evaluation, if the policy acted
     /// on it; nil if it rejected it.

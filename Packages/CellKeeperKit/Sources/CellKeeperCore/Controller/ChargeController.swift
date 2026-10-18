@@ -154,6 +154,10 @@ public actor ChargeController {
     /// with a backend that switches charging itself
     /// (``ControllerStatus/releasesConfirmed``).
     private var releasesConfirmed = 0
+    /// The override that most recently ended by itself, with how, and how
+    /// many have (``ControllerStatus/lastEndedOverride``).
+    private var lastEndedOverride: EndedOverride?
+    private var overridesEnded = 0
     private var lastFailureUptime: TimeInterval?
     private var sleepAnnouncedAtUptime: TimeInterval?
     private var isShutDown = false
@@ -257,7 +261,9 @@ public actor ChargeController {
             lastEvaluation: lastEvaluation,
             fullChargeSchedule: schedule,
             fullChargeScheduleWait: schedule == nil ? nil : scheduleWait,
-            fullChargeScheduleOutcome: scheduleOutcome
+            fullChargeScheduleOutcome: scheduleOutcome,
+            lastEndedOverride: lastEndedOverride,
+            overridesEnded: overridesEnded
         )
     }
 
@@ -516,6 +522,10 @@ public actor ChargeController {
                 if previous.isLive(atUptime: uptimeAtNow) {
                     record(.override, "\(Self.describe(previous)) ended: the scheduled full charge started.")
                 } else {
+                    // Its monotonic deadline passed before this evaluation:
+                    // it expired, as the policy would have found.
+                    lastEndedOverride = EndedOverride(override: previous, end: .expired)
+                    overridesEnded += 1
                     record(.override, "\(Self.describe(previous)) \(OverrideEnd.expired).")
                 }
             }
@@ -843,6 +853,8 @@ public actor ChargeController {
 
         if let ended = newDecision.overrideEnded, let override = activeOverride {
             activeOverride = nil
+            lastEndedOverride = EndedOverride(override: override, end: ended)
+            overridesEnded += 1
             record(.override, "\(Self.describe(override)) \(ended).")
             if startedSchedule, ended == .completed, case .started(let started)? = scheduleOutcome {
                 scheduleOutcome = .alreadyFull(started)
