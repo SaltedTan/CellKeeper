@@ -249,13 +249,36 @@ public enum PolicyNote: Sendable, Equatable, CustomStringConvertible {
         case .dischargeUnsupported:
             "The current backend cannot discharge while plugged in."
         case .fullChargeSuppressed(let state):
-            "Temporary full charge is paused by \(state.rawValue)."
+            if let rule = Self.fullChargeSuppression(by: state) {
+                "Temporary full charge is not in effect: \(rule)."
+            } else {
+                "Temporary full charge is not in effect."
+            }
         case .nativeLimitKeptWithoutTelemetry:
             "Battery telemetry is unavailable. macOS keeps enforcing its Charge Limit from its own measurements, so CellKeeper leaves it unchanged."
         case .confirmingLimit:
             "CellKeeper is confirming the limit with the next battery reading before it pauses charging, so a single wrong reading cannot pause it."
         case .dischargeEndedForMacOSChargeLimit:
             "The discharge session ended: while macOS's Charge Limit is on or cannot be read, CellKeeper starts no discharge and asks to end one in progress."
+        }
+    }
+
+    /// The rule that takes precedence over a temporary full charge while the
+    /// policy is in `state`, in plain words, for ``fullChargeSuppressed(by:)``
+    /// and the menu; nil for a state that comes after the full charge in
+    /// precedence and so cannot keep it from taking effect. It names the
+    /// rule only: whether charging is actually paused is shown elsewhere,
+    /// with its own confirmation. Today only the temperature pause adds that
+    /// note; no state is ever shown by its identifier.
+    public static func fullChargeSuppression(by state: PolicyState) -> String? {
+        switch state {
+        case .unmanaged: "the Manage charging setting takes precedence"
+        case .failSafe: "CellKeeper's fail-safe takes precedence"
+        case .deferringToMacOS: "deferring to macOS's Charge Limit takes precedence"
+        case .safetyFloor: "the safety floor takes precedence"
+        case .onBattery: "the rule for battery power takes precedence"
+        case .temperaturePause: "temperature protection takes precedence"
+        case .fullChargeOverride, .charging, .holding, .discharging, .osEnforcedLimit: nil
         }
     }
 }
@@ -295,6 +318,16 @@ public struct ChargeOverride: Sendable, Equatable {
         case dischargeToLimit
     }
 
+    /// Who started the override, for display and the activity log only. The
+    /// policy never reads it.
+    public enum Source: String, Sendable, Equatable {
+        /// The user, from the menu or Settings.
+        case user
+        /// A scheduled full charge (``FullChargeSchedule``), including a
+        /// running full charge whose deadline a schedule extended.
+        case schedule
+    }
+
     public var kind: Kind
     /// For a discharge session, the percentage confirmed by the user when it
     /// started. The session never discharges below it, nor below the current
@@ -306,23 +339,54 @@ public struct ChargeOverride: Sendable, Equatable {
     public var expiresAt: Date
     /// Monotonic expiry used by the policy (see ``PolicyInput/uptime``).
     public var expiresAtUptime: TimeInterval
+    /// Who started it; display only.
+    public var source: Source
 
     public static let defaultFullChargeDuration: TimeInterval = 12 * 60 * 60
     public static let defaultDischargeDuration: TimeInterval = 6 * 60 * 60
     public static let minimumDuration: TimeInterval = 60 * 60
     public static let maximumDuration: TimeInterval = 48 * 60 * 60
 
-    public init(kind: Kind, targetPercent: Int? = nil, startedAt: Date, uptime: TimeInterval, duration: TimeInterval) {
+    public init(kind: Kind, targetPercent: Int? = nil, startedAt: Date, uptime: TimeInterval, duration: TimeInterval, source: Source = .user) {
         let clamped = min(max(duration.isFinite ? duration : 0, Self.minimumDuration), Self.maximumDuration)
+        self.init(kind: kind, targetPercent: targetPercent, startedAt: startedAt, uptime: uptime, clampedDuration: clamped, source: source)
+    }
+
+    private init(kind: Kind, targetPercent: Int?, startedAt: Date, uptime: TimeInterval, clampedDuration: TimeInterval, source: Source) {
         self.kind = kind
         self.targetPercent = targetPercent
         self.startedAt = startedAt
-        self.expiresAt = startedAt.addingTimeInterval(clamped)
-        self.expiresAtUptime = uptime + clamped
+        self.expiresAt = startedAt.addingTimeInterval(clampedDuration)
+        self.expiresAtUptime = uptime + clampedDuration
+        self.source = source
     }
 
     public static func fullCharge(at start: Date, uptime: TimeInterval, duration: TimeInterval = defaultFullChargeDuration) -> ChargeOverride {
         ChargeOverride(kind: .fullCharge, startedAt: start, uptime: uptime, duration: duration)
+    }
+
+    /// A temporary full charge started by a schedule. Its monotonic deadline
+    /// is `remaining` seconds after `uptime`, at most ``maximumDuration``:
+    /// the time left to the schedule's end when it starts. Unlike a full
+    /// charge the user starts, it has no minimum duration, so a late start
+    /// is not lengthened to an hour. `uptime` must be read together with
+    /// `start`. Nil unless `remaining` is positive and `start`, `uptime` and
+    /// `remaining` are finite.
+    public static func scheduledFullCharge(at start: Date, uptime: TimeInterval, remaining: TimeInterval) -> ChargeOverride? {
+        guard start.timeIntervalSinceReferenceDate.isFinite, uptime.isFinite, remaining.isFinite, remaining > 0 else { return nil }
+        return ChargeOverride(kind: .fullCharge, targetPercent: nil, startedAt: start, uptime: uptime, clampedDuration: min(remaining, maximumDuration), source: .schedule)
+    }
+
+    /// True while its monotonic deadline has not passed at `uptime`.
+    public func isLive(atUptime uptime: TimeInterval) -> Bool {
+        uptime < expiresAtUptime
+    }
+
+    /// The wall-clock estimate of its deadline as seen at `now` and
+    /// `uptime`, derived from the monotonic deadline, so that a clock change
+    /// since it started does not mislead the display.
+    public func deadlineEstimate(now: Date, uptime: TimeInterval) -> Date {
+        now.addingTimeInterval(expiresAtUptime - uptime)
     }
 
     public static func dischargeToLimit(target: Int, at start: Date, uptime: TimeInterval, duration: TimeInterval = defaultDischargeDuration) -> ChargeOverride {
@@ -403,9 +467,16 @@ public struct PolicyMemory: Sendable, Equatable {
 public struct PolicyInput: Sendable, Equatable {
     /// Wall-clock time, used for telemetry age and display.
     public var now: Date
-    /// Monotonic seconds that keep counting during sleep, used for override
-    /// expiry and rate limiting so that clock changes cannot affect them.
+    /// Monotonic seconds that keep counting during sleep, used for rate
+    /// limiting, restore retries and the minimum temperature pause, so that
+    /// clock changes cannot affect them. The controller reads it before the
+    /// backend's reads, which errs toward restricting for these.
     public var uptime: TimeInterval
+    /// Monotonic seconds at which an override's expiry is judged (see
+    /// ``ChargeOverride/isLive(atUptime:)``). The controller reads it
+    /// together with ``now``, after the backend's reads, so an evaluation
+    /// that straddles a deadline ends the override. Defaults to ``uptime``.
+    public var overrideUptime: TimeInterval
     public var settings: ChargingSettings
     /// Latest telemetry, or nil if it could not be read.
     public var snapshot: BatterySnapshot?
@@ -431,6 +502,7 @@ public struct PolicyInput: Sendable, Equatable {
     public init(
         now: Date,
         uptime: TimeInterval,
+        overrideUptime: TimeInterval? = nil,
         settings: ChargingSettings,
         snapshot: BatterySnapshot?,
         activeOverride: ChargeOverride? = nil,
@@ -445,6 +517,7 @@ public struct PolicyInput: Sendable, Equatable {
     ) {
         self.now = now
         self.uptime = uptime
+        self.overrideUptime = overrideUptime ?? uptime
         self.settings = settings
         self.snapshot = snapshot
         self.activeOverride = activeOverride

@@ -5,7 +5,17 @@ import Foundation
 public protocol KeyValueStorage {
     func data(forKey key: String) -> Data?
     func string(forKey key: String) -> String?
+    /// Whatever is stored under `key`, of any type, or nil if nothing is, so
+    /// a value of an unexpected type can be told apart from none.
+    func object(forKey key: String) -> Any?
     func set(_ value: Any?, forKey key: String)
+}
+
+extension KeyValueStorage {
+    /// For storages that keep only data and strings.
+    public func object(forKey key: String) -> Any? {
+        data(forKey: key) ?? string(forKey: key)
+    }
 }
 
 extension UserDefaults: KeyValueStorage {}

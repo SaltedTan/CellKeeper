@@ -1,6 +1,6 @@
 # CellKeeper architecture
 
-Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper), the helper's NSXPC transport, tested over an anonymous listener but not used by the app yet, and the helper daemon's executable, which serves its engine over that transport to CellKeeper only, controls no hardware, refuses to listen when built without a team identifier, and is neither installed nor embedded, and the logic that removes the helper only after its restore, tested against fakes. Last reviewed 2026-10-10.
+Status: milestone 2 (telemetry + policy engine + simulated control + macOS's native Charge Limit + a one-shot scheduled full charge), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper), the helper's NSXPC transport, tested over an anonymous listener but not used by the app yet, and the helper daemon's executable, which serves its engine over that transport to CellKeeper only, controls no hardware, refuses to listen when built without a team identifier, and is neither installed nor embedded, and the logic that removes the helper only after its restore, tested against fakes. Last reviewed 2026-10-10.
 
 This document describes how CellKeeper is put together and why. Research that
 informed these decisions is in [`docs/research/`](research/README.md); safety
@@ -54,11 +54,13 @@ rules are in [`docs/safety.md`](safety.md).
 │  XPCHelperTransport        – `HelperTransport` over NSXPC (not used yet)      ││
 │  NoHelperRegistration      – the helper's registration: none in phase 4a      ││
 │  DiagnosticsReportFile     – the saved diagnostics report: name, UTF-8 write  ││
+│  FullChargeScheduleWording – what the menu and Settings say about a schedule  ││
 └───────────────┬──────────────────────────────────────────────────────────────┘│
                 │ depends on                                                    │
 ┌───────────────▼──────────────── CellKeeperCore (pure Swift, no IOKit) ────────▼───────────────┐
 │  Telemetry:  BatterySnapshot, BatteryHealth, TelemetryProvider (protocol)                      │
 │  Settings:   ChargingSettings (+ validation), SettingsStore (UserDefaults JSON)                │
+│  Schedule:   FullChargeSchedule (window, pure check), FullChargeScheduleStore (own key)        │
 │  Policy:     ChargingPolicy (pure state machine), PolicyInput/Decision/Memory, ChargeOverride  │
 │  Control:    ChargingBackend (protocol), MockChargingBackend, ReadOnlyChargingBackend,         │
 │              NativeChargeLimitBackend (+ ShortcutRunning / ChargeLimitReading /                │
@@ -132,7 +134,7 @@ Requirement → location:
 | Orchestration & safety fallbacks | `ChargeController` (Core) | Implemented |
 | Persistence/settings | `ChargingSettings`, `SettingsStore` (Core) | Implemented |
 | macOS UI | `CellKeeper/` app target | Implemented (menu bar + settings) |
-| Scheduler | — | Future: will feed overrides into `PolicyInput` |
+| Scheduler | `FullChargeSchedule`, `FullChargeScheduleStore` (Core), `ChargeController`, `FullChargeScheduleWording` (Kit) | One-shot scheduled temporary full charge implemented; scheduled limits and recurring schedules are future |
 | Notifications | — | Future: driven from `ControlEvent`s |
 | Shortcuts/automation | — | Future: App Intents calling `AppModel` intents |
 | Privileged operations | `HelperEngine` (HelperCore), `HelperChargingBackend` (Core), `HelperXPCServer` / `HelperXPCClient` (HelperXPC), `XPCHelperTransport` (Kit), `HelperDaemon` (HelperDaemon), `CellKeeperHelper` | Helper logic and the app's backend implemented, with a simulated control only, in process (the Simulated helper); no hardware control. The NSXPC transport with code-signing requirements on both sides is implemented and tested over an anonymous listener. The removal of the helper (`HelperRemoval`, `ChargeController.removeHelper`) is implemented and tested against fakes. The daemon executable serves its engine over that transport (when signed with a team identifier) and controls nothing; it and its launchd property list are neither embedded nor registered, and the app does not use the transport yet |
@@ -144,8 +146,9 @@ Requirement → location:
  60 s timer ─────────────┤
  wake (+35 s re-read) ───┤      AppModel (MainActor)            ChargeController (actor, serialized)
  will-sleep ─────────────┼──▶  ordered command queue  ──────▶  1. read telemetry snapshot
- user intents ───────────┘     (AsyncStream, 1 consumer)        2. backend.capabilities(), currentMode()
-                                                                3. ChargingPolicy.evaluate(input)   ← pure
+ clock/time-zone change ─┤     (AsyncStream, 1 consumer)        2. backend.capabilities(), currentMode()
+ user intents ───────────┘                                      3. scheduled full charge check      ← pure
+                                                                   ChargingPolicy.evaluate(input)   ← pure
                                          ◀── ControllerStatus   4. execute action via backend
                                                                 5. read back, record outcome/events
 ```
@@ -169,16 +172,28 @@ Requirement → location:
     when the wait ran out), an alert says which value to set by hand before
     the app exits, and the next launch retries (see "Native Charge Limit
     backend").
-- **Time.** Wall-clock time is used for telemetry age and display. Override
-  expiry, rate limiting and the minimum temperature pause use a monotonic
-  clock (`ContinuousClock`, which keeps counting during sleep), so changing
-  the system clock cannot extend a temporary override or a pause, or block
-  restrictions.
+- **Time.** Wall-clock time is used for telemetry age, display, and the
+  window of a scheduled full charge. Override expiry, rate limiting and the
+  minimum temperature pause use a monotonic clock (`ContinuousClock`, which
+  keeps counting during sleep), so changing the system clock cannot extend
+  a temporary override or a pause, or block restrictions. Each evaluation
+  reads that clock twice, either side of the backend's reads. Override
+  expiry uses the later reading, taken together with the wall time
+  (`PolicyInput.overrideUptime`, D83). Rate limiting, restore retries, the
+  temperature pause and the sleep and failure memory use the earlier one,
+  which errs toward restricting. A change of the
+  system clock or time zone (`NSSystemClockDidChange`,
+  `NSSystemTimeZoneDidChange`) sends an automatic evaluation
+  (`EvaluationTrigger.clockChanged`), so a schedule's window is checked
+  again at once. Nothing guarantees when an evaluation runs: the periodic
+  timer can be deferred by App Nap, commands and backend calls ahead in the
+  queue delay it, and nothing runs while the Mac sleeps.
 
 ## Charging policy
 
 `ChargingPolicy.evaluate(_:)` maps a `PolicyInput` (wall time, monotonic
-uptime, settings, snapshot, active override, backend capabilities, backend's
+uptime, the monotonic reading override expiry is judged on, settings,
+snapshot, active override, backend capabilities, backend's
 current mode, policy memory, fault flag, recent restricting requests,
 sleep-imminent flag) to a `PolicyDecision` (state, desired mode, action,
 reason, notes, next memory, override end).
@@ -247,6 +262,138 @@ even when the charge reading is unusable.
   pause, on lost or stale telemetry, while macOS's own Charge Limit is on or
   unreadable, when the backend cannot discharge, or if its confirmed target
   is outside 20–95%. After it ends it never restarts by itself.
+
+### Scheduled full charge
+
+One one-shot schedule (`FullChargeSchedule`) can start a **temporary full
+charge** later, for example before travel. It is not a new override kind.
+It starts the existing one, so rows 8 and N3 below, completion, unplugging
+and expiry are unchanged. `ChargeOverride.source` (`.user` or `.schedule`)
+is for display only, and the policy never reads it (a test checks the
+decisions are identical). A schedule never changes settings, Manage
+charging or the backend, never starts a discharge, and does not recur.
+
+Three things are kept apart:
+
+1. **The activation window.** A start (in the future when set, at most
+   7 days ahead) and an end 1–48 h later, both absolute instants. The
+   window is checked level-triggered against `PolicyInput.now` at every
+   evaluation (research rule R22). A time-zone change shifts only the
+   displayed times, and DST is resolved when the time is entered. A time
+   in the hour a backward DST change repeats is shown with its time zone,
+   and so are both ends of a window whose ends would otherwise read the
+   same.
+2. **The override's deadline.** When the schedule starts, the new full
+   charge's duration is the time left to the end at that moment, at most
+   48 h, with no one-hour minimum (`ChargeOverride.scheduledFullCharge`),
+   so a late start is not lengthened to an hour. The end bounds nothing
+   after that:
+   - The deadline is monotonic, so a clock change after activation does not
+     move it. After a forward change, the wall clock shows it later than
+     the end.
+   - A full charge already running with a later deadline keeps that
+     deadline (below).
+   - Like every override expiry, it is processed only during an evaluation.
+     If the Mac sleeps across it, nothing happens until the first evaluation
+     after wake; with macOS's Charge Limit, macOS keeps 100% until then.
+   - Its uptime is read together with the wall time it is computed from,
+     after the backend's reads, so slow reads do not shorten it. Every
+     override's expiry is judged on that same reading
+     (`PolicyInput.overrideUptime`, D83), so an evaluation that straddles
+     a deadline because the backend's reads were slow ends the override.
+     Everything else the policy times keeps the uptime read before the
+     backend calls, because the earlier reading errs toward restricting
+     there: the rate limit of restricting requests, the spacing of
+     automatic restore retries, the temperature pause and its minimum, and
+     the sleep and failure memory.
+   - Every evaluation derives the running override's displayed deadline
+     (`expiresAt`) from its monotonic deadline, for full charges started by
+     the user or a schedule and for discharge sessions, so a clock change
+     does not leave a stale estimate.
+3. **A confirmed setting change**, which only a read-back shows. The start
+   and the return to the limit may be rate-limited, refused or fail like
+   any other request. The wording therefore says that CellKeeper *requests*
+   100%, then requests its limit again at a check after the full charge
+   ends, which can be delayed. The running full charge's menu line
+   (`TemporaryFullChargeWording`, Kit, shared by full charges the user
+   starts) says what a read-back confirmed for the backend in charge: with
+   macOS's Charge Limit, that the limit is at 100%, not that the battery is
+   charging. It never says that 100% stops applying at a given time.
+
+**How it starts.** The schedule starts at the first evaluation inside the
+window where the settings are valid, Manage charging is on, and a usable
+reading (battery present, not stale, a known charge and power source) shows
+external power. Until then it waits (`FullChargeScheduleWait`), because
+starting would only waste it: unplugging ends a full charge at once, and
+turning management off cancels one. Unlike "Charge to 100% once", it may
+start when the limit is already 100% (it then changes nothing unless the
+limit is lowered before it ends).
+
+The check (`FullChargeSchedule.check(_:input:)`) is pure. It reads only the
+`PolicyInput` that the same evaluation then gives `ChargingPolicy`. In
+`ChargeController.performEvaluation` it runs after the backend's mode was
+read, so an outside change adopted in that evaluation (which turns
+management off) keeps the schedule from starting. On a start, the schedule
+is removed from its store and the override installed, with no suspension
+point between them, and the policy runs on that input.
+
+Everything else is left to the unchanged policy, exactly as for a manual
+full charge. Already full: it starts and completes in the same evaluation.
+Rows 1, 4, 5 and 7, N2, and an unavailable or faulted backend: it starts,
+and those rows and the action table decide.
+
+**What it does to an override already running:**
+- A live full charge (its monotonic deadline not passed) keeps the later of
+  the two monotonic deadlines. It is never shortened, and the displayed
+  deadline is derived from the deadline it keeps, even when that is beyond
+  the schedule's end.
+- A full charge whose monotonic deadline has passed counts as expired,
+  however late its wall-clock estimate looks, and is replaced.
+- A discharge session is replaced: `forceDischarge → normal` relaxes.
+
+**When the window passes before it could start**, the schedule is removed,
+never replayed. The menu says "The scheduled window passed before the full
+charge could start", and adds "Last checked: <reason>" only if this run saw
+it waiting. CellKeeper does not guess why no evaluation came: the Mac may
+have been asleep, CellKeeper not running, or the clock changed. Outcomes
+(`FullChargeScheduleOutcome`) stay in the menu until dismissed, and are
+logged as override events.
+
+**Not a wake alarm.** Waking the Mac needs root (`IOPMSchedulePowerEvent`,
+`pmset schedule`), which CellKeeper never uses, and CellKeeper does not
+open at login yet. No timer is aligned to the start, and no lateness bound
+is claimed (see "Time" under "Data flow").
+
+**Persistence and its limits.**
+- **The store.** `FullChargeScheduleStore` keeps the schedule under its own
+  `UserDefaults` key, `fullChargeSchedule.v1`, apart from `ChargingSettings`.
+  The key is the schema version: a later format uses a new key, which this
+  version never reads or removes. Both endpoints are required.
+- **Load.** A value under the key that is not JSON data, an unreadable
+  record, or one whose window is not finite or not 1–48 h, is removed with
+  a notice and never affects the settings or Manage charging. Only no value
+  at all counts as no schedule. A record whose window has passed is reported by the first
+  check.
+- **No second start.** The schedule never starts a second time within a run,
+  after a backward clock change, or after a relaunch that follows a
+  persisted removal. `UserDefaults` persists asynchronously, so after a
+  crash or power loss right after a start it may start once more inside the
+  user's own window. That is a relaxation the user asked for; with the
+  native backend it is another 100% request inside the authorised window.
+  These guarantees assume one controlling instance of CellKeeper.
+- **Not resumed.** A started charge is not persisted: quitting ends it, as
+  it ends a manual one.
+
+**macOS's Charge Limit.** `nativeLimit(100)` is a restricting change
+(`isRestricting`). The start therefore uses the restricting budget, is
+refused while the backend is faulted, and needs the user's own limit
+recorded first, with no exemption for schedules. A *successful* scheduled
+request never lowers the limit. A failed one keeps the existing recovery:
+the controller restores `.normal`, the user's own limit, which can be lower
+than CellKeeper's configured limit (own 80%, CellKeeper 95%). With a
+faulted backend the action table decides as usual: the 100% request is
+refused while the user's own limit is in effect, and `.normal` is requested
+while anything else is or may be.
 
 ### Precedence (highest first)
 
@@ -2052,6 +2199,33 @@ tested.
   Settings view. macOS starts security-scoped access on the URL a save
   panel returns; CellKeeper stops it once the write has ended, whatever
   the outcome.
+- **Scheduled full charge.**
+  - **Settings › Charging** has a "Scheduled full charge" section: start and
+    end pickers and a Schedule button, editable only while Manage charging
+    is on. An armed schedule shows its window and Cancel Schedule, which is
+    always enabled. The section also says what a schedule does with the
+    backend in charge (`FullChargeScheduleWording`, Kit): simulated and
+    unavailable backends change nothing; with macOS's Charge Limit,
+    CellKeeper requests 100% and later requests its limit again at its next
+    check, which can wait until the Mac wakes; with a real backend that
+    switches charging itself, it requests a temporary full charge that the
+    safety rules, such as the temperature pause, still override. It gives the start
+    conditions and, for macOS's Charge Limit, an overnight hint: start while
+    the Mac is awake and wait until the menu shows macOS enforcing 100%.
+  - **The menu** adds "Schedule…" next to "Charge to 100% once". It shows
+    the armed window with Cancel, or why a due schedule cannot start yet,
+    and an outcome line with OK. A running full charge, scheduled or
+    started by the user, has one line (`TemporaryFullChargeWording`, Kit).
+    It says what was requested and what a read-back confirmed for the
+    backend in charge (with macOS's Charge Limit: the limit at 100%), and
+    that CellKeeper requests its limit again at a check after the battery
+    is full, the user unplugs, or the charge expires (its deadline as
+    estimated now), which sleep can delay. The help of "Charge to 100%
+    once" says the same, and, for a backend that accepts no requests
+    (Read-only, an unavailable macOS Charge Limit), that a full charge
+    changes nothing.
+  - **Nothing promises** a charge "ready by" a time or a return to the limit
+    at an exact time.
 
 ## Known limitations
 
@@ -2147,6 +2321,11 @@ Decoding tolerates missing keys; decoded values are validated, and invalid or
 corrupt data falls back to defaults with Manage charging off (failing toward
 macOS defaults), with a visible notice. A first launch with nothing stored
 uses the defaults as they are. Invalid settings are never saved. The selected backend is stored separately.
+
+A scheduled full charge is stored on its own, under `fullChargeSchedule.v1`
+(`FullChargeScheduleStore`), so a schedule that cannot be read is removed
+with a notice and never makes the settings invalid or turns management off
+(see "Scheduled full charge").
 
 The helper daemon keeps one file, its activation history, under
 `/Library/Application Support/CellKeeper/Helper/` (see "Helper daemon").
@@ -2270,3 +2449,10 @@ The helper daemon logs under its own subsystem,
 | D74 | The steps for turning macOS's Charge Limit off are offered only while it may be limiting and the backend switches charging itself and accepts requests; with simulated controls they, and the notices, first say that the Simulated helper provides no replacement charge limit, that the Mac may charge to 100%, and to keep macOS's limit on unless the user is trying the simulation. CellKeeper only opens System Settings › Battery and never changes the setting | Advising to turn macOS's limit off is safe only where CellKeeper's own limit would take over; the Simulated helper's would not, and an unavailable backend controls nothing |
 | D75 | The helper backend counts each request against the session's request budget as admitted when its reply arrives, and as having taken a token whenever the helper might have had one (the count never goes below zero); a request is sure of a token only if the count held one when it was sent, and a `rateLimited` reply empties the count. A read the budget refuses is sent once more after a wait for a token; a second refusal is a failure that names the request budget, and nothing is read from a refused reply. An activation refused with `rateLimited` (the budget or the activation limit; the reply does not say which) is never sent again by the backend. Refines D43: its one-token reserve stays as a margin but no longer carries the guarantee (issue #67) | The helper judges its budget when it admits a request, at a moment between the sending and the reply that the app cannot see. D43's copy took a token at the sending and counted nothing for a move toward safety sent beyond it, so a request admitted late while the helper's budget was full, followed by such a move that spent the helper's last token, left the helper below the copy, and it refused a read the copy had paced (seen in CI). Counted at the reply, the app's count is never more than the tokens the helper holds when it admits the next request, whatever the latency, while one request at a time is in flight (the refill each credits can differ, after a refusal say, but the count stays at or below the helper's); a larger reserve would only make a refusal less likely. A refused reply carries no state, and whether to restrict again is the policy's decision |
 | D76 | Settings › Activity › Save Diagnostics… saves the diagnostics report through `NSSavePanel`, shown as a sheet on the Settings window, found through the button's view, while that window is on screen (otherwise as a window of its own), never with `runModal()`, and the app carries `com.apple.security.files.user-selected.read-write` for it (owner's approval, 2026-10-18). The report is generated when the user clicks Save and written as UTF-8 straight to the chosen file, not atomically, on a dispatch queue (off the main actor and the cooperative thread pool, D62); a failure is shown in an alert. One save runs at a time, from the panel opening until the write has ended, and the security-scoped access macOS starts on the chosen URL is stopped once the write has ended, whatever the outcome. CI checks that the signed Release app carries exactly that entitlement and the App Sandbox | A file is easier to attach to a bug report than pasted text. The entitlement reaches only files the user picks in an open or save panel. With `NSSavePanel` CellKeeper generates the report after the user clicks Save and writes the file itself; `fileExporter` takes its document when the panel opens, and SwiftUI writes the file. Inside the App Sandbox an atomic write first writes a copy into an item replacement directory, on the destination's volume, so only a direct write leaves nothing but the chosen file; the cost is that a failed write can leave an incomplete file, which the alert says. A modal loop would block the menu, and so could a write to a slow volume on the main actor; the key window can be the menu's, and a sheet there could block it too. Access to a save panel's URL that is never stopped leaks kernel resources, and enough leaks keep the app from adding locations to its sandbox until it is relaunched (Apple, "Accessing files from the macOS App Sandbox" and `startAccessingSecurityScopedResource()`; DTS, developer forums thread 804886). Two saves at once could let an older report overwrite a newer one, or mix two direct writes in one file |
+| D77 | One one-shot scheduled full charge (owner approval, 2026-10-18; shape decided by the lead): a start, in the future and at most 7 days ahead when set, and an end 1–48 h later, stored as absolute instants. It starts the existing temporary full charge, so rows 8 and N3 are unchanged and `ChargeOverride.source` is display only. It never changes settings, Manage charging or the backend, never discharges, and does not recur | The travel case needs one charge. A "ready by" time needs a charge-time estimate CellKeeper cannot make honestly (adapter, temperature, age, macOS's own slowing above about 80%, Optimized Battery Charging). Recurrence needs floating local time with DST rules and a record of the last occurrence against double firing (H14), and routine full charges work against the limit (R23) |
+| D78 | The activation window `[start, end)` is checked level-triggered against `PolicyInput.now` by a pure function (R22). The schedule starts at the first evaluation with valid settings, management on and a usable reading on external power, also at a 100% limit; otherwise it waits. Its full charge's duration is the time left to the end at activation (at most 48 h, no one-hour minimum), measured on an uptime read together with that wall time, after the backend's reads. The end bounds nothing after activation: the deadline is monotonic, and like every expiry it is processed only at evaluations. Every evaluation derives a running override's displayed deadline from its monotonic deadline. The running line says what a read-back confirmed, and that the limit is requested again at a later check. A window that passes is reported, with the reason it waited only if this run saw one, and is never replayed | Starting on battery or with management off would only throw the schedule away. Reading the uptime before the backend calls, as the policy does, would subtract their duration from the full charge. A wall-clock change can delay a start but never extend a running charge (D12); after activation it moves only the displayed estimate, which is refreshed. Sleep, refusals and failures can delay the return to the limit, and a confirmed 100% Charge Limit is a setting, not charging, so the wording says CellKeeper requests and never that the limit returns at a given time. Why no evaluation came (sleep, not running, a clock jump) is not known, so it is not guessed |
+| D79 | The schedule is removed from its store before its override is installed, with no suspension point between them. It never starts a second time within a run, after a backward clock change, or after a relaunch that follows a persisted removal. After a crash or power loss right after a start, it may start once more inside the user's window. One controlling instance is assumed. A started charge is not persisted, so quitting ends it | `UserDefaults` persists asynchronously. A second start repeats a relaxation the user asked for, inside the window they authorised (with macOS's Charge Limit, another 100% request), so an fsync'd file (D22) is not warranted. Overlapping instances already break native ownership more broadly. Monotonic time does not survive a relaunch, and resuming on wall time would break D12 |
+| D80 | The schedule has its own store, `fullChargeSchedule.v1`, where the key is the schema version. Both endpoints are required; unknown keys are ignored. A value under the key that is not JSON data, an unreadable record, or one whose window is not 1–48 h, is removed with a notice and never affects `ChargingSettings` or Manage charging. Turning management off keeps an armed schedule, which does not start while it is off (lead's decision) | A stale or broken schedule must never be what turns management off or makes the settings invalid. A later format under a new key cannot be misread or deleted by this version |
+| D81 | No timer is aligned to the start, and the Mac is never woken. The existing triggers (periodic, wake and post-wake re-read, power events, commands) and a new automatic `clockChanged` trigger (system clock or time-zone change) run the check. No lateness bound is claimed | An aligned timer would save at most one periodic interval and would need re-arming on every clock, time-zone and wake event. App Nap, queued commands and backend calls already delay every evaluation. Waking the Mac needs root (`IOPMSchedulePowerEvent`, `pmset schedule`), which CellKeeper never uses |
+| D82 | At the start, a live full charge keeps the later of the two monotonic deadlines (never shortened; its displayed deadline is derived from the deadline it keeps), one whose monotonic deadline has passed is replaced as expired, and a discharge session is replaced (lead's decision). With macOS's Charge Limit the start is a restricting change, with no exemption: it uses the budget, is refused while faulted, and needs ownership. A failed request keeps the existing recovery of the user's own limit, which can be lower than CellKeeper's limit | Deadlines compare on the monotonic clock only, because a wall-clock estimate can be wrong after a clock change. `forceDischarge → normal` relaxes. Exempting `nativeLimit(100)` would weaken the rate limit for an unattended write. A successful scheduled request never lowers the limit; changing the failure recovery for schedules would add a second path to the most safety-relevant code |
+| D83 | Every override's expiry (a full charge the user or a schedule started, and a discharge session) is judged on the monotonic clock read together with the wall time after the backend's reads (`PolicyInput.overrideUptime`; its default is `uptime`, so other callers keep its meaning). The controller's liveness checks for a scheduled start use the same reading. Everything else the policy times keeps the uptime read before the backend's reads: the rate limit of restricting requests, the spacing of automatic restore retries, the temperature pause and its minimum, and the sleep and failure memory (lead's decision, review of PR #82). This changes existing behaviour: a manual full charge or a discharge session now ends in the evaluation that straddles its deadline | Judged on the earlier reading, an evaluation that began just before a deadline and whose backend reads took longer than the time left returned after the deadline with the override still active, and a discharge session still asked to discharge, until the next evaluation (seen in review). For the other rules the earlier reading errs toward restricting (a restriction or a retry waits a little longer), which is the safe side; for an override it erred toward keeping a temporary state beyond its deadline |

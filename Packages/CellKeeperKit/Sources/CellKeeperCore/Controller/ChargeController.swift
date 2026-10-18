@@ -62,6 +62,12 @@ import os
 ///   made while CellKeeper was not running is detected like any other
 ///   external change, and the user's limit is restored before anything
 ///   else.
+/// - A scheduled full charge (``FullChargeSchedule``) only starts the
+///   existing temporary full charge, inside an evaluation and after the
+///   backend's mode was read: the schedule is removed from its store, then
+///   the override is installed, with no suspension point between them, and
+///   the same evaluation runs the policy. It never shortens a running full
+///   charge. Its guarantees assume one controlling instance.
 public actor ChargeController {
     public static let maximumConsecutiveFailures = 3
     /// A failure-free period of this length resets the failure count.
@@ -79,9 +85,23 @@ public actor ChargeController {
     private let adoptionMarkerStore: (any OwnershipRecordStore)?
     private let now: @Sendable () -> Date
     private let uptime: @Sendable () -> TimeInterval
+    /// Where the scheduled full charge is kept; nil turns scheduling off.
+    private let scheduleStore: (any FullChargeScheduleStoring)?
 
     private var settings: ChargingSettings
     private var activeOverride: ChargeOverride?
+    /// Whether ``schedule`` has been loaded from ``scheduleStore``. Loading
+    /// waits for the first command, so that it is logged at the right time.
+    private var hasLoadedSchedule = false
+    /// The armed scheduled full charge.
+    private var schedule: FullChargeSchedule?
+    /// Why the armed schedule, now due, cannot start yet; nil while it is
+    /// not due.
+    private var scheduleWait: FullChargeScheduleWait?
+    /// Why the armed schedule last waited in this run, for the outcome if
+    /// its window passes; never persisted.
+    private var lastScheduleWait: FullChargeScheduleWait?
+    private var scheduleOutcome: FullChargeScheduleOutcome?
     private var memory = PolicyMemory()
     private var snapshot: BatterySnapshot?
     private var telemetryError: String?
@@ -161,7 +181,10 @@ public actor ChargeController {
 
     /// - Parameters:
     ///   - adoptionMarkerStore: the native backend's record store, if any.
-    ///   - now: wall-clock time, for telemetry age and display.
+    ///   - scheduleStore: where a scheduled full charge is kept; nil turns
+    ///     scheduling off.
+    ///   - now: wall-clock time, for telemetry age, display, and a scheduled
+    ///     full charge's window.
     ///   - uptime: monotonic seconds that keep counting during sleep, for
     ///     override expiry and rate limiting. Defaults to `ContinuousClock`.
     public init(
@@ -169,12 +192,14 @@ public actor ChargeController {
         backend: any ChargingBackend,
         settings: ChargingSettings,
         adoptionMarkerStore: (any OwnershipRecordStore)? = nil,
+        scheduleStore: (any FullChargeScheduleStoring)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
         uptime: (@Sendable () -> TimeInterval)? = nil
     ) {
         self.telemetry = telemetry
         self.backend = backend
         self.adoptionMarkerStore = adoptionMarkerStore
+        self.scheduleStore = scheduleStore
         self.settings = settings
         self.now = now
         self.uptime = uptime ?? Self.continuousUptime()
@@ -214,7 +239,10 @@ public actor ChargeController {
             consecutiveFailures: consecutiveFailures,
             isBackendFaulted: isBackendFaulted,
             events: events,
-            lastEvaluation: lastEvaluation
+            lastEvaluation: lastEvaluation,
+            fullChargeSchedule: schedule,
+            fullChargeScheduleWait: schedule == nil ? nil : scheduleWait,
+            fullChargeScheduleOutcome: scheduleOutcome
         )
     }
 
@@ -269,7 +297,7 @@ public actor ChargeController {
             record(.settings, Self.describeChange(from: previous, to: validSettings))
             if !validSettings.isManagementEnabled, let ended = activeOverride {
                 activeOverride = nil
-                record(.override, "\(Self.describe(ended.kind)) cancelled because charge management was turned off.")
+                record(.override, "\(Self.describe(ended)) cancelled because charge management was turned off.")
             }
             await performEvaluation(.settingsChanged)
         }
@@ -314,9 +342,186 @@ public actor ChargeController {
         await exclusively {
             guard let cancelled = activeOverride else { return }
             activeOverride = nil
-            record(.override, "\(Self.describe(cancelled.kind)) cancelled.")
+            record(.override, "\(Self.describe(cancelled)) cancelled.")
             await performEvaluation(.overrideChanged)
         }
+    }
+
+    // MARK: - Scheduled full charge
+
+    /// Arms `newSchedule`, replacing any armed schedule, and evaluates. It is
+    /// rejected unless its window is valid and it starts in the future, at
+    /// most ``FullChargeSchedule/maximumLeadTime`` ahead, judged when the
+    /// command is made. Without a schedule store nothing is armed.
+    @discardableResult
+    public func setFullChargeSchedule(_ newSchedule: FullChargeSchedule) async throws -> ControllerStatus {
+        let issues = newSchedule.issues(settingAt: now())
+        guard issues.isEmpty else {
+            let error = FullChargeScheduleError(issues: issues)
+            _ = await exclusively {
+                record(.override, "Scheduled full charge rejected: \(error)", level: .error)
+            }
+            throw error
+        }
+        return await exclusively {
+            loadScheduleIfNeeded()
+            guard let scheduleStore else {
+                record(.override, "Scheduled full charge not set: scheduling is not available.", level: .error)
+                return
+            }
+            do {
+                try scheduleStore.saveSchedule(newSchedule)
+            } catch {
+                record(.failure, "Could not save the scheduled full charge: \(error)", level: .error)
+                return
+            }
+            let replaced = schedule != nil
+            schedule = newSchedule
+            scheduleWait = nil
+            lastScheduleWait = nil
+            scheduleOutcome = nil
+            record(.override, "Scheduled full charge \(replaced ? "changed" : "set"): \(Self.describeWindow(newSchedule)).")
+            await performEvaluation(.scheduleChanged)
+        }
+    }
+
+    /// Removes the armed schedule, if any, and evaluates. A full charge it
+    /// already started is not affected; ``cancelOverride()`` ends that.
+    @discardableResult
+    public func cancelFullChargeSchedule() async -> ControllerStatus {
+        await exclusively {
+            loadScheduleIfNeeded()
+            guard let cancelled = schedule else { return }
+            scheduleStore?.removeSchedule()
+            schedule = nil
+            scheduleWait = nil
+            lastScheduleWait = nil
+            record(.override, "Scheduled full charge cancelled: \(Self.describeWindow(cancelled)).")
+            await performEvaluation(.scheduleChanged)
+        }
+    }
+
+    /// Forgets the latest schedule's outcome once the user has seen it.
+    @discardableResult
+    public func dismissFullChargeScheduleOutcome() async -> ControllerStatus {
+        await exclusively {
+            scheduleOutcome = nil
+        }
+    }
+
+    /// Loads the armed schedule once, at the first command. A stored record
+    /// that cannot be used is removed, with a notice; it never affects the
+    /// settings. A schedule whose window has passed is left to the first
+    /// check, which reports it.
+    private func loadScheduleIfNeeded() {
+        guard !hasLoadedSchedule else { return }
+        hasLoadedSchedule = true
+        guard let scheduleStore else { return }
+        switch scheduleStore.loadSchedule() {
+        case .none:
+            break
+        case .schedule(let stored):
+            schedule = stored
+            record(.override, "Scheduled full charge loaded: \(Self.describeWindow(stored)).")
+        case .unusable(let reason):
+            scheduleStore.removeSchedule()
+            scheduleOutcome = .discarded(reason: reason)
+            record(.override, "A saved full-charge schedule was removed: \(reason). Your charging settings are not affected.", level: .error)
+        }
+    }
+
+    /// Checks the armed schedule against `input` and, if it starts, removes
+    /// it from its store and installs its full charge in ``activeOverride``
+    /// and `input`, with no suspension point between them. Returns true if
+    /// this evaluation installed a new scheduled full charge.
+    ///
+    /// Everything here that concerns overrides (the new full charge's
+    /// deadline, whether a running one is still live, and the displayed
+    /// deadline) uses `input.overrideUptime`, the monotonic clock read
+    /// together with `input.now` after the backend's reads, which the policy
+    /// also judges expiry on. The backend calls made between `input.uptime`
+    /// and `input.now` therefore neither shorten the new deadline nor skew
+    /// the display, and the controller and the policy agree on liveness.
+    private func applySchedule(to input: inout PolicyInput) -> Bool {
+        let uptimeAtNow = input.overrideUptime
+        guard let armed = schedule else { return false }
+        switch FullChargeSchedule.check(armed, input: input) {
+        case .notYet:
+            scheduleWait = nil
+            return false
+        case .waiting(let wait):
+            if scheduleWait != wait {
+                record(.override, "Scheduled full charge is due but cannot start yet: \(wait).")
+            }
+            scheduleWait = wait
+            lastScheduleWait = wait
+            return false
+        case .passed:
+            scheduleStore?.removeSchedule()
+            schedule = nil
+            scheduleOutcome = .windowPassed(armed, lastWait: lastScheduleWait)
+            let lastChecked = lastScheduleWait.map { " Last checked: \($0)." } ?? ""
+            record(.override, "Scheduled full charge (\(Self.describeWindow(armed))): the scheduled window passed before the full charge could start.\(lastChecked)")
+            scheduleWait = nil
+            lastScheduleWait = nil
+            return false
+        case .start(let remaining):
+            guard let candidate = ChargeOverride.scheduledFullCharge(at: input.now, uptime: uptimeAtNow, remaining: remaining) else {
+                return false
+            }
+            scheduleStore?.removeSchedule()
+            schedule = nil
+            scheduleWait = nil
+            lastScheduleWait = nil
+            let window = Self.describeWindow(armed)
+            if var running = activeOverride, running.kind == .fullCharge, running.isLive(atUptime: uptimeAtNow) {
+                // Deadlines compare on the monotonic clock only: a wall-clock
+                // estimate can be wrong after a clock change. A running full
+                // charge is never shortened, so its deadline may be later
+                // than the schedule's end.
+                let isExtended = candidate.expiresAtUptime > running.expiresAtUptime
+                if isExtended {
+                    running.expiresAtUptime = candidate.expiresAtUptime
+                    running.source = .schedule
+                }
+                running.expiresAt = running.deadlineEstimate(now: input.now, uptime: uptimeAtNow)
+                activeOverride = running
+                input.activeOverride = running
+                let deadline = Self.describeTime(running.expiresAt)
+                if isExtended {
+                    scheduleOutcome = .extendedRunning(armed)
+                    record(.override, "Scheduled full charge (\(window)): a temporary full charge was already running; it now expires at about \(deadline).")
+                } else {
+                    scheduleOutcome = .keptRunning(armed)
+                    record(.override, "Scheduled full charge (\(window)): a temporary full charge was already running, expiring later, at about \(deadline); it continues unchanged.")
+                }
+                return false
+            }
+            if let previous = activeOverride {
+                if previous.isLive(atUptime: uptimeAtNow) {
+                    record(.override, "\(Self.describe(previous)) ended: the scheduled full charge started.")
+                } else {
+                    record(.override, "\(Self.describe(previous)) \(OverrideEnd.expired).")
+                }
+            }
+            activeOverride = candidate
+            input.activeOverride = candidate
+            scheduleOutcome = .started(armed)
+            record(.override, "Scheduled full charge started (\(window)); it expires at about \(Self.describeTime(candidate.expiresAt)). It ends at a check after the battery is full, you unplug, or it expires; CellKeeper then asks for its limit again.")
+            return true
+        }
+    }
+
+    /// Derives the displayed deadline of the running override from its
+    /// monotonic deadline, with `input.now` and `input.overrideUptime`,
+    /// which are read together, so a clock change since it started does not
+    /// leave a stale estimate.
+    private func refreshOverrideDeadlineEstimate(in input: inout PolicyInput) {
+        guard var running = activeOverride else { return }
+        running.expiresAt = running.deadlineEstimate(now: input.now, uptime: input.overrideUptime)
+        guard running != activeOverride else { return }
+        activeOverride = running
+        input.activeOverride = running
     }
 
     /// Confirms `.normal` on the current backend, then switches to
@@ -537,6 +742,7 @@ public actor ChargeController {
     // MARK: - Evaluation
 
     private func performEvaluation(_ trigger: EvaluationTrigger) async {
+        loadScheduleIfNeeded()
         let previousSnapshot = snapshot
         do {
             let fresh = try await telemetry.currentSnapshot()
@@ -579,9 +785,23 @@ public actor ChargeController {
             : isOwnedStateUnverified ? .stateUnverified
             : nil
 
-        let input = PolicyInput(
-            now: now(),
+        // Two monotonic readings, either side of the backend's reads:
+        // - `evaluationUptime`, read before them, times what errs toward
+        //   restricting when read early: the rate limit of restricting
+        //   requests, the spacing of automatic restore retries, the
+        //   temperature pause and its minimum, and the sleep and failure
+        //   memory.
+        // - `uptimeAtNow`, read together with the wall time after them,
+        //   times overrides: whether one has expired (`overrideUptime`), a
+        //   scheduled full charge's deadline, and the displayed deadline.
+        //   An evaluation that straddles a deadline then ends the override,
+        //   and the reads' duration does not shorten a new deadline.
+        let evaluationNow = now()
+        let uptimeAtNow = uptime()
+        var input = PolicyInput(
+            now: evaluationNow,
             uptime: evaluationUptime,
+            overrideUptime: uptimeAtNow,
             settings: settings,
             snapshot: snapshot,
             activeOverride: activeOverride,
@@ -596,6 +816,11 @@ public actor ChargeController {
                 : nil,
             releaseReason: releaseReason
         )
+        // After the backend's mode was read, so that an adoption that turned
+        // management off in this evaluation is seen, and on the input the
+        // policy then evaluates.
+        let startedSchedule = applySchedule(to: &input)
+        refreshOverrideDeadlineEstimate(in: &input)
         restrictingRequests.removeAll { input.uptime - $0.uptime >= 60 * 60 }
         let newDecision = ChargingPolicy.evaluate(input)
         memory = newDecision.memory
@@ -603,7 +828,10 @@ public actor ChargeController {
 
         if let ended = newDecision.overrideEnded, let override = activeOverride {
             activeOverride = nil
-            record(.override, "\(Self.describe(override.kind)) \(ended).")
+            record(.override, "\(Self.describe(override)) \(ended).")
+            if startedSchedule, ended == .completed, case .started(let started)? = scheduleOutcome {
+                scheduleOutcome = .alreadyFull(started)
+            }
         }
         if Self.isMeaningfulChange(from: decision, to: newDecision) {
             record(.decision, "[\(trigger.rawValue)] \(newDecision.state.rawValue): want \(newDecision.desiredMode), action \(Self.describe(newDecision.action, nativeLimit: capabilities.isEnforcedByMacOS)). \(newDecision.reason.description(restoring: restoreTarget))")
@@ -1290,7 +1518,7 @@ public actor ChargeController {
         record(.safety, message + ".")
         if let ended = activeOverride {
             activeOverride = nil
-            record(.override, "\(Self.describe(ended.kind)) cancelled because the Charge Limit was changed outside CellKeeper.")
+            record(.override, "\(Self.describe(ended)) cancelled because the Charge Limit was changed outside CellKeeper.")
         }
     }
 
@@ -1401,6 +1629,21 @@ public actor ChargeController {
         case .fullCharge: "Temporary full charge"
         case .dischargeToLimit: "Discharge to limit"
         }
+    }
+
+    /// Like the description of its kind, naming a full charge that a
+    /// schedule started or extended.
+    static func describe(_ override: ChargeOverride) -> String {
+        override.kind == .fullCharge && override.source == .schedule ? "Scheduled full charge" : describe(override.kind)
+    }
+
+    /// A schedule's window for the activity log, in the system's time zone.
+    static func describeWindow(_ schedule: FullChargeSchedule) -> String {
+        "\(describeTime(schedule.startsAt)) to \(describeTime(schedule.endsAt))"
+    }
+
+    static func describeTime(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .shortened)
     }
 
     static func describeChange(from old: ChargingSettings, to new: ChargingSettings) -> String {

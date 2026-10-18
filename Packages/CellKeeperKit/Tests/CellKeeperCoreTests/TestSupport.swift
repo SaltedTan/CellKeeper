@@ -106,13 +106,14 @@ final class TestClock: @unchecked Sendable {
     private let lock = NSLock()
     private let start: Date
     private var elapsed: TimeInterval = 0
+    private var wallOffset: TimeInterval = 0
 
     init(_ start: Date = referenceDate) {
         self.start = start
     }
 
     var now: Date {
-        lock.withLock { start.addingTimeInterval(elapsed) }
+        lock.withLock { start.addingTimeInterval(elapsed + wallOffset) }
     }
 
     var uptime: TimeInterval {
@@ -121,6 +122,12 @@ final class TestClock: @unchecked Sendable {
 
     func advance(by interval: TimeInterval) {
         lock.withLock { elapsed += interval }
+    }
+
+    /// Changes the wall clock only, as setting the system clock does; the
+    /// monotonic uptime is unaffected.
+    func shiftWall(by interval: TimeInterval) {
+        lock.withLock { wallOffset += interval }
     }
 }
 
@@ -137,6 +144,10 @@ final class InMemoryStorage: KeyValueStorage, @unchecked Sendable {
 
     func string(forKey key: String) -> String? {
         lock.withLock { values[key] as? String }
+    }
+
+    func object(forKey key: String) -> Any? {
+        lock.withLock { values[key] }
     }
 
     func set(_ value: Any?, forKey key: String) {

@@ -29,11 +29,12 @@ Limit** (80–100%) through a shortcut you create, and macOS enforces it.
 | Charge limit 80/85/90/95/100% via macOS's Charge Limit | **Real, experimental, opt-in** (macOS 26.4+, Apple silicon); enforced by macOS; verified on one Mac |
 | Charge limit + custom resume threshold (hysteresis) | **Policy real, control simulated** |
 | Temporary charge to 100% | **Real** with macOS's Charge Limit; otherwise simulated |
+| Scheduled temporary charge to 100% (one schedule, one-shot, up to 7 days ahead) | **Real** with macOS's Charge Limit (CellKeeper requests 100% at the start); otherwise simulated. Starts only while your Mac is awake and CellKeeper is running; it cannot wake your Mac |
 | Temperature protection | **Policy real**; cannot trigger without a temperature reading; not available with macOS's Charge Limit |
 | Discharge to limit while plugged in | **Policy real, control simulated**; a confirmed one-shot session, never automatic; not available with macOS's Charge Limit |
 | Limits at any level (including below 80%), with CellKeeper switching charging itself | **Simulated** — choose **Simulated helper** in Settings › Control to try CellKeeper's own charge control at 20–100%, run through its helper's logic inside the app; nothing on your Mac changes. While macOS's own Charge Limit is on, it withholds new restrictions and asks for the release of any of its own; Settings › Control shows how to turn macOS's limit off (100% in System Settings › Battery) to try it, but the Simulated helper provides no replacement charge limit, so your Mac may then charge to 100%. **No hardware control yet**; the current priority — see [roadmap](docs/roadmap.md) milestone 4 and [issue #1](https://github.com/SaltedTan/CellKeeper/issues/1) |
 | Diagnostics report for bug reports, without serial numbers or other identifiers | **Real** — Settings › Activity › **Copy Diagnostics**, or **Save Diagnostics…** to a text file you choose |
-| Scheduling, calibration, notifications, Shortcuts actions for CellKeeper's own controls, launch at login | Planned |
+| Scheduled limits, recurring schedules, calibration, notifications, Shortcuts actions for CellKeeper's own controls, launch at login | Planned |
 
 The menu bar always shows which kind of control is in effect: **Available**,
 **Experimental**, **Simulated**, or **Unavailable**.

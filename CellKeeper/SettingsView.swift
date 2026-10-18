@@ -112,6 +112,10 @@ private struct ChargingSettingsTab: View {
             }
             .disabled(!settings.isManagementEnabled)
 
+            Section("Scheduled full charge") {
+                ScheduledFullChargeSection(model: model)
+            }
+
             if !isNative {
                 Section("Temperature protection") {
                     TemperatureProtectionControls(model: model)
@@ -146,6 +150,79 @@ private struct ChargingSettingsTab: View {
             get: { model.settings[keyPath: keyPath] },
             set: { newValue in model.updateSettings { $0[keyPath: keyPath] = newValue } }
         )
+    }
+}
+
+/// Settings › Charging's scheduled full charge: the armed schedule with
+/// Cancel, or an editor for a start and an end, with what a schedule does
+/// with the backend in charge (`FullChargeScheduleWording`). Editing needs
+/// Manage charging on, like "Charge to 100% once"; cancelling never does.
+private struct ScheduledFullChargeSection: View {
+    let model: AppModel
+    @State private var start: Date
+    @State private var end: Date
+
+    init(model: AppModel) {
+        self.model = model
+        let start = Self.defaultStart()
+        _start = State(initialValue: start)
+        _end = State(initialValue: start.addingTimeInterval(FullChargeSchedule.defaultWindow))
+    }
+
+    /// The next whole hour at least an hour from now.
+    static func defaultStart(now: Date = Date()) -> Date {
+        let calendar = Calendar.current
+        let hour = calendar.dateInterval(of: .hour, for: now)?.start ?? now
+        return hour.addingTimeInterval(2 * 3600)
+    }
+
+    var body: some View {
+        let status = model.status
+        let isManaged = model.settings.isManagementEnabled
+        if let schedule = status?.fullChargeSchedule {
+            LabeledContent("Scheduled", value: FullChargeScheduleWording.window(schedule))
+            if let wait = status?.fullChargeScheduleWait {
+                Label(FullChargeScheduleWording.armedLine(schedule, wait: wait), systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            Button("Cancel Schedule") { model.cancelFullChargeSchedule() }
+        } else {
+            Group {
+                DatePicker("Start", selection: $start, displayedComponents: [.date, .hourAndMinute])
+                DatePicker("End", selection: $end, in: start.addingTimeInterval(FullChargeSchedule.minimumWindow)...start.addingTimeInterval(FullChargeSchedule.maximumWindow), displayedComponents: [.date, .hourAndMinute])
+                Button("Schedule Full Charge") { model.setFullChargeSchedule(start: start, end: end) }
+            }
+            .disabled(!isManaged)
+            .onChange(of: start) { _, newStart in
+                let earliest = newStart.addingTimeInterval(FullChargeSchedule.minimumWindow)
+                let latest = newStart.addingTimeInterval(FullChargeSchedule.maximumWindow)
+                end = min(max(end, earliest), latest)
+            }
+        }
+        if let status, let outcome = status.fullChargeScheduleOutcome, let line = FullChargeScheduleWording.outcomeLine(outcome) {
+            Label(line, systemImage: "calendar")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        if let error = model.scheduleError {
+            Label(error, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.red)
+        }
+        if let status {
+            Text(FullChargeScheduleWording.explanation(for: status, end: status.fullChargeSchedule?.endsAt ?? end))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let hint = FullChargeScheduleWording.overnightHint(for: status) {
+                Text(hint)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        Text("One temporary full charge, starting at most \(Int(FullChargeSchedule.maximumLeadTime / 86_400)) days ahead, with an end 1–\(Int(FullChargeSchedule.maximumWindow / 3600)) hours after the start. \(FullChargeScheduleWording.startConditions)")
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 }
 
