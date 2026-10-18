@@ -123,6 +123,10 @@ private struct ChargingSettingsTab: View {
                 .disabled(!settings.isManagementEnabled)
             }
 
+            // Not tied to Manage charging: a fault or an unconfirmed restore
+            // can happen with management off too.
+            NotificationSettingsSection(model: model)
+
             if let error = model.settingsError {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .foregroundStyle(.red)
@@ -261,6 +265,45 @@ private struct TemperatureProtectionControls: View {
             get: { model.settings[keyPath: keyPath] },
             set: { newValue in model.updateSettings { $0[keyPath: keyPath] = newValue } }
         )
+    }
+}
+
+/// The opt-in to notifications (``NotificationOptIn``): the toggle is on only
+/// while macOS shows them, and says why not otherwise; a saved opt-in that
+/// macOS blocks can still be withdrawn.
+private struct NotificationSettingsSection: View {
+    let model: AppModel
+
+    var body: some View {
+        let optIn = model.notificationOptIn
+        Section {
+            Toggle("Send notifications", isOn: Binding(get: { optIn.isToggleOn }, set: { model.setNotificationsEnabled($0) }))
+                .disabled(optIn.isRequesting)
+            if let explanation = optIn.explanation {
+                Label(explanation, systemImage: optIn.offersSystemSettings ? "exclamationmark.triangle" : "info.circle")
+                    .font(.caption)
+                    .foregroundStyle(optIn.offersSystemSettings ? Color.orange : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if optIn.offersSystemSettings || optIn.offersWithdrawal {
+                HStack {
+                    if optIn.offersSystemSettings {
+                        Button("Open Notification Settings") { model.openNotificationSettings() }
+                            .help("Opens System Settings › Notifications. CellKeeper changes nothing there.")
+                    }
+                    if optIn.offersWithdrawal {
+                        Button("Turn Off Notifications") { model.setNotificationsEnabled(false) }
+                            .help("Saves that you do not want notifications. CellKeeper asks macOS nothing more.")
+                    }
+                }
+            }
+        } header: {
+            Text("Notifications")
+        } footer: {
+            Text(NotificationWording.settingsSummary)
+                .footerParagraph()
+        }
+        .onAppear { model.refreshNotificationPermission() }
     }
 }
 

@@ -100,6 +100,10 @@ charge limit" action instead of `pmset -g battlimit` (note 08, O18).
   battery temperature). Done: shown in the menu's Battery details (#19).
 - Unplug/replug and sleep/wake observation runs on real hardware to measure
   notification cadence (research 01, open question 1).
+- Notifications (limit reached, temperature pause, fault or an unconfirmed
+  restore, override ended), opt-in. Done: Settings › Charging, off by
+  default; each says only what CellKeeper confirmed, and that simulated
+  controls change nothing (architecture, "Notifications").
 
 ## Milestone 4 — CellKeeper's own charge control: limits at any level (current priority)
 
@@ -226,7 +230,6 @@ and an Apple Developer ID.
 
 ## Later
 
-- Notifications (limit reached, temperature pause, fault, override ended).
 - Launch at login (`SMAppService.mainApp`).
 - App Intents / Shortcuts actions for CellKeeper's own controls.
 - Scheduled limits and recurring schedules (a one-shot scheduled full charge

@@ -90,6 +90,8 @@ final class AppModel {
     private(set) var isSavingDiagnostics = false
     /// Why the last diagnostics save failed, until the user dismisses it.
     private(set) var diagnosticsSaveFailure: String?
+    /// The user's opt-in to notifications and what macOS allows.
+    private(set) var notificationOptIn: NotificationOptIn
 
     private enum Command: Sendable {
         case evaluate(EvaluationTrigger)
@@ -107,6 +109,20 @@ final class AppModel {
         case recheckBackend
         case confirmNoLimit
         case discardUnreadableRecord
+
+        /// The evaluation this command runs, for the notification planner:
+        /// the user's own commands never post a hold, a pause or an
+        /// override's end.
+        var trigger: EvaluationTrigger {
+            switch self {
+            case .evaluate(let trigger): trigger
+            case .apply: .settingsChanged
+            case .startFullCharge, .startDischarge, .cancelOverride: .overrideChanged
+            case .setSchedule, .cancelSchedule, .dismissScheduleOutcome: .scheduleChanged
+            case .switchBackend: .backendChanged
+            case .resetFault, .recheckBackend, .confirmNoLimit, .discardUnreadableRecord: .manual
+            }
+        }
     }
 
     /// How quitting went for the user's own Charge Limit.
@@ -133,6 +149,9 @@ final class AppModel {
     @ObservationIgnored private let store: SettingsStore
     @ObservationIgnored private let telemetry: any TelemetryProvider
     @ObservationIgnored private let controller: ChargeController
+    /// Posts notifications from the statuses the app receives; it never
+    /// sees the controller.
+    @ObservationIgnored private let notifier: ChargingNotifier
     /// A backend to switch to as soon as the app starts: set when an earlier
     /// session left macOS's Charge Limit changed while another backend is
     /// selected, so the native backend can restore it first.
@@ -156,7 +175,8 @@ final class AppModel {
     init(
         store: SettingsStore = SettingsStore(),
         telemetry: any TelemetryProvider = SystemTelemetryProvider(),
-        scheduleStore: any FullChargeScheduleStoring = FullChargeScheduleStore()
+        scheduleStore: any FullChargeScheduleStoring = FullChargeScheduleStore(),
+        notificationPoster: any NotificationPosting = SystemNotificationPoster()
     ) {
         var loaded = store.loadChargingSettings()
         // While an adoption marker exists, CellKeeper kept a Charge Limit
@@ -188,8 +208,12 @@ final class AppModel {
             adoptionMarkerStore: FileOwnershipRecordStore.default,
             scheduleStore: scheduleStore
         )
+        let notifier = ChargingNotifier(poster: notificationPoster, store: store)
+        self.notifier = notifier
+        self.notificationOptIn = notifier.optIn
         (commands, commandSink) = AsyncStream.makeStream(of: Command.self)
         noteInProcessHelper(of: backend)
+        notifier.onChange = { [weak self] in self?.notificationOptIn = $0 }
     }
 
     // MARK: - Lifecycle
@@ -231,6 +255,10 @@ final class AppModel {
         for name in [Notification.Name.NSSystemClockDidChange, Notification.Name.NSSystemTimeZoneDidChange] {
             observe(name, on: defaultCenter) { $0.clockDidChange() }
         }
+        // The user may change CellKeeper's notification settings in System
+        // Settings and come back.
+        observe(NSApplication.didBecomeActiveNotification, on: defaultCenter) { $0.refreshNotificationPermission() }
+        refreshNotificationPermission()
 
         if let startupSwitch {
             CellKeeperLog.app.notice("An earlier session left macOS's Charge Limit changed; restoring it before switching to the \(startupSwitch.rawValue, privacy: .public) backend")
@@ -315,6 +343,14 @@ final class AppModel {
         }
         observers.removeAll()
         return controller
+    }
+
+    /// Stops notifications for quitting, once the restore of macOS default
+    /// charging has started: every notification not yet handed to macOS is
+    /// stopped, without waiting (one being handed over at that moment may
+    /// still appear).
+    func stopNotificationsForTermination() {
+        notifier.shutdown()
     }
 
     /// Restores macOS default charging and shuts the controller down, so no
@@ -457,6 +493,28 @@ final class AppModel {
     func openBatterySettings() {
         if !NSWorkspace.shared.open(BatterySettingsLink.batteryPane) {
             CellKeeperLog.app.notice("Could not open the Battery pane of System Settings; opening System Settings")
+            NSWorkspace.shared.openApplication(at: BatterySettingsLink.systemSettingsApp, configuration: NSWorkspace.OpenConfiguration())
+        }
+    }
+
+    /// Saves the user's notification choice. Turning notifications on asks
+    /// macOS for permission (macOS prompts only the first time); turning
+    /// them off always works, whatever macOS allows.
+    func setNotificationsEnabled(_ enabled: Bool) {
+        Task { await notifier.setEnabled(enabled) }
+    }
+
+    /// Reads again what macOS allows for CellKeeper's notifications, if the
+    /// user opted in. Asks the user nothing.
+    func refreshNotificationPermission() {
+        Task { await notifier.refreshPermission() }
+    }
+
+    /// Opens System Settings › Notifications, or System Settings itself if
+    /// that pane cannot be opened. CellKeeper changes nothing there.
+    func openNotificationSettings() {
+        if !NSWorkspace.shared.open(NotificationSettingsLink.notificationsPane) {
+            CellKeeperLog.app.notice("Could not open the Notifications pane of System Settings; opening System Settings")
             NSWorkspace.shared.openApplication(at: BatterySettingsLink.systemSettingsApp, configuration: NSWorkspace.OpenConfiguration())
         }
     }
@@ -631,6 +689,10 @@ final class AppModel {
             status = await controller.confirmNoLimitIsOwnerLimit()
         case .discardUnreadableRecord:
             status = await controller.discardUnreadableOwnershipRecord()
+        }
+        // Plans at once and posts later; never waits.
+        if let status {
+            notifier.observe(status, trigger: command.trigger)
         }
         noteAdoptedChanges()
     }

@@ -181,6 +181,12 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     /// An adoption marker that could not be stored yet; retried at every
     /// read. Until it is stored, whatever is on disk stays as it is.
     private var unsavedMarker: AdoptionMarker?
+    /// Reads that showed the user's recorded limit back
+    /// (``NativeLimitStatus/restoresConfirmed``).
+    private var restoresConfirmed = 0
+    private var lastRestoredLimit: Int?
+    /// Unreadable records discarded at the user's request.
+    private var recordsDiscarded = 0
 
     /// - Parameters:
     ///   - store: where the user's own limit is recorded.
@@ -318,13 +324,13 @@ public actor NativeChargeLimitBackend: ChargingBackend {
                 if percent == owned.ownerLimit {
                     // A restore finished after an earlier session stopped
                     // waiting for it, or the user restored their own limit.
-                    clearRecord(reason: "your own limit of \(owned.ownerLimit)% is already in effect")
+                    clearRecord(owned, reason: "your own limit of \(owned.ownerLimit)% is already in effect")
                     return .normal
                 }
             }
             if owned.isRestoring, percent == owned.ownerLimit {
                 // A restore that could not be confirmed took effect.
-                clearRecord(reason: "your own limit of \(owned.ownerLimit)% is now in effect")
+                clearRecord(owned, reason: "your own limit of \(owned.ownerLimit)% is now in effect")
                 isLastReportedStateOwn = true
                 return .normal
             }
@@ -369,6 +375,9 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         }
         status.isAdoptionUnsaved = unsavedMarker != nil
         status.isShortcutFound = isShortcutFound
+        status.restoresConfirmed = restoresConfirmed
+        status.lastRestoredLimit = lastRestoredLimit
+        status.recordsDiscarded = recordsDiscarded
         return status
     }
 
@@ -426,6 +435,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         try store.remove()
         record = .none
         hasReconciledRecord = true
+        recordsDiscarded += 1
         CellKeeperLog.safety.notice("The unreadable record of the user's Charge Limit was discarded at the user's request")
     }
 
@@ -500,7 +510,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
                 let isFirstContact = !hasReconciledRecord
                 hasReconciledRecord = true
                 if percent == owned.ownerLimit, owned.accepts(percent) || isFirstContact {
-                    clearRecord(reason: "\(owned.ownerLimit)% already in effect")
+                    clearRecord(owned, reason: "\(owned.ownerLimit)% already in effect")
                     return .unchanged
                 }
                 if !owned.accepts(percent) {
@@ -525,7 +535,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             saveRecordBestEffort(owned)
             try await runShortcut(owned.ownerLimit)
             try await confirm(owned.ownerLimit, expected: .normal, owned: owned)
-            clearRecord(reason: "restored \(owned.ownerLimit)%")
+            clearRecord(owned, reason: "restored \(owned.ownerLimit)%")
             return .applied
         }
     }
@@ -677,7 +687,13 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         }
     }
 
-    private func clearRecord(reason: String) {
+    /// Deletes the record of the user's limit. Called only once a read of
+    /// macOS's Charge Limit has shown `owned.ownerLimit`, so each call counts
+    /// a restore confirmed by read-back, whoever restored it, whether or not
+    /// the deletion then succeeds.
+    private func clearRecord(_ owned: OwnershipRecord, reason: String) {
+        restoresConfirmed += 1
+        lastRestoredLimit = owned.ownerLimit
         do {
             try store.remove()
         } catch {

@@ -140,7 +140,20 @@ public actor ChargeController {
     private var handledFaults = HandledFaults()
     private var decision: PolicyDecision?
     private var lastExecution: ExecutionRecord?
-    private var consecutiveFailures = 0
+    private var consecutiveFailures = 0 {
+        didSet {
+            if oldValue < Self.maximumConsecutiveFailures, consecutiveFailures >= Self.maximumConsecutiveFailures {
+                faultsRaised += 1
+            }
+        }
+    }
+    /// How many times the backend in use became faulted in this session
+    /// (``ControllerStatus/faultsRaised``).
+    private var faultsRaised = 0
+    /// Reads that showed normal charging and so ended ``responsibleMode``,
+    /// with a backend that switches charging itself
+    /// (``ControllerStatus/releasesConfirmed``).
+    private var releasesConfirmed = 0
     private var lastFailureUptime: TimeInterval?
     private var sleepAnnouncedAtUptime: TimeInterval?
     private var isShutDown = false
@@ -238,6 +251,8 @@ public actor ChargeController {
             lastExecution: lastExecution,
             consecutiveFailures: consecutiveFailures,
             isBackendFaulted: isBackendFaulted,
+            faultsRaised: faultsRaised,
+            releasesConfirmed: releasesConfirmed,
             events: events,
             lastEvaluation: lastEvaluation,
             fullChargeSchedule: schedule,
@@ -1213,6 +1228,12 @@ public actor ChargeController {
         }
         reportedModeIsOwn = await backend.isReportedModeOwn()
         if mode == .normal {
+            // With macOS's Charge Limit, `.normal` means only that no record
+            // is held, which is no evidence of a restore; that backend
+            // counts its own (`NativeLimitStatus.restoresConfirmed`).
+            if responsibleMode != nil, !capabilities.isEnforcedByMacOS {
+                releasesConfirmed += 1
+            }
             responsibleMode = nil
         } else if reportedModeIsOwn == false {
             // Someone else's, by positive evidence in the backend's records:

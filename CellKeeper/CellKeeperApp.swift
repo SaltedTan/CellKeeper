@@ -56,6 +56,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+        // After the restore has started: notifications come second when
+        // quitting, although stopping them never waits.
+        model.stopNotificationsForTermination()
         return .terminateLater
     }
 

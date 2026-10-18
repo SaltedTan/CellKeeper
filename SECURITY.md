@@ -29,6 +29,10 @@ entitlement besides the sandbox lets it write a file the user chooses in a
 save panel: Settings › Activity › Save Diagnostics… saves the diagnostics
 report there, and nowhere else.
 
+If you turn notifications on, CellKeeper posts local notifications through
+macOS's notification center; it uses no push service, no network and no
+further entitlement for them.
+
 Its only control is opt-in and experimental. With the **macOS Charge Limit**
 backend selected, it changes macOS's own Charge Limit (80–100%) by running
 the user's "CellKeeper Set Charge Limit" shortcut with Apple's `shortcuts`
@@ -46,12 +50,13 @@ Issues we especially want to hear about:
 - anything that makes CellKeeper run a command other than `shortcuts list`,
   `shortcuts run` with the user's shortcut and a number from 80 to 100 as
   input, and `pmset -g battlimit`, or pass them other arguments;
-- reporting a simulated or unconfirmed change as applied, or not giving back
-  the user's own Charge Limit when CellKeeper says it has;
+- reporting a simulated or unconfirmed change as applied, also in a
+  notification, or not giving back the user's own Charge Limit when
+  CellKeeper says it has;
 - a malformed or tampered record file that makes CellKeeper set a limit the
   user did not choose, or crash;
-- leaks of device identifiers (serial numbers etc.) into logs, files, or the
-  UI;
+- leaks of device identifiers (serial numbers etc.) or user paths into logs,
+  files, notifications, or the UI;
 - anything that makes CellKeeper read or write a file outside its container
   other than the one the user chose in its save panel;
 - weaknesses in the build or CI configuration (for example, workflow

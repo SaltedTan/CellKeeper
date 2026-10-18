@@ -55,6 +55,7 @@ rules are in [`docs/safety.md`](safety.md).
 │  NoHelperRegistration      – the helper's registration: none in phase 4a      ││
 │  DiagnosticsReportFile     – the saved diagnostics report: name, UTF-8 write  ││
 │  FullChargeScheduleWording – what the menu and Settings say about a schedule  ││
+│  SystemNotificationPoster  – local notifications (UserNotifications), opt-in  ││
 └───────────────┬──────────────────────────────────────────────────────────────┘│
                 │ depends on                                                    │
 ┌───────────────▼──────────────── CellKeeperCore (pure Swift, no IOKit) ────────▼───────────────┐
@@ -68,6 +69,8 @@ rules are in [`docs/safety.md`](safety.md).
 │              HelperConnection protocols, InProcessHelperTransport), MacOSChargeLimitMonitor,   │
 │              HelperRemoval (+ HelperRegistration protocol)                                     │
 │  Controller: ChargeController (actor: telemetry → policy → backend, safety fallbacks, log)     │
+│  Notifications: NotificationPlanner (pure: statuses → notifications), NotificationWording,     │
+│                 NotificationOptIn, ChargingNotifier (+ NotificationPosting protocol)           │
 │  Support:    CellKeeperLog (os.Logger categories)                                              │
 └───────────────┬────────────────────────────────────────────────────────────────────────────────┘
                 │ depends on (Kit too)
@@ -135,7 +138,7 @@ Requirement → location:
 | Persistence/settings | `ChargingSettings`, `SettingsStore` (Core) | Implemented |
 | macOS UI | `CellKeeper/` app target | Implemented (menu bar + settings) |
 | Scheduler | `FullChargeSchedule`, `FullChargeScheduleStore` (Core), `ChargeController`, `FullChargeScheduleWording` (Kit) | One-shot scheduled temporary full charge implemented; scheduled limits and recurring schedules are future |
-| Notifications | — | Future: driven from `ControlEvent`s |
+| Notifications | `NotificationPlanner`, `ChargingNotifier` (Core), `SystemNotificationPoster` (Kit) | Implemented, opt-in: planned from `ControllerStatus` transitions (see "Notifications") |
 | Shortcuts/automation | — | Future: App Intents calling `AppModel` intents |
 | Privileged operations | `HelperEngine` (HelperCore), `HelperChargingBackend` (Core), `HelperXPCServer` / `HelperXPCClient` (HelperXPC), `XPCHelperTransport` (Kit), `HelperDaemon` (HelperDaemon), `CellKeeperHelper` | Helper logic and the app's backend implemented, with a simulated control only, in process (the Simulated helper); no hardware control. The NSXPC transport with code-signing requirements on both sides is implemented and tested over an anonymous listener. The removal of the helper (`HelperRemoval`, `ChargeController.removeHelper`) is implemented and tested against fakes. The daemon executable serves its engine over that transport (when signed with a team identifier) and controls nothing; it and its launchd property list are neither embedded nor registered, and the app does not use the transport yet |
 
@@ -2126,6 +2129,112 @@ Limitations:
   history, which shares its task; a relaunch in the same boot would then
   not know the latest activations.
 
+## Notifications
+
+Opt-in and off by default (Settings › Charging). Notifications are a side
+channel: they report what statuses establish and never affect charging.
+
+- **What is notified** (`NotificationKind`): CellKeeper's own hold at the
+  limit and a temperature pause, each only once a read-back shows it in
+  effect; with macOS's Charge Limit, macOS reporting the battery at or
+  above the limit CellKeeper chose and not charging, stated as what macOS
+  reports, with no cause (macOS reports none, and charges past its limit
+  now and then); a temporary full charge or a discharge that ended by
+  itself, with how (`OverrideEnd`); a backend that became faulted; a
+  restriction of CellKeeper's that may remain although it asked for its
+  release (`OwnRestrictionState`), or the user's own Charge Limit not
+  confirmed back (`isOwnLimitRestorePending`, an unreadable record); and,
+  after such a warning, what resolved it, which replaces the warning in
+  Notification Center. Nothing else has an "ended" counterpart.
+- **Evidence.** A notification that says something happened needs positive
+  evidence of that very thing. Holds and pauses need a read-back. A
+  restore warning is resolved only by a read-back since the warning: of
+  normal charging (`ControllerStatus.releasesConfirmed`, counted when a
+  read ends CellKeeper's own restriction, with backends that switch
+  charging themselves) or of the user's recorded limit
+  (`NativeLimitStatus.restoresConfirmed`, counted by the native backend
+  each time a read shows that limit while it holds the record; evidence of
+  the read only, since deleting the record afterwards can fail, so no
+  notification says it was deleted). Having no record is not evidence. A limit set outside CellKeeper and kept as the
+  user's own (`adoptionCount`) or a record the user discarded
+  (`recordsDiscarded`) also resolves it, and is worded as that. Telemetry
+  the policy rejects (`ChargingPolicy.usableSnapshot`, the same check the
+  native-limit policy applies) is neither evidence nor arming input.
+- **Planner** (`NotificationPlanner`, Core). A pure function of the
+  statuses the app receives, one per command, in order, with the command's
+  trigger and a monotonic time. It follows episodes, not the final
+  snapshot of a command: faults (`faultsRaised`) and restores (the
+  counters above) are counted by the controller and the native backend,
+  so one that began or ended between two statuses is not lost. A hold or a
+  pause is posted when it begins, then only once the opposite has been
+  seen on telemetry the policy accepts (charging toward that limit from
+  below it; a known temperature with the latch clear and protection on: a
+  rejected reading or an unknown temperature also clears the latch but
+  shows no cooling). At most one notification of a kind per minimum interval across
+  backends (1 h for the limit and temperature, 10 min for faults and
+  restore warnings); a transition inside it is dropped. Nothing true in the
+  first status is reported, except faults and restore warnings (the
+  controller starts every session without a fault and with nothing owed
+  beyond a restore an earlier session left, which it attempts at once).
+  Statuses of the user's own commands post only faults and restores. A
+  change of backend resets all arming and retires a restore warning
+  without a claim. While notifications are off or macOS does not show
+  them, statuses still consume transitions, so turning them on replays
+  nothing.
+- **Wording** (`NotificationWording`, `NativeLimitWording`, Core).
+  Observations only, never a likely cause; resolutions in the past tense,
+  which later events do not undo. Built from fixed phrases, numbers and
+  backend names: the policy's own reasons for a hold or a temperature
+  pause, `MacOSChargeLimitWording.releaseState` for a release, and the
+  menu's own text for the user's Charge Limit. Never error messages,
+  unavailability reasons, report problems or log entries, so no
+  identifiers or paths. With simulated controls the title starts with
+  "Simulated:" and the body ends by saying that the Mac's charging is not
+  changed.
+- **Opt-in** (`NotificationOptIn`, `ChargingNotifier`, Core). The choice is
+  saved apart from the charging settings (see "Persistence"). Turning it on
+  asks macOS for alerts (no sound or badge; macOS prompts only the first
+  time); nothing asks the notification center anything before that. The
+  toggle is on only while macOS shows CellKeeper's notifications (allowed,
+  and as banners or in Notification Center); otherwise Settings says why,
+  offers System Settings › Notifications (`NotificationSettingsLink`, Kit;
+  the pane's identifier is undocumented, and System Settings itself is
+  opened if it fails), and always offers "Turn Off Notifications", so the
+  user can withdraw the saved choice whatever macOS allows. The
+  permission is read again when the app becomes active and before each
+  post.
+- **Lifecycle and posting** (`ChargingNotifier`; `SystemNotificationPoster`,
+  Kit). `AppModel` hands every status to the notifier after the command
+  that produced it; the notifier never sees the controller. It plans at
+  once and posts afterwards, one notification at a time and in order, so
+  the command queue never waits for it. Every asynchronous step belongs to
+  a generation and is checked before it acts and after every suspension:
+  posts to the `NotificationGeneration` of the opt-in they were planned
+  under, which turning notifications off or on and quitting end; permission
+  reads and requests to their own operation, which a newer read, request,
+  change of choice or quitting supersedes, so an older answer never
+  overwrites a newer one. Ending a generation never waits: it marks it
+  ended under a brief lock and cancels its posting tasks. A hand-over runs
+  on the poster's own serial queue (never the main thread or Swift's
+  cooperative pool), with the center's completion-handler `add`, and
+  checks immediately before the system call that its generation has not
+  ended and its post has not already settled. So turning notifications
+  off, or quitting, stops every notification not yet handed to macOS; one
+  being handed over at that moment may still appear; notifications
+  already delivered stay in Notification Center. The center's answer is
+  awaited for at most 30 s, or until the post is cancelled; then its
+  outcome is unknown, logged as that, and never counted as delivered, and
+  a post that expired or was cancelled while queued behind a stalled call
+  is never handed over later. At most 8 posts wait at once in the
+  notifier, and at most 8 hand-overs are queued or under way in the
+  poster (notifications follow episodes and are rate-limited, so a few at
+  most ever do); beyond either, the newest are dropped and logged. A waiting post holds no
+  reference to the notifier. Quitting starts the restore of normal
+  charging first, then calls `ChargingNotifier.shutdown()`. A failed post
+  is logged by kind and numeric error code only and changes nothing.
+  CellKeeper sets no notification delegate, so macOS presents its
+  notifications with their own options also while CellKeeper is active.
+
 ## User interface
 
 The app's views (`CellKeeper/`) only present what Core and Kit compute;
@@ -2226,6 +2335,14 @@ tested.
     changes nothing.
   - **Nothing promises** a charge "ready by" a time or a return to the limit
     at an exact time.
+- **Notifications.** Settings › Charging has the opt-in, under the
+  temperature protection and independent of Manage charging (a fault or an
+  unconfirmed restore can happen with management off): one toggle, a line
+  saying why it is off when macOS does not show CellKeeper's notifications,
+  "Open Notification Settings" when macOS refuses, hides or did not
+  answer, and "Turn Off Notifications" whenever a saved opt-in is not
+  shown as on. The menu's warnings about the user's own Charge Limit come from
+  `NativeLimitWording` (Core), which the restore notification shares.
 
 ## Known limitations
 
@@ -2320,7 +2437,7 @@ unavailable.
 Decoding tolerates missing keys; decoded values are validated, and invalid or
 corrupt data falls back to defaults with Manage charging off (failing toward
 macOS defaults), with a visible notice. A first launch with nothing stored
-uses the defaults as they are. Invalid settings are never saved. The selected backend is stored separately.
+uses the defaults as they are. Invalid settings are never saved. The selected backend and the notification choice are stored separately, so neither can make stored charging settings invalid; the notification choice (`notifications.v1`) is on only if saved as on.
 
 A scheduled full charge is stored on its own, under `fullChargeSchedule.v1`
 (`FullChargeScheduleStore`), so a schedule that cannot be read is removed
@@ -2337,7 +2454,7 @@ The helper daemon keeps one file, its activation history, under
 changes log at info level (memory only); decisions, requests, results,
 settings changes, and safety fallbacks log at notice level or above so they
 persist. Logged content is limited to battery state, settings values, and
-decisions.
+decisions. Notifications are logged by kind only.
 
 The helper daemon logs under its own subsystem,
 `io.github.saltedtan.CellKeeper.Helper`, in the categories `lifecycle`,
@@ -2357,7 +2474,10 @@ The helper daemon logs under its own subsystem,
   macOS 27.0.1 (2026-10-18). Release builds do not carry the debugger
   entitlement `get-task-allow`. CI checks that the signed Release app
   carries exactly the App Sandbox and user-selected file entitlements, each
-  true, and nothing else.
+  true, and nothing else. Local notifications add no entitlement: Apple's
+  App Sandbox entitlements include none for notifications, and the only
+  notification entitlement, `com.apple.developer.aps-environment`, is for
+  push (from Apple's documentation; not yet observed on a signed build).
 - Contributor builds are ad-hoc signed and need no Apple Developer account.
   Release builds carry the Hardened Runtime flag even when ad-hoc signed;
   Debug builds omit it so the debugger can attach.
@@ -2456,3 +2576,8 @@ The helper daemon logs under its own subsystem,
 | D81 | No timer is aligned to the start, and the Mac is never woken. The existing triggers (periodic, wake and post-wake re-read, power events, commands) and a new automatic `clockChanged` trigger (system clock or time-zone change) run the check. No lateness bound is claimed | An aligned timer would save at most one periodic interval and would need re-arming on every clock, time-zone and wake event. App Nap, queued commands and backend calls already delay every evaluation. Waking the Mac needs root (`IOPMSchedulePowerEvent`, `pmset schedule`), which CellKeeper never uses |
 | D82 | At the start, a live full charge keeps the later of the two monotonic deadlines (never shortened; its displayed deadline is derived from the deadline it keeps), one whose monotonic deadline has passed is replaced as expired, and a discharge session is replaced (lead's decision). With macOS's Charge Limit the start is a restricting change, with no exemption: it uses the budget, is refused while faulted, and needs ownership. A failed request keeps the existing recovery of the user's own limit, which can be lower than CellKeeper's limit | Deadlines compare on the monotonic clock only, because a wall-clock estimate can be wrong after a clock change. `forceDischarge → normal` relaxes. Exempting `nativeLimit(100)` would weaken the rate limit for an unattended write. A successful scheduled request never lowers the limit; changing the failure recovery for schedules would add a second path to the most safety-relevant code |
 | D83 | Every override's expiry (a full charge the user or a schedule started, and a discharge session) is judged on the monotonic clock read together with the wall time after the backend's reads (`PolicyInput.overrideUptime`; its default is `uptime`, so other callers keep its meaning). The controller's liveness checks for a scheduled start use the same reading. Everything else the policy times keeps the uptime read before the backend's reads: the rate limit of restricting requests, the spacing of automatic restore retries, the temperature pause and its minimum, and the sleep and failure memory (lead's decision, review of PR #82). This changes existing behaviour: a manual full charge or a discharge session now ends in the evaluation that straddles its deadline | Judged on the earlier reading, an evaluation that began just before a deadline and whose backend reads took longer than the time left returned after the deadline with the override still active, and a discharge session still asked to discharge, until the next evaluation (seen in review). For the other rules the earlier reading errs toward restricting (a restriction or a retry waits a little longer), which is the safe side; for an override it erred toward keeping a temporary state beyond its deadline |
+| D84 | Notifications are opt-in and off by default. The choice is stored apart from `ChargingSettings` (`notifications.v1`, on only if saved as on), and the notification center is not touched before the user opts in. Turning them on asks macOS for alerts only. The toggle is on only while macOS shows CellKeeper's notifications (allowed, and as banners or in Notification Center); otherwise Settings says why, offers System Settings › Notifications, and always offers to turn them off, so the saved choice can be withdrawn whatever macOS allows. No entitlement is added (owner's decision on the feature, 2026-10-18; withdrawal after review of PR #81) | A notification preference must never be a reason stored charging settings are judged invalid, nor the reverse. A toggle that says on while macOS shows nothing would overclaim (R30), and a toggle that shows off must not leave the user unable to say no. Asking when the user turns it on gives macOS's prompt its context, as Apple's guidance asks. Apple's App Sandbox entitlements include none for notifications; the only notification entitlement, `com.apple.developer.aps-environment`, is for push |
+| D85 | What to notify is decided by a pure planner in Core from consecutive `ControllerStatus` values and counters, not from activity-log text: CellKeeper's own hold at the limit and a temperature pause, each once a read-back shows it in effect; with macOS's Charge Limit, macOS reporting the battery at or above CellKeeper's limit and not charging, as observations without a cause; a temporary full charge or discharge that ended by itself, with how; a backend that became faulted; a restriction of CellKeeper's that may remain although it asked for its release, or the user's own Charge Limit not confirmed back; and what resolved such a warning, which replaces it. A resolution needs positive evidence since the warning: a read-back of normal charging (`releasesConfirmed`, charging-modes backends) or of the user's recorded limit (`NativeLimitStatus.restoresConfirmed`), or a kept outside change or a discarded record, each worded as what happened (review of PR #81) | Statuses hold what read-backs established, and the counters keep what happened between them, so a notification cannot say more than was observed. Having no record, or no restriction in a final status, is no evidence of a restore: a kept outside change, a discarded record and a restore followed by a new change in the same command all look alike there. Log text is written for people and may change. A restore warning may lead the user to act by hand, so its resolution is worth one notification; faults end only by the user's action, and a pause or hold ending needs none |
+| D86 | Spam rule: notifications follow episodes. Faults and restores are tracked through monotonic counters (`faultsRaised`, the restore evidence of D85), so an episode that began or ended inside one command is seen; a hold or a pause is posted when it begins and armed again only once the opposite has been seen on telemetry the policy accepts (charging toward that limit from below it; a known temperature with the latch clear and protection on). At most one per kind per minimum interval on the monotonic clock, across backends: 1 h for the limit and temperature, 10 min for faults and restore warnings, none for override endings and resolutions. A transition inside the interval is dropped, not delayed (review of PR #81) | The final status of a command can hide a restore that completed, or a fault that was cleared and raised again, before it was published; arming from snapshots then missed later warnings. Arming makes the hysteresis, the debounce, blips of battery power or stale telemetry, sleep and wake, and a hold resuming after a temperature pause silent. The interval bounds what arming cannot, such as a latch cycling under heavy load or a backend that keeps failing and recovering. A delayed notification could report what is no longer true |
+| D87 | No replay, and evidence only from usable telemetry. Nothing true in the first status is reported, except faults and restore warnings. Statuses of the user's own commands (settings, overrides, a backend switch, refresh, a fault reset) post only faults and restores. A backend change resets all arming and retires a restore warning without a claim. The limit is armed for one limit value. Telemetry the policy rejects (`ChargingPolicy.usableSnapshot`, shared with the native-limit policy) neither arms nor evidences anything. While notifications are off or not shown, statuses still consume transitions (review of PR #81) | Launch, a backend switch, a settings change and turning notifications on must not report conditions that already held. The controller starts every session without a fault and with nothing owed beyond a restore an earlier session left, which it attempts at once, so a failure then is news (the quit alert says CellKeeper will try again at the next start). The native-limit policy keeps its limit on unusable telemetry, so its state alone does not make a reading usable |
+| D88 | Notifications are a side channel with a lifecycle. `AppModel` hands each status to the notifier after its command; the notifier plans at once and posts one at a time, in order. Every asynchronous step belongs to a generation, checked before it acts and after every suspension: posts to the opt-in's `NotificationGeneration`, ended by turning notifications off or on and by quitting (`shutdown()`, called on termination after the restore of normal charging has started); permission reads and requests to their own operation, superseded by any newer one, a change of choice or quitting. Ending a generation never waits; a hand-over checks it immediately before the system call, on the poster's own serial queue. So turning notifications off, or quitting, stops every notification not yet handed to macOS; one being handed over at that moment may still appear; notifications already delivered stay in Notification Center. The center's answer is awaited for at most 30 s or until cancelled, then counted as unknown, never as delivered; a hand-over also checks, right before the system call, that its post has not settled, so one that expired or was cancelled while queued behind a stalled call never reaches macOS later; at most 8 posts wait in the notifier and at most 8 hand-overs are queued or under way in the poster, and a waiting post holds no reference to the notifier. A failed post is logged by kind and numeric code only. Text is built from fixed phrases, numbers and backend names, reusing the policy's reasons, `MacOSChargeLimitWording.releaseState` and the menu's restore wording (`NativeLimitWording`, now shared), never free-form strings. No notification delegate is set (reviews of PR #81) | A notification must never change charging, delay the command queue or block the main thread (R1, R30, D62): waiting for a hand-over in flight would freeze the app, and on quitting would delay the restore, while a hand-over that completes after turning notifications off looks to the user exactly like one that completed just before, and one macOS has accepted is presented anyway. An answer from macOS that was overtaken must not turn the toggle back on, and a system that stops answering must not pile up posts or hand-overs, nor receive a stale one once it answers again. Posting in order keeps a resolution from arriving before its warning. Free-form strings, also in logs, may hold paths or device identifiers (R32). Without a delegate, macOS presents notifications with their own options even while CellKeeper is active (Apple's documentation of `userNotificationCenter(_:willPresent:withCompletionHandler:)`) |

@@ -4,14 +4,14 @@
 //
 // - CellKeeperCore: platform-neutral domain logic (telemetry model, settings
 //   validation, charging policy state machine, controller, backend protocol,
-//   simulated, read-only, native Charge Limit and helper backends, and the
-//   in-process helper transport). No IOKit, no hardware access. Depends on
-//   CellKeeperHelperCore.
+//   simulated, read-only, native Charge Limit and helper backends, the
+//   in-process helper transport, and the notification planner). No IOKit,
+//   no hardware access. Depends on CellKeeperHelperCore.
 // - CellKeeperKit: macOS system adapters (read-only IOKit telemetry,
 //   power-source notifications, the `shortcuts` and `pmset` runners, the
 //   Charge Limit record file, the saved diagnostics report, the helper's
-//   read-only power reading for the Simulated helper, and the NSXPC helper
-//   transport). Depends on
+//   read-only power reading for the Simulated helper, the NSXPC helper
+//   transport, and the local-notification poster). Depends on
 //   CellKeeperCore, CellKeeperHelperCore and CellKeeperHelperXPC.
 // - CellKeeperHelperCore: the logic of the privileged helper (the wire
 //   vocabulary shared with the app, and the helper engine: sessions,

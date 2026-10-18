@@ -22,6 +22,8 @@ extension UserDefaults: KeyValueStorage {}
 
 /// Persists settings in `UserDefaults` as JSON. Loaded values are validated;
 /// invalid or unreadable data falls back to defaults rather than being applied.
+/// The selected backend and the notification choice are stored under keys of
+/// their own.
 public struct SettingsStore {
     public static let chargingSettingsKey = "chargingSettings.v1"
 
@@ -70,6 +72,21 @@ public struct SettingsStore {
     public func save(_ settings: ChargingSettings) throws {
         let valid = try settings.validated()
         defaults.set(try JSONEncoder().encode(valid), forKey: Self.chargingSettingsKey)
+    }
+
+    /// Whether the user opted in to notifications. Kept apart from
+    /// ``ChargingSettings``, so it can never make stored charging settings
+    /// invalid, and stored settings that are invalid never turn it off.
+    public static let notificationsKey = "notifications.v1"
+
+    /// The user's notification choice: on only if saved as on, so a missing
+    /// or unrecognised value means off (the default).
+    public func loadNotificationsEnabled() -> Bool {
+        defaults.string(forKey: Self.notificationsKey) == "on"
+    }
+
+    public func saveNotificationsEnabled(_ enabled: Bool) {
+        defaults.set(enabled ? "on" : "off", forKey: Self.notificationsKey)
     }
 
     public func string(forKey key: String) -> String? {

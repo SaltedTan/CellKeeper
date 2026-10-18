@@ -127,6 +127,16 @@ public struct ControllerStatus: Sendable, Equatable {
     public var lastExecution: ExecutionRecord?
     public var consecutiveFailures: Int
     public var isBackendFaulted: Bool
+    /// How many times a backend became faulted in this session, counting
+    /// faults that began and were cleared between two statuses. Only grows.
+    public var faultsRaised: Int
+    /// With a backend that switches charging itself: how many reads in this
+    /// session showed normal charging after a restriction of CellKeeper's
+    /// own may have been in effect, each ending ``ownRestrictionMode``. A
+    /// release confirmed by read-back, counted even if a later request in
+    /// the same command restricted charging again. Only grows; not counted
+    /// for macOS's Charge Limit (see ``NativeLimitStatus/restoresConfirmed``).
+    public var releasesConfirmed: Int
     public var events: [ControlEvent]
     public var lastEvaluation: Date?
     /// The scheduled full charge that is armed, if any. It is removed when

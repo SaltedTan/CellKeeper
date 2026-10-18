@@ -283,6 +283,18 @@ public struct NativeLimitStatus: Sendable, Equatable {
     /// Whether the user's shortcut was found when CellKeeper last looked for
     /// it or ran it; nil if it has not checked yet, or the last run failed.
     public var isShortcutFound: Bool?
+    /// How many times this backend read the user's recorded limit back from
+    /// macOS while it held a record of it: each one a restore confirmed by
+    /// read-back, by CellKeeper or by hand. Evidence of that read only; the
+    /// record is deleted afterwards, which may fail (the next launch then
+    /// finds the limit in effect and deletes it). Only grows. Having no
+    /// record is not counted: it is no evidence of a restore.
+    public var restoresConfirmed: Int
+    /// The user's limit the latest of those reads showed.
+    public var lastRestoredLimit: Int?
+    /// How many unreadable records this backend discarded at the user's
+    /// request. Only grows.
+    public var recordsDiscarded: Int
 
     public init(
         reportedLimit: Int? = nil,
@@ -294,7 +306,10 @@ public struct NativeLimitStatus: Sendable, Equatable {
         needsNoLimitConfirmation: Bool = false,
         isRestoreUnfinished: Bool = false,
         isAdoptionUnsaved: Bool = false,
-        isShortcutFound: Bool? = nil
+        isShortcutFound: Bool? = nil,
+        restoresConfirmed: Int = 0,
+        lastRestoredLimit: Int? = nil,
+        recordsDiscarded: Int = 0
     ) {
         self.reportedLimit = reportedLimit
         self.readAt = readAt
@@ -306,6 +321,9 @@ public struct NativeLimitStatus: Sendable, Equatable {
         self.isRestoreUnfinished = isRestoreUnfinished
         self.isAdoptionUnsaved = isAdoptionUnsaved
         self.isShortcutFound = isShortcutFound
+        self.restoresConfirmed = restoresConfirmed
+        self.lastRestoredLimit = lastRestoredLimit
+        self.recordsDiscarded = recordsDiscarded
     }
 
     /// True while CellKeeper has changed the setting and must restore it.
