@@ -185,12 +185,18 @@ public struct WeeklyFullChargePattern: Sendable, Equatable {
 
     /// The first occurrence that starts strictly after `now` in `timeZone`
     /// on a nominal day after `handled` (any day if nil), or nil if the
-    /// pattern is not valid or `now` not finite. Of occurrences that start
-    /// at the same instant, the one with the greatest nominal day wins, as
-    /// in ``latestOccurrence(startingAtOrBefore:in:)``.
+    /// pattern is not valid, `now` not finite, or `handled` the last day
+    /// there is (9999-12-31, after which no day follows). Of occurrences
+    /// that start at the same instant, the one with the greatest nominal
+    /// day wins, as in ``latestOccurrence(startingAtOrBefore:in:)``.
     public func firstOccurrence(startingAfter now: Date, onDayAfter handled: LocalDay?, in timeZone: TimeZone) -> WeeklyFullChargeOccurrence? {
         guard let today = LocalDay(containing: now, in: timeZone), let yesterday = today.adding(days: -1) else { return nil }
-        let first = handled.flatMap { $0.adding(days: 1) }.map { max($0, yesterday) } ?? yesterday
+        var first = yesterday
+        if let handled {
+            // No day after the handled one: none can be next.
+            guard let after = handled.adding(days: 1) else { return nil }
+            first = max(after, yesterday)
+        }
         // Offsets 0 through 8 reach every weekday after today: counted from
         // yesterday, a day whose start has just passed comes again at 8.
         return occurrences(from: first, through: first.adding(days: 8), in: timeZone)

@@ -317,6 +317,17 @@ struct WeeklyFullChargeStoreTests {
         #expect(store(["handled.startsAt": "253402300800"]) == .unusable(reason: "its record of the last weekly full charge is not valid"))
     }
 
+    @Test("A stored record of the last day there is loads, and leaves no occurrence next or due")
+    func lastDay() {
+        guard case .schedule(let loaded) = store(["handled.year": "9999", "handled.month": "12", "handled.day": "31"]) else {
+            Issue.record("a record of 9999-12-31 was refused")
+            return
+        }
+        let now = utc("2026-10-23T05:00:00Z")
+        #expect(loaded.next(after: now, in: london) == nil)
+        #expect(loaded.check(input: inputAt(utc("2026-10-23T06:00:00Z")), timeZone: london) == .nothingDue)
+    }
+
     @Test("A missing field, a value that is not JSON, and one of another type cannot be used")
     func unreadable() {
         storage.set(try! JSONSerialization.data(withJSONObject: ["weekdays": [6], "hour": 7, "minute": 0, "durationHours": 12]), forKey: WeeklyFullChargeStore.key)

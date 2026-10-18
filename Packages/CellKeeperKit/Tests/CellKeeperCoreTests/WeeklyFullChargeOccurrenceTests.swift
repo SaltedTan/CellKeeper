@@ -223,6 +223,9 @@ struct WeeklyOccurrenceTests {
         #expect(fridays.firstOccurrence(startingAfter: utc("2026-10-23T07:00:00Z"), onDayAfter: day(2026, 10, 16), in: london)?.day == day(2026, 10, 30))
         // A record three weeks ahead of the clock.
         #expect(fridays.firstOccurrence(startingAfter: beforeStart, onDayAfter: day(2026, 11, 13), in: london)?.startsAt == utc("2026-11-20T07:00:00Z"))
+        // No day follows the last one there is, so nothing is next; the
+        // search does not start again from today.
+        #expect(fridays.firstOccurrence(startingAfter: beforeStart, onDayAfter: day(9999, 12, 31), in: london) == nil)
     }
 
     @Test("Just after a Monday-only start, the next is the following Monday: counted from yesterday, at offset 8")
