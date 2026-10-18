@@ -114,10 +114,12 @@ CellKeeper Full Charge**, **Stop CellKeeper Full Charge or Discharge**,
 **Set CellKeeper Manage Charging** and **Get CellKeeper Status**, and Siri
 and Spotlight know "Get CellKeeper status". They are the same commands as
 the menu, with the same checks: an action refuses, with the reason, what
-the menu would not offer. Set CellKeeper Limit is not Apple's **Set Charge
+the menu would not offer. One exception: Set CellKeeper Limit also works
+while **Manage charging** is off, when the menu's limit control is
+disabled; the limit is then saved for later, and CellKeeper uses it once
+you turn Manage charging on. Set CellKeeper Limit is not Apple's **Set Charge
 Limit** action, nor the "CellKeeper Set Charge Limit" shortcut you may have
-created; it changes CellKeeper's own setting, which applies only while
-**Manage charging** is on.
+created; it changes CellKeeper's own setting.
 
 An action says what CellKeeper saved or was asked to do, not that your
 Mac's charging changed; the menu shows what happens next. If CellKeeper is

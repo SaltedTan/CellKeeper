@@ -2366,10 +2366,17 @@ tested.
     at an exact time.
 - **The Settings banner** reports a problem with the user's latest change
   in Settings. Only changes made in the UI touch it (`SettingsChangeSource`,
-  `SettingsReconciliation`, Kit): a saved change clears it, a refused one
-  shows why, an unchanged value leaves it. A Shortcuts action's change, and
-  CellKeeper keeping Manage charging off after it kept a Charge Limit set
-  outside it, never touch it, whatever command found that (D95). A failed
+  `SettingsReconciliation`, Kit): when made, a saved change clears it, a
+  refused one shows why, an unchanged value leaves it. After the controller
+  applied a change, the banner is set only when a change made in the UI
+  asked for Manage charging on (on in the settings it carried, whatever
+  else it changed, such as the limit) and the controller kept it off, for
+  example because it had just kept a Charge Limit set outside CellKeeper:
+  the banner then explains the change the user just made, as before. Every
+  other reconciliation leaves the banner as it is: a Shortcuts action's
+  change that the controller kept off (logged instead), and CellKeeper
+  keeping Manage charging off after an outside change found by any command,
+  a Shortcuts action's or a periodic check (D95). A failed
   save reads "CellKeeper could not save its settings."; the error goes only
   to the unified log, privately. A limit set in the UI is checked against
   the limits offered for the backend in charge (`ChargeLimitRequest`), as
@@ -2430,11 +2437,16 @@ applies only while Manage charging is on.
   anything an action sends. An action takes one absolute deadline, 10 s
   ahead on the monotonic clock, and waits against it for the attach and,
   except Stop and turning management off, for the first status
-  (`FirstValue`, Kit). A value that arrives after the deadline is refused
-  even if the waiting timer fires late; a cancelled action resumes once,
-  with nothing. Quitting is checked after every wait, immediately before
-  anything is changed. After the waits the action is synchronous on the
-  main actor: check, save, queue, word the result. `openAppWhenRun` keeps
+  (`FirstValue`, Kit, which records when its value was provided). A value
+  provided after the deadline is refused, also one already there when the
+  action asks, and even if the waiting timer fires late; a cancelled wait
+  resumes once, with nothing. After every wait, and so immediately before
+  anything is changed, the action is admitted again and never on a cached
+  value alone: it refuses once quitting has started, if it was cancelled
+  (also when its value reached it in the same main-actor turn), and once
+  the clock shows the deadline passed, however early the value arrived.
+  After the last admission the action is synchronous on the main actor:
+  check, save, queue, word the result. `openAppWhenRun` keeps
   its default (false; deprecated from macOS 26 for `supportedModes`, which
   a macOS 14 target cannot declare).
 - **Launch.** When CellKeeper is not running, macOS launches it to run the
@@ -2471,10 +2483,12 @@ applies only while Manage charging is on.
 - **Refusals** are thrown with their text, which Shortcuts shows before
   stopping the shortcut: "CellKeeper is still starting or switching how it
   controls charging. Try again in a moment." (no attach or first status by
-  the deadline, or an unsettled context); "CellKeeper is quitting."; the
-  limit and start checks above; "CellKeeper could not save its settings."
-  An action never sets or clears the Settings banner, also when the
-  controller later keeps Manage charging off (D95); that is logged.
+  the deadline, a cancelled action, or an unsettled context); "CellKeeper
+  is quitting."; the limit and start checks above; "CellKeeper could not
+  save its settings." An action never sets or clears the Settings banner,
+  also when the controller later keeps Manage charging off (D95); that is
+  logged as "CellKeeper kept Manage charging off after a Shortcuts settings
+  change." with the controller's reason.
 - **Get CellKeeper Status** (D98) reports the latest status with the time
   of CellKeeper's latest check and starts no evaluation of its own. Its
   value (`ShortcutsStatus`, Kit; a transient entity in the app) has the
@@ -2752,8 +2766,8 @@ The helper daemon logs under its own subsystem,
 | D91 | Admission is decided where commands are serialized: `ChargeController.startFullCharge` while an override is live (a full charge or a discharge, from the user or a schedule) changes nothing and logs that; the override keeps its identity, source, deadline and the ending counters. One whose deadline has passed is replaced. Schedule starts keep D82. An action's Start result acknowledges a queued request (lead's decision, design review, 2026-10-19) | Starts queued behind one another (a double-click, several actions) saw the same status and replaced each other, resetting the deadline or overwriting a schedule's full charge or a discharge |
 | D92 | A Shortcuts action's result states only what is certain when it returns, the saved setting or the queued command; backend effects only as something the menu shows. Qualifiers (Manage charging off, simulated, no requests, a fault, deferring to macOS's limit with the own-restriction warning, a running full charge, a limit below 50%) are each decided from the settled context, never from the sentence. All text is fixed phrases, numbers, backend names and D89's words, with no unavailability reason, report problem, error, path or identifier, in dialogs, refusals, the status value and the log; a failed save reads "CellKeeper could not save its settings." in Settings too, and its error goes only to the unified log, privately (lead's decisions, 2026-10-19) | Actions return before the backend acts, and a queued command can be superseded, refused or rate-limited; Shortcuts can pass the text anywhere |
 | D93 | Backend-specific checks and qualifiers only in a settled context: a first status, no pending backend switch, and the backend in charge being the selected one (also the startup switch and a queued switch). A fault alone does not unsettle it. Otherwise setting the limit, starting a full charge and turning Manage charging on refuse; turning it off and Stop are accepted with generic text | `start()` only queues the startup switch and the launch evaluation; a status from before a switch describes another backend than the one the action's command will meet |
-| D94 | Readiness: the model is attached after `start()`. An action waits for it and, except Stop and turning management off, for the first status, against one absolute 10 s deadline on the monotonic clock; a value after the deadline is refused even if the timer fires late; a cancelled action resumes once; quitting is checked after every wait, immediately before anything changes. `openAppWhenRun` keeps its default (false); launching for an action is a normal start | No action runs before start-up queued its work; a bounded wait cannot deadlock, even when a cold launch's evaluation runs the user's shortcut |
-| D95 | Settings changes carry their source (the UI, a Shortcuts action, or CellKeeper keeping Manage charging off after it kept a Charge Limit set outside it). All are reconciled the same way (`handledAdoptionCount`, the controller's adoption checks and the "newer change on its way" guard unchanged), but only the UI's touch the Settings banner: a saved change clears it, a refused one shows it, an unchanged one leaves it. An action's refusal is told to the shortcut, and logged; the controller keeping management off after an action, and CellKeeper's own change after an adoption, whichever command found it, are only logged; the menu's notice shows the kept change (lead's decisions, design reviews r1 and r2, 2026-10-19) | The banner reports a problem with the user's latest change in Settings; an action's outcome is told to the shortcut, and an adoption is not the user's change |
+| D94 | Readiness: the model is attached after `start()`. An action waits for it and, except Stop and turning management off, for the first status, against one absolute 10 s deadline on the monotonic clock. A value provided after the deadline is refused, also one already there (`FirstValue` records when it was provided), even if the timer fires late; a cancelled wait resumes once. The admission decision is made after every wait, so after the last suspension and immediately before any change, never on a cached value alone: it refuses once quitting has started, if the action was cancelled (cancellation wins over a value that reached it in the same main-actor turn), and once the clock shows the deadline passed. `openAppWhenRun` keeps its default (false); launching for an action is a normal start (code review r1, lead's decision, 2026-10-19) | No action runs before start-up queued its work, after it was cancelled, or later than its bound; a bounded wait cannot deadlock, even when a cold launch's evaluation runs the user's shortcut |
+| D95 | Settings changes carry their source (the UI, a Shortcuts action, or CellKeeper keeping Manage charging off after it kept a Charge Limit set outside it). All are reconciled the same way (`handledAdoptionCount`, the controller's adoption checks and the "newer change on its way" guard unchanged), but only the UI's touch the Settings banner. When made, a saved change clears it, a refused one shows it, an unchanged one leaves it. After the controller applied a change, the banner is set only when a UI change asked for Manage charging on (on in the settings it carried, whatever else it changed) and the controller kept it off, as before; every other reconciliation leaves it untouched. An action's refusal is told to the shortcut, and logged; the controller keeping management off after an action's change, and CellKeeper's own change after an adoption found by any command (an action's or a periodic check), are only logged; the menu's notice shows the kept change (lead's decisions, design reviews r1 and r2 and code review r1, 2026-10-19) | The banner reports a problem with the user's latest change in Settings; an action's outcome is told to the shortcut, and an adoption is not the user's change |
 | D96 | No Shortcuts action asks for confirmation, because none of their UI commands does. Stop ends a discharge too, with no confirmation, like the menu's Cancel; it gets no exemption from the rate limit or any safety rule. Discharge, backend switches, the schedule, notifications and the native backend's confirmations stay in the UI only | Confirmation parity with the UI, no more, no less. Ending a full charge with macOS's Charge Limit requests the limit again, a restricting change |
 | D97 | "Charge to 100% once" (the menu and Start CellKeeper Full Charge) needs a reading that shows a battery present and external power (`FullChargeStart`); the menu used to check only the power source (lead's decision, 2026-10-19) | A deliberate tightening: with no battery there is nothing to charge, and the action and the button must agree |
 | D98 | Get CellKeeper Status reports the latest status with the time of the latest check and starts no evaluation of its own; its value is a transient entity (charge, macOS's charging status, state, backend, simulated, limit, Manage charging, checked at). The only App Shortcut (Siri, Spotlight) is for this action, and its phrase sends no control command itself (lead's decision) | A read must not cause backend requests; a phrase works without setup, and a misheard one should not change charging |

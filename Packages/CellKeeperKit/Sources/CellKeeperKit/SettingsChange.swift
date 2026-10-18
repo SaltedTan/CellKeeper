@@ -133,7 +133,12 @@ public enum SettingsReconciliation {
         }
     }
 
-    /// After the controller applied the change.
+    /// After the controller applied the change. The banner is set only when
+    /// a change made in the UI asked for Manage charging on (on in the
+    /// settings it carried, whatever else it changed) and the controller
+    /// kept it off, as when it found a Charge Limit set outside CellKeeper:
+    /// the banner then explains the change the user just made. Every other
+    /// reconciliation leaves the banner as it is.
     /// - Parameters:
     ///   - sent: the settings the command carried.
     ///   - current: the app's settings now; a newer change may differ.
@@ -144,7 +149,7 @@ public enum SettingsReconciliation {
             let reason = refusal ?? "Manage charging stays off; Settings › Activity says why."
             switch source {
             case .ui: return Outcome(keepsManagementOff: true, banner: .show(reason))
-            case .shortcuts: return Outcome(keepsManagementOff: true, logMessage: "A Shortcuts action turned Manage charging on, but CellKeeper kept it off. \(reason)")
+            case .shortcuts: return Outcome(keepsManagementOff: true, logMessage: "CellKeeper kept Manage charging off after a Shortcuts settings change. \(reason)")
             case .adoption: return Outcome(keepsManagementOff: true, logMessage: "CellKeeper kept Manage charging off. \(reason)")
             }
         case .rejected(let error):

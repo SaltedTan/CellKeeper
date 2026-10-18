@@ -365,7 +365,30 @@ struct SettingsReconciliationTests {
         let action = SettingsReconciliation.outcome(sent: on, current: on, controller: controller, source: .shortcuts)
         #expect(action.keepsManagementOff)
         #expect(action.banner.applied(to: earlier) == earlier)
-        #expect(action.logMessage == "A Shortcuts action turned Manage charging on, but CellKeeper kept it off. Manage charging stays off: test.")
+        #expect(action.logMessage == "CellKeeper kept Manage charging off after a Shortcuts settings change. Manage charging stays off: test.")
+    }
+
+    @Test("A limit change with Manage charging on that meets a Charge Limit changed outside CellKeeper: from Settings the banner explains it; from Shortcuts, or CellKeeper's own follow-up, the banner is untouched")
+    func limitChangeMeetsAdoption() {
+        // Managing at 90%; the limit was changed outside CellKeeper; the
+        // change asks for 95% with management on, and the controller keeps
+        // the outside value and turns management off.
+        var sent = on
+        sent.chargeLimit = 95
+        let refusal = "Manage charging stays off: CellKeeper has just kept a Charge Limit changed outside it. Turn it on again to let CellKeeper manage the limit."
+        let controller = SettingsReconciliation.ControllerResult.applied(isManagementEnabled: false, managementRefusal: refusal)
+        let ui = SettingsReconciliation.outcome(sent: sent, current: sent, controller: controller, source: .ui)
+        #expect(ui.keepsManagementOff)
+        #expect(ui.banner.applied(to: earlier) == refusal)
+        let action = SettingsReconciliation.outcome(sent: sent, current: sent, controller: controller, source: .shortcuts)
+        #expect(action.keepsManagementOff)
+        #expect(action.banner.applied(to: earlier) == earlier)
+        #expect(action.banner.applied(to: nil) == nil)
+        // CellKeeper's own change that follows (management off) leaves the
+        // banner as it is, whichever command found the outside change.
+        let followUp = SettingsReconciliation.outcome(sent: off, current: off, controller: .applied(isManagementEnabled: false, managementRefusal: nil), source: .adoption)
+        #expect(followUp.banner.applied(to: earlier) == earlier)
+        #expect(SettingsReconciliation.banner(after: .saved(previous: on), source: .adoption).applied(to: earlier) == earlier)
     }
 
     @Test("A newer change on its way, or a change that did not turn management on, is left alone")
