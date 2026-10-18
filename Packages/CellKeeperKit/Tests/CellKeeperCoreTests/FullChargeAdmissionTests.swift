@@ -35,9 +35,9 @@ struct FullChargeAdmissionTests {
         let first = try #require(await controller.startFullCharge().activeOverride)
         clock.advance(by: 60)
         let second = await controller.startFullCharge()
-        let running = try #require(second.activeOverride)
-        #expect(running.startedAt == first.startedAt)
-        #expect(running.expiresAtUptime == first.expiresAtUptime)
+        #expect(second.activeOverride == first)
+        #expect(second.overridesEnded == 0)
+        #expect(second.lastEndedOverride == nil)
         #expect(notStartedEvents(second) == ["Temporary full charge not started: a temporary full charge is already running."])
     }
 
@@ -71,14 +71,15 @@ struct FullChargeAdmissionTests {
         let start = clock.now.addingTimeInterval(hour)
         try await controller.setFullChargeSchedule(FullChargeSchedule(startsAt: start, endsAt: start.addingTimeInterval(4 * hour)))
         clock.advance(by: hour + 60)
-        let scheduled = try #require(await controller.evaluate(.periodic).activeOverride)
+        let started = await controller.evaluate(.periodic)
+        let scheduled = try #require(started.activeOverride)
         #expect(scheduled.source == .schedule)
 
         clock.advance(by: 60)
         let status = await controller.startFullCharge()
-        let running = try #require(status.activeOverride)
-        #expect(running.source == .schedule)
-        #expect(running.expiresAtUptime == scheduled.expiresAtUptime)
+        #expect(status.activeOverride == scheduled)
+        #expect(status.overridesEnded == started.overridesEnded)
+        #expect(status.fullChargeScheduleOutcome == started.fullChargeScheduleOutcome)
         #expect(notStartedEvents(status) == ["Temporary full charge not started: a temporary full charge is already running."])
     }
 
