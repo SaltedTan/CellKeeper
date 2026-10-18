@@ -546,7 +546,8 @@ later or the same deadline). After the one policy evaluation, each
 schedule that started, extended or kept the full charge says "already
 full" if it completed there: one override, one completion (an expired full
 charge that a schedule replaced in the same evaluation is a separate,
-earlier ending). D91 holds: a manual start is ignored while a full charge a
+earlier ending). A weekly store that cannot be written changes neither the
+one-shot's start nor the policy, which runs in every evaluation. D91 holds: a manual start is ignored while a full charge a
 weekly occurrence started is live. With Manage charging off an occurrence
 waits, and passes with "Last checked: Manage charging was off" (D80).
 Backend switches, faults, Read-only, unavailable and simulated backends
