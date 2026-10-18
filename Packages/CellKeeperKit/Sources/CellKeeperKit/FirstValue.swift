@@ -23,12 +23,21 @@ public struct SystemDeadlineClock: DeadlineClock {
 /// deadline: for a Shortcuts action, the app model once it has started, and
 /// the model's first status.
 ///
-/// A waiter gets the value only if it is provided before the waiter's
-/// deadline by the clock, however late the waiter's timer runs; otherwise,
-/// and when its task is cancelled, it gets nil. Each waiter is resumed once.
+/// A waiter gets the value only if it was provided before the waiter's
+/// deadline by the clock (recorded when provided, also for a value already
+/// there), however late the waiter's timer runs; otherwise, and when its
+/// task is cancelled while it waits, it gets nil. Each waiter is resumed
+/// once.
+///
+/// It does not decide whether to act: a value can reach a task that was
+/// cancelled in the same main-actor turn, and the task may run later than
+/// the deadline. A caller that acts on the value checks cancellation and the
+/// clock itself, after its last suspension.
 @MainActor
 public final class FirstValue<Value: Sendable> {
     public private(set) var value: Value?
+    /// When the value was provided, by the clock.
+    public private(set) var providedAt: ContinuousClock.Instant?
     private let clock: any DeadlineClock
     private var waiters: [Int: Waiter] = [:]
     private var nextWaiterID = 0
@@ -47,18 +56,23 @@ public final class FirstValue<Value: Sendable> {
     /// deadline has passed get nil, even if their timer has not fired yet.
     public func provide(_ newValue: Value) {
         guard value == nil else { return }
-        value = newValue
         let now = clock.now
+        value = newValue
+        providedAt = now
         for id in Array(waiters.keys) {
             guard let deadline = waiters[id]?.deadline else { continue }
             resume(id, with: now < deadline ? newValue : nil)
         }
     }
 
-    /// The value, waiting for it until `deadline` at the latest; nil if it
-    /// was not provided before then, or if the task is cancelled.
+    /// The value if it was provided before `deadline`, waiting for it until
+    /// then at the latest; nil otherwise, or if the task is cancelled before
+    /// it arrives. A value already there is returned without waiting, and
+    /// only if it was provided before `deadline`.
     public func value(by deadline: ContinuousClock.Instant) async -> Value? {
-        if let value { return value }
+        if let value, let providedAt {
+            return providedAt < deadline ? value : nil
+        }
         guard clock.now < deadline, !Task.isCancelled else { return nil }
         let id = nextWaiterID
         nextWaiterID += 1

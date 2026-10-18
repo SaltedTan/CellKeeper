@@ -171,19 +171,31 @@ public final class ShortcutsActionCoordinator {
     }
 
     /// Waits for the app, then for its first status if `needsStatus`, both
-    /// against one deadline; checks quitting after each wait, immediately
-    /// before the caller changes anything (nothing suspends after this).
+    /// against one absolute deadline, and admits the action after each wait.
+    /// The last admission is the caller's final check: nothing suspends
+    /// between it and the change the caller then makes.
     private func ready(needsStatus: Bool) async -> Readiness {
         let deadline = clock.now.advanced(by: bound)
         guard let target = await attached.value(by: deadline) else {
             return .refused(ShortcutsActionWording.notReady)
         }
-        guard !target.isTerminating else { return .refused(ShortcutsActionWording.quitting) }
+        if let refusal = admissionRefusal(target, deadline: deadline) { return .refused(refusal) }
         guard needsStatus else { return .ready(target) }
         let hasStatus = await target.firstStatus.value(by: deadline) != nil
-        guard !target.isTerminating else { return .refused(ShortcutsActionWording.quitting) }
+        if let refusal = admissionRefusal(target, deadline: deadline) { return .refused(refusal) }
         guard hasStatus, target.status != nil else { return .refused(ShortcutsActionWording.notReady) }
         return .ready(target)
+    }
+
+    /// Whether the action may go on, decided after a suspension and never on
+    /// a cached value alone: not once quitting has started, not if the
+    /// action was cancelled (also when a value reached it in the same turn),
+    /// and not once the clock shows the deadline passed (however early the
+    /// value it waited for arrived).
+    private func admissionRefusal(_ target: any ShortcutsActionTarget, deadline: ContinuousClock.Instant) -> String? {
+        if target.isTerminating { return ShortcutsActionWording.quitting }
+        if Task.isCancelled || clock.now >= deadline { return ShortcutsActionWording.notReady }
+        return nil
     }
 
     private func settledContext(_ target: any ShortcutsActionTarget) -> ShortcutsActionContext? {

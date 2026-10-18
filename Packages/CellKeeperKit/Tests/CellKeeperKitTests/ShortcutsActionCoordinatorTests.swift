@@ -134,6 +134,80 @@ struct ShortcutsActionCoordinatorTests {
         #expect(target.fullChargesQueued == 0)
     }
 
+    @Test("Cancelled before it starts, with the app and its status already there, an action refuses and changes nothing")
+    func cancelledWithCachedReadiness() async {
+        let coordinator = makeCoordinator()
+        let target = FakeActionTarget(clock: clock, status: await evaluatedActionStatus())
+        coordinator.attach(target)
+        let limit = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await coordinator.setChargeLimit(70)
+        }
+        let stop = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return await coordinator.stopOverride()
+        }
+        let limitOutcome = await limit.value
+        let stopOutcome = await stop.value
+        #expect(limitOutcome == notReady)
+        #expect(stopOutcome == notReady)
+        #expect(target.changes.isEmpty)
+        #expect(target.cancelsQueued == 0)
+    }
+
+    @Test("Cancelled in the same turn as its status arrives, an action refuses and changes nothing: cancellation wins")
+    func cancellationRacesStatus() async {
+        let coordinator = makeCoordinator()
+        let target = FakeActionTarget(clock: clock)
+        coordinator.attach(target)
+        let status = await evaluatedActionStatus()
+        let action = Task { await coordinator.setChargeLimit(70) }
+        await clock.waitForSleeps(1)
+        // One main-actor turn: the cancellation's own cleanup is queued
+        // behind it, so the status reaches the waiter first.
+        action.cancel()
+        target.receive(status)
+        let outcome = await action.value
+        #expect(outcome == notReady)
+        #expect(target.changes.isEmpty)
+    }
+
+    @Test("Resumed after the deadline, an action refuses although the app and its status arrived in time")
+    func resumedAfterDeadline() async {
+        let coordinator = makeCoordinator()
+        let target = FakeActionTarget(clock: clock)
+        let status = await evaluatedActionStatus()
+        let action = Task { await coordinator.setChargeLimit(70) }
+        await clock.waitForSleeps(1)
+        // All in one main-actor turn, so the action cannot run in between:
+        // the app at 9 s and its status at 9.5 s, then the clock past the
+        // deadline before the action resumes.
+        clock.advance(by: .seconds(9), waking: false)
+        coordinator.attach(target)
+        clock.advance(by: .milliseconds(500), waking: false)
+        target.receive(status)
+        clock.advance(by: .seconds(2), waking: false)
+        let outcome = await action.value
+        #expect(outcome == notReady)
+        #expect(target.changes.isEmpty)
+    }
+
+    @Test("The app at 9 s and its first status at 11 s, while the action is suspended between the two waits: refused, nothing changed")
+    func statusAfterDeadlineBetweenWaits() async {
+        let coordinator = makeCoordinator()
+        let target = FakeActionTarget(clock: clock)
+        let status = await evaluatedActionStatus()
+        let action = Task { await coordinator.setChargeLimit(70) }
+        await clock.waitForSleeps(1)
+        clock.advance(by: .seconds(9), waking: false)
+        coordinator.attach(target)
+        clock.advance(by: .seconds(2), waking: false)
+        target.receive(status)
+        let outcome = await action.value
+        #expect(outcome == notReady)
+        #expect(target.changes.isEmpty)
+    }
+
     @Test("Quitting while an action waits for the status: it refuses as quitting and changes nothing")
     func quittingDuringWait() async {
         let coordinator = makeCoordinator()

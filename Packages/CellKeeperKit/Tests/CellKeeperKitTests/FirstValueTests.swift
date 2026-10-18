@@ -90,6 +90,29 @@ struct FirstValueTests {
         #expect(value == nil)
     }
 
+    @Test("A value already there that was provided after the deadline is refused")
+    func cachedValueProvidedLate() async {
+        let gate = FirstValue<Int>(clock: clock)
+        let deadline = clock.now.advanced(by: .seconds(10))
+        clock.advance(by: .seconds(11))
+        gate.provide(7)
+        let value = await gate.value(by: deadline)
+        #expect(value == nil)
+        let later = await gate.value(by: clock.now.advanced(by: .seconds(1)))
+        #expect(later == 7)
+    }
+
+    @Test("A value already there that was provided before the deadline is returned even once the clock has passed it: acting on it is the caller's decision")
+    func cachedValueProvidedInTime() async {
+        let gate = FirstValue<Int>(clock: clock)
+        let deadline = clock.now.advanced(by: .seconds(10))
+        gate.provide(7)
+        clock.advance(by: .seconds(11))
+        let value = await gate.value(by: deadline)
+        #expect(value == 7)
+        #expect(gate.providedAt != nil)
+    }
+
     @Test("A deadline already passed gives nil without waiting")
     func deadlinePassed() async {
         let gate = FirstValue<Int>(clock: clock)
