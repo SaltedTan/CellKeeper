@@ -184,6 +184,109 @@ struct CommandLineAdapterTests {
         return try await call.value
     }
 
+    /// A call of the runner, with a deadline an hour away, on a tool for
+    /// the tests that stop it. `/bin/sh` runs `setup`, records its process
+    /// ID in a marker (written to a temporary file and renamed, so the test
+    /// reads it whole) or exits with status 3, and then runs while the hold
+    /// file exists, checking every 0.1 s, and gives up by itself after 3000
+    /// checks (at least 300 s). Leaving the loop either way, it exits with
+    /// status 0. `release()` removes the files, which ends a tool still
+    /// running at its next check, without a signal.
+    final class HeldToolCall {
+        let task: Task<ProcessResult, any Error>
+        private let hold: URL
+        private let marker: URL
+        private let finished = Flag()
+
+        init(setup: String = "") throws {
+            let base = FileManager.default.temporaryDirectory.appendingPathComponent("cellkeeper-test-\(UUID().uuidString)")
+            hold = base.appendingPathExtension("hold")
+            marker = base.appendingPathExtension("pid")
+            try Data().write(to: hold)
+            let script = "\(setup) echo $$ > \"$1.tmp\" && mv \"$1.tmp\" \"$1\" || exit 3; i=0; while [ -e \"$0\" ] && [ $i -lt 3000 ]; do /bin/sleep 0.1; i=$((i + 1)); done"
+            let arguments = ["-c", script, hold.path, marker.path]
+            let finished = finished
+            task = Task {
+                defer { finished.set() }
+                return try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: arguments, timeout: 3600)
+            }
+        }
+
+        /// Waits up to 300 s for the tool to record its process ID, and
+        /// then starts watching the tool's exit, if the call still runs:
+        /// with no stop requested yet, the tool is then in its loop, so the
+        /// watch starts on the tool's own process. Once the call has ended,
+        /// the tool has exited and its ID may be another process's. If there
+        /// is no tool to watch, it records an issue, ends the call and
+        /// returns nil.
+        func watchTool() async -> ExitWatch? {
+            await eventually(within: 300) {
+                finished.value || FileManager.default.fileExists(atPath: marker.path)
+            }
+            let recorded = (try? String(contentsOf: marker, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !finished.value, let pid = recorded.flatMap({ pid_t($0) }), let watch = ExitWatch(pid) {
+                return watch
+            }
+            task.cancel()
+            let result = await task.result
+            Issue.record("no running tool to watch (recorded ID: \(recorded ?? "none")); the call ended with \(result)")
+            return nil
+        }
+
+        func release() {
+            for url in [hold, marker, marker.appendingPathExtension("tmp")] {
+                try? FileManager.default.removeItem(at: url)
+            }
+        }
+    }
+
+    /// How a process ended, as the kernel reports it to a kqueue watch
+    /// (with the exit status, for a child of the test process, as the
+    /// runner's tools are). The watch follows the process it was started
+    /// on, whatever later takes its ID, and nothing is sent to that ID.
+    final class ExitWatch {
+        enum Outcome: Equatable {
+            case exited(status: Int32)
+            case killed(signal: Int32)
+        }
+
+        private let queue: Int32
+        private var reported: Outcome?
+
+        /// Nil if no process has that ID.
+        init?(_ pid: pid_t) {
+            guard pid > 0 else { return nil }
+            let queue = kqueue()
+            guard queue >= 0 else { return nil }
+            var change = kevent(ident: UInt(pid), filter: Int16(EVFILT_PROC), flags: UInt16(EV_ADD), fflags: UInt32(NOTE_EXIT) | UInt32(NOTE_EXITSTATUS), data: 0, udata: nil)
+            guard kevent(queue, &change, 1, nil, 0, nil) == 0 else {
+                close(queue)
+                return nil
+            }
+            self.queue = queue
+        }
+
+        deinit {
+            close(queue)
+        }
+
+        /// How the process ended, or nil if the kernel has not reported
+        /// its exit.
+        func outcome() -> Outcome? {
+            if reported == nil {
+                var event = kevent()
+                var noWait = timespec()
+                if kevent(queue, nil, 0, &event, 1, &noWait) == 1, event.fflags & UInt32(NOTE_EXIT) != 0 {
+                    // A wait status: the signal that killed the process in
+                    // the low 7 bits, or else its exit status in the next 8.
+                    let status = Int32(truncatingIfNeeded: event.data)
+                    reported = status & 0x7f == 0 ? .exited(status: (status >> 8) & 0xff) : .killed(signal: status & 0x7f)
+                }
+            }
+            return reported
+        }
+    }
+
     @Test("Exit status and both output streams are captured")
     func capturesOutput() async throws {
         let result = try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "printf out; printf 'first\\nsecond' >&2; exit 3"], timeout: Self.toolTimeout)
@@ -205,54 +308,29 @@ struct CommandLineAdapterTests {
     }
 
     @Test("A tool that ignores SIGTERM is killed after the grace period")
-    func ignoresTerminate() async {
-        // The tool marks that it ignores SIGTERM, and only then is it
-        // stopped, so the stop provably meets a tool that ignores SIGTERM.
-        // (A deadline could fire before a slow shell installs its trap.) A
-        // cancellation and the deadline stop a tool the same way: SIGTERM,
-        // then SIGKILL after the grace period.
-        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("cellkeeper-test-\(UUID().uuidString)")
-        defer {
-            try? FileManager.default.removeItem(at: marker)
-            try? FileManager.default.removeItem(at: marker.appendingPathExtension("tmp"))
-        }
-        let task = Task {
-            // An ignored signal stays ignored across exec, so sleep ignores
-            // SIGTERM; exec keeps the process ID the marker records.
-            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "trap '' TERM; echo $$ > \"$0.tmp\"; mv \"$0.tmp\" \"$0\"; exec /bin/sleep 30", marker.path], timeout: 600)
-        }
-        for _ in 0..<60_000 where !FileManager.default.fileExists(atPath: marker.path) {
-            try? await Task.sleep(for: .milliseconds(1))
-        }
-        let recorded = (try? String(contentsOf: marker, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let pid = recorded.flatMap({ pid_t($0) }), pid > 0 else {
-            Issue.record("the tool did not record its process ID")
-            task.cancel()
-            return
-        }
-        let started = Date()
-        task.cancel()
+    func ignoresTerminate() async throws {
+        // The tool ignores SIGTERM from before it records its process ID,
+        // and is stopped only after that, by the cancellation, so the stop
+        // meets a tool that ignores SIGTERM. It runs until it is stopped or
+        // released (`HeldToolCall`). A cancellation and the deadline stop a
+        // tool the same way: SIGTERM, then SIGKILL after the grace period.
+        let call = try HeldToolCall(setup: "trap '' TERM;")
+        defer { call.release() }
+        guard let exit = await call.watchTool() else { return }
+        let started = ContinuousClock.now
+        call.task.cancel()
         await #expect(throws: CancellationError.self) {
-            try await task.value
+            try await call.task.value
         }
-        let elapsed = Date().timeIntervalSince(started)
-        // Not before the grace period: SIGTERM did not stop it.
-        #expect(elapsed >= ProcessRunner.stopGracePeriod)
-        #expect(elapsed < 20)
-        // And it is gone: SIGKILL stopped it, not the runner giving up.
-        // (Allow a moment for the exited process to be reaped.)
-        var isGone = false
-        for _ in 0..<5_000 {
-            if kill(pid, 0) == -1, errno == ESRCH {
-                isGone = true
-                break
-            }
-            try? await Task.sleep(for: .milliseconds(1))
-        }
-        #expect(isGone)
-        if !isGone {
-            kill(pid, SIGKILL)
-        }
+        // Not before the grace period. ContinuousClock advances at least as
+        // much as the runner's clock; the wall clock can be set back.
+        let elapsed = ContinuousClock.now - started
+        #expect(elapsed >= .seconds(ProcessRunner.stopGracePeriod))
+        // After the call, with the hold file still there, the kernel
+        // reports the tool killed by SIGKILL: neither SIGTERM nor the tool
+        // itself ended it, and the runner did not leave it running.
+        let outcome = try #require(exit.outcome(), "the tool still ran after the call")
+        #expect(outcome == .killed(signal: SIGKILL))
     }
 
     @Test("A missing tool is a launch failure")
@@ -328,25 +406,23 @@ struct CommandLineAdapterTests {
     }
 
     @Test("Cancelling the calling task stops the tool promptly")
-    func cancellation() async {
-        // The tool marks that it runs, so the cancellation provably arrives
-        // while it runs, not before it starts.
-        let marker = FileManager.default.temporaryDirectory.appendingPathComponent("cellkeeper-test-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: marker) }
-        let task = Task {
-            try await ProcessRunner.run(URL(fileURLWithPath: "/bin/sh"), arguments: ["-c", "touch \"$0\"; exec /bin/sleep 30", marker.path], timeout: 30)
-        }
-        for _ in 0..<60_000 where !FileManager.default.fileExists(atPath: marker.path) {
-            try? await Task.sleep(for: .milliseconds(1))
-        }
-        #expect(FileManager.default.fileExists(atPath: marker.path))
-        let started = Date()
-        task.cancel()
+    func cancellation() async throws {
+        // The tool runs until it is stopped or released (`HeldToolCall`),
+        // so the cancellation meets a running tool. The deadline is an hour
+        // away, so a runner that ignored the cancellation would normally
+        // see the tool give up by itself (after at least 300 s) first.
+        let call = try HeldToolCall()
+        defer { call.release() }
+        guard let exit = await call.watchTool() else { return }
+        call.task.cancel()
         await #expect(throws: CancellationError.self) {
-            try await task.value
+            try await call.task.value
         }
-        // Well before the tool's own 30 s: the cancellation stopped it.
-        #expect(Date().timeIntervalSince(started) < 20)
+        // After the call, with the hold file still there, the kernel
+        // reports the tool killed by SIGTERM, the runner's stop, rather
+        // than exiting by itself.
+        let outcome = try #require(exit.outcome(), "the tool still ran after the call")
+        #expect(outcome == .killed(signal: SIGTERM))
     }
 
     @Test("An already-cancelled task does not start the tool")
