@@ -30,6 +30,16 @@ enum ControlBackendChoice: String, CaseIterable, Identifiable {
         }
     }
 
+    /// The identifier of the backend this choice makes.
+    var backendIdentifier: String {
+        switch self {
+        case .simulated: MockChargingBackend().descriptor.identifier
+        case .readOnly: ReadOnlyChargingBackend().descriptor.identifier
+        case .nativeLimit: NativeChargeLimitBackend.identifier
+        case .simulatedHelper: HelperChargingBackend.simulatedHelperIdentifier
+        }
+    }
+
     var title: String {
         switch self {
         case .simulated: "Simulated"
@@ -92,12 +102,16 @@ final class AppModel {
     private(set) var diagnosticsSaveFailure: String?
     /// The user's opt-in to notifications and what macOS allows.
     private(set) var notificationOptIn: NotificationOptIn
+    /// True once quitting has started; Shortcuts actions then refuse.
+    private(set) var isTerminating = false
+    /// Provided with the first status, for Shortcuts actions that need one.
+    @ObservationIgnored let firstStatus = FirstValue<Bool>()
 
     private enum Command: Sendable {
         case evaluate(EvaluationTrigger)
         /// `adoptionsSeen`: outside changes the app had reflected when the
-        /// user made this change.
-        case apply(ChargingSettings, adoptionsSeen: Int)
+        /// change was made. `source` decides only how a refusal is shown.
+        case apply(ChargingSettings, adoptionsSeen: Int, source: SettingsChangeSource)
         case startFullCharge
         case startDischarge
         case cancelOverride
@@ -334,6 +348,7 @@ final class AppModel {
     /// Stops monitoring and command processing, returning the controller so
     /// the caller can restore defaults without involving the main actor.
     func stopForTermination() -> ChargeController {
+        isTerminating = true
         commandSink.finish()
         for task in tasks { task.cancel() }
         tasks.removeAll()
@@ -390,9 +405,14 @@ final class AppModel {
     /// Saves "Manage charging" as off after CellKeeper kept a Charge Limit
     /// set outside it. The backend's adoption marker also keeps it off at
     /// the next launch until the user turns management on again, because
-    /// settings reach the disk asynchronously.
+    /// settings reach the disk asynchronously. Not the user's change, so it
+    /// never touches the Settings banner, whichever command found the
+    /// change; a failed save is logged. The menu's notice shows the kept
+    /// change.
     func keepManagementOffAfterOutsideChange() {
-        updateSettings { $0.isManagementEnabled = false }
+        var proposed = settings
+        proposed.isManagementEnabled = false
+        changeSettings(proposed, source: .adoption)
     }
 
     // MARK: - User intents
@@ -401,36 +421,60 @@ final class AppModel {
         send(.evaluate(.manual))
     }
 
-    /// Validates and applies a settings change. Invalid changes are rejected
-    /// with an explanation and nothing is saved or applied. Returns true if
-    /// the resulting settings are saved (including when nothing changed).
+    /// Validates, saves and queues a settings change; an invalid one, or one
+    /// that cannot be saved, is refused and nothing is saved or applied.
+    /// Only the UI's changes (`source`) touch the Settings banner: a saved
+    /// one clears it, a refused one shows why, an unchanged one leaves it.
+    @discardableResult
+    func changeSettings(_ proposed: ChargingSettings, source: SettingsChangeSource) -> SettingsChangeResult {
+        let result: SettingsChangeResult
+        if proposed == settings {
+            result = .unchanged
+        } else if case let issues = proposed.validationIssues, !issues.isEmpty {
+            result = .refused(issues.map(\.description).joined(separator: "\n"))
+        } else {
+            do {
+                try store.save(proposed)
+                result = .saved(previous: settings)
+                settings = proposed
+                send(.apply(proposed, adoptionsSeen: handledAdoptionCount, source: source))
+            } catch {
+                CellKeeperLog.settings.error("Could not save settings: \(String(describing: error), privacy: .private)")
+                result = .refused(SettingsChangeResult.saveFailed)
+            }
+        }
+        settingsError = SettingsReconciliation.banner(after: result, source: source).applied(to: settingsError)
+        if let message = SettingsReconciliation.logMessage(after: result, source: source) {
+            CellKeeperLog.settings.notice("\(message, privacy: .public)")
+        }
+        return result
+    }
+
+    /// A settings change from the UI. Returns true if the resulting settings
+    /// are saved (including when nothing changed).
     @discardableResult
     func updateSettings(_ change: (inout ChargingSettings) -> Void) -> Bool {
         var proposed = settings
         change(&proposed)
-        guard proposed != settings else { return true }
-        let issues = proposed.validationIssues
-        guard issues.isEmpty else {
-            settingsError = issues.map(\.description).joined(separator: "\n")
-            return false
-        }
-        do {
-            try store.save(proposed)
-        } catch {
-            settingsError = "Could not save settings: \(error)"
-            return false
-        }
-        settingsError = nil
-        settings = proposed
-        send(.apply(proposed, adoptionsSeen: handledAdoptionCount))
+        if case .refused = changeSettings(proposed, source: .ui) { return false }
         return true
     }
 
+    /// Checked against the limits offered for the backend in charge, as Set
+    /// CellKeeper Limit is, so a value is refused rather than clamped.
     func setChargeLimit(_ limit: Int) {
-        updateSettings { $0 = $0.withChargeLimit(limit) }
+        switch ChargeLimitRequest(limit: limit, choices: chargeLimitChoices, settings: settings) {
+        case .accepted(let proposed):
+            changeSettings(proposed, source: .ui)
+        case .refused(let text):
+            settingsError = SettingsReconciliation.banner(after: .refused(text), source: .ui).applied(to: settingsError)
+        }
     }
 
+    /// Does nothing unless the menu's button would be enabled
+    /// (``FullChargeStart``).
     func startFullCharge() {
+        guard let status, FullChargeStart.refusal(settings: settings, status: status) == nil else { return }
         send(.startFullCharge)
     }
 
@@ -624,21 +668,32 @@ final class AppModel {
         switch command {
         case .evaluate(let trigger):
             status = await controller.evaluate(trigger)
-        case .apply(let newSettings, let adoptionsSeen):
+        case .apply(let newSettings, let adoptionsSeen, let source):
+            let applied: SettingsReconciliation.ControllerResult
             do {
                 let newStatus = try await controller.apply(settings: newSettings, adoptionsSeen: adoptionsSeen)
                 status = newStatus
-                // The controller keeps management off if the user had not seen
-                // a kept outside change yet, or the change cannot be retired;
-                // show and save what is actually in effect, unless a newer
-                // change is already on its way.
-                if newSettings.isManagementEnabled, !newStatus.settings.isManagementEnabled, settings == newSettings {
-                    settings.isManagementEnabled = false
-                    try? store.save(settings)
-                    settingsError = newStatus.managementRefusal ?? "Manage charging stays off; Settings › Activity says why."
-                }
+                applied = .applied(isManagementEnabled: newStatus.settings.isManagementEnabled, managementRefusal: newStatus.managementRefusal)
             } catch {
-                settingsError = "Settings were rejected: \(error)"
+                applied = .rejected(String(describing: error))
+            }
+            // The controller keeps management off if the change was made
+            // before a kept outside change was seen, or that change cannot be
+            // retired: show and save what is actually in effect, unless a
+            // newer change is already on its way. Only the UI's changes are
+            // shown in Settings.
+            let outcome = SettingsReconciliation.outcome(sent: newSettings, current: settings, controller: applied, source: source)
+            if outcome.keepsManagementOff {
+                settings.isManagementEnabled = false
+                do {
+                    try store.save(settings)
+                } catch {
+                    CellKeeperLog.settings.error("Could not save settings: \(String(describing: error), privacy: .private)")
+                }
+            }
+            settingsError = outcome.banner.applied(to: settingsError)
+            if let message = outcome.logMessage {
+                CellKeeperLog.settings.notice("\(message, privacy: .public)")
             }
         case .startFullCharge:
             status = await controller.startFullCharge()
@@ -693,6 +748,7 @@ final class AppModel {
         // Plans at once and posts later; never waits.
         if let status {
             notifier.observe(status, trigger: command.trigger)
+            firstStatus.provide(true)
         }
         noteAdoptedChanges()
     }
@@ -740,6 +796,23 @@ final class AppModel {
             parts.append(decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS))
         }
         return parts.joined(separator: ", ")
+    }
+}
+
+/// What Shortcuts actions use: the same commands as the menu and Settings.
+extension AppModel: ShortcutsActionTarget {
+    var selectedBackendIdentifier: String {
+        backendChoice.backendIdentifier
+    }
+
+    /// The menu's "Charge to 100% once", already checked by the caller.
+    func queueFullCharge() {
+        send(.startFullCharge)
+    }
+
+    /// The menu's Cancel.
+    func queueCancelOverride() {
+        send(.cancelOverride)
     }
 }
 

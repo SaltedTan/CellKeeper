@@ -269,7 +269,7 @@ private struct NativeChargeLimitPicker: View {
             .disabled(!model.settings.isManagementEnabled)
             .help("macOS enforces this limit and resumes charging once the battery drops more than 5%; a custom resume point is not available with its Charge Limit.")
             if !steps.contains(limit) {
-                Text("\(limit)% cannot be set with macOS's Charge Limit. Choose one of the values above; until then your own limit stays in effect.")
+                Text("\(ChargeLimitChoices.notSettableWithMacOSLimit(limit)) Choose one of the values above; until then your own limit stays in effect.")
                     .font(.caption)
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
@@ -378,7 +378,7 @@ private struct FullChargeControl: View {
                     } label: {
                         Label("Charge to 100% once", systemImage: "arrow.up.to.line")
                     }
-                    .disabled(!model.settings.isManagementEnabled || model.settings.chargeLimit >= 100 || status.snapshot?.isOnExternalPower != true)
+                    .disabled(FullChargeStart.refusal(settings: model.settings, status: status) != nil)
                     .help(TemporaryFullChargeWording.buttonHelp(for: status))
                     Spacer()
                     if status.fullChargeSchedule == nil {

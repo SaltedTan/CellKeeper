@@ -60,7 +60,7 @@ private struct ChargingSettingsTab: View {
                         }
                     }
                     if !model.nativeLimitSteps.contains(settings.chargeLimit) {
-                        Label("\(settings.chargeLimit)% cannot be set with macOS's Charge Limit. Choose one of the values offered; until then your own limit stays in effect.", systemImage: "exclamationmark.triangle")
+                        Label("\(ChargeLimitChoices.notSettableWithMacOSLimit(settings.chargeLimit)) Choose one of the values offered; until then your own limit stays in effect.", systemImage: "exclamationmark.triangle")
                             .font(.caption)
                             .foregroundStyle(.orange)
                     }

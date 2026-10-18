@@ -231,7 +231,7 @@ struct ShortcutsActionWordingTests {
         status.snapshot?.isBatteryPresent = false
         let noBattery = ShortcutsStatus(status: status, settings: status.settings, selectedBackendIdentifier: status.backend.identifier)
         #expect(noBattery.batteryCharge == nil)
-        #expect(noBattery.title == "No battery")
+        #expect(noBattery.title == "Battery charge unknown")
         #expect(noBattery.dialog.hasPrefix("No battery detected. "))
         status.snapshot = nil
         let noReading = ShortcutsStatus(status: status, settings: status.settings, selectedBackendIdentifier: status.backend.identifier)
@@ -346,13 +346,13 @@ struct SettingsReconciliationTests {
         #expect(SettingsReconciliation.banner(after: .unchanged, source: .ui).applied(to: earlier) == earlier)
     }
 
-    @Test("Refusals other than the UI's are logged, in fixed words")
+    @Test("Only CellKeeper's own refused change is logged here, in fixed words: the UI shows its own, an action logs its outcome")
     func logWhenMade() {
         let failed = SettingsChangeResult.refused(SettingsChangeResult.saveFailed)
         #expect(SettingsReconciliation.logMessage(after: failed, source: .ui) == nil)
-        #expect(SettingsReconciliation.logMessage(after: failed, source: .shortcuts) == "A Shortcuts action's settings change was refused: CellKeeper could not save its settings.")
+        #expect(SettingsReconciliation.logMessage(after: failed, source: .shortcuts) == nil)
         #expect(SettingsReconciliation.logMessage(after: failed, source: .adoption) == "CellKeeper could not save Manage charging as off after keeping a Charge Limit set outside it: CellKeeper could not save its settings.")
-        #expect(SettingsReconciliation.logMessage(after: .saved(previous: on), source: .shortcuts) == nil)
+        #expect(SettingsReconciliation.logMessage(after: .saved(previous: on), source: .adoption) == nil)
     }
 
     @Test("Kept off by the controller: both sources keep it off; only the UI's change shows the banner, an action's is logged")

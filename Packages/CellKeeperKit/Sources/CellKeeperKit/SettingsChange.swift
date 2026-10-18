@@ -100,16 +100,13 @@ public enum SettingsReconciliation {
         }
     }
 
-    /// What to log about a refused change; the UI's refusals are shown
-    /// instead. The texts are fixed (a failed save's error is logged apart,
+    /// What to log about a refused change of CellKeeper's own. The UI's
+    /// refusals are shown in Settings, and a Shortcuts action logs its own
+    /// outcome. The text is fixed (a failed save's error is logged apart,
     /// privately).
     public static func logMessage(after result: SettingsChangeResult, source: SettingsChangeSource) -> String? {
-        guard case .refused(let text) = result else { return nil }
-        switch source {
-        case .ui: return nil
-        case .shortcuts: return "A Shortcuts action's settings change was refused: \(text)"
-        case .adoption: return "CellKeeper could not save Manage charging as off after keeping a Charge Limit set outside it: \(text)"
-        }
+        guard case .refused(let text) = result, source == .adoption else { return nil }
+        return "CellKeeper could not save Manage charging as off after keeping a Charge Limit set outside it: \(text)"
     }
 
     /// What the controller did with the change.

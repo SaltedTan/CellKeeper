@@ -167,9 +167,16 @@ public struct ShortcutsStatus: Sendable, Equatable {
     public var isManagingCharging: Bool
     /// When CellKeeper last checked.
     public var checkedAt: Date?
-    /// The short title and subtitle Shortcuts shows for the value.
-    public var title: String
     public var dialog: String
+
+    /// The title Shortcuts shows for the value; its subtitle is the state.
+    public var title: String { Self.title(batteryCharge: batteryCharge) }
+
+    /// The title for a value with this charge. Shortcuts may pass the value
+    /// on and rebuild it from its properties, so it depends on them alone.
+    public static func title(batteryCharge: Int?) -> String {
+        batteryCharge.map { "Battery \($0)%" } ?? "Battery charge unknown"
+    }
 
     static let unsettled = "still starting or switching"
 
@@ -180,18 +187,15 @@ public struct ShortcutsStatus: Sendable, Equatable {
         if let snapshot, snapshot.isBatteryPresent {
             batteryCharge = snapshot.chargePercent
             chargingStatus = snapshot.chargingStatus.description
-            battery = "\(snapshot.chargePercent.map { "Battery \($0)%" } ?? "Battery charge unknown"), \(chargingStatus)."
-            title = snapshot.chargePercent.map { "Battery \($0)%" } ?? "Battery charge unknown"
+            battery = "\(Self.title(batteryCharge: snapshot.chargePercent)), \(chargingStatus)."
         } else if snapshot != nil {
             batteryCharge = nil
             chargingStatus = "no battery"
             battery = "No battery detected."
-            title = "No battery"
         } else {
             batteryCharge = nil
             chargingStatus = ChargingStatus.unknown.description
             battery = "No battery reading."
-            title = "No battery reading"
         }
         chargeLimit = settings.chargeLimit
         isManagingCharging = settings.isManagementEnabled
