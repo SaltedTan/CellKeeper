@@ -176,7 +176,12 @@ Requirement → location:
   window of a scheduled full charge. Override expiry, rate limiting and the
   minimum temperature pause use a monotonic clock (`ContinuousClock`, which
   keeps counting during sleep), so changing the system clock cannot extend
-  a temporary override or a pause, or block restrictions. A change of the
+  a temporary override or a pause, or block restrictions. Each evaluation
+  reads that clock twice, either side of the backend's reads. Override
+  expiry uses the later reading, taken together with the wall time
+  (`PolicyInput.overrideUptime`, D83). Rate limiting, restore retries, the
+  temperature pause and the sleep and failure memory use the earlier one,
+  which errs toward restricting. A change of the
   system clock or time zone (`NSSystemClockDidChange`,
   `NSSystemTimeZoneDidChange`) sends an automatic evaluation
   (`EvaluationTrigger.clockChanged`), so a schedule's window is checked
@@ -187,7 +192,8 @@ Requirement → location:
 ## Charging policy
 
 `ChargingPolicy.evaluate(_:)` maps a `PolicyInput` (wall time, monotonic
-uptime, settings, snapshot, active override, backend capabilities, backend's
+uptime, the monotonic reading override expiry is judged on, settings,
+snapshot, active override, backend capabilities, backend's
 current mode, policy memory, fault flag, recent restricting requests,
 sleep-imminent flag) to a `PolicyDecision` (state, desired mode, action,
 reason, notes, next memory, override end).
@@ -291,9 +297,15 @@ Three things are kept apart:
      If the Mac sleeps across it, nothing happens until the first evaluation
      after wake; with macOS's Charge Limit, macOS keeps 100% until then.
    - Its uptime is read together with the wall time it is computed from,
-     after the backend's reads, so slow reads do not shorten it. The policy
-     itself keeps its uptime from before the backend calls, as for every
-     evaluation.
+     after the backend's reads, so slow reads do not shorten it. Every
+     override's expiry is judged on that same reading
+     (`PolicyInput.overrideUptime`, D83), so an evaluation that straddles
+     a deadline because the backend's reads were slow ends the override.
+     Everything else the policy times keeps the uptime read before the
+     backend calls, because the earlier reading errs toward restricting
+     there: the rate limit of restricting requests, the spacing of
+     automatic restore retries, the temperature pause and its minimum, and
+     the sleep and failure memory.
    - Every evaluation derives the running override's displayed deadline
      (`expiresAt`) from its monotonic deadline, for full charges started by
      the user or a schedule and for discharge sessions, so a clock change
@@ -2195,7 +2207,9 @@ tested.
     backend in charge (`FullChargeScheduleWording`, Kit): simulated and
     unavailable backends change nothing; with macOS's Charge Limit,
     CellKeeper requests 100% and later requests its limit again at its next
-    check, which can wait until the Mac wakes. It gives the start
+    check, which can wait until the Mac wakes; with a real backend that
+    switches charging itself, it requests a temporary full charge that the
+    safety rules, such as the temperature pause, still override. It gives the start
     conditions and, for macOS's Charge Limit, an overnight hint: start while
     the Mac is awake and wait until the menu shows macOS enforcing 100%.
   - **The menu** adds "Schedule…" next to "Charge to 100% once". It shows
@@ -2207,7 +2221,9 @@ tested.
     that CellKeeper requests its limit again at a check after the battery
     is full, the user unplugs, or the charge expires (its deadline as
     estimated now), which sleep can delay. The help of "Charge to 100%
-    once" says the same.
+    once" says the same, and, for a backend that accepts no requests
+    (Read-only, an unavailable macOS Charge Limit), that a full charge
+    changes nothing.
   - **Nothing promises** a charge "ready by" a time or a return to the limit
     at an exact time.
 
@@ -2439,3 +2455,4 @@ The helper daemon logs under its own subsystem,
 | D80 | The schedule has its own store, `fullChargeSchedule.v1`, where the key is the schema version. Both endpoints are required; unknown keys are ignored. A value under the key that is not JSON data, an unreadable record, or one whose window is not 1–48 h, is removed with a notice and never affects `ChargingSettings` or Manage charging. Turning management off keeps an armed schedule, which does not start while it is off (lead's decision) | A stale or broken schedule must never be what turns management off or makes the settings invalid. A later format under a new key cannot be misread or deleted by this version |
 | D81 | No timer is aligned to the start, and the Mac is never woken. The existing triggers (periodic, wake and post-wake re-read, power events, commands) and a new automatic `clockChanged` trigger (system clock or time-zone change) run the check. No lateness bound is claimed | An aligned timer would save at most one periodic interval and would need re-arming on every clock, time-zone and wake event. App Nap, queued commands and backend calls already delay every evaluation. Waking the Mac needs root (`IOPMSchedulePowerEvent`, `pmset schedule`), which CellKeeper never uses |
 | D82 | At the start, a live full charge keeps the later of the two monotonic deadlines (never shortened; its displayed deadline is derived from the deadline it keeps), one whose monotonic deadline has passed is replaced as expired, and a discharge session is replaced (lead's decision). With macOS's Charge Limit the start is a restricting change, with no exemption: it uses the budget, is refused while faulted, and needs ownership. A failed request keeps the existing recovery of the user's own limit, which can be lower than CellKeeper's limit | Deadlines compare on the monotonic clock only, because a wall-clock estimate can be wrong after a clock change. `forceDischarge → normal` relaxes. Exempting `nativeLimit(100)` would weaken the rate limit for an unattended write. A successful scheduled request never lowers the limit; changing the failure recovery for schedules would add a second path to the most safety-relevant code |
+| D83 | Every override's expiry (a full charge the user or a schedule started, and a discharge session) is judged on the monotonic clock read together with the wall time after the backend's reads (`PolicyInput.overrideUptime`; its default is `uptime`, so other callers keep its meaning). The controller's liveness checks for a scheduled start use the same reading. Everything else the policy times keeps the uptime read before the backend's reads: the rate limit of restricting requests, the spacing of automatic restore retries, the temperature pause and its minimum, and the sleep and failure memory (lead's decision, review of PR #82). This changes existing behaviour: a manual full charge or a discharge session now ends in the evaluation that straddles its deadline | Judged on the earlier reading, an evaluation that began just before a deadline and whose backend reads took longer than the time left returned after the deadline with the override still active, and a discharge session still asked to discharge, until the next evaluation (seen in review). For the other rules the earlier reading errs toward restricting (a restriction or a retry waits a little longer), which is the safe side; for an override it erred toward keeping a temporary state beyond its deadline |
