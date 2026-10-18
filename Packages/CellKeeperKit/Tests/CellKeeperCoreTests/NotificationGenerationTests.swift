@@ -72,19 +72,36 @@ struct BoundedWaitTests {
         #expect(stopped.isFired)
     }
 
-    @Test("With an expiry that never comes, the watchdog still ends the wait, with an issue of its own")
-    func expiryWatchdog() async {
+    @Test("With an expiry that never comes, the bound still ends the wait, with an issue of its own", .timeLimit(.minutes(1)))
+    func expiryMissing() async {
         let stopped = TestSignal()
+        // The expiry never comes (it ends only when cancelled) and the body
+        // never returns, so the 0.05 s bound always ends the wait first;
+        // the polling then has the full stop bound to stop.
         await withKnownIssue {
-            // The expiry never comes; it only ends when cancelled.
             await waitBounded("a condition that never holds", seconds: 0.05, expiry: { try? await Task.sleep(for: .seconds(3600)) }) {
                 await until { false }
                 stopped.fire()
             }
         } matching: { issue in
-            issue.comments.contains { $0.rawValue.contains("never came") || $0.rawValue.contains("Timed out") }
+            issue.comments.contains { $0.rawValue.contains("never came") }
         }
         #expect(stopped.isFired)
+    }
+
+    @Test("A body that returns first records nothing, though the expiry comes afterwards")
+    func returnsBeforeExpiry() async {
+        let returned = TestSignal()
+        let expired = TestSignal()
+        // The expiry waits until the test has the value, then comes; the
+        // value had settled the wait, so that records nothing.
+        let value = await boundedValue("a value", expiry: {
+            await returned.wait()
+            expired.fire()
+        }) { 7 }
+        #expect(value == 7)
+        returned.fire()
+        await waitBounded("the expiry to come") { await expired.wait() }
     }
 
     @Test("A wait that finishes in time returns the value and records nothing")

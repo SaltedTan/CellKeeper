@@ -5,93 +5,106 @@ import Testing
 /// Waits for `body` for at most `seconds`, and records an issue naming
 /// `what` if it has not finished by then. Returns whether it finished. The
 /// time only bounds a failure: a passing outcome never depends on how fast
-/// anything runs. See ``boundedValue(_:seconds:expiry:_:)``.
+/// anything runs. See ``boundedValue(_:seconds:stopSeconds:expiry:_:)``.
 @discardableResult
-func waitBounded(_ what: String, seconds: Double = 10, expiry: (@Sendable () async -> Void)? = nil, _ body: @escaping @Sendable () async -> Void) async -> Bool {
-    let finished = await boundedValue(what, seconds: seconds, expiry: expiry) { () async -> Bool in
+func waitBounded(_ what: String, seconds: Double = 10, stopSeconds: Double = 10, expiry: (@Sendable () async -> Void)? = nil, _ body: @escaping @Sendable () async -> Void) async -> Bool {
+    let finished = await boundedValue(what, seconds: seconds, stopSeconds: stopSeconds, expiry: expiry) { () async -> Bool in
         await body()
         return true
     }
     return finished ?? false
 }
 
+/// How a bounded wait ended: whichever settled first, and only that one is
+/// acted on.
+private enum WaitEnd<Value: Sendable>: Sendable {
+    case returned(Value)
+    /// The bound ran out, or the expiry came.
+    case expired
+    /// An expiry was given and did not come within `seconds`.
+    case expiryMissing
+}
+
 /// What `body` returns, if it returns within `seconds`, or before `expiry`
 /// returns when one is given (a test of the bound itself). Otherwise it
-/// records an issue naming `what`, cancels `body`, and waits a second bound
-/// of `seconds` for it to stop, recording another issue if it has not; it
+/// records an issue naming `what`, cancels `body`, and waits up to
+/// `stopSeconds` for it to stop, recording another issue if it has not; it
 /// then returns nil. A `body` that ignored cancellation may still be running
 /// after that.
 ///
-/// With `expiry`, a watchdog of `seconds` still bounds the wait: if the
-/// expiry has not come by then, it records an issue of its own (which does
-/// not say "Timed out", so a test expecting the expiry fails) and ends the
-/// wait as the expiry would. Neither fires once `body` has finished.
-func boundedValue<Value: Sendable>(_ what: String, seconds: Double = 10, expiry: (@Sendable () async -> Void)? = nil, _ body: @escaping @Sendable () async -> Value) async -> Value? {
-    let race = FirstOutcome<Value?>()
+/// With `expiry`, `seconds` still bounds the wait: if the expiry has not
+/// come by then, the issue says so instead (it does not say "Timed out", so
+/// a test expecting the expiry fails), and the wait ends as it would on
+/// expiry. Issues are recorded here, only for the outcome that settled
+/// first, so nothing is recorded once `body` has returned.
+func boundedValue<Value: Sendable>(_ what: String, seconds: Double = 10, stopSeconds: Double = 10, expiry: (@Sendable () async -> Void)? = nil, _ body: @escaping @Sendable () async -> Value) async -> Value? {
+    let race = FirstOutcome<WaitEnd<Value>>()
     let work = Task {
-        let value = await body()
-        race.settle(value)
+        race.settle(.returned(await body()))
     }
     let timer = Task {
-        if let expiry {
-            await withTaskGroup(of: Bool.self) { group in
-                group.addTask {
-                    await expiry()
-                    return true
-                }
-                // The watchdog: false only if its time ran out.
-                group.addTask {
-                    do {
-                        try await Task.sleep(for: .seconds(seconds))
-                        return false
-                    } catch {
-                        return true
-                    }
-                }
-                let isExpiry = await group.next() ?? true
-                group.cancelAll()
-                if !isExpiry, !Task.isCancelled {
-                    Issue.record("The expiry for \(what) never came within \(seconds) s")
-                }
-                // Before the group waits for an expiry that may never
-                // return, so the caller is never held up by it.
-                race.settle(nil)
+        guard let expiry else {
+            do {
+                try await Task.sleep(for: .seconds(seconds))
+                race.settle(.expired)
+            } catch {
+                // Cancelled: the work finished first.
             }
             return
         }
-        do {
-            try await Task.sleep(for: .seconds(seconds))
-            race.settle(nil)
-        } catch {
-            // Cancelled: the work finished first.
+        await withTaskGroup(of: WaitEnd<Value>?.self) { group in
+            group.addTask {
+                await expiry()
+                return .expired
+            }
+            group.addTask {
+                do {
+                    try await Task.sleep(for: .seconds(seconds))
+                    return .expiryMissing
+                } catch {
+                    return nil
+                }
+            }
+            // Nil when the timer was cancelled because the work finished
+            // first. Settled before the group waits for an expiry that may
+            // never return, so the caller is never held up by it.
+            if let end = await group.next() ?? nil {
+                race.settle(end)
+            }
+            group.cancelAll()
         }
     }
-    let value = await race.value()
+    let end = await race.value()
     timer.cancel()
-    if value == nil {
+    switch end {
+    case .returned(let value):
+        return value
+    case .expired:
         Issue.record(expiry == nil ? "Timed out after \(seconds) s waiting for \(what)" : "Timed out waiting for \(what)")
-        work.cancel()
-        let stopped = FirstOutcome<Bool>()
-        Task {
-            await work.value
-            stopped.settle(true)
-        }
-        let stopTimer = Task {
-            do {
-                try await Task.sleep(for: .seconds(seconds))
-                stopped.settle(false)
-            } catch {}
-        }
-        if await !stopped.value() {
-            Issue.record("Waiting for \(what) did not stop when cancelled")
-        }
-        stopTimer.cancel()
+    case .expiryMissing:
+        Issue.record("The expiry for \(what) never came within \(seconds) s")
     }
-    return value
+    work.cancel()
+    let stopped = FirstOutcome<Bool>()
+    Task {
+        await work.value
+        stopped.settle(true)
+    }
+    let stopTimer = Task {
+        do {
+            try await Task.sleep(for: .seconds(stopSeconds))
+            stopped.settle(false)
+        } catch {}
+    }
+    if await !stopped.value() {
+        Issue.record("Waiting for \(what) did not stop when cancelled")
+    }
+    stopTimer.cancel()
+    return nil
 }
 
 /// Polls `condition` until it holds, and stops when cancelled; use inside
-/// ``waitBounded(_:seconds:expiry:_:)``.
+/// ``waitBounded(_:seconds:stopSeconds:expiry:_:)``.
 func until(_ condition: @escaping @Sendable () -> Bool) async {
     while !condition() {
         do {
@@ -157,7 +170,7 @@ final class TestSignal: @unchecked Sendable {
         }
     }
 
-    /// Unbounded; use inside ``waitBounded(_:seconds:expiry:_:)``.
+    /// Unbounded; use inside ``waitBounded(_:seconds:stopSeconds:expiry:_:)``.
     func wait() async {
         await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
             let isDone = lock.withLock { () -> Bool in
