@@ -365,7 +365,8 @@ private struct FullChargeControl: View {
                 HStack {
                     switch override.kind {
                     case .fullCharge:
-                        Label(fullChargeText(override), systemImage: "arrow.up.to.line")
+                        Label(TemporaryFullChargeWording.line(for: override, status: status, lastResult: status.lastExecution?.result.title), systemImage: "arrow.up.to.line")
+                            .fixedSize(horizontal: false, vertical: true)
                     case .dischargeToLimit:
                         Label(dischargeText(override), systemImage: "minus.plus.batteryblock")
                             .foregroundStyle(.orange)
@@ -383,9 +384,7 @@ private struct FullChargeControl: View {
                         Label("Charge to 100% once", systemImage: "arrow.up.to.line")
                     }
                     .disabled(!model.settings.isManagementEnabled || model.settings.chargeLimit >= 100 || status.snapshot?.isOnExternalPower != true)
-                    .help(status.capabilities.isEnforcedByMacOS
-                        ? "Raises macOS's Charge Limit to 100% once, then sets your limit again. Ends when full, when unplugged, or after 12 hours."
-                        : "Charges once to 100%, then returns to the limit. Ends when full, when unplugged, or after 12 hours.")
+                    .help(TemporaryFullChargeWording.buttonHelp(for: status))
                     Spacer()
                     if status.fullChargeSchedule == nil {
                         Button("Schedule…") { openScheduleSettings() }
@@ -398,21 +397,11 @@ private struct FullChargeControl: View {
         }
     }
 
-    /// Says a full charge is happening only while the policy is running one
-    /// and the backend has confirmed the mode it needs.
-    private func fullChargeText(_ override: ChargeOverride) -> String {
-        let until = "until full, unplugged, or \(override.expiresAt.formatted(date: .omitted, time: .shortened))"
-        let scheduled = override.source == .schedule ? "Scheduled: " : ""
-        switch overrideProgress(runningIn: .fullChargeOverride) {
-        case .unavailable: return "\(scheduled)Full charge requested, but charging control is unavailable"
-        case .notInEffect(let why): return "\(scheduled)Full charge requested, not in effect\(why)"
-        case .running(simulated: true): return "\(scheduled)Simulating a charge to 100% \(until)"
-        case .running(simulated: false): return "\(scheduled)Charging to 100% \(until)"
-        }
-    }
-
-    /// Like ``fullChargeText(_:)``. The session stops at its target or at
-    /// the current limit, whichever is higher (`ChargingPolicy`).
+    /// Says a discharge is happening only while the policy is running one
+    /// and the backend has confirmed the mode it needs (the full charge's
+    /// line is `TemporaryFullChargeWording`'s). The session stops at its
+    /// target or at the current limit, whichever is higher
+    /// (`ChargingPolicy`).
     private func dischargeText(_ override: ChargeOverride) -> String {
         let limit = status.settings.chargeLimit
         let target = max(override.targetPercent ?? limit, limit)

@@ -222,10 +222,10 @@ public enum DiagnosticsReport {
             "started (window \(timestamp(schedule.startsAt)) to \(timestamp(schedule.endsAt)))"
         case .alreadyFull(let schedule):
             "already full at the start (window \(timestamp(schedule.startsAt)) to \(timestamp(schedule.endsAt)))"
-        case .extendedRunning(_, let deadline):
-            "extended a running full charge to \(timestamp(deadline))"
-        case .keptRunning(_, let deadline):
-            "a full charge was already running until \(timestamp(deadline))"
+        case .extendedRunning:
+            "extended the deadline of a running full charge"
+        case .keptRunning:
+            "a running full charge already had a later deadline"
         case .windowPassed(let schedule, let lastWait):
             "window passed before it could start (\(timestamp(schedule.startsAt)) to \(timestamp(schedule.endsAt)))" + (lastWait.map { "; last checked: \($0)" } ?? "")
         case .discarded(let reason):

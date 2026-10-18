@@ -9,10 +9,12 @@ import Foundation
 ///   window that passes before the full charge could start is never
 ///   replayed.
 /// - The **override deadline** is monotonic: when the schedule starts, it
-///   becomes a ``ChargeOverride`` whose deadline is `endsAt − now` on the
-///   ``PolicyInput/uptime`` clock (at most 48 h). Like every override
-///   expiry, it is processed only during an evaluation, so sleep can delay
-///   it, and a clock change after the start does not move it.
+///   becomes a ``ChargeOverride`` whose duration is the time left to
+///   `endsAt` at that moment (at most 48 h). The end bounds nothing after
+///   that: a running full charge with a later deadline keeps it, a clock
+///   change does not move the deadline, and, like every override expiry,
+///   it is processed only during an evaluation, so sleep and refused or
+///   failed requests can delay what follows it.
 /// - A **confirmed setting change** is only what a read-back shows; the
 ///   request it makes may be rate-limited, refused or fail like any other.
 ///
@@ -148,8 +150,8 @@ public enum FullChargeScheduleWait: String, Sendable, Equatable, CustomStringCon
 public enum FullChargeScheduleCheck: Sendable, Equatable {
     /// Before the window.
     case notYet
-    /// Inside the window and eligible: start a full charge whose monotonic
-    /// deadline is `remaining` seconds away (the window's end).
+    /// Inside the window and eligible: start a full charge whose duration is
+    /// `remaining`, the time left to the window's end now.
     case start(remaining: TimeInterval)
     /// Inside the window, but it cannot start yet.
     case waiting(FullChargeScheduleWait)
@@ -164,14 +166,13 @@ public enum FullChargeScheduleOutcome: Sendable, Equatable {
     /// It started a temporary full charge that the same evaluation found
     /// already complete.
     case alreadyFull(FullChargeSchedule)
-    /// A full charge was already running; the schedule moved its deadline
-    /// later, to `deadline` (an estimate derived from the monotonic
-    /// deadline).
-    case extendedRunning(FullChargeSchedule, deadline: Date)
-    /// A full charge was already running with a later deadline, `deadline`
-    /// (an estimate derived from the monotonic deadline); it continues
-    /// unchanged.
-    case keptRunning(FullChargeSchedule, deadline: Date)
+    /// A full charge was already running; the schedule moved its monotonic
+    /// deadline later. The running override shows the deadline in force.
+    case extendedRunning(FullChargeSchedule)
+    /// A full charge was already running with a later monotonic deadline;
+    /// it continues unchanged. The running override shows the deadline in
+    /// force.
+    case keptRunning(FullChargeSchedule)
     /// The window passed before the full charge could start. `lastWait` is
     /// the reason it last waited in this run, if it was seen waiting.
     case windowPassed(FullChargeSchedule, lastWait: FullChargeScheduleWait?)

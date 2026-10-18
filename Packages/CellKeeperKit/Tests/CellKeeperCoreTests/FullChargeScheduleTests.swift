@@ -240,6 +240,17 @@ struct FullChargeScheduleStoreTests {
         }
     }
 
+    @Test("A value under the key that is not data is unusable, not absent")
+    func notData() {
+        let values: [any Sendable] = ["not a record", 42, true, ["startsAt": 1_800_003_600.0]]
+        for value in values {
+            storage.set(value, forKey: FullChargeScheduleStore.key)
+            #expect(store.loadSchedule() == .unusable(reason: "it is not a schedule record"))
+        }
+        storage.set(nil, forKey: FullChargeScheduleStore.key)
+        #expect(store.loadSchedule() == .none)
+    }
+
     @Test("Unknown keys are ignored")
     func unknownKeys() {
         storeJSON(#"{"startsAt":1800003600,"endsAt":1800046800,"note":"from a later version"}"#)

@@ -26,8 +26,9 @@ public protocol FullChargeScheduleStoring: Sendable {
 /// - The key, `fullChargeSchedule.v1`, is the schema version: a later format
 ///   is stored under a new key, which this version never reads or removes.
 /// - Both endpoints are required (seconds since 1970); unknown keys are
-///   ignored. A record without both, or whose window is not finite or not
-///   1–48 h, is unusable.
+///   ignored. A value under the key that is not JSON data, a record without
+///   both endpoints, or one whose window is not finite or not 1–48 h, is
+///   unusable; only no value at all counts as no schedule.
 /// - `UserDefaults` persists asynchronously: a removal right before a crash
 ///   or power loss may not reach the disk, so a schedule that had started
 ///   may be found again at the next launch.
@@ -50,8 +51,11 @@ public final class FullChargeScheduleStore: FullChargeScheduleStoring, @unchecke
 
     public func loadSchedule() -> FullChargeScheduleLoad {
         lock.withLock {
-            guard let data = defaults.data(forKey: Self.key) else {
+            guard let stored = defaults.object(forKey: Self.key) else {
                 return .none
+            }
+            guard let data = stored as? Data else {
+                return .unusable(reason: "it is not a schedule record")
             }
             let record: Record
             do {

@@ -343,11 +343,12 @@ public struct ChargeOverride: Sendable, Equatable {
     }
 
     /// A temporary full charge started by a schedule. Its monotonic deadline
-    /// is `remaining` seconds after `uptime`, at most ``maximumDuration``.
-    /// Unlike a full charge the user starts, it has no minimum duration, so a
-    /// schedule started late never runs past the end the user chose. Nil
-    /// unless `remaining` is positive and `start`, `uptime` and `remaining`
-    /// are finite.
+    /// is `remaining` seconds after `uptime`, at most ``maximumDuration``:
+    /// the time left to the schedule's end when it starts. Unlike a full
+    /// charge the user starts, it has no minimum duration, so a late start
+    /// is not lengthened to an hour. `uptime` must be read together with
+    /// `start`. Nil unless `remaining` is positive and `start`, `uptime` and
+    /// `remaining` are finite.
     public static func scheduledFullCharge(at start: Date, uptime: TimeInterval, remaining: TimeInterval) -> ChargeOverride? {
         guard start.timeIntervalSinceReferenceDate.isFinite, uptime.isFinite, remaining.isFinite, remaining > 0 else { return nil }
         return ChargeOverride(kind: .fullCharge, targetPercent: nil, startedAt: start, uptime: uptime, clampedDuration: min(remaining, maximumDuration), source: .schedule)

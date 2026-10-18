@@ -69,7 +69,7 @@ struct FullChargeScheduleControllerTests {
         #expect(started.events.contains { $0.kind == .override && $0.message.contains("Scheduled full charge started") })
     }
 
-    @Test("Started late, it still ends at the window's end: its deadline has no one-hour minimum")
+    @Test("Started late, its deadline is the time left to the end at that moment: no one-hour minimum")
     func lateStartEndsAtEnd() async throws {
         let (controller, _) = makeController()
         let armed = schedule()
@@ -85,6 +85,70 @@ struct FullChargeScheduleControllerTests {
         #expect(ended.activeOverride == nil)
         #expect(ended.decision?.overrideEnded == .expired)
         #expect(ended.events.contains { $0.message == "Scheduled full charge expired." })
+    }
+
+    /// How late after the start the first evaluation runs: on time, and ten
+    /// minutes before the end.
+    static let lateness: [TimeInterval] = [0, 42_600]
+
+    @Test("Slow backend reads do not shorten the scheduled full charge: its deadline is the time left to the end when the wall clock was read, also when it starts late", arguments: lateness)
+    func slowBackendReads(lateness: TimeInterval) async throws {
+        // Each capability and mode read takes 30 s, between the policy's
+        // monotonic reading and its wall-clock reading.
+        let backend = SlowReadingBackend(clock: clock, delay: 30)
+        let (controller, _) = makeController(backend: backend)
+        let armed = schedule()
+        try await controller.setFullChargeSchedule(armed)
+        clock.advance(by: armed.startsAt.timeIntervalSince(clock.now) + lateness)
+        let started = await controller.evaluate(.periodic)
+        let override = try #require(started.activeOverride)
+        #expect(override.source == .schedule)
+        #expect(override.expiresAtUptime - clock.uptime == armed.endsAt.timeIntervalSince(clock.now))
+        #expect(override.expiresAt == armed.endsAt)
+        #expect(override.expiresAtUptime - clock.uptime < 12 * hour - lateness)
+    }
+
+    /// Wall-clock changes made while an override runs.
+    static let wallJumpsAfterStart: [TimeInterval] = [36_000, -36_000]
+
+    @Test("After a clock change, a running manual full charge shows the deadline its monotonic deadline gives", arguments: wallJumpsAfterStart)
+    func manualDisplayFollowsDeadline(jump: TimeInterval) async throws {
+        let (controller, _) = makeController()
+        let manual = try #require(await controller.startFullCharge().activeOverride)
+        clock.shiftWall(by: jump)
+        clock.advance(by: 60)
+        let running = try #require(await controller.evaluate(.clockChanged).activeOverride)
+        #expect(running.expiresAtUptime == manual.expiresAtUptime)
+        #expect(running.expiresAt == clock.now.addingTimeInterval(manual.expiresAtUptime - clock.uptime))
+        #expect(running.expiresAt == manual.expiresAt.addingTimeInterval(jump))
+    }
+
+    @Test("After a clock change, a running scheduled full charge shows the deadline its monotonic deadline gives, which the window's end does not bound", arguments: wallJumpsAfterStart)
+    func scheduledDisplayFollowsDeadline(jump: TimeInterval) async throws {
+        let (controller, _) = makeController()
+        let armed = schedule()
+        try await controller.setFullChargeSchedule(armed)
+        clock.advance(by: hour)
+        let started = try #require(await controller.evaluate(.periodic).activeOverride)
+        #expect(started.expiresAt == armed.endsAt)
+        clock.shiftWall(by: jump)
+        clock.advance(by: 60)
+        let running = try #require(await controller.evaluate(.clockChanged).activeOverride)
+        #expect(running.expiresAtUptime == started.expiresAtUptime)
+        #expect(running.expiresAt == armed.endsAt.addingTimeInterval(jump))
+    }
+
+    @Test("After a clock change, a running discharge session shows the deadline its monotonic deadline gives", arguments: wallJumpsAfterStart)
+    func dischargeDisplayFollowsDeadline(jump: TimeInterval) async throws {
+        let (controller, _) = makeController(percent: 90)
+        await controller.evaluate(.launch)
+        let session = try #require(await controller.startDischargeToLimit().activeOverride)
+        clock.shiftWall(by: jump)
+        clock.advance(by: 60)
+        let running = try #require(await controller.evaluate(.clockChanged).activeOverride)
+        #expect(running.kind == .dischargeToLimit)
+        #expect(running.expiresAtUptime == session.expiresAtUptime)
+        #expect(running.expiresAt == session.expiresAt.addingTimeInterval(jump))
     }
 
     @Test("Nothing ends at the deadline while no evaluation runs; the next one ends it")
@@ -356,7 +420,7 @@ struct FullChargeScheduleControllerTests {
             #expect(running.expiresAtUptime == clock.uptime + window)
             #expect(running.source == .schedule)
             #expect(running.expiresAt == armed.endsAt)
-            #expect(status.fullChargeScheduleOutcome == .extendedRunning(armed, deadline: armed.endsAt))
+            #expect(status.fullChargeScheduleOutcome == .extendedRunning(armed))
         } else {
             #expect(running.expiresAtUptime == original.expiresAtUptime)
             #expect(running.source == .user)
@@ -364,7 +428,7 @@ struct FullChargeScheduleControllerTests {
             let deadline = clock.now.addingTimeInterval(original.expiresAtUptime - clock.uptime)
             #expect(running.expiresAt == deadline)
             #expect(deadline > armed.endsAt)
-            #expect(status.fullChargeScheduleOutcome == .keptRunning(armed, deadline: deadline))
+            #expect(status.fullChargeScheduleOutcome == .keptRunning(armed))
         }
         #expect(stored == .none)
     }
@@ -453,6 +517,37 @@ struct FullChargeScheduleControllerTests {
         #expect(storage.data(forKey: FullChargeScheduleStore.key) == nil)
         #expect(status.settings == settings)
         #expect(status.decision?.state == .charging)
+    }
+
+    @Test("A value under the schedule's key that is not a record is removed with a notice, and the saved charging settings stay as they were")
+    func notARecord() async throws {
+        let values: [any Sendable] = ["not a record", 42, true, ["startsAt": 1_800_003_600.0]]
+        for value in values {
+            let storage = InMemoryStorage()
+            let settingsStore = SettingsStore(defaults: storage)
+            let saved = ChargingSettings.default.withChargeLimit(85)
+            try settingsStore.save(saved)
+            let savedData = storage.data(forKey: SettingsStore.chargingSettingsKey)
+            storage.set(value, forKey: FullChargeScheduleStore.key)
+            let loaded = settingsStore.loadChargingSettings()
+            let clock = clock
+            let controller = ChargeController(
+                telemetry: StubTelemetry(snapshot(percent: 70), clock: clock),
+                backend: MockChargingBackend(),
+                settings: loaded.settings,
+                scheduleStore: FullChargeScheduleStore(defaults: storage),
+                now: { clock.now },
+                uptime: { clock.uptime }
+            )
+            let status = await controller.evaluate(.launch)
+            #expect(status.fullChargeScheduleOutcome == .discarded(reason: "it is not a schedule record"))
+            #expect(storage.object(forKey: FullChargeScheduleStore.key) == nil)
+            #expect(status.settings == saved)
+            let after = settingsStore.loadChargingSettings()
+            #expect(after.settings == saved)
+            #expect(after.recoveryReason == nil)
+            #expect(storage.data(forKey: SettingsStore.chargingSettingsKey) == savedData)
+        }
     }
 
     @Test("A stored schedule whose window passed while CellKeeper was not running is reported at launch")
@@ -678,5 +773,34 @@ struct FullChargeScheduleNativeTests {
         #expect(status.fullChargeScheduleWait == .managementOff)
         #expect(system.runInputs == ["90"])
         #expect(system.reading == .limit(85))
+    }
+}
+
+/// The simulated backend, with capability and mode reads that each take
+/// `delay` seconds of the test clock, as a slow backend's would.
+actor SlowReadingBackend: ChargingBackend {
+    private let inner = MockChargingBackend()
+    private let clock: TestClock
+    private let delay: TimeInterval
+
+    init(clock: TestClock, delay: TimeInterval) {
+        self.clock = clock
+        self.delay = delay
+    }
+
+    nonisolated var descriptor: BackendDescriptor { inner.descriptor }
+
+    func capabilities() async -> ControlCapabilities {
+        clock.advance(by: delay)
+        return await inner.capabilities()
+    }
+
+    func currentMode() async throws -> ChargeControlMode? {
+        clock.advance(by: delay)
+        return try await inner.currentMode()
+    }
+
+    func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome {
+        try await inner.setMode(mode)
     }
 }

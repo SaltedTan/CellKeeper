@@ -146,6 +146,10 @@ final class InMemoryStorage: KeyValueStorage, @unchecked Sendable {
         lock.withLock { values[key] as? String }
     }
 
+    func object(forKey key: String) -> Any? {
+        lock.withLock { values[key] }
+    }
+
     func set(_ value: Any?, forKey key: String) {
         lock.withLock { values[key] = value }
     }

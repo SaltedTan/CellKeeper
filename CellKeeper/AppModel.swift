@@ -143,7 +143,9 @@ final class AppModel {
     /// The pending re-read after a wake; cancelled if the Mac announces
     /// sleep again first.
     @ObservationIgnored private var postWakeReread: Task<Void, Never>?
-    @ObservationIgnored private var observers: [NSObjectProtocol] = []
+    /// Notification observers, each with the center it was added to, so
+    /// that stopping removes them all.
+    @ObservationIgnored private var observers: [(center: NotificationCenter, token: any NSObjectProtocol)] = []
     /// Outside changes to the Charge Limit already reflected in the settings.
     @ObservationIgnored private var handledAdoptionCount = 0
     /// The in-process helpers of the Simulated helper backends made in this
@@ -217,25 +219,17 @@ final class AppModel {
         })
 
         let center = NSWorkspace.shared.notificationCenter
-        observers.append(center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.didWake() }
-        })
-        observers.append(center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.willSleep() }
-        })
+        observe(NSWorkspace.didWakeNotification, on: center) { $0.didWake() }
+        observe(NSWorkspace.willSleepNotification, on: center) { $0.willSleep() }
 
         let defaultCenter = NotificationCenter.default
         for name in [ProcessInfo.thermalStateDidChangeNotification, Notification.Name.NSProcessInfoPowerStateDidChange] {
-            observers.append(defaultCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.readSystemConditions() }
-            })
+            observe(name, on: defaultCenter) { $0.readSystemConditions() }
         }
         // A scheduled full charge's window is wall-clock time: check it again
         // at once when the clock or the time zone changes (research rule R22).
         for name in [Notification.Name.NSSystemClockDidChange, Notification.Name.NSSystemTimeZoneDidChange] {
-            observers.append(defaultCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.clockDidChange() }
-            })
+            observe(name, on: defaultCenter) { $0.clockDidChange() }
         }
 
         if let startupSwitch {
@@ -243,6 +237,18 @@ final class AppModel {
             send(.switchBackend(startupSwitch))
         }
         send(.evaluate(.launch))
+    }
+
+    /// Calls `handler` on the main actor for each `name` posted to `center`,
+    /// and keeps the observer so that ``stopForTermination()`` removes it.
+    private func observe(_ name: Notification.Name, on center: NotificationCenter, handler: @escaping @MainActor @Sendable (AppModel) -> Void) {
+        let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                handler(self)
+            }
+        }
+        observers.append((center, token))
     }
 
     private func didWake() {
@@ -304,6 +310,10 @@ final class AppModel {
         for task in tasks { task.cancel() }
         tasks.removeAll()
         postWakeReread?.cancel()
+        for observer in observers {
+            observer.center.removeObserver(observer.token)
+        }
+        observers.removeAll()
         return controller
     }
 
@@ -586,7 +596,7 @@ final class AppModel {
                 // armed, but it was set.
                 let wasUsed: Bool = switch newStatus.fullChargeScheduleOutcome {
                 case .started(let used)?, .alreadyFull(let used)?, .windowPassed(let used, _)?,
-                     .extendedRunning(let used, _)?, .keptRunning(let used, _)?:
+                     .extendedRunning(let used)?, .keptRunning(let used)?:
                     used == schedule
                 case .discarded?, nil:
                     false

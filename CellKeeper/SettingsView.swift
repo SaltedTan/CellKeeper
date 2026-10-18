@@ -220,7 +220,7 @@ private struct ScheduledFullChargeSection: View {
                     .foregroundStyle(.secondary)
             }
         }
-        Text("One temporary full charge, at most \(Int(FullChargeSchedule.maximumLeadTime / 86_400)) days ahead, for 1–\(Int(FullChargeSchedule.maximumWindow / 3600)) hours. \(FullChargeScheduleWording.startConditions)")
+        Text("One temporary full charge, starting at most \(Int(FullChargeSchedule.maximumLeadTime / 86_400)) days ahead, with an end 1–\(Int(FullChargeSchedule.maximumWindow / 3600)) hours after the start. \(FullChargeScheduleWording.startConditions)")
             .font(.caption)
             .foregroundStyle(.secondary)
     }
