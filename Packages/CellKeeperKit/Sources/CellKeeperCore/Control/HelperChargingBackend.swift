@@ -974,7 +974,15 @@ public actor HelperChargingBackend: ChargingBackend {
                     ? "another client of the helper restored macOS's defaults, which cleared \(name)"
                     : "another client of the helper cleared \(name)")
             }
-            return .unattributed("CellKeeper's helper reports \(name) \(state) after \(cause), which does not say who set it")
+            let event = switch cause {
+            case .clearedByClient: "a client cleared it"
+            case .clearedByRestore: "a client's restore of macOS's defaults"
+            case .activationLimited: "the restore that follows an activation its limits refused"
+            case .sessionEnded: "a client's connection ended"
+            case .sessionRevoked: "the helper revoked a client's session"
+            default: "\(cause)"
+            }
+            return .unattributed("CellKeeper's helper reports \(name) \(state) after \(event), which does not say who set it")
         case .interlock:
             if change.interlocks.contains(.externalModification) {
                 return .outside("CellKeeper's helper changed \(name) after its controls were changed outside it")

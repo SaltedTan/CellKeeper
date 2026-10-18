@@ -1,18 +1,30 @@
 import Foundation
 
-/// The source currently powering the Mac.
-public enum PowerSource: String, Sendable, Codable, Equatable {
+/// The source currently powering the Mac. Its description names it in plain
+/// words for the activity log and the diagnostics report; the raw value is
+/// its identifier.
+public enum PowerSource: String, Sendable, Codable, Equatable, CaseIterable, CustomStringConvertible {
     case externalPower
     case battery
     case unknown
+
+    public var description: String {
+        switch self {
+        case .externalPower: "external power"
+        case .battery: "battery power"
+        case .unknown: "unknown"
+        }
+    }
 }
 
 /// High-level charging status, derived only from what the system reports.
 ///
 /// This describes what macOS says is happening, not what CellKeeper wants to
 /// happen. The two can legitimately differ (for example when control is
-/// simulated or unavailable).
-public enum ChargingStatus: String, Sendable, Equatable {
+/// simulated or unavailable). Its description names it in plain words for
+/// the activity log and the diagnostics report; the raw value is its
+/// identifier.
+public enum ChargingStatus: String, Sendable, Equatable, CaseIterable, CustomStringConvertible {
     /// On external power and the battery is charging.
     case charging
     /// On external power but the battery is not charging and is not reported
@@ -23,6 +35,16 @@ public enum ChargingStatus: String, Sendable, Equatable {
     /// Running from the battery.
     case discharging
     case unknown
+
+    public var description: String {
+        switch self {
+        case .charging: "charging"
+        case .notCharging: "not charging"
+        case .fullyCharged: "fully charged"
+        case .discharging: "discharging"
+        case .unknown: "unknown"
+        }
+    }
 }
 
 /// Battery health and capacity information. Every field is optional because

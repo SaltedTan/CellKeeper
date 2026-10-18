@@ -44,14 +44,23 @@ public enum DiagnosticsReport {
 
         section("Control")
         let capabilities = status.capabilities
+        // As in the activity log: with macOS's Charge Limit, what CellKeeper
+        // restores is the user's own limit.
+        let restoreTarget = capabilities.isEnforcedByMacOS
+            ? "your own macOS Charge Limit" + (status.nativeLimit?.ownerLimit.map { " of \($0)%" } ?? "")
+            : "normal charging"
+        // A mode in plain words, then its identifier.
+        func describeMode(_ mode: ChargeControlMode) -> String {
+            "\(mode == .normal ? restoreTarget : mode.description) (\(mode.identifier))"
+        }
         field("Backend", "\(status.backend.displayName) (\(status.backend.identifier))")
         field("Availability", describe(capabilities.availability))
         if capabilities.isEnforcedByMacOS {
             field("Style", "macOS Charge Limit, steps \(capabilities.nativeLimitSteps.map(String.init).joined(separator: ", "))")
         } else {
-            field("Style", "switches charging, modes \(capabilities.supportedModes.map(\.description).sorted().joined(separator: ", "))")
+            field("Style", "switches charging, modes \(capabilities.supportedModes.sorted { $0.identifier < $1.identifier }.map(describeMode).joined(separator: ", "))")
         }
-        field("Reported mode", status.currentMode.map(\.description) ?? "unknown")
+        field("Reported mode", status.currentMode.map(describeMode) ?? "unknown")
         if let macOSLimit = capabilities.macOSChargeLimit {
             // While macOS's own Charge Limit may be limiting, the policy asks
             // for normal charging and withholds restrictions; only a
@@ -87,14 +96,9 @@ public enum DiagnosticsReport {
 
         section("Decision")
         if let decision = status.decision {
-            field("State", decision.state.rawValue)
-            field("Wants", decision.desiredMode.description)
+            field("State", identified(decision.state))
+            field("Wants", describeMode(decision.desiredMode))
             field("Action", ChargeController.describe(decision.action, nativeLimit: capabilities.isEnforcedByMacOS))
-            // As in the activity log: with macOS's Charge Limit, what
-            // CellKeeper restores is the user's own limit.
-            let restoreTarget = capabilities.isEnforcedByMacOS
-                ? "your own macOS Charge Limit" + (status.nativeLimit?.ownerLimit.map { " of \($0)%" } ?? "")
-                : "normal charging"
             field("Reason", decision.reason.description(restoring: restoreTarget))
             for note in decision.notes {
                 field("Note", note.description)
@@ -179,8 +183,8 @@ public enum DiagnosticsReport {
             return
         }
         field("Charge", optional(snapshot.chargePercent) { "\($0)%" })
-        field("Power source", snapshot.powerSource.rawValue)
-        field("Charging status", snapshot.chargingStatus.rawValue)
+        field("Power source", identified(snapshot.powerSource))
+        field("Charging status", identified(snapshot.chargingStatus))
         field("Temperature", optional(snapshot.temperatureCelsius) { "\($0.formatted()) °C" })
         field("Voltage", optional(snapshot.voltageMillivolts) { "\($0) mV" })
         field("Current", optional(snapshot.amperageMilliamps) { "\($0) mA" })
@@ -190,6 +194,12 @@ public enum DiagnosticsReport {
         field("Full-charge capacity", optional(health.fullChargeCapacityMilliampHours) { "\($0) mAh" })
         field("Design capacity", optional(health.designCapacityMilliampHours) { "\($0) mAh" })
         field("Condition", health.condition ?? "not available")
+    }
+
+    /// `value` in plain words, then its identifier, as the report shows the
+    /// backend.
+    private static func identified<Value: RawRepresentable & CustomStringConvertible>(_ value: Value) -> String where Value.RawValue == String {
+        "\(value) (\(value.rawValue))"
     }
 
     private static func describe(_ availability: ControlAvailability) -> String {

@@ -2,8 +2,9 @@ import Foundation
 import os
 
 /// Why an evaluation ran. Recorded for diagnostics only; the policy does not
-/// depend on it.
-public enum EvaluationTrigger: String, Sendable {
+/// depend on it. Its description says when the evaluation ran, in plain
+/// words, for the activity log.
+public enum EvaluationTrigger: String, Sendable, CaseIterable, CustomStringConvertible {
     case launch
     case powerSourceChanged
     case periodic
@@ -29,6 +30,23 @@ public enum EvaluationTrigger: String, Sendable {
         switch self {
         case .launch, .powerSourceChanged, .periodic, .willSleep, .didWake, .postWakeReread, .clockChanged: true
         case .settingsChanged, .overrideChanged, .backendChanged, .scheduleChanged, .manual: false
+        }
+    }
+
+    public var description: String {
+        switch self {
+        case .launch: "at launch"
+        case .powerSourceChanged: "after a power source change"
+        case .periodic: "at a periodic check"
+        case .settingsChanged: "after a settings change"
+        case .overrideChanged: "after you started or cancelled a full charge or discharge"
+        case .backendChanged: "after a backend change"
+        case .willSleep: "before sleep"
+        case .didWake: "after waking from sleep"
+        case .postWakeReread: "at the re-read after waking"
+        case .clockChanged: "after a clock or time zone change"
+        case .scheduleChanged: "after a schedule change"
+        case .manual: "at a check you asked for"
         }
     }
 }

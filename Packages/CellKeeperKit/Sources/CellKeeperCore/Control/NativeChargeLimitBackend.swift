@@ -534,7 +534,9 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             owned.isRestoring = true
             saveRecordBestEffort(owned)
             try await runShortcut(owned.ownerLimit)
-            try await confirm(owned.ownerLimit, expected: .normal, owned: owned)
+            // A mismatch names the user's own limit, the value the read-back
+            // should show, rather than normal charging.
+            try await confirm(owned.ownerLimit, expected: .nativeLimit(percent: owned.ownerLimit), owned: owned)
             clearRecord(owned, reason: "restored \(owned.ownerLimit)%")
             return .applied
         }

@@ -37,7 +37,22 @@ public enum ChargeControlMode: Hashable, Sendable, CustomStringConvertible {
         return restrictionLevel >= (current?.restrictionLevel ?? 0)
     }
 
+    /// The mode in plain words, for what the user reads: notices in the menu
+    /// and Settings, error messages, the activity log and the diagnostics
+    /// report. With a native-limit backend `.normal` is the user's own macOS
+    /// Charge Limit, which callers name themselves.
     public var description: String {
+        switch self {
+        case .normal: "normal charging"
+        case .inhibitCharging: "a charging pause"
+        case .forceDischarge: "a discharge while plugged in"
+        case .nativeLimit(let percent): "a macOS Charge Limit of \(percent)%"
+        }
+    }
+
+    /// The mode's identifier, which the diagnostics report adds after the
+    /// plain words.
+    public var identifier: String {
         switch self {
         case .normal: "normal"
         case .inhibitCharging: "inhibitCharging"

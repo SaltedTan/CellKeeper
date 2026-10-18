@@ -861,7 +861,8 @@ public actor ChargeController {
             }
         }
         if Self.isMeaningfulChange(from: decision, to: newDecision) {
-            record(.decision, "[\(trigger.rawValue)] \(newDecision.state.rawValue): want \(newDecision.desiredMode), action \(Self.describe(newDecision.action, nativeLimit: capabilities.isEnforcedByMacOS)). \(newDecision.reason.description(restoring: restoreTarget))")
+            let state = newDecision.state.description
+            record(.decision, "\(state.prefix(1).uppercased())\(state.dropFirst()) (\(trigger)): wants \(describeTarget(newDecision.desiredMode)), action \(Self.describe(newDecision.action, nativeLimit: capabilities.isEnforcedByMacOS)). \(newDecision.reason.description(restoring: restoreTarget))")
         }
         for note in newDecision.notes where !(decision?.notes.contains(note) ?? false) {
             record(.decision, "Note: \(note)")
@@ -874,7 +875,7 @@ public actor ChargeController {
             recordMacOSLimitRelease(of: held)
         } else if let held = macOSLimitReleaseUnconfirmed, currentMode == .normal {
             macOSLimitReleaseUnconfirmed = nil
-            record(.safety, "A read-back now shows normal charging: CellKeeper's \(describeTarget(held))\(simulationNote), which it asked to end when macOS's Charge Limit started to apply, has ended.")
+            record(.safety, "A read-back now shows normal charging: CellKeeper's restriction, \(describeTarget(held))\(simulationNote), which it asked to end when macOS's Charge Limit started to apply, has ended.")
         }
         await renewHoldIfStillWanted(newDecision)
 
@@ -944,7 +945,7 @@ public actor ChargeController {
             // The backend's own safety rules, not another tool: no fault.
             ownedMode = observed
             unconfirmedRequests = []
-            record(.safety, "\(backend.descriptor.displayName) ended CellKeeper's \(describeTarget(owned)) itself: \(release). Not an outside change; now \(describeTarget(observed)).", level: release == .leaseExpired ? .error : .default)
+            record(.safety, "\(backend.descriptor.displayName) ended CellKeeper's restriction (\(describeTarget(owned))) itself: \(release). Not an outside change; now \(describeTarget(observed)).", level: release == .leaseExpired ? .error : .default)
         } else if ownedMode == observed {
             unconfirmedRequests = []
         } else if let owned = ownedMode {
@@ -952,9 +953,9 @@ public actor ChargeController {
             unconfirmedRequests = []
             consecutiveFailures = max(consecutiveFailures, Self.maximumConsecutiveFailures)
             if capabilities.isEnforcedByMacOS {
-                record(.safety, "macOS's Charge Limit changed outside CellKeeper (expected \(owned), found \(observed)); it may have been changed in System Settings or by another tool. Backend faulted; restoring your own limit.", level: .fault)
+                record(.safety, "macOS's Charge Limit changed outside CellKeeper (expected \(describeTarget(owned)), found \(describeTarget(observed))); it may have been changed in System Settings or by another tool. Backend faulted; restoring your own limit.", level: .fault)
             } else {
-                record(.safety, "Charging mode changed outside CellKeeper (expected \(owned), found \(observed)); another tool may be controlling charging. Backend faulted; restoring normal charging.", level: .fault)
+                record(.safety, "Charging mode changed outside CellKeeper (expected \(describeTarget(owned)), found \(describeTarget(observed))); another tool may be controlling charging. Backend faulted; restoring normal charging.", level: .fault)
             }
         }
     }
@@ -1044,10 +1045,10 @@ public actor ChargeController {
         let heldText = "\(describeTarget(held))\(simulationNote)"
         if currentMode == .normal {
             macOSLimitReleaseUnconfirmed = nil
-            record(.safety, "\(started) while CellKeeper held \(heldText). A read-back confirms that this restriction ended. \(deferring)")
+            record(.safety, "\(started) while CellKeeper held a restriction of its own: \(heldText). A read-back confirms that this restriction ended. \(deferring)")
         } else {
             macOSLimitReleaseUnconfirmed = held
-            record(.safety, "\(started) while CellKeeper held \(heldText). No read-back has confirmed that this restriction ended, so it may remain; CellKeeper keeps asking for its release. \(deferring)", level: .error)
+            record(.safety, "\(started) while CellKeeper held a restriction of its own: \(heldText). No read-back has confirmed that this restriction ended, so it may remain; CellKeeper keeps asking for its release. \(deferring)", level: .error)
         }
     }
 
@@ -1163,7 +1164,7 @@ public actor ChargeController {
                 registerFailure("Backend failed to apply \(target): \(message)")
             }
             if mode != .normal {
-                _ = await restoreNormal(reason: "safety fallback after failed \(mode) request")
+                _ = await restoreNormal(reason: "safety fallback after a failed request for \(target)")
             }
         }
     }
@@ -1174,17 +1175,11 @@ public actor ChargeController {
         capabilities.isEnforcedByMacOS ? describeTarget(.normal) : "normal charging"
     }
 
-    /// How a requested mode is described in the activity log.
+    /// How a mode is described in the activity log: in plain words, and
+    /// with macOS's Charge Limit, `.normal` as the user's own limit.
     private func describeTarget(_ mode: ChargeControlMode) -> String {
-        guard capabilities.isEnforcedByMacOS else { return mode.description }
-        switch mode {
-        case .normal:
-            return "your own macOS Charge Limit" + (nativeLimit?.ownerLimit.map { " of \($0)%" } ?? "")
-        case .nativeLimit(let percent):
-            return "a macOS Charge Limit of \(percent)%"
-        case .inhibitCharging, .forceDischarge:
-            return mode.description
-        }
+        guard capabilities.isEnforcedByMacOS, mode == .normal else { return mode.description }
+        return "your own macOS Charge Limit" + (nativeLimit?.ownerLimit.map { " of \($0)%" } ?? "")
     }
 
     /// For native limits, the value macOS reported when confirming.
@@ -1643,7 +1638,9 @@ public actor ChargeController {
         guard snapshot.isBatteryPresent else { return "No battery present." }
         let percent = snapshot.chargePercent.map { "\($0)%" } ?? "unknown charge"
         let temperature = snapshot.temperatureCelsius.map { "\($0.formatted(.number.precision(.fractionLength(1))))°C" } ?? "temperature n/a"
-        return "Battery \(percent), \(snapshot.powerSource.rawValue), \(snapshot.chargingStatus.rawValue), \(temperature)."
+        let power = snapshot.powerSource == .unknown ? "unknown power source" : "on \(snapshot.powerSource)"
+        let status = snapshot.chargingStatus == .unknown ? "unknown charging status" : snapshot.chargingStatus.description
+        return "Battery \(percent), \(power), \(status), \(temperature)."
     }
 
     static func describe(_ action: ChargingAction, nativeLimit: Bool = false) -> String {

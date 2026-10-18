@@ -34,7 +34,7 @@ struct DecisionReasonTests {
         (.failSafe, "CellKeeper's fail-safe takes precedence"),
         (.deferringToMacOS, "deferring to macOS's Charge Limit takes precedence"),
         (.safetyFloor, "the safety floor takes precedence"),
-        (.onBattery, "the rule for battery power takes precedence"),
+        (.onBattery, "being on battery power takes precedence"),
         (.temperaturePause, "temperature protection takes precedence"),
         (.fullChargeOverride, nil),
         (.charging, nil),

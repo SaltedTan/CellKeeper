@@ -1,8 +1,10 @@
 import Foundation
 
 /// The policy's externally visible state. Derived on every evaluation from
-/// the inputs and ``PolicyMemory``.
-public enum PolicyState: String, Sendable, Equatable, Codable {
+/// the inputs and ``PolicyMemory``. Its description names it in plain words
+/// for the activity log and the diagnostics report; the raw value is its
+/// identifier.
+public enum PolicyState: String, Sendable, Equatable, Codable, CaseIterable, CustomStringConvertible {
     /// Management is turned off; macOS default charging.
     case unmanaged
     /// Inputs are missing, stale, or invalid; macOS default charging.
@@ -35,6 +37,22 @@ public enum PolicyState: String, Sendable, Equatable, Codable {
     /// ended is up to the read-back, not this state. Never used with a
     /// native-limit backend.
     case deferringToMacOS
+
+    public var description: String {
+        switch self {
+        case .unmanaged: "not managing charging"
+        case .failSafe: "fail-safe"
+        case .safetyFloor: "at the safety floor"
+        case .onBattery: "on battery power"
+        case .temperaturePause: "temperature pause"
+        case .fullChargeOverride: "temporary full charge"
+        case .charging: "charging to the limit"
+        case .holding: "holding at the limit"
+        case .discharging: "discharging to the limit"
+        case .osEnforcedLimit: "limit enforced by macOS"
+        case .deferringToMacOS: "deferring to macOS's Charge Limit"
+        }
+    }
 }
 
 /// The concrete request the policy makes of the backend for this evaluation.
@@ -276,7 +294,7 @@ public enum PolicyNote: Sendable, Equatable, CustomStringConvertible {
         case .failSafe: "CellKeeper's fail-safe takes precedence"
         case .deferringToMacOS: "deferring to macOS's Charge Limit takes precedence"
         case .safetyFloor: "the safety floor takes precedence"
-        case .onBattery: "the rule for battery power takes precedence"
+        case .onBattery: "being on battery power takes precedence"
         case .temperaturePause: "temperature protection takes precedence"
         case .fullChargeOverride, .charging, .holding, .discharging, .osEnforcedLimit: nil
         }

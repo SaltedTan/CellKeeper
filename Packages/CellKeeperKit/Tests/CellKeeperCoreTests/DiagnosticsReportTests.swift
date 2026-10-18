@@ -61,8 +61,8 @@ struct DiagnosticsReportTests {
         #expect(report.contains("Charge limit: 80%"))
         #expect(report.contains("Resume threshold: 75%"))
         #expect(report.contains("Charge: 78%"))
-        #expect(report.contains("Power source: externalPower"))
-        #expect(report.contains("State: charging"))
+        #expect(report.contains("Power source: external power (externalPower)"))
+        #expect(report.contains("State: charging to the limit (charging)"))
         #expect(report.contains("Reason: Charging from 78% toward the 80% limit."))
         // Every activity event appears, in order.
         let activity = report.components(separatedBy: "== Activity (oldest first)\n")[1]
@@ -76,6 +76,27 @@ struct DiagnosticsReportTests {
             }
             searchStart = range.upperBound
         }
+    }
+
+    @Test("The report names states, modes, the power source and the charging status in plain words, then their identifiers; activity keeps its kinds' identifiers")
+    func plainWordsWithIdentifiers() async {
+        let clock = clock
+        let telemetry = StubTelemetry(snapshot(percent: 85, charging: false, temperature: nil), clock: clock)
+        let controller = ChargeController(telemetry: telemetry, backend: MockChargingBackend(), settings: .default, now: { clock.now }, uptime: { clock.uptime })
+        await controller.evaluate(.launch)
+        clock.advance(by: 60)
+        let status = await controller.evaluate(.periodic)
+        let report = DiagnosticsReport.text(status: status, environment: environment, generatedAt: referenceDate)
+        let lines = report.split(separator: "\n").map(String.init)
+
+        #expect(lines.contains("Style: switches charging, modes a discharge while plugged in (forceDischarge), a charging pause (inhibitCharging), normal charging (normal)"))
+        #expect(lines.contains("Reported mode: a charging pause (inhibitCharging)"))
+        #expect(lines.contains("Power source: external power (externalPower)"))
+        #expect(lines.contains("Charging status: not charging (notCharging)"))
+        #expect(lines.contains("State: holding at the limit (holding)"))
+        #expect(lines.contains("Wants: a charging pause (inhibitCharging)"))
+        #expect(lines.contains { $0.hasSuffix(" [decision] Holding at the limit (at a periodic check): wants a charging pause, action disable charging. Charge 85% has reached the 80% limit; charging paused.") })
+        #expect(lines.contains { $0.hasSuffix(" [telemetry] Battery 85%, on external power, not charging, temperature n/a.") })
     }
 
     @Test("Paths in error messages do not name the macOS account")
@@ -108,7 +129,7 @@ struct DiagnosticsReportTests {
         let report = DiagnosticsReport.text(status: status, environment: unknownModel, generatedAt: referenceDate)
         #expect(report.contains("Model: unknown"))
         #expect(report.contains("Telemetry: unavailable: test telemetry failure"))
-        #expect(report.contains("State: failSafe"))
+        #expect(report.contains("State: fail-safe (failSafe)"))
     }
 
     @Test("With macOS's Charge Limit, the report shows what macOS reports and the recorded limit")
@@ -127,6 +148,9 @@ struct DiagnosticsReportTests {
         #expect(report.contains("== macOS Charge Limit"))
         #expect(report.contains("Availability: experimental"))
         #expect(report.contains("Style: macOS Charge Limit, steps 80, 85, 90, 95, 100"))
+        #expect(report.contains("Reported mode: a macOS Charge Limit of 85% (nativeLimit(85%))"))
+        #expect(report.contains("State: limit enforced by macOS (osEnforcedLimit)"))
+        #expect(report.contains("Wants: a macOS Charge Limit of 85% (nativeLimit(85%))"))
         #expect(report.contains("Reported by macOS: 85%"))
         #expect(report.contains("Own limit: 80% recorded"))
         #expect(report.contains("CellKeeper's limit: 85%"))

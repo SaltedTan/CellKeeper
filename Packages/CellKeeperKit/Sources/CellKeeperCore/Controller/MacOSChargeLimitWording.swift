@@ -104,19 +104,19 @@ public enum MacOSChargeLimitWording {
         case .noneInEffect:
             "The last read-back shows no restriction in effect."
         case .inEffect(let mode, let requested) where mode == requested:
-            "The last read-back still shows CellKeeper's restriction (\(mode.restrictionDescription)) in effect. CellKeeper keeps asking for its release; it remains until a read-back shows it ended."
+            "The last read-back still shows CellKeeper's restriction (\(mode)) in effect. CellKeeper keeps asking for its release; it remains until a read-back shows it ended."
         case .inEffect(let mode, let requested):
-            "The last read-back shows \(mode.restrictionDescription) in effect, and CellKeeper cannot rule out that it is its own (it asked for \(requested.restrictionDescription)). CellKeeper keeps asking for normal charging until a read-back shows no restriction."
+            "The last read-back shows \(mode) in effect, and CellKeeper cannot rule out that it is its own (it asked for \(requested)). CellKeeper keeps asking for normal charging until a read-back shows no restriction."
         case .unconfirmed(let mode):
-            "No read-back has confirmed that CellKeeper's restriction (\(mode.restrictionDescription)) ended, so it may remain. CellKeeper keeps asking for its release until a read-back shows it ended."
+            "No read-back has confirmed that CellKeeper's restriction (\(mode)) ended, so it may remain. CellKeeper keeps asking for its release until a read-back shows it ended."
         case .unknown:
             "CellKeeper could not read back the backend's state, so it cannot confirm that nothing it set remains. It keeps asking for normal charging."
         case .noneKnown:
             "The backend accepts no requests, and CellKeeper knows of no request of its own that could be in effect there."
         case .notCellKeepers(let mode):
-            "The backend's records show \(mode.restrictionDescription) in effect, set by something other than CellKeeper; CellKeeper does not override it."
+            "The backend's records show \(mode) in effect, set by something other than CellKeeper; CellKeeper does not override it."
         case .unexplained(let mode):
-            "The last read-back shows \(mode.restrictionDescription) in effect, and CellKeeper knows of no request of its own that set it; it does not override it."
+            "The last read-back shows \(mode) in effect, and CellKeeper knows of no request of its own that set it; it does not override it."
         }
         return isSimulated ? "\(text) \(simulatedNote)" : text
     }
@@ -129,9 +129,9 @@ public enum MacOSChargeLimitWording {
         let simulated = isSimulated ? ", simulated" : ""
         switch own {
         case .inEffect(let mode, let requested) where mode == requested:
-            return "The last read-back still shows CellKeeper's own restriction (\(mode.restrictionDescription)\(simulated)) in effect"
+            return "The last read-back still shows CellKeeper's own restriction (\(mode)\(simulated)) in effect"
         case .inEffect(_, let requested), .unconfirmed(let requested):
-            return "CellKeeper's own restriction (\(requested.restrictionDescription)\(simulated)) may remain until a read-back shows it ended"
+            return "CellKeeper's own restriction (\(requested)\(simulated)) may remain until a read-back shows it ended"
         case .unknown:
             return "CellKeeper cannot confirm that nothing it set remains"
         case .noneInEffect, .noneKnown, .notCellKeepers, .unexplained:
@@ -223,18 +223,5 @@ public enum MacOSChargeLimitGuide {
             notes.insert(MacOSChargeLimitWording.simulatedCaution, at: 0)
         }
         return notes
-    }
-}
-
-extension ChargeControlMode {
-    /// The mode in words, for what the menu, Settings and the diagnostics
-    /// report say about a restriction; logs keep the technical name.
-    public var restrictionDescription: String {
-        switch self {
-        case .normal: "normal charging"
-        case .inhibitCharging: "a charging pause"
-        case .forceDischarge: "running from battery"
-        case .nativeLimit(let percent): "a macOS Charge Limit of \(percent)%"
-        }
     }
 }

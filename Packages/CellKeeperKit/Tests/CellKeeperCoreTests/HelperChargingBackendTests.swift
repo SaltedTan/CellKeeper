@@ -362,7 +362,7 @@ struct HelperChargingBackendTests {
         var held: ChargeControlMode
         var condition: Condition
         var wording: String
-        var testDescription: String { "\(held) cleared by \(condition.rawValue)" }
+        var testDescription: String { "\(held.identifier) cleared by \(condition.rawValue)" }
     }
 
     static let interlockReleases = [

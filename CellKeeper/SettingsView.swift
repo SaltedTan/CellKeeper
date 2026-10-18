@@ -577,7 +577,7 @@ private struct ActivityTab: View {
                 List(Array(events)) { event in
                     VStack(alignment: .leading, spacing: 2) {
                         HStack {
-                            Text(event.kind.rawValue.capitalized)
+                            Text(event.kind.title)
                                 .font(.caption.weight(.semibold))
                             Spacer()
                             Text(event.date.formatted(date: .omitted, time: .standard))
