@@ -49,14 +49,43 @@ enum ProcessRunner {
     /// giving up waiting.
     static let stopGracePeriod: TimeInterval = 2
 
-    static func run(_ executable: URL, arguments: [String], timeout: TimeInterval) async throws -> ProcessResult {
+    /// The runner's clock, how it signals a tool, and an observer of its
+    /// polling loop: `.system`; tests set their own clock and record the
+    /// signals and passes instead.
+    struct Hooks: Sendable {
+        var uptime: @Sendable () -> TimeInterval
+        /// Sends SIGTERM or SIGKILL to the tool.
+        var signal: @Sendable (Process, Int32) -> Void
+        var observe: (@Sendable (Event) -> Void)?
+
+        enum Event: Sendable {
+            /// The tool was started with this process ID.
+            case launched(pid_t)
+            /// A pass of the loop has taken its step, and the loop goes on.
+            case passed
+        }
+
+        static let system = Hooks(
+            uptime: { ProcessInfo.processInfo.systemUptime },
+            signal: { process, number in
+                if number == SIGTERM {
+                    process.terminate()
+                } else {
+                    kill(process.processIdentifier, number)
+                }
+            },
+            observe: nil
+        )
+    }
+
+    static func run(_ executable: URL, arguments: [String], timeout: TimeInterval, hooks: Hooks = .system) async throws -> ProcessResult {
         let cancellation = CancellationFlag()
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 // Polling blocks a thread, so keep it off the cooperative pool.
                 DispatchQueue.global(qos: .userInitiated).async {
                     continuation.resume(with: Result {
-                        try runBlocking(executable, arguments: arguments, timeout: timeout, cancellation: cancellation)
+                        try runBlocking(executable, arguments: arguments, timeout: timeout, cancellation: cancellation, hooks: hooks)
                     })
                 }
             }
@@ -65,7 +94,7 @@ enum ProcessRunner {
         }
     }
 
-    private static func runBlocking(_ executable: URL, arguments: [String], timeout: TimeInterval, cancellation: CancellationFlag) throws -> ProcessResult {
+    private static func runBlocking(_ executable: URL, arguments: [String], timeout: TimeInterval, cancellation: CancellationFlag, hooks: Hooks) throws -> ProcessResult {
         if cancellation.isCancelled { throw CancellationError() }
         let process = Process()
         process.executableURL = executable
@@ -80,10 +109,11 @@ enum ProcessRunner {
         } catch {
             throw ProcessRunnerError.launchFailed(String(describing: error))
         }
+        hooks.observe?(.launched(process.processIdentifier))
 
         let streams = [CapturedStream(output.fileHandleForReading), CapturedStream(errors.fileHandleForReading)]
         defer { streams.forEach { $0.close() } }
-        let clock = { ProcessInfo.processInfo.systemUptime }
+        let clock = hooks.uptime
         let deadline = clock() + timeout
         var exitedAt: TimeInterval?
         var stopRequestedAt: TimeInterval?
@@ -100,16 +130,17 @@ enum ProcessRunner {
                 if open.isEmpty || now - exited >= streamGracePeriod { break }
             } else if let requested = stopRequestedAt {
                 if !killed, now - requested >= stopGracePeriod {
-                    kill(process.processIdentifier, SIGKILL)
+                    hooks.signal(process, SIGKILL)
                     killed = true
                 } else if killed, now - requested >= 2 * stopGracePeriod {
                     break
                 }
             } else if cancellation.isCancelled || now >= deadline {
                 stoppedForCancellation = cancellation.isCancelled
-                process.terminate()
+                hooks.signal(process, SIGTERM)
                 stopRequestedAt = now
             }
+            hooks.observe?(.passed)
 
             if open.isEmpty {
                 usleep(20_000)
