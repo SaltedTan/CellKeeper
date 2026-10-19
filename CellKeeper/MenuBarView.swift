@@ -58,12 +58,12 @@ private struct BatteryHeader: View {
 
     var body: some View {
         if let snapshot, snapshot.isBatteryPresent {
-            // One element for VoiceOver: "Battery 81%, Power adapter, Charging".
+            // One element for VoiceOver: "Charge 81%, Power adapter, Charging".
             HStack(alignment: .firstTextBaseline) {
                 Text(Format.percent(snapshot.chargePercent))
                     .font(.system(size: chargeSize, weight: .semibold, design: .rounded))
                     .monospacedDigit()
-                    .accessibilityLabel("Battery \(Format.percent(snapshot.chargePercent))")
+                    .accessibilityLabel("Charge \(Format.percent(snapshot.chargePercent))")
                 VStack(alignment: .leading, spacing: 2) {
                     Label(snapshot.powerSource.title, systemImage: snapshot.isOnExternalPower ? "powerplug" : "battery.100percent")
                     Text(snapshot.chargingStatus.title)
@@ -544,14 +544,14 @@ private struct WeeklyFullChargeLines: View {
             if let due = status.weeklyFullChargeDue {
                 Label(WeeklyFullChargeWording.dueLine(due, now: now), systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
         if let problem = status.weeklyFullChargeStoreProblem {
             Label(WeeklyFullChargeWording.storeProblemLine(problem), systemImage: "exclamationmark.triangle")
                 .font(.caption)
-                .foregroundStyle(.orange)
+                .foregroundStyle(.warningText)
                 .fixedSize(horizontal: false, vertical: true)
         }
         if let outcome = status.weeklyFullChargeOutcome, let line = WeeklyFullChargeWording.outcomeLine(outcome, now: now) {
@@ -562,6 +562,7 @@ private struct WeeklyFullChargeLines: View {
                 Spacer()
                 Button("OK") { model.dismissWeeklyFullChargeOutcome() }
                     .controlSize(.small)
+                    .accessibilityLabel("OK, dismiss the weekly full charge message")
             }
             .font(.caption)
         }

@@ -46,6 +46,21 @@ struct WeeklyFullChargeWordingTests {
         #expect(WeeklyFullChargeWording.shortName(of: 6, calendar: posixGregorian) == "Fri")
     }
 
+    @Test("VoiceOver hears each day's full name; the button shows the short one")
+    func dayNames() {
+        #expect(WeeklyFullChargeWording.name(of: 6, calendar: posixGregorian) == "Friday")
+        #expect(WeeklyFullChargeWording.name(of: 1, calendar: posixGregorian) == "Sunday")
+        #expect(WeeklyFullChargeWording.weekdayOrder(calendar: posixGregorian).map { WeeklyFullChargeWording.name(of: $0, calendar: posixGregorian) }
+                == ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"])
+    }
+
+    @Test("The start picker's spoken time is the hour and minute it shows, whatever the Mac's time zone")
+    func spokenStart() {
+        #expect(plain(WeeklyFullChargeWording.timeOfDay(hour: 7, minute: 30, locale: posix)) == "7:30 AM")
+        #expect(plain(WeeklyFullChargeWording.timeOfDay(hour: 23, minute: 5, locale: posix)) == "11:05 PM")
+        #expect(plain(WeeklyFullChargeWording.timeOfDay(hour: 0, minute: 0, locale: posix)) == "12:00 AM")
+    }
+
     @Test("The summary names one day in full, several in short, and every day as such")
     func summary() {
         #expect(plain(WeeklyFullChargeWording.summary(fridays, locale: posix, calendar: posixGregorian)) == "Every Friday at 7:00 AM, for 12 hours")

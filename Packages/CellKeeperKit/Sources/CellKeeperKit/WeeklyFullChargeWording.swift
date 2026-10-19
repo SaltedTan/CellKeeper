@@ -23,6 +23,12 @@ public enum WeeklyFullChargeWording {
         calendar.shortWeekdaySymbols[(weekday - 1) % 7]
     }
 
+    /// The full name of `weekday` (1 = Sunday) in `calendar`'s locale, which
+    /// VoiceOver reads for the day's button.
+    public static func name(of weekday: Int, calendar: Calendar = .current) -> String {
+        calendar.weekdaySymbols[(weekday - 1) % 7]
+    }
+
     /// For example "Every Friday at 7:00 AM, for 12 hours", "Every Mon, Wed,
     /// and Fri at …", or "Every day at …", with day names in `locale` and the
     /// days in `calendar`'s order.
@@ -134,8 +140,10 @@ public enum WeeklyFullChargeWording {
     // MARK: - Formatting
 
     /// `hour`:`minute` as `locale` writes a time of day, read on the editor's
-    /// fixed day in GMT, so no time zone or calendar changes it.
-    static func timeOfDay(hour: Int, minute: Int, locale: Locale) -> String {
+    /// fixed day in GMT, so no time zone or calendar changes it. VoiceOver
+    /// reads it for the editor's start picker, whose value is a moment in
+    /// GMT that an assistive app could otherwise read in the Mac's time zone.
+    public static func timeOfDay(hour: Int, minute: Int, locale: Locale = .current) -> String {
         var style = Date.FormatStyle.dateTime.hour().minute()
         style.timeZone = WeeklyFullChargeDraft.pickerTimeZone
         style.calendar = WeeklyFullChargeDraft.pickerCalendar

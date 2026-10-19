@@ -272,7 +272,7 @@ private struct WeeklyFullChargeSection: View {
                 if let due = status?.weeklyFullChargeDue {
                     Label(WeeklyFullChargeWording.dueLine(due, now: now), systemImage: "exclamationmark.triangle")
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.warningText)
                 }
                 if let last = WeeklyFullChargeWording.lastLine(weekly.handled, now: now) {
                     Text(last)
@@ -283,7 +283,7 @@ private struct WeeklyFullChargeSection: View {
             if let problem = status?.weeklyFullChargeStoreProblem {
                 Label(WeeklyFullChargeWording.storeProblemLine(problem), systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Group {
@@ -297,6 +297,7 @@ private struct WeeklyFullChargeSection: View {
                                 }
                             ))
                             .toggleStyle(.button)
+                            .accessibilityLabel(WeeklyFullChargeWording.name(of: day))
                         }
                     }
                 }
@@ -305,9 +306,12 @@ private struct WeeklyFullChargeSection: View {
                 DatePicker("Start", selection: $draft.pickerTime, displayedComponents: .hourAndMinute)
                     .environment(\.timeZone, WeeklyFullChargeDraft.pickerTimeZone)
                     .environment(\.calendar, WeeklyFullChargeDraft.pickerCalendar)
+                    // Its value is a moment in GMT; say the time it shows.
+                    .accessibilityValue(WeeklyFullChargeWording.timeOfDay(hour: draft.hour, minute: draft.minute))
                 Stepper(value: $draft.durationHours, in: WeeklyFullChargePattern.durationHoursRange) {
                     LabeledContent("Duration", value: draft.durationHours == 1 ? "1 hour" : "\(draft.durationHours) hours")
                 }
+                .accessibilityValue(AccessibilityWording.hours(draft.durationHours))
                 Button(weekly == nil ? "Save Weekly Full Charge" : "Save Changes") { model.setWeeklyFullCharge(draft.pattern) }
                     .disabled(!draft.pattern.issues.isEmpty || draft.pattern == weekly?.pattern)
                     .help(WeeklyFullChargeWording.saveHelp)
@@ -325,7 +329,7 @@ private struct WeeklyFullChargeSection: View {
             if let error = model.weeklyError {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.criticalText)
             }
             Text(WeeklyFullChargeWording.explanation)
                 .font(.caption)
