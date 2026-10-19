@@ -91,7 +91,8 @@ charge limit" action instead of `pmset -g battlimit` (note 08, O18).
   starts the existing temporary full charge (see `architecture.md`,
   "Scheduled full charge"). It works with every backend, simulated where
   the backend is, and starts only while the Mac is awake and CellKeeper
-  is running.
+  is running. A weekly full charge followed (owner approval 2026-10-19;
+  see "Weekly full charge" there).
 
 ## Milestone 3 — Diagnostics and observability (after phase 4a)
 
@@ -243,9 +244,13 @@ and an Apple Developer ID.
   tried in the Shortcuts app on a Mac. A "schedule a full charge" action is
   left until someone asks: on macOS 26+ a Shortcuts automation at a time
   of day can run Start CellKeeper Full Charge.
-- Scheduled limits and recurring schedules (a one-shot scheduled full charge
-  exists; recurrence needs floating local time with DST rules and a record
-  of the last occurrence, so that a clock change cannot fire one twice).
+- Recurring schedules. *Done as a weekly full charge* (owner approval
+  2026-10-19): one weekly schedule of the temporary full charge (the days,
+  a local start time, 1–48 hours) alongside the one-shot schedule, in
+  floating local time with RFC 5545's rules for skipped and repeated times
+  and a record of the last occurrence handled (see `architecture.md`,
+  "Weekly full charge"). Still later: scheduled limits, other recurrences,
+  more than one weekly schedule, and skipping one occurrence.
 - Calibration workflow (never below 15%, only within 10–40 °C, user-initiated
   and abortable).
 - Battery temperature, if a public source returns or a reviewed source is

@@ -80,6 +80,8 @@ final class AppModel {
     private(set) var settingsError: String?
     /// Why the most recent scheduled full charge was not set.
     private(set) var scheduleError: String?
+    /// Why the most recent weekly full charge was not saved.
+    private(set) var weeklyError: String?
     /// Set when stored settings were unusable and defaults were loaded.
     private(set) var settingsRecoveryMessage: String?
     /// macOS's system-wide thermal state and Low Power Mode, shown for
@@ -123,6 +125,9 @@ final class AppModel {
         case setSchedule(FullChargeSchedule)
         case cancelSchedule
         case dismissScheduleOutcome
+        case setWeekly(WeeklyFullChargePattern)
+        case removeWeekly
+        case dismissWeeklyOutcome
         case switchBackend(ControlBackendChoice)
         case resetFault
         case recheckBackend
@@ -137,7 +142,7 @@ final class AppModel {
             case .evaluate(let trigger): trigger
             case .apply: .settingsChanged
             case .startFullCharge, .startDischarge, .cancelOverride: .overrideChanged
-            case .setSchedule, .cancelSchedule, .dismissScheduleOutcome: .scheduleChanged
+            case .setSchedule, .cancelSchedule, .dismissScheduleOutcome, .setWeekly, .removeWeekly, .dismissWeeklyOutcome: .scheduleChanged
             case .switchBackend: .backendChanged
             case .resetFault, .recheckBackend, .confirmNoLimit, .discardUnreadableRecord: .manual
             }
@@ -195,6 +200,7 @@ final class AppModel {
         store: SettingsStore = SettingsStore(),
         telemetry: any TelemetryProvider = SystemTelemetryProvider(),
         scheduleStore: any FullChargeScheduleStoring = FullChargeScheduleStore(),
+        weeklyStore: any WeeklyFullChargeStoring = WeeklyFullChargeStore(),
         notificationPoster: any NotificationPosting = SystemNotificationPoster()
     ) {
         var loaded = store.loadChargingSettings()
@@ -225,7 +231,16 @@ final class AppModel {
             backend: backend,
             settings: loaded.settings,
             adoptionMarkerStore: FileOwnershipRecordStore.default,
-            scheduleStore: scheduleStore
+            scheduleStore: scheduleStore,
+            weeklyStore: weeklyStore,
+            // Read fresh at every evaluation. Foundation caches the system
+            // time zone until it is reset, and documents no reset of its own
+            // when it changes; resetting here does not depend on the
+            // change notification arriving (one made while the Mac slept).
+            timeZone: {
+                NSTimeZone.resetSystemTimeZone()
+                return TimeZone.current
+            }
         )
         let notifier = ChargingNotifier(poster: notificationPoster, store: store)
         self.notifier = notifier
@@ -269,8 +284,10 @@ final class AppModel {
         for name in [ProcessInfo.thermalStateDidChangeNotification, Notification.Name.NSProcessInfoPowerStateDidChange] {
             observe(name, on: defaultCenter) { $0.readSystemConditions() }
         }
-        // A scheduled full charge's window is wall-clock time: check it again
-        // at once when the clock or the time zone changes (research rule R22).
+        // A scheduled full charge's window is wall-clock time, and a weekly
+        // one's start is a local time in the current time zone: check them
+        // again at once when the clock or the time zone changes (research
+        // rule R22).
         for name in [Notification.Name.NSSystemClockDidChange, Notification.Name.NSSystemTimeZoneDidChange] {
             observe(name, on: defaultCenter) { $0.clockDidChange() }
         }
@@ -517,6 +534,28 @@ final class AppModel {
         send(.dismissScheduleOutcome)
     }
 
+    /// Saves `pattern` as the weekly full charge, replacing any in use. A
+    /// pattern that is not valid is not sent, and ``weeklyError`` says why.
+    /// The controller counts from when it runs the command.
+    func setWeeklyFullCharge(_ pattern: WeeklyFullChargePattern) {
+        let issues = pattern.issues
+        guard issues.isEmpty else {
+            weeklyError = issues.map(\.description).joined(separator: " ")
+            return
+        }
+        weeklyError = nil
+        send(.setWeekly(pattern))
+    }
+
+    func removeWeeklyFullCharge() {
+        weeklyError = nil
+        send(.removeWeekly)
+    }
+
+    func dismissWeeklyFullChargeOutcome() {
+        send(.dismissWeeklyOutcome)
+    }
+
     /// Saves the choice at once: if the switch cannot complete in this
     /// session, the next launch restores the old backend's changes first and
     /// then switches.
@@ -715,7 +754,7 @@ final class AppModel {
                 // armed, but it was set.
                 let wasUsed: Bool = switch newStatus.fullChargeScheduleOutcome {
                 case .started(let used)?, .alreadyFull(let used)?, .windowPassed(let used, _)?,
-                     .extendedRunning(let used)?, .keptRunning(let used)?:
+                     .extendedRunning(let used)?, .keptRunning(let used, _)?:
                     used == schedule
                 case .discarded?, nil:
                     false
@@ -730,6 +769,16 @@ final class AppModel {
             status = await controller.cancelFullChargeSchedule()
         case .dismissScheduleOutcome:
             status = await controller.dismissFullChargeScheduleOutcome()
+        case .setWeekly(let pattern):
+            do {
+                status = try await controller.setWeeklyFullCharge(pattern)
+            } catch {
+                weeklyError = "The weekly full charge was not saved: \(error)"
+            }
+        case .removeWeekly:
+            status = await controller.removeWeeklyFullCharge()
+        case .dismissWeeklyOutcome:
+            status = await controller.dismissWeeklyFullChargeOutcome()
         case .switchBackend(let choice):
             let backend = choice.makeBackend()
             noteInProcessHelper(of: backend)
@@ -842,5 +891,14 @@ private final class ResumeOnce<Value: Sendable>: @unchecked Sendable {
             return continuation
         }
         pending?.resume(returning: value)
+    }
+}
+
+extension ControllerStatus {
+    /// The time this status describes: its latest check, or now before the
+    /// first. Dates in the menu and Settings show their year only when it
+    /// differs from this one's.
+    var describedAt: Date {
+        lastEvaluation ?? Date()
     }
 }

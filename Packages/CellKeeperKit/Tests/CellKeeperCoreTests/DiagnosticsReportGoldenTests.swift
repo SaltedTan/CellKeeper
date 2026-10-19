@@ -1703,4 +1703,314 @@ struct DiagnosticsReportGoldenTests {
             Last evaluation: 2027-01-15T11:00:00Z
             """)
     }
+
+    @Test("A schedule that leaves a running full charge whose deadline is exactly its own as it is")
+    func scheduleKeptRunningSameDeadline() async throws {
+        let status = try await DiagnosticsFixture.scheduleKeptRunningSameDeadline()
+        expectReport(status, head: """
+            CellKeeper diagnostics
+            Generated: 2027-01-15T08:00:00Z
+            App: 0.1.0 (1)
+            macOS: Version 27.0.1 (Build 26A434)
+            Model: Mac16,1
+
+            == Control
+            Backend: Simulated (simulated)
+            Availability: simulated
+            Style: switches charging, modes a discharge while plugged in (forceDischarge), a charging pause (inhibitCharging), normal charging (normal)
+            Reported mode: normal charging (normal)
+            Pending switch: none
+            Consecutive failures: 0
+
+            == Settings
+            Manage charging: on
+            Charge limit: 80%
+            Resume threshold: 75%
+            Temperature protection: on (pause \(Self.number(40)) °C, resume \(Self.number(35)) °C)
+
+            == Battery
+            Read at: 2027-01-15T09:00:00Z
+            Driver updated: not available
+            Charge: 70%
+            Power source: external power (externalPower)
+            Charging status: charging (charging)
+            Temperature: \(Self.number(30)) °C
+            Voltage: not available
+            Current: not available
+            Adapter: not available
+            Cycle count: not available
+            Full-charge capacity: not available
+            Design capacity: not available
+            Condition: not available
+
+            == Decision
+            State: temporary full charge (fullChargeOverride)
+            Wants: normal charging (normal)
+            Action: none
+            Reason: Temporary full charge requested (now 70%).
+            Override: Temporary full charge, started 2027-01-15T08:00:00Z, expires 2027-01-15T11:00:00Z
+            Schedule outcome: a running full charge already had the same deadline
+            Last evaluation: 2027-01-15T09:00:00Z
+            """)
+    }
+
+    @Test("A weekly occurrence due while on battery, whose window runs from EDT into EST: each end with its own offset")
+    func weeklyDueAcrossOffsetChange() async throws {
+        let status = try await DiagnosticsFixture.weeklyDueAcrossOffsetChange()
+        expectReport(status, head: """
+            CellKeeper diagnostics
+            Generated: 2027-01-15T08:00:00Z
+            App: 0.1.0 (1)
+            macOS: Version 27.0.1 (Build 26A434)
+            Model: Mac16,1
+
+            == Control
+            Backend: Simulated (simulated)
+            Availability: simulated
+            Style: switches charging, modes a discharge while plugged in (forceDischarge), a charging pause (inhibitCharging), normal charging (normal)
+            Reported mode: normal charging (normal)
+            Pending switch: none
+            Consecutive failures: 0
+
+            == Settings
+            Manage charging: on
+            Charge limit: 80%
+            Resume threshold: 75%
+            Temperature protection: on (pause \(Self.number(40)) °C, resume \(Self.number(35)) °C)
+
+            == Battery
+            Read at: 2026-11-01T00:30:00Z
+            Driver updated: not available
+            Charge: 70%
+            Power source: battery power (battery)
+            Charging status: discharging (discharging)
+            Temperature: \(Self.number(30)) °C
+            Voltage: not available
+            Current: not available
+            Adapter: not available
+            Cycle count: not available
+            Full-charge capacity: not available
+            Design capacity: not available
+            Condition: not available
+
+            == Decision
+            State: on battery power (onBattery)
+            Wants: normal charging (normal)
+            Action: none
+            Reason: Running on battery; CellKeeper's restrictions are cleared until power is reconnected.
+            Weekly full charge: every Sat at 20:00 for 12 hours
+            Weekly due: 2026-10-31 (nominal), 2026-10-31T20:00:00-04:00 to 2026-11-01T07:00:00-05:00; waiting: the Mac is on battery
+            Weekly next: 2026-11-07 (nominal), 2026-11-07T20:00:00-05:00 to 2026-11-08T08:00:00-05:00
+            Weekly handled: 2026-10-24 (nominal), began before the schedule was saved (beforeSave), starting 2026-10-24T20:00:00-04:00
+            Last evaluation: 2026-11-01T00:30:00Z
+            """)
+    }
+
+    @Test("A weekly occurrence started in London, then the Mac in New York: the record's offset and the next one's differ")
+    func weeklyStartedThenTravelled() async throws {
+        let status = try await DiagnosticsFixture.weeklyStartedThenTravelled()
+        expectReport(status, head: """
+            CellKeeper diagnostics
+            Generated: 2027-01-15T08:00:00Z
+            App: 0.1.0 (1)
+            macOS: Version 27.0.1 (Build 26A434)
+            Model: Mac16,1
+
+            == Control
+            Backend: Simulated (simulated)
+            Availability: simulated
+            Style: switches charging, modes a discharge while plugged in (forceDischarge), a charging pause (inhibitCharging), normal charging (normal)
+            Reported mode: normal charging (normal)
+            Pending switch: none
+            Consecutive failures: 0
+
+            == Settings
+            Manage charging: on
+            Charge limit: 80%
+            Resume threshold: 75%
+            Temperature protection: on (pause \(Self.number(40)) °C, resume \(Self.number(35)) °C)
+
+            == Battery
+            Read at: 2026-10-23T06:00:30Z
+            Driver updated: not available
+            Charge: 70%
+            Power source: external power (externalPower)
+            Charging status: charging (charging)
+            Temperature: \(Self.number(30)) °C
+            Voltage: not available
+            Current: not available
+            Adapter: not available
+            Cycle count: not available
+            Full-charge capacity: not available
+            Design capacity: not available
+            Condition: not available
+
+            == Decision
+            State: temporary full charge (fullChargeOverride)
+            Wants: normal charging (normal)
+            Action: none
+            Reason: Temporary full charge requested (now 70%).
+            Override: Scheduled full charge, started 2026-10-23T06:00:30Z, expires 2026-10-23T18:00:00Z
+            Weekly full charge: every Fri at 07:00 for 12 hours
+            Weekly next: 2026-10-30 (nominal), 2026-10-30T07:00:00-04:00 to 2026-10-30T19:00:00-04:00
+            Weekly handled: 2026-10-23 (nominal), started (started), starting 2026-10-23T07:00:00+01:00
+            Weekly outcome: started (window 2026-10-23T07:00:00+01:00 to 2026-10-23T19:00:00+01:00)
+            Last evaluation: 2026-10-23T06:00:30Z
+            """)
+    }
+
+    @Test("A weekly full charge in use that its store could not save")
+    func weeklyStoreNotSaved() async throws {
+        let status = try await DiagnosticsFixture.weeklyStoreNotSaved()
+        expectReport(status, head: """
+            CellKeeper diagnostics
+            Generated: 2027-01-15T08:00:00Z
+            App: 0.1.0 (1)
+            macOS: Version 27.0.1 (Build 26A434)
+            Model: Mac16,1
+
+            == Control
+            Backend: Simulated (simulated)
+            Availability: simulated
+            Style: switches charging, modes a discharge while plugged in (forceDischarge), a charging pause (inhibitCharging), normal charging (normal)
+            Reported mode: normal charging (normal)
+            Pending switch: none
+            Consecutive failures: 0
+
+            == Settings
+            Manage charging: on
+            Charge limit: 80%
+            Resume threshold: 75%
+            Temperature protection: on (pause \(Self.number(40)) °C, resume \(Self.number(35)) °C)
+
+            == Battery
+            Read at: 2026-10-22T12:00:00Z
+            Driver updated: not available
+            Charge: 70%
+            Power source: external power (externalPower)
+            Charging status: charging (charging)
+            Temperature: \(Self.number(30)) °C
+            Voltage: not available
+            Current: not available
+            Adapter: not available
+            Cycle count: not available
+            Full-charge capacity: not available
+            Design capacity: not available
+            Condition: not available
+
+            == Decision
+            State: charging to the limit (charging)
+            Wants: normal charging (normal)
+            Action: none
+            Reason: Charge 70% is at or below the resume threshold 75%; charging.
+            Weekly full charge: every Mon, Wed, Fri at 07:30 for 1 hour
+            Weekly next: 2026-10-23 (nominal), 2026-10-23T07:30:00+01:00 to 2026-10-23T08:30:00+01:00
+            Weekly handled: 2026-10-21 (nominal), began before the schedule was saved (beforeSave), starting 2026-10-21T07:30:00+01:00
+            Weekly store: not saved; the weekly full charge in use differs from the stored one (notSaved)
+            Last evaluation: 2026-10-22T12:00:00Z
+            """)
+    }
+
+    @Test("A removed weekly full charge leaves only its latest outcome")
+    func weeklyRemovedAfterPassing() async throws {
+        let status = try await DiagnosticsFixture.weeklyRemovedAfterPassing()
+        expectReport(status, head: """
+            CellKeeper diagnostics
+            Generated: 2027-01-15T08:00:00Z
+            App: 0.1.0 (1)
+            macOS: Version 27.0.1 (Build 26A434)
+            Model: Mac16,1
+
+            == Control
+            Backend: Simulated (simulated)
+            Availability: simulated
+            Style: switches charging, modes a discharge while plugged in (forceDischarge), a charging pause (inhibitCharging), normal charging (normal)
+            Reported mode: normal charging (normal)
+            Pending switch: none
+            Consecutive failures: 0
+
+            == Settings
+            Manage charging: on
+            Charge limit: 80%
+            Resume threshold: 75%
+            Temperature protection: on (pause \(Self.number(40)) °C, resume \(Self.number(35)) °C)
+
+            == Battery
+            Read at: 2026-10-23T19:00:00Z
+            Driver updated: not available
+            Charge: 70%
+            Power source: external power (externalPower)
+            Charging status: charging (charging)
+            Temperature: \(Self.number(30)) °C
+            Voltage: not available
+            Current: not available
+            Adapter: not available
+            Cycle count: not available
+            Full-charge capacity: not available
+            Design capacity: not available
+            Condition: not available
+
+            == Decision
+            State: charging to the limit (charging)
+            Wants: normal charging (normal)
+            Action: none
+            Reason: Charge 70% is at or below the resume threshold 75%; charging.
+            Weekly outcome: window passed before it could start (2026-10-23T07:00:00+01:00 to 2026-10-23T19:00:00+01:00)
+            Last evaluation: 2026-10-23T19:00:00Z
+            """)
+    }
+
+    @Test("The one-shot and the weekly full charge due with the same end: the weekly one keeps the one-shot's full charge")
+    func bothDueSameDeadline() async throws {
+        let status = try await DiagnosticsFixture.bothDueSameDeadline()
+        expectReport(status, head: """
+            CellKeeper diagnostics
+            Generated: 2027-01-15T08:00:00Z
+            App: 0.1.0 (1)
+            macOS: Version 27.0.1 (Build 26A434)
+            Model: Mac16,1
+
+            == Control
+            Backend: Simulated (simulated)
+            Availability: simulated
+            Style: switches charging, modes a discharge while plugged in (forceDischarge), a charging pause (inhibitCharging), normal charging (normal)
+            Reported mode: normal charging (normal)
+            Pending switch: none
+            Consecutive failures: 0
+
+            == Settings
+            Manage charging: on
+            Charge limit: 80%
+            Resume threshold: 75%
+            Temperature protection: on (pause \(Self.number(40)) °C, resume \(Self.number(35)) °C)
+
+            == Battery
+            Read at: 2026-10-23T06:00:30Z
+            Driver updated: not available
+            Charge: 70%
+            Power source: external power (externalPower)
+            Charging status: charging (charging)
+            Temperature: \(Self.number(30)) °C
+            Voltage: not available
+            Current: not available
+            Adapter: not available
+            Cycle count: not available
+            Full-charge capacity: not available
+            Design capacity: not available
+            Condition: not available
+
+            == Decision
+            State: temporary full charge (fullChargeOverride)
+            Wants: normal charging (normal)
+            Action: none
+            Reason: Temporary full charge requested (now 70%).
+            Override: Scheduled full charge, started 2026-10-23T06:00:30Z, expires 2026-10-23T18:00:00Z
+            Schedule outcome: started (window 2026-10-23T06:00:00Z to 2026-10-23T18:00:00Z)
+            Weekly full charge: every Fri at 07:00 for 12 hours
+            Weekly next: 2026-10-30 (nominal), 2026-10-30T07:00:00Z to 2026-10-30T19:00:00Z
+            Weekly handled: 2026-10-23 (nominal), started (started), starting 2026-10-23T07:00:00+01:00
+            Weekly outcome: a running full charge already had the same deadline
+            Last evaluation: 2026-10-23T06:00:30Z
+            """)
+    }
 }

@@ -68,6 +68,13 @@ import os
 ///   the override is installed, with no suspension point between them, and
 ///   the same evaluation runs the policy. It never shortens a running full
 ///   charge. Its guarantees assume one controlling instance.
+/// - A weekly full charge (``WeeklyFullChargeSchedule``) starts the same
+///   full charge by the same rules, after the one-shot schedule in the same
+///   evaluation. Its record of the occurrence handled is moved in memory
+///   first, where the rest of the run reads it, so no occurrence starts or
+///   passes twice in a run; the store is then brought in line and read
+///   back, and a write that fails delays nothing and is retried at every
+///   evaluation.
 public actor ChargeController {
     public static let maximumConsecutiveFailures = 3
     /// A failure-free period of this length resets the failure count.
@@ -87,6 +94,11 @@ public actor ChargeController {
     private let uptime: @Sendable () -> TimeInterval
     /// Where the scheduled full charge is kept; nil turns scheduling off.
     private let scheduleStore: (any FullChargeScheduleStoring)?
+    /// Where the weekly full charge is kept; nil turns it off.
+    private let weeklyStore: (any WeeklyFullChargeStoring)?
+    /// The time zone weekly occurrences are computed in, read at every
+    /// evaluation together with ``now``.
+    private let timeZone: @Sendable () -> TimeZone
 
     private var settings: ChargingSettings
     private var activeOverride: ChargeOverride?
@@ -102,6 +114,33 @@ public actor ChargeController {
     /// its window passes; never persisted.
     private var lastScheduleWait: FullChargeScheduleWait?
     private var scheduleOutcome: FullChargeScheduleOutcome?
+    /// Whether ``weekly`` has been loaded from ``weeklyStore``, at the first
+    /// command.
+    private var hasLoadedWeekly = false
+    /// The weekly full charge in use and its record. Authoritative for this
+    /// run: what the store holds matters only at the next launch.
+    private var weekly: WeeklyFullChargeSchedule?
+    /// The latest record handled in this run, loaded or made here. It only
+    /// moves forward and outlives a removal, so no occurrence on or before
+    /// its day starts again in this run, whatever the store or the clock
+    /// does.
+    private var weeklyHandledInRun: WeeklyFullChargeRecord?
+    /// The occurrence that is due and cannot start yet; nil when none is.
+    private var weeklyDue: WeeklyFullChargeDue?
+    /// Why an occurrence last waited, with its nominal day, never
+    /// persisted: a passed outcome names the reason only for that same
+    /// occurrence. Replaced when another occurrence waits; dropped once one
+    /// is handled.
+    private var weeklyWaitEvidence: (day: LocalDay, wait: FullChargeScheduleWait)?
+    /// Set while the store does not hold what is in use, until a later
+    /// write is read back as made; every evaluation tries again.
+    private var weeklyStoreProblem: WeeklyFullChargeStoreProblem?
+    /// True from a change to the weekly full charge in use until the store
+    /// has been brought in line with it.
+    private var isWeeklyStoreDirty = false
+    /// The next occurrence as of the latest evaluation.
+    private var weeklyNext: WeeklyFullChargeOccurrence?
+    private var weeklyOutcome: WeeklyFullChargeOutcome?
     private var memory = PolicyMemory()
     private var snapshot: BatterySnapshot?
     private var telemetryError: String?
@@ -200,8 +239,12 @@ public actor ChargeController {
     ///   - adoptionMarkerStore: the native backend's record store, if any.
     ///   - scheduleStore: where a scheduled full charge is kept; nil turns
     ///     scheduling off.
+    ///   - weeklyStore: where a weekly full charge is kept; nil turns it off.
     ///   - now: wall-clock time, for telemetry age, display, and a scheduled
     ///     full charge's window.
+    ///   - timeZone: the time zone a weekly full charge's local times are
+    ///     read in. Called at every evaluation, and when a weekly schedule
+    ///     is saved, together with `now`; never captured once.
     ///   - uptime: monotonic seconds that keep counting during sleep, for
     ///     override expiry and rate limiting. Defaults to `ContinuousClock`.
     public init(
@@ -210,15 +253,19 @@ public actor ChargeController {
         settings: ChargingSettings,
         adoptionMarkerStore: (any OwnershipRecordStore)? = nil,
         scheduleStore: (any FullChargeScheduleStoring)? = nil,
+        weeklyStore: (any WeeklyFullChargeStoring)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
+        timeZone: @escaping @Sendable () -> TimeZone = { TimeZone.current },
         uptime: (@Sendable () -> TimeInterval)? = nil
     ) {
         self.telemetry = telemetry
         self.backend = backend
         self.adoptionMarkerStore = adoptionMarkerStore
         self.scheduleStore = scheduleStore
+        self.weeklyStore = weeklyStore
         self.settings = settings
         self.now = now
+        self.timeZone = timeZone
         self.uptime = uptime ?? Self.continuousUptime()
     }
 
@@ -262,6 +309,11 @@ public actor ChargeController {
             fullChargeSchedule: schedule,
             fullChargeScheduleWait: schedule == nil ? nil : scheduleWait,
             fullChargeScheduleOutcome: scheduleOutcome,
+            weeklyFullCharge: weekly,
+            weeklyFullChargeDue: weekly == nil ? nil : weeklyDue,
+            weeklyFullChargeNext: weekly == nil ? nil : weeklyNext,
+            weeklyFullChargeOutcome: weeklyOutcome,
+            weeklyFullChargeStoreProblem: weeklyStoreProblem,
             lastEndedOverride: lastEndedOverride,
             overridesEnded: overridesEnded
         )
@@ -482,10 +534,223 @@ public actor ChargeController {
         }
     }
 
+    // MARK: - Weekly full charge
+
+    /// Saves `pattern` as the weekly full charge, replacing any in use, and
+    /// evaluates. It counts from now, read inside this command together with
+    /// the time zone: an occurrence that started before it, or a day already
+    /// handled in this run or recorded before, does not start
+    /// (``WeeklyFullChargeSchedule/saving(_:handledAtLeast:now:timeZone:)``).
+    /// It is in use at once; the store is then brought in line and read
+    /// back, and while that fails, ``ControllerStatus/weeklyFullChargeStoreProblem``
+    /// says so and every evaluation tries again. A full charge already
+    /// running is not changed.
+    @discardableResult
+    public func setWeeklyFullCharge(_ pattern: WeeklyFullChargePattern) async throws -> ControllerStatus {
+        let issues = pattern.issues
+        guard issues.isEmpty else {
+            let error = WeeklyFullChargeError.invalid(issues)
+            _ = await exclusively {
+                record(.override, "Weekly full charge rejected: \(error)", level: .error)
+            }
+            throw error
+        }
+        var failure: WeeklyFullChargeError?
+        let status = await exclusively {
+            loadWeeklyIfNeeded()
+            guard weeklyStore != nil else {
+                failure = .notAvailable
+                record(.override, "Weekly full charge not saved: it is not available.", level: .error)
+                return
+            }
+            let saved: WeeklyFullChargeSchedule
+            do {
+                saved = try WeeklyFullChargeSchedule.saving(pattern, handledAtLeast: weeklyHandledInRun, now: now(), timeZone: timeZone())
+            } catch {
+                failure = error as? WeeklyFullChargeError ?? .invalid(issues)
+                record(.override, "Weekly full charge rejected: \(error)", level: .error)
+                return
+            }
+            let replaced = weekly != nil
+            weekly = saved
+            weeklyHandledInRun = saved.handled
+            weeklyDue = nil
+            weeklyWaitEvidence = nil
+            weeklyNext = nil
+            weeklyOutcome = nil
+            record(.override, "Weekly full charge \(replaced ? "changed" : "saved"): \(Self.describe(pattern)). It counts from now.")
+            isWeeklyStoreDirty = true
+            await performEvaluation(.scheduleChanged)
+        }
+        if let failure { throw failure }
+        return status
+    }
+
+    /// Stops using the weekly full charge and evaluates; its removal from
+    /// the store is then made and read back, and retried at every
+    /// evaluation while it fails. Days handled in this run stay handled, so
+    /// a weekly schedule saved again in this run does not start them again.
+    /// A full charge it already started is not affected;
+    /// ``cancelOverride()`` ends that.
+    @discardableResult
+    public func removeWeeklyFullCharge() async -> ControllerStatus {
+        await exclusively {
+            loadWeeklyIfNeeded()
+            guard let removed = weekly else { return }
+            weekly = nil
+            weeklyDue = nil
+            weeklyWaitEvidence = nil
+            weeklyNext = nil
+            record(.override, "Weekly full charge removed: \(Self.describe(removed.pattern)).")
+            isWeeklyStoreDirty = true
+            await performEvaluation(.scheduleChanged)
+        }
+    }
+
+    /// Forgets the latest weekly outcome once the user has seen it.
+    @discardableResult
+    public func dismissWeeklyFullChargeOutcome() async -> ControllerStatus {
+        await exclusively {
+            weeklyOutcome = nil
+        }
+    }
+
+    /// Loads the weekly full charge once, at the first command. A stored
+    /// value that cannot be used is not used, never affects the settings,
+    /// and is removed, with a notice; while that removal cannot be read
+    /// back, every evaluation tries again.
+    private func loadWeeklyIfNeeded() {
+        guard !hasLoadedWeekly else { return }
+        hasLoadedWeekly = true
+        guard let weeklyStore else { return }
+        switch weeklyStore.loadWeeklyFullCharge() {
+        case .none:
+            break
+        case .schedule(let stored):
+            weekly = stored
+            weeklyHandledInRun = stored.handled
+            record(.override, "Weekly full charge loaded: \(Self.describe(stored.pattern)); last handled \(stored.handled.day) (\(Self.describe(stored.handled.result))).")
+        case .unusable(let reason):
+            weeklyOutcome = .discarded(reason: reason)
+            record(.override, "A saved weekly full charge could not be used and is removed: \(reason). Your charging settings are not affected.", level: .error)
+            isWeeklyStoreDirty = true
+        }
+    }
+
+    /// Brings the store in line with the weekly full charge in use (or its
+    /// absence) and reads it back. A failure is noted once, with the error
+    /// only in the unified log, and ``weeklyStoreProblem`` and
+    /// ``isWeeklyStoreDirty`` stay set until a later attempt is read back as
+    /// made.
+    private func syncWeeklyStore() {
+        guard let weeklyStore else {
+            isWeeklyStoreDirty = false
+            return
+        }
+        let problem: WeeklyFullChargeStoreProblem = weekly == nil ? .notRemoved : .notSaved
+        do {
+            if let weekly {
+                try weeklyStore.saveWeeklyFullCharge(weekly)
+            } else {
+                try weeklyStore.removeWeeklyFullCharge()
+            }
+        } catch {
+            if weeklyStoreProblem != problem {
+                let what = problem == .notRemoved ? "the removal of the weekly full charge" : "the weekly full charge and its record"
+                record(.failure, "CellKeeper could not save \(what); it keeps using what is shown and tries again at its next check.", level: .error)
+                CellKeeperLog.settings.error("Could not save the weekly full charge: \(String(describing: error), privacy: .private)")
+            }
+            weeklyStoreProblem = problem
+            return
+        }
+        if weeklyStoreProblem != nil {
+            record(.override, "CellKeeper saved \(problem == .notRemoved ? "the removal of the weekly full charge" : "the weekly full charge and its record").")
+        }
+        weeklyStoreProblem = nil
+        isWeeklyStoreDirty = false
+    }
+
+    /// Checks the weekly full charge in use against `input` in `timeZone`.
+    /// A start or a passed occurrence moves the record in memory first, so
+    /// that it is never eligible again in this run; then the full charge is
+    /// installed (with no suspension point in between) or the outcome set,
+    /// and the store is brought in line. A failed write delays nothing: it
+    /// is retried at later evaluations. Returns how it met the override
+    /// running, if it started. Updates the next occurrence.
+    private func applyWeekly(to input: inout PolicyInput, timeZone: TimeZone) -> ScheduledStart? {
+        // Once per evaluation, after anything this evaluation handled.
+        defer {
+            if isWeeklyStoreDirty { syncWeeklyStore() }
+        }
+        guard let armed = weekly else {
+            weeklyDue = nil
+            weeklyNext = nil
+            return nil
+        }
+        var start: ScheduledStart?
+        var isHandled = false
+        switch armed.check(input: input, timeZone: timeZone) {
+        case .nothingDue:
+            weeklyDue = nil
+        case .waiting(let occurrence, let wait):
+            let due = WeeklyFullChargeDue(occurrence: occurrence, wait: wait)
+            if weeklyDue != due {
+                record(.override, "Weekly full charge (\(Self.describeTime(occurrence.startsAt))) is due but cannot start yet: \(wait).")
+            }
+            weeklyDue = due
+            weeklyWaitEvidence = (occurrence.day, wait)
+        case .passed(let occurrence):
+            isHandled = true
+            let lastWait = weeklyWaitEvidence.flatMap { $0.day == occurrence.day ? $0.wait : nil }
+            handleWeekly(occurrence, as: .passed)
+            weeklyOutcome = .windowPassed(occurrence, lastWait: lastWait)
+            let lastChecked = lastWait.map { " Last checked: \($0)." } ?? ""
+            record(.override, "Weekly full charge (\(Self.describeWindow(occurrence.window))): the window passed before the full charge could start.\(lastChecked)")
+        case .start(let occurrence, let remaining):
+            guard let candidate = ChargeOverride.scheduledFullCharge(at: input.now, uptime: input.overrideUptime, remaining: remaining) else { break }
+            isHandled = true
+            handleWeekly(occurrence, as: .started)
+            let how = installScheduledFullCharge(candidate, in: &input)
+            start = how
+            let window = Self.describeWindow(occurrence.window)
+            let deadline = Self.describeTime(activeOverride?.expiresAt ?? candidate.expiresAt)
+            switch how {
+            case .started:
+                weeklyOutcome = .started(occurrence)
+                record(.override, "Weekly full charge started (\(window)); it expires at about \(deadline). It ends at a check after the battery is full, you unplug, or it expires; CellKeeper then asks for its limit again.")
+            case .extended:
+                weeklyOutcome = .extendedRunning(occurrence)
+                record(.override, "Weekly full charge (\(window)): a temporary full charge was already running; it now expires at about \(deadline).")
+            case .kept(let deadlineRelation):
+                weeklyOutcome = .keptRunning(occurrence, deadline: deadlineRelation)
+                record(.override, "Weekly full charge (\(window)): a temporary full charge was already running, expiring \(Self.describe(deadlineRelation)), at about \(deadline); it continues unchanged.")
+            }
+        }
+        let next = weekly?.next(after: input.now, in: timeZone)
+        // A change for any other reason than time passing or an occurrence
+        // being handled: a time zone or clock change. Why is not guessed.
+        if !isHandled, let previous = weeklyNext, previous.startsAt > input.now, previous != next {
+            record(.override, "Next weekly full charge: \(next.map { Self.describeWindow($0.window) } ?? "none").")
+        }
+        weeklyNext = next
+        return start
+    }
+
+    /// Records `occurrence` as handled in memory, where this run reads it,
+    /// before anything else changes. The record only moves forward.
+    private func handleWeekly(_ occurrence: WeeklyFullChargeOccurrence, as result: WeeklyFullChargeRecord.Result) {
+        let handled = WeeklyFullChargeRecord(occurrence, result: result)
+        weekly?.handled = handled
+        weeklyHandledInRun = handled
+        weeklyDue = nil
+        weeklyWaitEvidence = nil
+        isWeeklyStoreDirty = true
+    }
+
     /// Checks the armed schedule against `input` and, if it starts, removes
     /// it from its store and installs its full charge in ``activeOverride``
-    /// and `input`, with no suspension point between them. Returns true if
-    /// this evaluation installed a new scheduled full charge.
+    /// and `input`, with no suspension point between them. Returns how it
+    /// met the override running, if it started.
     ///
     /// Everything here that concerns overrides (the new full charge's
     /// deadline, whether a running one is still live, and the displayed
@@ -494,20 +759,19 @@ public actor ChargeController {
     /// also judges expiry on. The backend calls made between `input.uptime`
     /// and `input.now` therefore neither shorten the new deadline nor skew
     /// the display, and the controller and the policy agree on liveness.
-    private func applySchedule(to input: inout PolicyInput) -> Bool {
-        let uptimeAtNow = input.overrideUptime
-        guard let armed = schedule else { return false }
+    private func applySchedule(to input: inout PolicyInput) -> ScheduledStart? {
+        guard let armed = schedule else { return nil }
         switch FullChargeSchedule.check(armed, input: input) {
         case .notYet:
             scheduleWait = nil
-            return false
+            return nil
         case .waiting(let wait):
             if scheduleWait != wait {
                 record(.override, "Scheduled full charge is due but cannot start yet: \(wait).")
             }
             scheduleWait = wait
             lastScheduleWait = wait
-            return false
+            return nil
         case .passed:
             scheduleStore?.removeSchedule()
             schedule = nil
@@ -516,56 +780,83 @@ public actor ChargeController {
             record(.override, "Scheduled full charge (\(Self.describeWindow(armed))): the scheduled window passed before the full charge could start.\(lastChecked)")
             scheduleWait = nil
             lastScheduleWait = nil
-            return false
+            return nil
         case .start(let remaining):
-            guard let candidate = ChargeOverride.scheduledFullCharge(at: input.now, uptime: uptimeAtNow, remaining: remaining) else {
-                return false
+            guard let candidate = ChargeOverride.scheduledFullCharge(at: input.now, uptime: input.overrideUptime, remaining: remaining) else {
+                return nil
             }
             scheduleStore?.removeSchedule()
             schedule = nil
             scheduleWait = nil
             lastScheduleWait = nil
             let window = Self.describeWindow(armed)
-            if var running = activeOverride, running.kind == .fullCharge, running.isLive(atUptime: uptimeAtNow) {
-                // Deadlines compare on the monotonic clock only: a wall-clock
-                // estimate can be wrong after a clock change. A running full
-                // charge is never shortened, so its deadline may be later
-                // than the schedule's end.
-                let isExtended = candidate.expiresAtUptime > running.expiresAtUptime
-                if isExtended {
-                    running.expiresAtUptime = candidate.expiresAtUptime
-                    running.source = .schedule
-                }
-                running.expiresAt = running.deadlineEstimate(now: input.now, uptime: uptimeAtNow)
-                activeOverride = running
-                input.activeOverride = running
-                let deadline = Self.describeTime(running.expiresAt)
-                if isExtended {
-                    scheduleOutcome = .extendedRunning(armed)
-                    record(.override, "Scheduled full charge (\(window)): a temporary full charge was already running; it now expires at about \(deadline).")
-                } else {
-                    scheduleOutcome = .keptRunning(armed)
-                    record(.override, "Scheduled full charge (\(window)): a temporary full charge was already running, expiring later, at about \(deadline); it continues unchanged.")
-                }
-                return false
+            let start = installScheduledFullCharge(candidate, in: &input)
+            let deadline = Self.describeTime(activeOverride?.expiresAt ?? candidate.expiresAt)
+            switch start {
+            case .started:
+                scheduleOutcome = .started(armed)
+                record(.override, "Scheduled full charge started (\(window)); it expires at about \(deadline). It ends at a check after the battery is full, you unplug, or it expires; CellKeeper then asks for its limit again.")
+            case .extended:
+                scheduleOutcome = .extendedRunning(armed)
+                record(.override, "Scheduled full charge (\(window)): a temporary full charge was already running; it now expires at about \(deadline).")
+            case .kept(let deadlineRelation):
+                scheduleOutcome = .keptRunning(armed, deadline: deadlineRelation)
+                record(.override, "Scheduled full charge (\(window)): a temporary full charge was already running, expiring \(Self.describe(deadlineRelation)), at about \(deadline); it continues unchanged.")
             }
-            if let previous = activeOverride {
-                if previous.isLive(atUptime: uptimeAtNow) {
-                    record(.override, "\(Self.describe(previous)) ended: the scheduled full charge started.")
-                } else {
-                    // Its monotonic deadline passed before this evaluation:
-                    // it expired, as the policy would have found.
-                    lastEndedOverride = EndedOverride(override: previous, end: .expired)
-                    overridesEnded += 1
-                    record(.override, "\(Self.describe(previous)) \(OverrideEnd.expired).")
-                }
-            }
-            activeOverride = candidate
-            input.activeOverride = candidate
-            scheduleOutcome = .started(armed)
-            record(.override, "Scheduled full charge started (\(window)); it expires at about \(Self.describeTime(candidate.expiresAt)). It ends at a check after the battery is full, you unplug, or it expires; CellKeeper then asks for its limit again.")
-            return true
+            return start
         }
+    }
+
+    /// How a schedule's full charge met the override already running.
+    private enum ScheduledStart {
+        /// It was installed, replacing a discharge session or an expired
+        /// override, if any.
+        case started
+        /// A live full charge took its later monotonic deadline.
+        case extended
+        /// A live full charge's monotonic deadline was later or the same;
+        /// it continues unchanged.
+        case kept(RunningDeadline)
+    }
+
+    /// Installs `candidate`, a schedule's full charge, in ``activeOverride``
+    /// and `input` by D82's rules, and says how. A live full charge keeps
+    /// the later of the two monotonic deadlines, so it is never shortened;
+    /// one whose monotonic deadline has passed is replaced as expired; a
+    /// discharge session is replaced. Liveness is judged on
+    /// `input.overrideUptime`, as the policy judges expiry.
+    private func installScheduledFullCharge(_ candidate: ChargeOverride, in input: inout PolicyInput) -> ScheduledStart {
+        let uptimeAtNow = input.overrideUptime
+        if var running = activeOverride, running.kind == .fullCharge, running.isLive(atUptime: uptimeAtNow) {
+            // Deadlines compare on the monotonic clock only: a wall-clock
+            // estimate can be wrong after a clock change. A running full
+            // charge is never shortened, so its deadline may be later than
+            // the schedule's end.
+            let isExtended = candidate.expiresAtUptime > running.expiresAtUptime
+            if isExtended {
+                running.expiresAtUptime = candidate.expiresAtUptime
+                running.source = .schedule
+            }
+            running.expiresAt = running.deadlineEstimate(now: input.now, uptime: uptimeAtNow)
+            activeOverride = running
+            input.activeOverride = running
+            if isExtended { return .extended }
+            return .kept(candidate.expiresAtUptime == running.expiresAtUptime ? .same : .later)
+        }
+        if let previous = activeOverride {
+            if previous.isLive(atUptime: uptimeAtNow) {
+                record(.override, "\(Self.describe(previous)) ended: the scheduled full charge started.")
+            } else {
+                // Its monotonic deadline passed before this evaluation: it
+                // expired, as the policy would have found.
+                lastEndedOverride = EndedOverride(override: previous, end: .expired)
+                overridesEnded += 1
+                record(.override, "\(Self.describe(previous)) \(OverrideEnd.expired).")
+            }
+        }
+        activeOverride = candidate
+        input.activeOverride = candidate
+        return .started
     }
 
     /// Derives the displayed deadline of the running override from its
@@ -799,6 +1090,7 @@ public actor ChargeController {
 
     private func performEvaluation(_ trigger: EvaluationTrigger) async {
         loadScheduleIfNeeded()
+        loadWeeklyIfNeeded()
         let previousSnapshot = snapshot
         do {
             let fresh = try await telemetry.currentSnapshot()
@@ -852,8 +1144,10 @@ public actor ChargeController {
         //   scheduled full charge's deadline, and the displayed deadline.
         //   An evaluation that straddles a deadline then ends the override,
         //   and the reads' duration does not shorten a new deadline.
+        // The time zone a weekly full charge is read in is taken with them.
         let evaluationNow = now()
         let uptimeAtNow = uptime()
+        let evaluationTimeZone = timeZone()
         var input = PolicyInput(
             now: evaluationNow,
             uptime: evaluationUptime,
@@ -874,8 +1168,10 @@ public actor ChargeController {
         )
         // After the backend's mode was read, so that an adoption that turned
         // management off in this evaluation is seen, and on the input the
-        // policy then evaluates.
-        let startedSchedule = applySchedule(to: &input)
+        // policy then evaluates. The one-shot first, then the weekly one: if
+        // both start, the second meets the first's full charge (D82).
+        let oneShotStart = applySchedule(to: &input)
+        let weeklyStart = applyWeekly(to: &input, timeZone: evaluationTimeZone)
         refreshOverrideDeadlineEstimate(in: &input)
         restrictingRequests.removeAll { input.uptime - $0.uptime >= 60 * 60 }
         let newDecision = ChargingPolicy.evaluate(input)
@@ -887,8 +1183,16 @@ public actor ChargeController {
             lastEndedOverride = EndedOverride(override: override, end: ended)
             overridesEnded += 1
             record(.override, "\(Self.describe(override)) \(ended).")
-            if startedSchedule, ended == .completed, case .started(let started)? = scheduleOutcome {
-                scheduleOutcome = .alreadyFull(started)
+            // Every schedule that started, extended or kept this full charge
+            // in this evaluation found the battery already full. There is
+            // still one override and one ending.
+            if ended == .completed {
+                if oneShotStart != nil, let outcome = scheduleOutcome {
+                    scheduleOutcome = outcome.foundAlreadyFull
+                }
+                if weeklyStart != nil, let outcome = weeklyOutcome {
+                    weeklyOutcome = outcome.foundAlreadyFull
+                }
             }
         }
         if Self.isMeaningfulChange(from: decision, to: newDecision) {
@@ -1701,6 +2005,35 @@ public actor ChargeController {
     /// A schedule's window for the activity log, in the system's time zone.
     static func describeWindow(_ schedule: FullChargeSchedule) -> String {
         "\(describeTime(schedule.startsAt)) to \(describeTime(schedule.endsAt))"
+    }
+
+    /// A weekly pattern for the activity log and the diagnostics report,
+    /// for example "every Mon, Fri at 07:00 for 12 hours", with fixed
+    /// English day names and a 24-hour time.
+    static func describe(_ pattern: WeeklyFullChargePattern) -> String {
+        let names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+        let days = pattern.weekdays.count == 7
+            ? "day"
+            : pattern.weekdays.sorted().compactMap { names.indices.contains($0 - 1) ? names[$0 - 1] : nil }.joined(separator: ", ")
+        let hours = pattern.durationHours == 1 ? "1 hour" : "\(pattern.durationHours) hours"
+        return "every \(days) at \(String(format: "%02d:%02d", pattern.hour, pattern.minute)) for \(hours)"
+    }
+
+    /// How a kept full charge's deadline compared, for the activity log.
+    static func describe(_ deadline: RunningDeadline) -> String {
+        switch deadline {
+        case .later: "later"
+        case .same: "at the same time"
+        }
+    }
+
+    /// What a weekly record's result means, in words.
+    static func describe(_ result: WeeklyFullChargeRecord.Result) -> String {
+        switch result {
+        case .started: "started"
+        case .passed: "passed before it could start"
+        case .beforeSave: "began before the schedule was saved"
+        }
     }
 
     static func describeTime(_ date: Date) -> String {

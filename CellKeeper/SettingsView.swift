@@ -119,6 +119,10 @@ private struct ChargingSettingsTab: View {
                 ScheduledFullChargeSection(model: model)
             }
 
+            Section("Weekly full charge") {
+                WeeklyFullChargeSection(model: model)
+            }
+
             if !isNative {
                 Section("Temperature protection") {
                     TemperatureProtectionControls(model: model)
@@ -185,11 +189,12 @@ private struct ScheduledFullChargeSection: View {
 
     var body: some View {
         let status = model.status
+        let now = status?.describedAt ?? Date()
         let isManaged = model.settings.isManagementEnabled
         if let schedule = status?.fullChargeSchedule {
-            LabeledContent("Scheduled", value: FullChargeScheduleWording.window(schedule))
+            LabeledContent("Scheduled", value: FullChargeScheduleWording.window(schedule, now: now))
             if let wait = status?.fullChargeScheduleWait {
-                Label(FullChargeScheduleWording.armedLine(schedule, wait: wait), systemImage: "exclamationmark.triangle")
+                Label(FullChargeScheduleWording.armedLine(schedule, wait: wait, now: now), systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
@@ -218,7 +223,7 @@ private struct ScheduledFullChargeSection: View {
                 .foregroundStyle(.red)
         }
         if let status {
-            Text(FullChargeScheduleWording.explanation(for: status, end: status.fullChargeSchedule?.endsAt ?? end))
+            Text(FullChargeScheduleWording.explanation(for: status, end: status.fullChargeSchedule?.endsAt ?? end, now: now))
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if let hint = FullChargeScheduleWording.overnightHint(for: status) {
@@ -230,6 +235,109 @@ private struct ScheduledFullChargeSection: View {
         Text("One temporary full charge, starting at most \(Int(FullChargeSchedule.maximumLeadTime / 86_400)) days ahead, with an end 1–\(Int(FullChargeSchedule.maximumWindow / 3600)) hours after the start. \(FullChargeScheduleWording.startConditions)")
             .font(.caption)
             .foregroundStyle(.secondary)
+    }
+}
+
+/// Settings › Charging's weekly full charge: an editor for the days, the
+/// start time and the duration, with Save; the one in use with its next
+/// start, an occurrence that is due, the latest one handled, and a store
+/// that could not keep up, with Remove (`WeeklyFullChargeWording`). Editing
+/// needs Manage charging on, like the scheduled full charge; removing never
+/// does.
+private struct WeeklyFullChargeSection: View {
+    let model: AppModel
+    /// The start stays an hour and a minute (`WeeklyFullChargeDraft`), never a
+    /// moment in the Mac's time zone, so a skipped hour or a time zone change
+    /// cannot move it.
+    @State private var draft = WeeklyFullChargeDraft()
+
+    var body: some View {
+        let status = model.status
+        let now = status?.describedAt ?? Date()
+        let weekly = status?.weeklyFullCharge
+        Group {
+            if let weekly {
+                LabeledContent("In use", value: WeeklyFullChargeWording.summary(weekly.pattern))
+                if let next = status?.weeklyFullChargeNext {
+                    Text(WeeklyFullChargeWording.nextLine(next, now: now))
+                        .font(.caption)
+                    if let note = WeeklyFullChargeWording.skipNote(next, pattern: weekly.pattern, now: now) {
+                        Text(note)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let due = status?.weeklyFullChargeDue {
+                    Label(WeeklyFullChargeWording.dueLine(due, now: now), systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+                if let last = WeeklyFullChargeWording.lastLine(weekly.handled, now: now) {
+                    Text(last)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let problem = status?.weeklyFullChargeStoreProblem {
+                Label(WeeklyFullChargeWording.storeProblemLine(problem), systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Group {
+                LabeledContent("Days") {
+                    HStack(spacing: 4) {
+                        ForEach(WeeklyFullChargeWording.weekdayOrder(), id: \.self) { day in
+                            Toggle(WeeklyFullChargeWording.shortName(of: day), isOn: Binding(
+                                get: { draft.weekdays.contains(day) },
+                                set: { isOn in
+                                    if isOn { draft.weekdays.insert(day) } else { draft.weekdays.remove(day) }
+                                }
+                            ))
+                            .toggleStyle(.button)
+                        }
+                    }
+                }
+                // Shown and read on a fixed day in GMT, so the picker gives
+                // back exactly the hour and minute it shows.
+                DatePicker("Start", selection: $draft.pickerTime, displayedComponents: .hourAndMinute)
+                    .environment(\.timeZone, WeeklyFullChargeDraft.pickerTimeZone)
+                    .environment(\.calendar, WeeklyFullChargeDraft.pickerCalendar)
+                Stepper(value: $draft.durationHours, in: WeeklyFullChargePattern.durationHoursRange) {
+                    LabeledContent("Duration", value: draft.durationHours == 1 ? "1 hour" : "\(draft.durationHours) hours")
+                }
+                Button(weekly == nil ? "Save Weekly Full Charge" : "Save Changes") { model.setWeeklyFullCharge(draft.pattern) }
+                    .disabled(!draft.pattern.issues.isEmpty || draft.pattern == weekly?.pattern)
+                    .help(WeeklyFullChargeWording.saveHelp)
+            }
+            .disabled(!model.settings.isManagementEnabled)
+            if weekly != nil {
+                Button("Remove Weekly Full Charge") { model.removeWeeklyFullCharge() }
+                    .help(WeeklyFullChargeWording.removeHelp)
+            }
+            if let outcome = status?.weeklyFullChargeOutcome, let line = WeeklyFullChargeWording.outcomeLine(outcome, now: now) {
+                Label(line, systemImage: "calendar")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let error = model.weeklyError {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+            Text(WeeklyFullChargeWording.explanation)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(WeeklyFullChargeWording.record)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        // The editor shows the pattern in use once it is known (loaded at
+        // launch, saved, or removed), and keeps the user's edits otherwise.
+        .onChange(of: weekly?.pattern, initial: true) { _, pattern in
+            guard let pattern else { return }
+            draft = WeeklyFullChargeDraft(pattern)
+        }
     }
 }
 

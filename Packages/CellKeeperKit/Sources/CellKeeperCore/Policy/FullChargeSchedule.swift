@@ -163,22 +163,44 @@ public enum FullChargeScheduleCheck: Sendable, Equatable {
 public enum FullChargeScheduleOutcome: Sendable, Equatable {
     /// It started a temporary full charge.
     case started(FullChargeSchedule)
-    /// It started a temporary full charge that the same evaluation found
-    /// already complete.
+    /// The full charge it started, extended or kept was complete in the
+    /// same evaluation.
     case alreadyFull(FullChargeSchedule)
     /// A full charge was already running; the schedule moved its monotonic
     /// deadline later. The running override shows the deadline in force.
     case extendedRunning(FullChargeSchedule)
-    /// A full charge was already running with a later monotonic deadline;
-    /// it continues unchanged. The running override shows the deadline in
-    /// force.
-    case keptRunning(FullChargeSchedule)
+    /// A full charge was already running with a monotonic deadline later
+    /// than, or the same as, the schedule's; it continues unchanged. The
+    /// running override shows the deadline in force.
+    case keptRunning(FullChargeSchedule, deadline: RunningDeadline)
     /// The window passed before the full charge could start. `lastWait` is
     /// the reason it last waited in this run, if it was seen waiting.
     case windowPassed(FullChargeSchedule, lastWait: FullChargeScheduleWait?)
     /// A stored schedule could not be read or was not valid, and was
     /// removed.
     case discarded(reason: String)
+
+    /// This outcome once the full charge it started, extended or kept
+    /// turned out complete in the same evaluation; other outcomes are
+    /// unchanged.
+    public var foundAlreadyFull: FullChargeScheduleOutcome {
+        switch self {
+        case .started(let schedule), .extendedRunning(let schedule), .keptRunning(let schedule, _):
+            .alreadyFull(schedule)
+        case .alreadyFull, .windowPassed, .discarded:
+            self
+        }
+    }
+}
+
+/// How the monotonic deadline of a full charge already running compared
+/// with a schedule's, when the schedule kept it unchanged.
+public enum RunningDeadline: Sendable, Equatable {
+    /// Later than the schedule's.
+    case later
+    /// The same as the schedule's, as when two schedules whose windows end
+    /// together start in one evaluation.
+    case same
 }
 
 /// A rejected schedule.

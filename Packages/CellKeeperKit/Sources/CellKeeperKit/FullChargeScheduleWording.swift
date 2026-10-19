@@ -9,31 +9,48 @@ import Foundation
 /// the full charge gets when it starts. Simulated and unavailable backends
 /// are said to change nothing.
 public enum FullChargeScheduleWording {
-    /// A date as the menu and Settings show it: weekday, day, month and time,
-    /// with the time zone when the local time occurs twice (the hour a
-    /// daylight-saving change repeats), so the instant is never ambiguous.
-    public static func format(_ date: Date, timeZone: TimeZone = .current, locale: Locale = .current) -> String {
-        format(date, timeZone: timeZone, locale: locale, withZone: isInRepeatedHour(date, timeZone: timeZone))
+    /// A date as the menu and Settings show it, in `calendar` (the user's):
+    /// weekday, day, month and time, with the year when it is not the year of
+    /// `now` (the time the caller's status describes) in that same calendar
+    /// and `timeZone`, and with the time zone when the local time occurs
+    /// twice (the hour a daylight-saving change repeats), so the instant is
+    /// never ambiguous.
+    public static func format(_ date: Date, timeZone: TimeZone = .current, locale: Locale = .current, calendar: Calendar = .current, now: Date) -> String {
+        format(date, timeZone: timeZone, locale: locale, calendar: calendar, now: now, withZone: isInRepeatedHour(date, timeZone: timeZone))
     }
 
-    static func format(_ date: Date, timeZone: TimeZone, locale: Locale, withZone: Bool) -> String {
+    static func format(_ date: Date, timeZone: TimeZone, locale: Locale, calendar: Calendar, now: Date, withZone: Bool) -> String {
         var style = Date.FormatStyle.dateTime.weekday(.abbreviated).day().month(.abbreviated).hour().minute()
+        if !isInSameYear(date, as: now, timeZone: timeZone, calendar: calendar) {
+            style = style.year()
+        }
         if withZone {
             style = style.timeZone(.specificName(.short))
         }
         style.timeZone = timeZone
+        // The calendar the year was compared in; `locale(_:)` does not set it.
+        style.calendar = calendar
         return date.formatted(style.locale(locale))
+    }
+
+    /// True if `date` and `now` fall in the same year (and era) of `calendar`
+    /// in `timeZone`.
+    static func isInSameYear(_ date: Date, as now: Date, timeZone: TimeZone, calendar: Calendar) -> Bool {
+        var calendar = calendar
+        calendar.timeZone = timeZone
+        return calendar.component(.year, from: date) == calendar.component(.year, from: now)
+            && calendar.component(.era, from: date) == calendar.component(.era, from: now)
     }
 
     /// The schedule's window, start to end. Both times carry the time zone
     /// when either occurs twice or the two would otherwise read the same.
-    public static func window(_ schedule: FullChargeSchedule, timeZone: TimeZone = .current, locale: Locale = .current) -> String {
+    public static func window(_ schedule: FullChargeSchedule, timeZone: TimeZone = .current, locale: Locale = .current, calendar: Calendar = .current, now: Date) -> String {
         var withZone = isInRepeatedHour(schedule.startsAt, timeZone: timeZone) || isInRepeatedHour(schedule.endsAt, timeZone: timeZone)
-        if !withZone, format(schedule.startsAt, timeZone: timeZone, locale: locale, withZone: false) == format(schedule.endsAt, timeZone: timeZone, locale: locale, withZone: false) {
+        if !withZone, format(schedule.startsAt, timeZone: timeZone, locale: locale, calendar: calendar, now: now, withZone: false) == format(schedule.endsAt, timeZone: timeZone, locale: locale, calendar: calendar, now: now, withZone: false) {
             withZone = true
         }
-        let start = format(schedule.startsAt, timeZone: timeZone, locale: locale, withZone: withZone)
-        let end = format(schedule.endsAt, timeZone: timeZone, locale: locale, withZone: withZone)
+        let start = format(schedule.startsAt, timeZone: timeZone, locale: locale, calendar: calendar, now: now, withZone: withZone)
+        let end = format(schedule.endsAt, timeZone: timeZone, locale: locale, calendar: calendar, now: now, withZone: withZone)
         return "\(start) – \(end)"
     }
 
@@ -55,11 +72,11 @@ public enum FullChargeScheduleWording {
 
     /// The menu's line for an armed schedule: its window, or, once it is
     /// due, why it cannot start yet.
-    public static func armedLine(_ schedule: FullChargeSchedule, wait: FullChargeScheduleWait?, timeZone: TimeZone = .current, locale: Locale = .current) -> String {
+    public static func armedLine(_ schedule: FullChargeSchedule, wait: FullChargeScheduleWait?, timeZone: TimeZone = .current, locale: Locale = .current, calendar: Calendar = .current, now: Date) -> String {
         guard let wait else {
-            return "Full charge scheduled: \(window(schedule, timeZone: timeZone, locale: locale))"
+            return "Full charge scheduled: \(window(schedule, timeZone: timeZone, locale: locale, calendar: calendar, now: now))"
         }
-        let end = format(schedule.endsAt, timeZone: timeZone, locale: locale)
+        let end = format(schedule.endsAt, timeZone: timeZone, locale: locale, calendar: calendar, now: now)
         return "Scheduled full charge is due but cannot start yet: \(waitText(wait)). It can still start until \(end)."
     }
 
@@ -91,8 +108,10 @@ public enum FullChargeScheduleWording {
             return nil
         case .alreadyFull:
             return "The scheduled full charge found the battery already full."
-        case .keptRunning:
+        case .keptRunning(_, .later):
             return "A temporary full charge was already running and expires later than the scheduled one would have, so the schedule changed nothing."
+        case .keptRunning(_, .same):
+            return "A temporary full charge was already running and expires when the scheduled one would have, so the schedule changed nothing."
         case .windowPassed(_, let lastWait):
             let lastChecked = lastWait.map { " Last checked: \(lastCheckedText($0))." } ?? ""
             return "The scheduled window passed before the full charge could start.\(lastChecked)"
@@ -103,10 +122,10 @@ public enum FullChargeScheduleWording {
 
     /// What a scheduled full charge does with the backend in charge, for
     /// Settings. `end` is the schedule's end, if one is set.
-    public static func explanation(for status: ControllerStatus, end: Date?, timeZone: TimeZone = .current, locale: Locale = .current) -> String {
+    public static func explanation(for status: ControllerStatus, end: Date?, timeZone: TimeZone = .current, locale: Locale = .current, calendar: Calendar = .current, now: Date) -> String {
         let capabilities = status.capabilities
         let limit = status.settings.chargeLimit
-        let until = end.map { format($0, timeZone: timeZone, locale: locale) } ?? "the end you choose"
+        let until = end.map { format($0, timeZone: timeZone, locale: locale, calendar: calendar, now: now) } ?? "the end you choose"
         let duration = "The full charge lasts for the time left until \(until) when it starts (longer only if a full charge that expires later is already running), or less if the battery is full or you unplug first."
         if case .unavailable(let reason) = capabilities.availability {
             return "\(status.backend.displayName) is unavailable (\(reason)), so a scheduled full charge changes nothing; CellKeeper only shows what it would do."
@@ -147,7 +166,7 @@ public enum FullChargeScheduleWording {
 public enum TemporaryFullChargeWording {
     /// The line for `override`, a running full charge. `lastResult` describes
     /// the last request, for a full charge that is not in effect.
-    public static func line(for override: ChargeOverride, status: ControllerStatus, lastResult: String?, timeZone: TimeZone = .current, locale: Locale = .current) -> String {
+    public static func line(for override: ChargeOverride, status: ControllerStatus, lastResult: String?, timeZone: TimeZone = .current, locale: Locale = .current, calendar: Calendar = .current, now: Date) -> String {
         let name = override.source == .schedule ? "Scheduled full charge" : "Temporary full charge"
         let capabilities = status.capabilities
         if case .unavailable = capabilities.availability {
@@ -167,7 +186,7 @@ public enum TemporaryFullChargeWording {
         guard let decision = status.decision, decision.state == .fullChargeOverride, status.currentMode == decision.desiredMode else {
             return "\(name) requested, not in effect" + (lastResult.map { " (\($0))" } ?? "") + "."
         }
-        let expiry = FullChargeScheduleWording.format(override.expiresAt, timeZone: timeZone, locale: locale)
+        let expiry = FullChargeScheduleWording.format(override.expiresAt, timeZone: timeZone, locale: locale, calendar: calendar, now: now)
         let endings = "at a check after the battery is full, you unplug, or it expires (about \(expiry))"
         let limit = status.settings.chargeLimit
         if capabilities.isEnforcedByMacOS {
