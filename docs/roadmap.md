@@ -24,7 +24,12 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
 85, 90, 95 and 100% steps.
 
 - Everything that needs no hardware write is built first (phase 4a).
-- No privileged helper ships without an Apple Developer ID. Private
+- No privileged helper ships to other Macs without an Apple Developer
+  ID. For the maintainer's own Mac, the owner chose on 2026-10-19 to sign
+  local helper builds with a free Apple ID (Personal Team, Apple
+  Development certificate); whether `SMAppService` registers a daemon
+  signed that way is unverified, and a manual `sudo` launch-daemon install
+  is the fallback. Private
   mechanisms are tried only on a test Mac: on 2026-10-19 the owner decided
   that the maintainer's Mac is that test Mac, and authorized one experiment
   on it, an owner-run test of Apple's private `ChargeInhibit` power
@@ -36,7 +41,9 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
   ([issue #74](https://github.com/SaltedTan/CellKeeper/issues/74)). The
   removal button and in-app recovery help moved to phase 4b (owner
   decision, 2026-10-18): until a helper is registered, there is nothing
-  real to remove. Phase 4b stays blocked on an Apple Developer ID. Phase
+  real to remove. Phase 4b's distributable form stays blocked on an
+  Apple Developer ID; a local build for the maintainer's Mac can use the
+  free Personal Team signing. Phase
   4c has had a test Mac since 2026-10-19; its first step, the
   `ChargeInhibit` probe, waits for the owner's run.
 - While both were blocked, the owner approved three smaller features on
@@ -194,6 +201,11 @@ hardware.
 ### Phase 4b — Signed helper (needs an Apple Developer ID)
 
 Tracked in [issue #57](https://github.com/SaltedTan/CellKeeper/issues/57).
+Distribution needs a Developer ID. For the maintainer's own Mac only, the
+owner decided on 2026-10-19 to use a free Personal Team (Apple
+Development) signature for local helper builds first ([research note 04](research/04-privileged-helper.md)
+§10 Q1: unverified with `SMAppService`; fallback: a manual `sudo`
+launch-daemon install).
 
 - Register the daemon with `SMAppService` and guide the user through
   approving it. Non-sandboxed, Hardened Runtime, notarized app and helper
