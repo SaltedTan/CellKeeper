@@ -411,7 +411,7 @@ the one experiment authorized in §2.
 | Charging stopped after | Not observed. Every reading showed charging. The one change in the battery's values during the hold, 46 s after creation, showed 2459 mA into the battery and 47 055 mW of system power input |
 | Charging resumed after the release | Not applicable: no stop was observed. At +140.1 s it was still charging, at 2536 mA and 81% |
 | Verdict | `no effect observed` |
-| Notes | The charge was 80% at the start, so `check` warned about Optimized Battery Charging (§5). That did not matter: charging went on. The battery's values changed only at +6.0, +66.0 and +92.1 s, so most rows repeat the previous values. The probe records no update time for them; that the battery publishes new values only about once a minute and when the charge changes is an inference `[INFERRED/UNVERIFIED]` |
+| Notes | The charge was 80% at the start, so `check` warned about Optimized Battery Charging (§5). No pause was observed: every reading showed charging. The battery's values changed only at +6.0, +66.0 and +92.1 s, so most rows repeat the previous values. The probe records no update time for them; that the battery publishes new values only about once a minute and when the charge changes is an inference `[INFERRED/UNVERIFIED]` |
 
 The report follows, with runs of identical sample rows shortened, the
 warning's text and the criteria (§4) left out, and the title and section
