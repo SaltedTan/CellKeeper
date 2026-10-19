@@ -17,7 +17,7 @@
   the app, its Xcode project or CellKeeperKit, and nothing ships from it.
 - **Tags and grades:** as in [note 02](02-charging-control-apple-silicon.md)
   (tag legend and grades A–E, X). Here, **B** is Apple open source, **A**
-  the public macOS 27.0 SDK, **C** reviewed open-source kernel work, **D**
+  the public macOS 27.0 SDK, **C** open-source kernel patches posted for review, **D**
   community tool documentation corroborated by several reports, **E** a
   single report, and **X** a read-only observation on this Mac.
 
@@ -87,18 +87,20 @@ binary.
 
 These are the decisions that note 10 §10 and the roadmap (phase 4c) said
 the adapter cut still needed ("SMC writes and the clean-room rule"); the
-owner made them on 2026-10-20, and the roadmap now says so. Two source
-reports cited below (S11, S12) also name a private entitlement that their
-author found by inspecting an Apple binary; as in note 02 §3.6, that name is
-not recorded here and nothing in this note or the probe depends on it.
+owner made them on 2026-10-20, and the roadmap now says so. Discussions
+around two sources cited below (S11, S12) mention a private entitlement
+(note 02 §3.6 records where such names come from); as there, no
+entitlement name is recorded here and nothing in this note or the probe
+depends on one.
 
 ## 3. Mechanism and sources
 
 Every fact below is cited with its source and licence, and graded. Facts
 about `CHIE`'s values are **third-party claims — unverified** until the
 owner's `run` confirms them on this Mac; the interface facts come from
-Apple's own open source and the public SDK. No code, comment or structure
-was copied from any source; the probe is written independently.
+Apple's own open source and the public SDK. No code or structure was
+copied from any source; facts are restated in this note's own words, and
+the probe is written independently.
 
 ### 3.1 The key, its type and size, and the cut/restore values
 
@@ -111,11 +113,11 @@ was copied from any source; the probe is written independently.
 
 **A disagreement, recorded.** The Linux `macsmc-power` driver
 (GPL-2.0-only OR MIT) does **not** use `CHIE`: it uses other keys for
-force-discharge and inhibit, and never mentions `CHIE` (S5, S6). Their
+force-discharge and inhibit, and never mentions `CHIE` (S6; the later version, S5, keeps those keys). Their
 values are outside the owner's exception and are not recorded here. The two user-space
 macOS tools (S1, S2) treat `CHIE` as the *newer* adapter key that replaced
 `CH0I`/`CH0J` on Tahoe-era firmware, and report that on 20457.x firmware the
-older keys are gone while `CHIE` remains (S1, S3). The Linux driver targets
+older keys are gone while `CHIE` remains (S3). The Linux driver targets
 the keys it supports on the hardware it was tested on (an M3), which did not
 include `CHIE`, so it neither confirms nor contradicts `CHIE` or its values;
 they rest on the two macOS tools alone (S1, S2). The probe writes **only**
@@ -124,7 +126,8 @@ they rest on the two macOS tools alone (S1, S2). The probe writes **only**
 ### 3.2 The AppleSMC user-client interface (to read and write one key)
 
 These facts come from Apple's own open source and the public SDK, and are
-corroborated by two permissively or weakly-copyleft OSS SMC clients. They
+corroborated by two open-source SMC clients, one permissive (SMCKit, MIT)
+and one strong copyleft (gosmc, GPL-2.0). They
 describe how to open the SMC user client and read or write **one** named
 key — not how to enumerate keys, which the probe never does.
 
@@ -132,11 +135,11 @@ key — not how to enumerate keys, which the probe never does.
 |---|---|---|---|---|
 | Service and user client | `IOServiceMatching("AppleSMC")` finds the SMC; `IOServiceOpen` opens a connection. In Apple's source the open uses type `1` and is followed by an `IOConnectCallMethod` with selector `kSMCUserClientOpen` (0), and closed with `kSMCUserClientClose` (1). The two OSS clients open with type `0` and make no open or close call. | Apple PowerManagement `pmconfigd/PrivateLib.c` (S7); SMCKit `SMC.swift` (S8); gosmc `driver_darwin.go` (S9) | Apple **APSL-2.0** (S7); SMCKit **MIT** (S8); gosmc **GPL-2.0** (S9) | `[PRIVATE/UNDOCUMENTED][IOKIT][SMC/HW]`, **B**; D; they **disagree** on the open type |
 | Selector | The struct method's selector is `kSMCHandleYPCEvent = 2` (gosmc uses the same value), called with `IOConnectCallStructMethod(conn, 2, &in, size, &out, &size)`. | S7, S8, S9 | as above | **B**; all three agree |
-| Command bytes (in `data8`) | `kSMCGetKeyInfo = 9`, `kSMCReadKey = 5`, `kSMCWriteKey = 6` (also `kSMCGetKeyCount = 7`, `kSMCGetKeyFromIndex = 8`, which the probe never uses). | S7, S8, S9 | as above | **B**; all three agree |
+| Command bytes (in `data8`) | `kSMCGetKeyInfo = 9`, `kSMCReadKey = 5`, `kSMCWriteKey = 6`, which all three agree on (also `kSMCGetKeyFromIndex = 8` in all three, and `kSMCGetKeyCount = 7` in Apple's source only; the probe uses neither). | S7, S8, S9 | as above | **B**; agree on 5, 6, 9 |
 | Result codes (output `result` byte) | `kSMCSuccess = 0`, `kSMCError = 1`, `kSMCKeyNotFound = 0x84` (132). Apple's source marks the key-not-found value as not yet verified. | S7, S8 | APSL-2.0; MIT | **B**; agree |
 | Parameter struct | `SMCParamStruct`: `key` (uint32); `vers` (SMCVersion: `major`/`minor`/`build`/`reserved` uint8, `release` uint16); `pLimitData` (version/length uint16, cpuPLimit/gpuPLimit/memPLimit uint32); `keyInfo` (`dataSize`, `dataType` uint32, `dataAttributes` uint8); `result` uint8; `status` uint8; `data8` uint8; `data32` uint32; `bytes[32]`. SMCKit adds an explicit `padding` uint16 before `result` and asserts the struct is **80 bytes**. | S7 (the struct and command enums), S8 (padding and the 80-byte assertion) | APSL-2.0; MIT | **B**; agree |
 | `dataSize` width | Apple declares `keyInfo.dataSize` as `IOByteCount`. In the public SDK, `IOByteCount` is 64-bit on arm64 user space and 32-bit on Intel (`IOTypes.h`, S10). gosmc instead uses a **fixed 32-bit** `dataSize` on every platform, matching the kext's wire format. | S7, S10 (IOByteCount); S9 (fixed uint32) | APSL-2.0; A; GPL-2.0 | **B**; A; a difference that matters on arm64 (§4) |
-| Read/write sequence | For both read and write, first a `kSMCGetKeyInfo` call (set `key`, `data8 = 9`) learns the key's `dataSize` and `dataType` and detects `kSMCKeyNotFound`; then the op call sets `keyInfo.dataSize` and `data8 = 5` (read) or `6` (write), with the payload in `bytes`. A write whose length differs from the key's `dataSize` is refused. Apple byte-swaps a read key's bytes (reverse order) except for `'ACID'`. | S7, S8, S9 | as above | **B**; agree |
+| Read/write sequence | For both read and write, first a `kSMCGetKeyInfo` call (set `key`, `data8 = 9`) learns the key's `dataSize` and `dataType` and detects `kSMCKeyNotFound`; then the op call sets `keyInfo.dataSize` and `data8 = 5` (read) or `6` (write), with the payload in `bytes`. gosmc refuses a write whose length differs from the key's `dataSize` (S9); Apple's writer (S7) and SMCKit (S8) do not check it, so the probe enforces it itself. Apple byte-swaps a read key's bytes (reverse order) except for `'ACID'`. | S7, S8, S9 | as above | **B**; agree |
 | FourCC packing | A 4-character key or type code is packed big-endian: `c0 << 24 | c1 << 16 | c2 << 8 | c3`. | S8, S9 | MIT; GPL-2.0 | C/D; agree |
 
 **What this means for writing one byte to `CHIE`.** Open the AppleSMC user
@@ -160,8 +163,11 @@ Design decisions for the interface, each written independently:
   decodes the 80 bytes at those offsets explicitly, rather than relying on
   a Swift struct's layout, and the tests check every offset.
 - **Opening.** `IOServiceOpen` with type `0` and no `kSMCUserClientOpen`
-  call, as the two tools reported to work on Apple silicon do (S8, S9);
-  Apple's type `1` and open/close calls (S7) come from an Intel-era release.
+  call, as gosmc does (S9); batt, which uses gosmc, is the client reported to
+  work on Apple silicon (S1, S12). SMCKit (S8) also opens with type `0`, but
+  describes itself as a client for Intel-based Macs. Apple's type `1` and
+  open/close calls (S7) are from an old release, presumably written for
+  Intel Macs `[INFERRED/UNVERIFIED]`.
 - **Confirmation before any write — one layout, no fallback.** The
   interface was written for the Intel SMC device, and on Apple silicon the
   matched service is an RTKit endpoint (§9). So the probe treats the
@@ -191,15 +197,14 @@ Design decisions for the interface, each written independently:
   `[INFERRED/UNVERIFIED]`
 - The adapter cut enforces **only while the Mac is awake**; it is not a
   firmware ceiling like the native limit. A tool using it disables the cut
-  before sleep, and a lid-closed Mac with the adapter cut goes to sleep
-  (S11, S12). `[INFERRED/UNVERIFIED]`
+  before sleep (S12). `[INFERRED/UNVERIFIED]`
 - A written key does **not** release itself. One tool re-applies and
   restores the key on exit, before sleep, and after an unclean kill
   (`SIGKILL`), recovering by re-detecting and restoring (S12). Whether
-  unplug/replug, sleep or a restart clears `CHIE` is **not reported**; Apple
-  says the SMC "resets automatically" on an Apple-silicon restart
-  (note 02 §1.8, S of that note), which suggests but does not confirm that a
-  restart clears it. `[INFERRED/UNVERIFIED]`
+  unplug/replug, sleep or a restart clears `CHIE` is **not reported**; Apple's
+  support article on resetting the SMC says it resets automatically on Macs
+  with Apple silicon (Apple Support 102605, note 02 §1.8 and its S3), which
+  suggests but does not confirm that a restart clears it. `[INFERRED/UNVERIFIED]`
 - Wear: cutting the adapter makes the battery go through many small
   discharge–charge cycles; one contributor stopped using such a build for that reason (S13).
   This is the opinion behind the 25% floor and the opt-in, wide-band design
@@ -251,7 +256,7 @@ Subcommands:
 
 - `check` — read-only, **no root needed** if the user client allows it:
   "in order to write values, the program must be run as root. This is not
-  required for reading values" (bclm, note 02 §3.8, a third-party claim). If
+  required for reading values" (bclm, MIT; cited in note 02 §3.8 as S20 — a third-party claim). If
   the user client cannot be opened without root, `check` FAILs and says so;
   it never asks for root. Opens the AppleSMC user client, reads `CHIE`'s type,
   size and value, and **FAILs** if the type is not `hex_` or the size is not
@@ -560,10 +565,10 @@ any of them.
   https://github.com/actuallymentor/battery . Supports: `CHIE` used for
   force-discharge; writing `08` to `CHIE` to cut and `00` to restore;
   a read of `00` meaning not discharging.
-- **S3** — actuallymentor/battery issue #469 (**MIT** project):
+- **S3** — actuallymentor/battery pull request #469 (**MIT** project):
   https://github.com/actuallymentor/battery/pull/469 . Supports: `CHIE`
   reads as type `hex_`, one byte `00`, while the inhibit and `bf*` keys are "no data" or
-  error, on an M1 Pro and an M4, macOS 27.0 (build 26A428).
+  error, in a comment from an M4 MacBook Air, macOS 27.0 (build 26A428).
 - **S4** — actuallymentor/battery PR #480 (**MIT** project, AI co-authored):
   https://github.com/actuallymentor/battery/pull/480 . Supports: `CHIE 08`
   with no native limit switches to "Battery Power", `ExternalConnected=No`
@@ -611,8 +616,8 @@ any of them.
   `IOByteCount32` (32-bit) on Intel — why a fixed 32-bit `dataSize` is used.
 - **S11** — charlie0129/batt issue #152 (**GPL-2.0** project):
   https://github.com/charlie0129/batt/issues/152 . Supports: `CHIE` readable
-  and "still writable" while the other charge keys are gated on 20457.x; the
-  adapter key as "the one lever still open".
+  and reported writable while the other charge keys are gated on 20457.x,
+  making it the only charge-related key left to use there.
 - **S12** — charlie0129/batt PR #154, "Add adapter mode …" (**GPL-2.0**
   project): https://github.com/charlie0129/batt/pull/154 . Supports: an
   adapter-cut limit cuts wall power at the upper limit and restores at the
