@@ -248,8 +248,9 @@ decision after that result.
   assertion for 60 s with a timeout, releases it, and reports whether
   charging stopped and resumed. Nothing ships from it. *Run by the owner on
   2026-10-19: no effect observed.* powerd accepted and released the
-  assertion, and the Mac kept charging while it was held, so
-  `ChargeInhibit` is not usable on this Mac, macOS build and firmware.
+  assertion, and every reading while it was held showed charging, so
+  `ChargeInhibit` stays unverified and is not added to the helper's
+  allowlist.
 - Follow research note 02 §7: a read-only, allowlisted capability probe,
   then single reversible writes, then the persistence matrix. Evaluate
   Apple's private `ChargeInhibit` power assertion first: Apple's published

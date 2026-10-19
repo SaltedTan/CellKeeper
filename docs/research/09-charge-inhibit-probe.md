@@ -2,8 +2,8 @@
 
 - **Date:** 2026-10-19
 - **Status:** The owner ran the probe once, on 2026-10-19. Result: **no
-  effect observed**. powerd accepted and released the assertion, and the
-  Mac kept charging while it was held (§10).
+  effect observed**. powerd accepted and released the assertion, and every
+  reading while it was held showed charging (§10).
 - **Machine:** Mac16,1 (MacBook Pro, Apple M4), macOS 27.0.1 (26A434),
   system firmware mBoot-20457.1.29. This is the maintainer's own Mac.
 - **Tool:** [`Tools/charge-inhibit-probe/`](../../Tools/charge-inhibit-probe/),
@@ -408,10 +408,10 @@ the one experiment authorized in §2.
 | IOReturn of creation | `0x0` (`kIOReturnSuccess`), at +20.0 s |
 | IOReturn of release (attempts) | `0x0` (`kIOReturnSuccess`), at +80.1 s, first attempt |
 | Listed by `pmset -g assertions` 2 s after creation / before / after the release | yes / yes / no |
-| Charging stopped after | Never. Every reading showed charging. The one battery update inside the hold, 46 s after creation, showed 2459 mA into the battery and 47 055 mW of system power input |
-| Charging resumed after the release | Not applicable: charging never stopped. At +140.1 s it was still charging, at 2536 mA and 81% |
+| Charging stopped after | Not observed. Every reading showed charging. The one change in the battery's values during the hold, 46 s after creation, showed 2459 mA into the battery and 47 055 mW of system power input |
+| Charging resumed after the release | Not applicable: no stop was observed. At +140.1 s it was still charging, at 2536 mA and 81% |
 | Verdict | `no effect observed` |
-| Notes | The charge was 80% at the start, so `check` warned about Optimized Battery Charging (§5). That did not matter: charging went on. The battery's values changed only at +6.0, +66.0 and +92.1 s. The probe reads every 2 s, but the values it reads were updated only about once a minute and when the charge changed, so most rows repeat the last update |
+| Notes | The charge was 80% at the start, so `check` warned about Optimized Battery Charging (§5). That did not matter: charging went on. The battery's values changed only at +6.0, +66.0 and +92.1 s, so most rows repeat the previous values. The probe records no update time for them; that the battery publishes new values only about once a minute and when the charge changes is an inference `[INFERRED/UNVERIFIED]` |
 
 The report follows, with runs of identical sample rows shortened, the
 warning's text and the criteria (§4) left out, and the title and section
@@ -485,8 +485,9 @@ macOS build and firmware.
   `IOPMAssertionRelease`. The release on request, one layer of §7's
   fail-safe, behaves as Apple's published source describes. Release at the
   timeout and on process exit were not exercised.
-- `[VERIFIED-EXPERIMENTALLY]` Holding it did not stop charging. The battery
-  update inside the hold, 46 s after creation, showed 2.46 A into the
+- `[VERIFIED-EXPERIMENTALLY]` No effect on charging was observed while it
+  was held: every reading showed charging. The one change in the battery's
+  values during the hold, 46 s after creation, showed 2.46 A into the
   battery and about 47 W of system power input. For comparison, while
   macOS's own limit held the battery at 80% (§9), the input was about 10 W
   with 0 mA into the battery.
@@ -496,11 +497,13 @@ macOS build and firmware.
   is consistent with note 02's finding that charge-inhibit paths are gated
   on this firmware.
 - **Not ruled out:** an effect that takes longer than about 46 s, or one
-  the battery reports only at a later update. Only one battery update fell
-  inside the 60 s hold. A run with `--hold 300` would cover about five; it
-  would be a second experiment, which needs a new owner decision (§2).
+  the battery reports only at a later update. The battery's values changed
+  once during the 60 s hold. If they change about once a minute
+  `[INFERRED/UNVERIFIED]`, a run with `--hold 300` would see about five
+  changes; it would be a second experiment, which needs a new owner
+  decision (§2).
 - **About the probe's criteria.** They assume a fresh reading every 2 s,
-  but the battery's values here changed about once a minute. Two
+  but the battery's values here changed only about once a minute. Two
   consequences for any later run, neither of which changes this verdict
   (no reading showed a stop):
   - A stop that first showed at the update 46 s after creation would have
@@ -513,9 +516,9 @@ macOS build and firmware.
 
 ### What it means for phase 4c
 
-- `ChargeInhibit` is not a usable mechanism for CellKeeper on this Mac as
-  it is today (macOS 27.0.1, firmware 20457.1.29). Nothing is added to the
-  helper's allowlist.
+- No effect was observed during this 60 s hold. `ChargeInhibit` stays
+  unverified for CellKeeper on this Mac (macOS 27.0.1, firmware
+  20457.1.29), and nothing is added to the helper's allowlist.
 - The candidates left in note 02 each need a separate owner decision (§2).
   By their descriptions, both stop the adapter's power rather than only
   the charging, so the Mac would run from its battery while plugged in

@@ -491,7 +491,7 @@ The goal is to let a future developer confirm or refute **one** mechanism on **o
 1. Does the "Set Battery Charge Limit" Shortcuts action accept a variable input? Does it have an "until tomorrow" option on the Mac? Is there a **Get** counterpart? Can a sandboxed app invoke `shortcuts run`?
 2. What do `pmset -g battlimit` fields mean (`Drain`, `IsEOC`, `NoChargeToFull`, `Owner`)? Is the getter stable across 27.x? Is there any public replacement?
 3. Does the native limit hold during sleep and across restart on this M4 / 20457.1.29? What happens when shut down? This needs a clean machine.
-4. Do the private `ChargeInhibit` / `DisableInflow` assertions affect charging on Apple silicon (macOS 26/27)? *For `ChargeInhibit` on this Mac: no effect observed. In an owner-run probe on 2026-10-19, powerd accepted and released the assertion, and charging went on while it was held (note 09 §10).*
+4. Do the private `ChargeInhibit` / `DisableInflow` assertions affect charging on Apple silicon (macOS 26/27)? *For `ChargeInhibit` on this Mac: no effect observed. In an owner-run probe on 2026-10-19, powerd accepted and released the assertion, and every reading while it was held showed charging (note 09 §10).*
 5. Is `CHIE` still writable by root on macOS 27.0.1 release firmware? Does an adapter cut survive unplug/replug, sleep and restart?
 6. Where does the `bf*` gating live? Is it macOS-kernel or firmware enforcement (the 15.8 conflict)? Will Apple extend gating to `CHIE`?
 7. When exactly did `CHTE`/`CHIE` replace `CH0B`/`CH0C`/`CH0I` (firmware build)?
