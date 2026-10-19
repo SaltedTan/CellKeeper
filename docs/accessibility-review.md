@@ -55,8 +55,8 @@ render is possible; Zoom and Hover Text are the system's aids there.
 
 ## Results
 
-All must and should findings are fixed, and every nit but three (M14, G9,
-G10, deferred below). Verified in the accessibility tree after the fixes:
+All must and should findings are fixed, and every nit but G10 (deferred
+below); M14 and G9 were fixed in a follow-up (below, D110). Verified in the accessibility tree after the fixes:
 the slider and steppers carry their value with its unit; the battery
 header, the menu's labelled values, the Battery details rows, the
 diagnostics rows and the activity events are one element each, and no
@@ -88,11 +88,26 @@ The code review of #93 found two problems in the first fixes, both fixed:
   changes, CellKeeper's own and status updates announce nothing
   (`BannerChange.announcement`).
 
+### Follow-up: why a button is disabled (M14, G9)
+
+A disabled "Charge to 100% once" (menu) or "Discharge Now…" (Settings ›
+Charging) now says why, in secondary text under the button in the menu
+and under the row's label in Settings, and as the button's accessibility
+hint; an enabled one shows nothing extra and keeps its help tag. One
+function in Kit enables each button and gives the reason, the first that
+applies in a fixed order: `FullChargeStart.refusal`, unchanged and shared
+with Start CellKeeper Full Charge, and `DischargeStart.refusal`, which
+enables "Discharge Now…" under exactly the conditions it had (a test
+compares it with the former predicate over more than 9,000 combinations
+of settings, backends, readings and overrides). Verified in the
+accessibility tree for eight statuses: a disabled button's AXHelp is the
+reason and the reason is also a text element; an enabled "Charge to 100%
+once" keeps its help tag as AXHelp, and an enabled "Discharge Now…" has
+none, as before; the Settings button's title element is still "Discharge
+to the limit" (D110).
+
 ### Deferred
 
-- **M14, G9** (nit): why "Charge to 100% once" or "Discharge Now…" is
-  disabled is said only in a help tag (M14) or not at all (G9). Showing it
-  needs new visible wording; left for a wording change, not this review.
 - **G10** (nit): Settings › Diagnostics shows the report's values ("12427
   mV"), whose units VoiceOver reads letter by letter. Spoken units there
   need a spoken form in Core's section model, which the golden-tested
@@ -101,11 +116,13 @@ The code review of #93 found two problems in the first fixes, both fixed:
 ### For the owner's Mac
 
 With VoiceOver: the slider's value and its 1% steps (M1, M2), the
-announcements of a refused setting and of Copy Diagnostics (G2, G4), and
-the weekly Start picker reading the time it shows (W6). With Full
-Keyboard Access: Tab through the menu and Settings, and the slider with
-the arrow keys (M2). With Increase Contrast: the warning and error text
-(M6). These belong with the other owner-only checks in issue #89.
+announcements of a refused setting and of Copy Diagnostics (G2, G4), the
+weekly Start picker reading the time it shows (W6), and a disabled
+"Charge to 100% once" or "Discharge Now…" giving its reason as a hint
+(M14, G9). With Full Keyboard Access: Tab through the menu and Settings,
+and the slider with the arrow keys (M2). With Increase Contrast: the
+warning and error text (M6). These belong with the other owner-only
+checks in issue #89.
 
 ## Findings
 
@@ -132,7 +149,7 @@ the arrow keys (M2). With Increase Contrast: the warning and error text
 | M11 | "Policy", "Wants", "Last action", `MenuBarView.swift:139-154` | Label and value are two elements (linked by a title element) | nit | Fixed: one element each |
 | M12 | Charge percentage, `MenuBarView.swift:58` | A fixed point size; no effect on macOS today, but it would not follow a text size | nit | Fixed: `@ScaledMetric`, 30 points at the standard size |
 | M13 | "Settings…" and "Quit CellKeeper", `MenuBarView.swift:34-41` | No ⌘, and ⌘Q on the buttons themselves (the hidden main menu has them) | nit | Fixed |
-| M14 | "Charge to 100% once" disabled, `MenuBarView.swift:381-382` | Why it is disabled is said only in its help tag, which keyboard users do not see | nit | Deferred |
+| M14 | "Charge to 100% once" disabled, `MenuBarView.swift:381-382` | Why it is disabled is said only in its help tag, which keyboard users do not see | nit | Fixed in the follow-up: the reason under the button and as its hint (D110) |
 | M15 | Icons in `Label`s | Hidden from accessibility by SwiftUI (verified); every icon has text beside it | pass | |
 
 ### Settings (`SettingsView.swift`, `Presentation.swift`, `AppModel.swift`)
@@ -147,7 +164,7 @@ the arrow keys (M2). With Increase Contrast: the warning and error text
 | G6 | Warning and error text, `SettingsView.swift:68, 89, 95, 135, 139, 194, 218, 288, 362, 474, 479, 485, 510` | As M6 | should | Fixed, as M6 |
 | G7 | Activity rows, `SettingsView.swift:578-592` | Kind, time and message are three elements in one row | nit | Fixed: one element |
 | G8 | About title, `SettingsView.swift:691-692` | Not a heading | nit | Fixed |
-| G9 | "Discharge Now…" disabled, `SettingsView.swift:98-101` | Why it is disabled is not shown | nit | Deferred |
+| G9 | "Discharge Now…" disabled, `SettingsView.swift:98-101` | Why it is disabled is not shown | nit | Fixed in the follow-up: the reason under the row's label and as the button's hint (D110) |
 | G10 | Diagnostics values with units, `DiagnosticsReport.swift` (Core) | "12427 mV", "6131 mAh": abbreviations, as in the report the tab mirrors | nit | Deferred |
 | G11 | Form sections, toggles, pickers, buttons, date pickers | Section titles are headings; every control has its label as title element (verified) | pass | |
 | G12 | Confirmation dialogs, `SettingsView.swift:102-110, 326-330, 500-504, 514-518` | Verified: Escape is Cancel in each; Return is the action in "Start Discharge", "Use macOS Charge Limit" and "Yes, my limit is 100%"; "Discard Record" (`role: .destructive`) has no default button | pass | |

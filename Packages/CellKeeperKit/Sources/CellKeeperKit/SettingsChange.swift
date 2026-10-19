@@ -164,6 +164,8 @@ public enum SettingsReconciliation {
 /// Whether "Charge to 100% once" can start a temporary full charge now. The
 /// menu's button and Start CellKeeper Full Charge share it; nil means it
 /// can. It needs a reading that shows a battery and external power.
+/// Otherwise it gives one reason, the first that applies: the menu shows it
+/// under the disabled button, and the action refuses with it (D97, D110).
 public enum FullChargeStart {
     public static func refusal(settings: ChargingSettings, status: ControllerStatus) -> String? {
         if let running = status.activeOverride {
@@ -181,4 +183,39 @@ public enum FullChargeStart {
         }
         return nil
     }
+}
+
+/// Whether Settings › Charging's "Discharge Now…" can start a discharge to
+/// the limit now; nil means it can, and the button is enabled exactly then.
+/// Otherwise one reason, the first that applies in this order: Manage
+/// charging, the limit's range (``ChargingPolicy/dischargeTargetRange``),
+/// the backend, a reading of the charge, external power, a charge above the
+/// limit, an override already running. Settings shows it under the disabled
+/// button (D110). The controller checks Manage charging, the range and a
+/// live override again when the command arrives (D108).
+public enum DischargeStart {
+    /// - Parameter status: the latest status; nil before the first, which
+    ///   reads as no reading.
+    public static func refusal(settings: ChargingSettings, status: ControllerStatus?) -> String? {
+        guard settings.isManagementEnabled else { return "Manage charging is off. Turn it on to discharge to the limit." }
+        let range = ChargingPolicy.dischargeTargetRange
+        guard range.contains(settings.chargeLimit) else { return "Discharging needs a limit of \(range.lowerBound)–\(range.upperBound)%." }
+        guard let status else { return noReading }
+        guard status.capabilities.supports(.forceDischarge) else { return "Discharging while plugged in is not available with the current backend." }
+        guard let snapshot = status.snapshot, let percent = snapshot.chargePercent else { return noReading }
+        guard snapshot.isOnExternalPower else {
+            return snapshot.powerSource == .battery
+                ? "The Mac is on battery. Connect power first."
+                : "CellKeeper has no battery reading that shows the Mac plugged in."
+        }
+        guard percent > settings.chargeLimit else { return "The battery is already at or below the limit." }
+        if let running = status.activeOverride {
+            return running.kind == .fullCharge
+                ? "A temporary full charge is running."
+                : "A discharge to the limit is already running."
+        }
+        return nil
+    }
+
+    private static let noReading = "CellKeeper has no reading of the battery's charge."
 }

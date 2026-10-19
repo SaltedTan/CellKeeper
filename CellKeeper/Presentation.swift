@@ -377,6 +377,34 @@ struct PendingSwitchNotice: View {
     }
 }
 
+/// Why a button is disabled (``FullChargeStart``, ``DischargeStart``),
+/// shown only while it is: under the button in the menu, under its row's
+/// label in Settings. Secondary text, not a warning tone: nothing is wrong.
+/// The button carries the same text as its accessibility hint
+/// (`disabledReasonHint(_:help:)`); the line stays readable on its own for
+/// VoiceOver users who turn hints off.
+struct DisabledReason: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+extension View {
+    /// The accessibility hint of a button that may be disabled: the reason
+    /// while it is (nil when enabled), otherwise `help`, its help tag, as
+    /// before. On macOS both are the element's AXHelp and the outer modifier
+    /// wins (verified), so this goes after `.help(_:)`; an empty hint would
+    /// remove the help tag's.
+    func disabledReasonHint(_ reason: String?, help: String = "") -> some View {
+        accessibilityHint(reason ?? help)
+    }
+}
+
 /// A small capsule label, tinted and outlined in `color`. The text keeps
 /// the label colour: coloured text on a tint of its own colour is too faint
 /// to read (2.2:1 to 4:1 against white).

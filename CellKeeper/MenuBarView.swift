@@ -452,20 +452,27 @@ private struct FullChargeControl: View {
                 }
                 .font(.caption)
             } else {
+                // One predicate enables the button and gives the reason.
+                let refusal = FullChargeStart.refusal(settings: model.settings, status: status)
+                let help = TemporaryFullChargeWording.buttonHelp(for: status)
                 HStack {
                     Button {
                         model.startFullCharge()
                     } label: {
                         Label("Charge to 100% once", systemImage: "arrow.up.to.line")
                     }
-                    .disabled(FullChargeStart.refusal(settings: model.settings, status: status) != nil)
-                    .help(TemporaryFullChargeWording.buttonHelp(for: status))
+                    .disabled(refusal != nil)
+                    .help(help)
+                    .disabledReasonHint(refusal, help: help)
                     Spacer()
                     if status.fullChargeSchedule == nil {
                         Button("Schedule…") { openScheduleSettings() }
                             .controlSize(.small)
                             .help("Schedule a temporary full charge in Settings › Charging.")
                     }
+                }
+                if let refusal {
+                    DisabledReason(text: refusal)
                 }
             }
             ScheduledFullChargeLines(model: model, status: status)
