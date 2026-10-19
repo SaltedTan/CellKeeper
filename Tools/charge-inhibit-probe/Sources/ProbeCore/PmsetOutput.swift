@@ -65,77 +65,88 @@ public enum ChargeLimitReport: Sendable, Equatable {
     }
 }
 
-/// The `ChargeInhibit` part of `pmset -g assertions`, reduced to structured
-/// fields.
+/// The `DisableInflow` and `ChargeInhibit` parts of `pmset -g assertions`,
+/// reduced to structured fields.
 ///
 /// In Apple's published pmset source (PowerManagement-1846.0.25.0.1,
-/// `pmset/pmset.m`), the system-wide summary lists `ChargeInhibit` only
-/// while its level is non-zero, and the per-process list prints, for every
-/// assertion, `pid N(process): [id] time Type named: "name"`. Only the level
-/// and, per ChargeInhibit, the holder's process name (if it is a safe name)
-/// and whether it is the probe's own assertion are kept. Assertion names,
-/// details and every other line are dropped, so nothing arbitrary reaches a
-/// report.
+/// `pmset/pmset.m`), the system-wide summary lists either type only while
+/// its level is non-zero, and the per-process list prints, for every
+/// assertion, `pid N(process): [id] time Type named: "name"`. Only the levels
+/// and, per assertion of either type, its type, the holder's process name
+/// (if it is a safe name) and whether it is the probe's own assertion are
+/// kept. Assertion names, details and every other line are dropped, so
+/// nothing arbitrary reaches a report.
 public struct AssertionListing: Sendable, Equatable {
-    public static let type = "ChargeInhibit"
+    /// The types the listing keeps.
+    public static let types = AssertionKind.allCases.map(\.type)
 
     public struct Holder: Sendable, Equatable {
+        /// The assertion's type, one of ``AssertionListing/types``.
+        public var type: String
         /// The holding process's name, or "[redacted]" (``Privacy/safeName(_:names:)``).
         public var process: String
-        /// Whether the assertion's name is exactly the probe's.
+        /// Whether the assertion's name is exactly the probe's name for its
+        /// type.
         public var isProbe: Bool
 
-        public init(process: String, isProbe: Bool) {
+        public init(type: String, process: String, isProbe: Bool) {
+            self.type = type
             self.process = process
             self.isProbe = isProbe
         }
 
         public var description: String {
-            "ChargeInhibit held by \(process) (\(isProbe ? "the probe's assertion" : "another assertion"))"
+            "\(type) held by \(process) (\(isProbe ? "the probe's assertion" : "another assertion"))"
         }
     }
 
-    /// The system-wide ChargeInhibit level, nil if the summary does not list it.
-    public var systemWideLevel: Int?
+    /// The system-wide levels by type; a type the summary does not list is
+    /// missing.
+    public var systemWideLevels: [String: Int]
     public var holders: [Holder]
 
-    public init(systemWideLevel: Int?, holders: [Holder]) {
-        self.systemWideLevel = systemWideLevel
+    public init(systemWideLevels: [String: Int] = [:], holders: [Holder] = []) {
+        self.systemWideLevels = systemWideLevels
         self.holders = holders
     }
 
-    /// Whether any ChargeInhibit assertion is listed.
-    public var listsAny: Bool { (systemWideLevel ?? 0) > 0 || !holders.isEmpty }
+    /// Whether any DisableInflow or ChargeInhibit assertion is listed.
+    public var listsAny: Bool { systemWideLevels.values.contains { $0 > 0 } || !holders.isEmpty }
 
-    /// Whether the probe's own assertion is listed.
-    public var listsProbe: Bool { holders.contains { $0.isProbe } }
+    /// Whether the probe's own assertion of `kind` is listed.
+    public func listsProbe(_ kind: AssertionKind) -> Bool {
+        holders.contains { $0.type == kind.type && $0.isProbe }
+    }
 
     /// A one-line summary for reports.
     public var summary: String {
         if holders.isEmpty {
-            return systemWideLevel.map { "a system-wide ChargeInhibit level of \($0) with no holder listed" } ?? "no ChargeInhibit"
+            let levels = Self.types.compactMap { type in
+                systemWideLevels[type].flatMap { $0 > 0 ? "a system-wide \(type) level of \($0)" : nil }
+            }
+            return levels.isEmpty ? "no DisableInflow or ChargeInhibit" : levels.joined(separator: " and ") + " with no holder listed"
         }
         return holders.map(\.description).joined(separator: "; ")
     }
 
     public static func parse(_ output: String, redacting names: [String] = []) -> AssertionListing {
-        var level: Int?
+        var levels: [String: Int] = [:]
         var holders: [Holder] = []
         for rawLine in output.split(whereSeparator: \.isNewline) {
             let line = rawLine.trimmingCharacters(in: .whitespaces)
-            guard line.contains(type) else { continue }
+            guard types.contains(where: { line.contains($0) }) else { continue }
             let fields = line.split(whereSeparator: \.isWhitespace)
-            if fields.count == 2, fields[0] == type, let value = Int(fields[1]) {
-                level = value
+            if fields.count == 2, types.contains(String(fields[0])), let value = Int(fields[1]) {
+                levels[String(fields[0])] = value
             } else if let holder = holder(in: line, names: names) {
                 holders.append(holder)
             }
         }
-        return AssertionListing(systemWideLevel: level, holders: holders)
+        return AssertionListing(systemWideLevels: levels, holders: holders)
     }
 
     /// The holder in a per-process line whose assertion type is exactly
-    /// ChargeInhibit, or nil.
+    /// DisableInflow or ChargeInhibit, or nil.
     static func holder(in line: String, names: [String]) -> Holder? {
         guard line.hasPrefix("pid "),
               let open = line.firstIndex(of: "("),
@@ -145,10 +156,10 @@ public struct AssertionListing: Sendable, Equatable {
         let process = String(line[line.index(after: open)..<close.lowerBound])
         // After the id: "time Type named: "name"".
         let parts = line[idEnd.upperBound...].split(separator: " ", maxSplits: 2, omittingEmptySubsequences: true)
-        guard parts.count == 3, parts[1] == type, parts[2].hasPrefix("named: \"") else { return nil }
+        guard parts.count == 3, let kind = AssertionKind(type: String(parts[1])), parts[2].hasPrefix("named: \"") else { return nil }
         let quoted = parts[2].dropFirst("named: \"".count)
-        let isProbe = quoted.hasSuffix("\"") && quoted.dropLast() == Substring(ProbeAssertion.name)
-        return Holder(process: Privacy.safeName(process, names: names), isProbe: isProbe)
+        let isProbe = quoted.hasSuffix("\"") && quoted.dropLast() == Substring(kind.name)
+        return Holder(type: kind.type, process: Privacy.safeName(process, names: names), isProbe: isProbe)
     }
 }
 

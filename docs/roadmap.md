@@ -33,7 +33,8 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
   mechanisms are tried only on a test Mac: on 2026-10-19 the owner decided
   that the maintainer's Mac is that test Mac, and authorized one experiment
   on it, an owner-run test of Apple's private `ChargeInhibit` power
-  assertion (phase 4c). No SMC access is authorized.
+  assertion (phase 4c), and after its result one more, of the private
+  `DisableInflow` assertion. No SMC access is authorized.
 - Phase 4a was completed on 2026-10-11, and its follow-ups on
   2026-10-17: the request pacer (#67) and three timing-sensitive tests
   ([issue #1](https://github.com/SaltedTan/CellKeeper/issues/1)). The
@@ -46,7 +47,8 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
   free Personal Team signing. Phase
   4c has had a test Mac since 2026-10-19; its first step, the
   `ChargeInhibit` probe, ran that day and showed no effect on charging.
-  Any next mechanism needs a new owner decision.
+  Its second, a `DisableInflow` probe, is built and waits for the owner's
+  run. Any mechanism after that needs a new owner decision.
 - While both were blocked, the owner approved three smaller features on
   2026-10-18, all done: Save Diagnostics… (milestone 3), opt-in
   notifications (milestone 3) and a one-shot scheduled full charge
@@ -239,7 +241,8 @@ confirmed 2026-10-09). On 2026-10-19 the owner decided to use that Mac
 once AlDente's helper is removed, and authorized one experiment: a test of
 `ChargeInhibit` that the owner runs with `sudo`. SMC reads and writes, the
 adapter cut, and any other private mechanism each need a separate owner
-decision after that result.
+decision after that result. After it, the owner authorized one more
+owner-run experiment, with Apple's private `DisableInflow` assertion.
 
 - **First step: the `ChargeInhibit` probe**
   ([research note 09](research/09-charge-inhibit-probe.md)). A standalone
@@ -251,6 +254,15 @@ decision after that result.
   assertion, and every reading while it was held showed charging, so
   `ChargeInhibit` stays unverified and is not added to the helper's
   allowlist.
+- **Second step: the `DisableInflow` probe**
+  ([research note 10](research/10-disable-inflow-probe.md)). The same
+  tool, now run with `--assertion disable-inflow`: it holds one
+  `DisableInflow` assertion for 180 s with a timeout and tells three
+  outcomes apart: no effect, charging stopped on adapter power, and the
+  adapter's power cut, with the Mac running from its battery while plugged
+  in. Its criteria now need readings of at least two battery updates,
+  which came a minute apart on this Mac. Read literally, Apple's published source predicts no effect on
+  Apple silicon (note 10 §3). *Built; not run yet.*
 - Follow research note 02 §7: a read-only, allowlisted capability probe,
   then single reversible writes, then the persistence matrix. Evaluate
   Apple's private `ChargeInhibit` power assertion first: Apple's published

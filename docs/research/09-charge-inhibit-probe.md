@@ -289,6 +289,13 @@ cannot be read fails. Warnings never stop a run.
 8. Set the Charge Limit (and Optimized Battery Charging) back the way you
    want them.
 
+Since [note 10](10-disable-inflow-probe.md), the tool needs the assertion
+named on its command line, so these steps now read
+`.build/release/charge-inhibit-probe check --assertion charge-inhibit` and
+`sudo .build/release/charge-inhibit-probe run --assertion charge-inhibit`,
+and such a run is judged by note 10's wider criteria (note 10 §4); §10
+records the run as it was made, with the commands above.
+
 ## 7. Safety
 
 - **What it changes.** One power assertion, held for the hold time (60 s by

@@ -1,4 +1,5 @@
 import Foundation
+import ProbeCore
 
 /// Run time on `CLOCK_MONOTONIC`, which on macOS keeps counting while the
 /// system sleeps (clock_gettime(3)), so a sleep shows up as a gap between
@@ -19,11 +20,17 @@ struct Clock: Sendable {
         Double(Self.nanoseconds() &- start) / 1_000_000_000
     }
 
+    /// Seconds since 1970, on the wall clock, for comparison with the
+    /// battery's `UpdateTime`.
+    static var unixNow: Double {
+        Date().timeIntervalSince1970
+    }
+
     /// Sleeps until `target` run seconds, in short steps so a stop request
     /// is seen quickly. Returns false if a stop was requested.
     func pause(until target: Double, stop: StopRequest) -> Bool {
         while true {
-            if stop.signal != nil { return false }
+            if stop.reason != nil { return false }
             let remaining = target - now
             if remaining <= 0 { return true }
             Thread.sleep(forTimeInterval: min(remaining, 0.1))
@@ -53,35 +60,63 @@ struct Clock: Sendable {
     }
 }
 
-/// The first SIGINT, SIGTERM or SIGHUP the probe received, if any.
-final class StopRequest: @unchecked Sendable {
-    private let lock = NSLock()
-    private var received: Int32?
+/// Why the run stopped early.
+enum StopReason: Equatable, CustomStringConvertible {
+    /// SIGINT, SIGTERM or SIGHUP.
+    case signal(Int32)
+    /// A system sleep notification, by its `IOMessage.h` name.
+    case sleep(String)
 
-    /// Records `signal`; returns false if one was already recorded.
-    func record(_ signal: Int32) -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        guard received == nil else { return false }
-        received = signal
-        return true
-    }
-
-    var signal: Int32? {
-        lock.lock()
-        defer { lock.unlock() }
-        return received
+    var description: String {
+        switch self {
+        case let .signal(number): signalName(number)
+        case let .sleep(message): "the system's \(message)"
+        }
     }
 }
 
-/// Writes to standard output or standard error at once, unbuffered.
+/// The first reason the probe was asked to stop, if any, and how many
+/// signals it received.
+final class StopRequest: @unchecked Sendable {
+    private let lock = NSLock()
+    private var first: StopReason?
+    private var signals = 0
+
+    /// Records `reason` if it is the first.
+    func record(_ reason: StopReason) {
+        lock.lock()
+        defer { lock.unlock() }
+        if first == nil { first = reason }
+    }
+
+    /// Records a signal; returns false if a signal was already received.
+    func recordSignal(_ number: Int32) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if first == nil { first = .signal(number) }
+        signals += 1
+        return signals == 1
+    }
+
+    var reason: StopReason? {
+        lock.lock()
+        defer { lock.unlock() }
+        return first
+    }
+}
+
+/// Writes to standard output or standard error at once, unbuffered, but
+/// never from the sleep queue: such a write is dropped (`ProbeConsole`).
 enum Console {
+    static let output = ProbeConsole { FileHandle.standardOutput.write(Data(($0 + "\n").utf8)) }
+    static let errors = ProbeConsole { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }
+
     static func out(_ line: String = "") {
-        FileHandle.standardOutput.write(Data((line + "\n").utf8))
+        output.write(line)
     }
 
     static func error(_ line: String) {
-        FileHandle.standardError.write(Data((line + "\n").utf8))
+        errors.write(line)
     }
 }
 

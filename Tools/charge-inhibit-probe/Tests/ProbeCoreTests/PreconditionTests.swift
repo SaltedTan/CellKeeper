@@ -13,23 +13,31 @@ struct PreconditionTests {
             aldenteService: .notFound,
             aldenteProcesses: ProcessScan(matches: [], unreadable: 0),
             otherBatteryDaemons: [],
-            assertions: AssertionListing(systemWideLevel: nil, holders: [])
+            assertions: AssertionListing()
         )
     }
 
-    func check(_ title: String, in state: SystemState) -> Check? {
-        Preconditions.evaluate(state).first { $0.title == title }
+    func check(_ title: String, in state: SystemState, _ assertion: AssertionKind = .disableInflow) -> Check? {
+        Preconditions.evaluate(state, assertion: assertion).first { $0.title == title }
     }
 
-    func failures(_ state: SystemState) -> [String] {
-        Preconditions.evaluate(state).filter { $0.status == .fail }.map(\.title)
+    func failures(_ state: SystemState, _ assertion: AssertionKind = .disableInflow) -> [String] {
+        Preconditions.evaluate(state, assertion: assertion).filter { $0.status == .fail }.map(\.title)
     }
 
-    @Test("A Mac that is charging on AC with nothing else in the way is ready")
+    @Test("A Mac that is charging on AC with nothing else in the way is ready, for either assertion")
     func allPass() {
-        let checks = Preconditions.evaluate(ready)
-        #expect(checks.allSatisfy { $0.status == .pass })
-        #expect(Preconditions.summary(checks).hasPrefix("READY"))
+        let inhibit = Preconditions.evaluate(ready, assertion: .chargeInhibit)
+        #expect(inhibit.allSatisfy { $0.status == .pass })
+        #expect(Preconditions.summary(inhibit, assertion: .chargeInhibit).hasPrefix("READY"))
+        #expect(Preconditions.summary(inhibit, assertion: .chargeInhibit).contains("run --assertion charge-inhibit"))
+
+        let inflow = Preconditions.evaluate(ready, assertion: .disableInflow)
+        #expect(!inflow.contains { $0.status == .fail })
+        // The one warning: Optimized Battery Charging, which the probe cannot read.
+        #expect(inflow.filter { $0.status == .warn }.map(\.title) == ["Optimized Battery Charging off"])
+        #expect(Preconditions.summary(inflow, assertion: .disableInflow).hasPrefix("READY"))
+        #expect(Preconditions.summary(inflow, assertion: .disableInflow).contains("run --assertion disable-inflow"))
     }
 
     @Test("Not charging: fails with the advice to raise macOS's Charge Limit")
@@ -39,7 +47,7 @@ struct PreconditionTests {
         let result = try #require(check("macOS is charging now", in: state))
         #expect(result.status == .fail)
         #expect(result.detail == "macOS isn't charging the battery now — raise macOS's Charge Limit to 100% (System Settings › Battery) and wait until it charges")
-        #expect(Preconditions.summary(Preconditions.evaluate(state)).hasPrefix("NOT READY"))
+        #expect(Preconditions.summary(Preconditions.evaluate(state, assertion: .disableInflow), assertion: .disableInflow).hasPrefix("NOT READY"))
     }
 
     @Test("Charging flag on, current still at zero: fails until charging is under way")
@@ -64,6 +72,47 @@ struct PreconditionTests {
         state.reading.averageCurrent = nil
         #expect(failures(state).contains("macOS is charging now"))
         #expect(failures(state).contains("Battery current readable"))
+    }
+
+    @Test("No battery update time, or no system power input, fails for either assertion")
+    func updateTimeAndInput() throws {
+        var state = ready
+        state.reading.updateTime = nil
+        for assertion in AssertionKind.allCases {
+            #expect(failures(state, assertion) == ["Battery update time readable"])
+        }
+        state = ready
+        state.reading.systemPowerIn = nil
+        for assertion in AssertionKind.allCases {
+            #expect(failures(state, assertion) == ["System power input readable"])
+        }
+        let readable = try #require(check("Battery update time readable", in: ready))
+        #expect(readable.status == .pass)
+        #expect(readable.detail.hasSuffix("s old"))
+    }
+
+    @Test("DisableInflow needs at least 40% to start; ChargeInhibit does not check it")
+    func minimumCharge() {
+        var state = ready
+        state.reading.percent = 39
+        #expect(failures(state, .disableInflow) == ["Charge at least 40%"])
+        #expect(failures(state, .chargeInhibit).isEmpty)
+        state.reading.percent = 40
+        #expect(failures(state, .disableInflow).isEmpty)
+        #expect(check("Charge in the recommended 50–74%", in: state)?.status == .warn)
+    }
+
+    @Test("DisableInflow warns when no read reports the adapter attached")
+    func adapterReported() {
+        var state = ready
+        state.reading.rawExternalConnected = false
+        #expect(check("Adapter reported attached", in: state)?.status == .pass)
+        state.reading.adapterAttached = false
+        let result = check("Adapter reported attached", in: state)
+        #expect(result?.status == .warn)
+        #expect(result?.detail.contains("cannot be told from an unplugged adapter") == true)
+        #expect(failures(state).isEmpty)
+        #expect(check("Adapter reported attached", in: state, .chargeInhibit) == nil)
     }
 
     @Test("On battery, or no battery: fails")
@@ -184,15 +233,32 @@ struct PreconditionTests {
         ])
     }
 
-    @Test("A ChargeInhibit someone else holds fails, because the probe's own would then change nothing; an unrunnable pmset fails too")
+    @Test("A ChargeInhibit or DisableInflow someone else holds fails, for either test; an unrunnable pmset fails too")
     func existingAssertion() throws {
+        let title = "No ChargeInhibit or DisableInflow assertion held"
         var state = ready
-        state.assertions = AssertionListing(systemWideLevel: 1, holders: [.init(process: "sometool", isProbe: false)])
-        let result = try #require(check("No ChargeInhibit assertion held", in: state))
+        state.assertions = AssertionListing(
+            systemWideLevels: ["ChargeInhibit": 1],
+            holders: [.init(type: "ChargeInhibit", process: "sometool", isProbe: false)]
+        )
+        let result = try #require(check(title, in: state))
         #expect(result.status == .fail)
         #expect(result.detail.contains("ChargeInhibit held by sometool (another assertion)"))
 
+        state.assertions = AssertionListing(systemWideLevels: ["DisableInflow": 1])
+        for assertion in AssertionKind.allCases {
+            let inflow = try #require(check(title, in: state, assertion))
+            #expect(inflow.status == .fail)
+            #expect(inflow.detail.contains("a system-wide DisableInflow level of 1 with no holder listed"))
+        }
+
         state.assertions = nil
-        #expect(check("No ChargeInhibit assertion held", in: state)?.status == .fail)
+        #expect(check(title, in: state)?.status == .fail)
+    }
+
+    @Test("The Optimized Battery Charging reminder is for DisableInflow only")
+    func optimizedChargingReminder() {
+        #expect(check("Optimized Battery Charging off", in: ready, .disableInflow)?.status == .warn)
+        #expect(check("Optimized Battery Charging off", in: ready, .chargeInhibit) == nil)
     }
 }
