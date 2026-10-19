@@ -191,7 +191,7 @@ Press and user reports (grade D/E):
   - `DisableInflow` with the comment "Disables AC Power Inflow (requires root to initiate)".
   - `ChargeInhibit` with the comment "Disables battery charging (requires root to initiate)".
 - **PowerManagement-1846.0.25.0.1** (S11):
-  - **Root check:** pmconfigd treats either assertion as requiring root (`propertiesDictRequiresRoot`).
+  - **Root check:** pmconfigd treats either assertion as requiring root (`propertiesDictRequiresRoot`). *Qualified in note 09 §3 (2026-10-19): as published, that function looks the type names up as keys of the properties dictionary, not as the `AssertType` value.*
   - **Forwarding:** on raise and release, pmconfigd forwards to the `AppleSmartBatteryManager` user client (`kSBUCChargeInhibit` / `kSBUCInflowDisable`). A non-smart-battery build path instead sets `IsCharging` / `ExternalConnected` to false on `IOPMPowerSource` services.
   - **Admin check:** the open-source `AppleSmartBatteryManagerUserClient` checks `kIOClientPrivilegeAdministrator` before calling `inhibitCharging()` / `disableInflow()`.
   - **Release on exit:** when a process dies, pmconfigd's `HandleProcessExit` **releases every assertion owned by that PID**. This fail-safe matters for design: a crashed client cannot leave this inhibit stuck.
@@ -491,7 +491,7 @@ The goal is to let a future developer confirm or refute **one** mechanism on **o
 1. Does the "Set Battery Charge Limit" Shortcuts action accept a variable input? Does it have an "until tomorrow" option on the Mac? Is there a **Get** counterpart? Can a sandboxed app invoke `shortcuts run`?
 2. What do `pmset -g battlimit` fields mean (`Drain`, `IsEOC`, `NoChargeToFull`, `Owner`)? Is the getter stable across 27.x? Is there any public replacement?
 3. Does the native limit hold during sleep and across restart on this M4 / 20457.1.29? What happens when shut down? This needs a clean machine.
-4. Do the private `ChargeInhibit` / `DisableInflow` assertions affect charging on Apple silicon (macOS 26/27)?
+4. Do the private `ChargeInhibit` / `DisableInflow` assertions affect charging on Apple silicon (macOS 26/27)? *For `ChargeInhibit` on this Mac, an owner-run probe is prepared (note 09, 2026-10-19).*
 5. Is `CHIE` still writable by root on macOS 27.0.1 release firmware? Does an adapter cut survive unplug/replug, sleep and restart?
 6. Where does the `bf*` gating live? Is it macOS-kernel or firmware enforcement (the 15.8 conflict)? Will Apple extend gating to `CHIE`?
 7. When exactly did `CHTE`/`CHIE` replace `CH0B`/`CH0C`/`CH0I` (firmware build)?
