@@ -139,15 +139,27 @@ As in note 09 §4, with these changes:
    - Released, or none was held: the probe records it and allows the sleep
      (`IOAllowPowerChange`).
    - Every attempt failed: the probe never allows the sleep and never says
-     the assertion was released. It writes one line to the console and to
-     the report file with plain `write(2)` calls, without waiting on the
-     main thread or its locks, and ends the process at once with
-     `_exit(3)` (the exit status of a run after which charging did not
-     resume). Exiting is the strongest release left: powerd frees every
-     assertion of a process that exits (`HandleProcessExit`, B; note 09
-     §7). Without an acknowledgement, the system waits until the client is
-     gone, or for its acknowledgement timeout (about 30 s, S3), before it
-     sleeps; that only delays the sleep, which is the safe direction
+     the assertion was released. It then takes these steps, in this order
+     (`EmergencyExit`):
+     1. It arms a 2 s exit deadline that depends on no lock, queue or
+        output: SIGALRM back to its default action, which ends the
+        process, and `alarm(2)`.
+     2. It appends one line to the report file, which it keeps open for
+        this (`O_APPEND`).
+     3. It writes the line to the console, best effort: one non-blocking
+        write each to standard error and standard output (`O_NONBLOCK` set
+        with `fcntl` and the descriptors' flags restored after). A full
+        pipe, for example output piped to a pager or `tee` that is not
+        reading, is skipped, not waited for.
+     4. It ends the process with `_exit(3)` (the exit status of a run
+        after which charging did not resume).
+
+     If a write still hangs, the deadline ends the process within 2 s.
+     Exiting is the strongest release left: powerd frees every assertion
+     of a process that exits (`HandleProcessExit`, B; note 09 §7). Without
+     an acknowledgement, the system waits until the client is gone, or for
+     its acknowledgement timeout (about 30 s, S3), before it sleeps; that
+     only delays the sleep, which is the safe direction
      `[INFERRED/UNVERIFIED]` for the shipping kernel. `_exit` rather than
      `exit`: it runs no exit handlers, which could wait on locks the main
      thread holds, and nothing is left to flush.
@@ -184,8 +196,16 @@ As in note 09 §4, with these changes:
    `charge-inhibit-probe-<assertion>-<timestamp>.txt`, for example
    `charge-inhibit-probe-disable-inflow-20261020-101500.txt` (`.gitignore`
    already covers `charge-inhibit-probe-*.txt`). If an assertion was held
-   and the last reading does not show charging on adapter power, the
-   report opens with the recovery steps (§7), whatever the verdict.
+   and either its release is not confirmed or the last reading does not
+   show charging on adapter power, the report opens with the recovery
+   steps (§7), whatever the verdict.
+9. **"Released" only when confirmed.** The console and the report say the
+   assertion was released only when `IOPMAssertionRelease` succeeded and,
+   where the probe checks it, `pmset -g assertions` no longer lists it. A
+   stop signal, a sleep notification and the end of the run are worded the
+   same way (`ReleaseWording`); otherwise they say "release attempted (N
+   tries) and failed — powerd releases it at its timeout or when the probe
+   exits", and the report opens with the recovery steps.
 
 Readings stay every 2 s, never catching up, on `CLOCK_MONOTONIC`, as in
 note 09.
@@ -323,7 +343,7 @@ every report prints them:
 The function is pure and covered by unit tests over synthetic runs, on
 the probe's real schedule, with every reading its own battery update or
 with the battery updating once a minute as on this Mac
-(`swift test --package-path Tools/charge-inhibit-probe`, 126 tests). Beyond
+(`swift test --package-path Tools/charge-inhibit-probe`, 134 tests). Beyond
 the cases note 09 §4 lists, which still pass with the new windows, they
 cover:
 
@@ -350,16 +370,28 @@ cover:
   the creation and across the release, each inconclusive;
 - on a sleep notification: a successful release before the
   acknowledgement; nothing held; and a failed release, with no
-  acknowledgement, no claim that it was released, and an exit with status
-  3; the teardown order on the normal path, after a stop signal and after
-  a sleep notification;
+  acknowledgement, no claim that it was released, and the emergency exit
+  with status 3, after which nothing else happens even when a fake exit
+  returns; the teardown order on the normal path, after a stop signal and
+  after a sleep notification;
+- the emergency exit's order (deadline, report line, console line, exit),
+  and, against a genuinely full pipe whose write end is blocking again,
+  that the console write returns at once (within 1 s; a watchdog drains
+  the pipe if it ever blocks), the report line is still written, and the
+  pipe's flags are restored; a report file that could not be opened;
+- "released" only when confirmed: the console line after SIGINT with a
+  failed release, the report's stop note (a failed release, an assertion
+  still listed or not checkable, nothing held), a whole report after a
+  failed release at the normal end or after SIGINT (no "released"
+  anywhere, recovery steps first), a release still listed or not
+  checkable (recovery steps first), and the verdict after a sleep notice;
 - a "did not resume" without 2 updates after the release (inconclusive,
   with the recovery steps first in the report); a stale update while held;
   a baseline of one update; a baseline update too old at creation;
 - a sleep notification; a charge below 25%; a hold shorter than the 90 s
   window; a failed release, no resume and a sleep gap, as before.
 
-Each key rule was mutation-checked on 2026-10-19: with any one of 30 rules
+Each key rule was mutation-checked on 2026-10-19: with any one of 40 rules
 disabled (the 2-update requirement, the same-second rule, the adapter and
 power-input conditions of a cut, the 90 s window, the floor, the sleep
 notices, the staleness and clock checks, the 2 updates after the release,
@@ -369,8 +401,11 @@ until the release, the report's recovery section, the baseline's and the
 creation's clock checks, the direct comparison of consecutive readings and
 of events with the reading before them, and, on a sleep notification, the
 release before the acknowledgement, no acknowledgement and an exit after a
-failed release, the failure line, and the teardown order), at least one
-test fails. `charge-inhibit-probe` builds with `-warnings-as-errors`, and CI
+failed release, the failure line, and the teardown order; and the emergency
+exit's deadline before any write, the report line before the console line,
+the non-blocking console write and the restored flags, and "released" only
+when confirmed in the signal line, the stop note, the recovery block and
+the sleep-notice verdict), at least one test fails. `charge-inhibit-probe` builds with `-warnings-as-errors`, and CI
 runs those tests on every matrix toolchain.
 
 ## 5. Preconditions
@@ -452,8 +487,8 @@ and Optimized Battery Charging may pause near 80%).
 - **If the adapter is cut** (outcome c), the Mac runs from its battery while
   the assertion is held. At the 10–16 W it draws while not charging, 300 s
   is about 1 Wh, a percent or two of a laptop battery
-  `[INFERRED/UNVERIFIED]`. The probe releases at once if the charge falls
-  below 25% (note 02 §7 puts the floor for an adapter cut at about 25–30%),
+  `[INFERRED/UNVERIFIED]`. The probe ends the hold and releases the
+  assertion at once if the charge falls below 25% (note 02 §7 puts the floor for an adapter cut at about 25–30%),
   and it refuses to start below 40% (§5). In Apple's published source, a
   fully discharged battery also re-enables inflow (§3, B; Intel path).
 - **Sleep.** A closed lid or the Apple menu still sleeps the Mac; the
@@ -466,8 +501,9 @@ and Optimized Battery Charging may pause near 80%).
   sleep notification, on a reading that ends the hold early, and in a
   `defer`; a failed release is retried; after a signal or a sleep
   notification, nothing is created. If the release fails on a sleep
-  notification, the probe does not allow the sleep and exits at once
-  (§4), so that powerd frees the assertion with the process. The assertion carries a timeout of
+  notification, the probe does not allow the sleep, records one line, and
+  exits; a 2 s deadline armed before any write ends it even if a write
+  hangs (§4), so that powerd frees the assertion with the process. The assertion carries a timeout of
   hold + 30 s with `TimeoutActionRelease`, and powerd releases every
   assertion of a process that exits. The idle-sleep assertion has its own
   timeout (the longest run plus 120 s) and is released after the private

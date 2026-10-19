@@ -74,6 +74,12 @@ enum RunCommand {
             return 1
         }
         giveToInvokingUser(fileName)
+        // Kept open for the sleep notification's emergency line, which must
+        // not have to open anything (`EmergencyExit`).
+        let reportDescriptor = open(fileName, O_WRONLY | O_APPEND)
+        defer {
+            if reportDescriptor >= 0 { close(reportDescriptor) }
+        }
 
         // 4. Signals: latch the stop, release at once, then finish the
         // report. Sleep: the same, before the system is allowed to sleep.
@@ -88,7 +94,7 @@ enum RunCommand {
             releaseIdleSleep: { idleSleep.release() },
             deregisterSleep: { sleepWatch.stop() }
         )
-        let signalSources = installSignalHandlers(teardown: teardown, stop: stop)
+        let signalSources = installSignalHandlers(kind: kind, teardown: teardown, stop: stop)
         defer {
             teardown.finish()
             signalSources.forEach { $0.cancel() }
@@ -106,13 +112,29 @@ enum RunCommand {
                 assertion: kind,
                 release: { teardown.stop() },
                 acknowledge: acknowledge,
-                record: { recordAtOnce($0, reportFile: fileName) },
-                terminate: { status in
-                    // `_exit`, not `exit`: it runs no exit handlers, which
-                    // could wait on locks the main thread holds; the line
-                    // above is already written, and powerd frees the
-                    // process's assertions however it ends.
-                    _exit(status)
+                record: { EmergencyExit.writeWithoutBlocking($0, to: STDERR_FILENO) },
+                emergencyExit: { line, status in
+                    EmergencyExit.perform(line, status: status, steps: EmergencyExit.Steps(
+                        armDeadline: {
+                            // Before any write: SIGALRM's default action ends
+                            // the process in 2 s, with no lock, queue or
+                            // output involved.
+                            signal(SIGALRM, SIG_DFL)
+                            alarm(EmergencyExit.deadline)
+                        },
+                        writeReport: { EmergencyExit.writeReport($0, to: reportDescriptor) },
+                        writeConsole: { line in
+                            EmergencyExit.writeWithoutBlocking(line, to: STDERR_FILENO)
+                            EmergencyExit.writeWithoutBlocking(line, to: STDOUT_FILENO)
+                        },
+                        exit: { status in
+                            // `_exit`, not `exit`: it runs no exit handlers,
+                            // which could wait on locks the main thread
+                            // holds, and nothing is left to flush. powerd
+                            // frees the process's assertions however it ends.
+                            _exit(status)
+                        }
+                    ))
                 }
             )
         })
@@ -246,7 +268,9 @@ enum RunCommand {
             verdict = .inconclusive(reason: notCreated)
         }
         if let reason = stop.reason {
-            notes.append("Stopped by \(reason) at +\(seconds(clock.now)); the probe released the assertion at once (if it held one).")
+            notes.append(ReleaseWording.stopNote(
+                "\(reason)", at: clock.now, release: release, stillHeld: holder.isHeld, assertion: kind
+            ))
             if creation == nil {
                 verdict = .inconclusive(reason: "the probe was stopped (\(reason)) before the assertion was created")
             }
@@ -289,7 +313,7 @@ enum RunCommand {
                 first = false
             }
             if let problem = Verdict.holdProblem(of: sample) {
-                notes.append("Released early, \(seconds(sample.time - created.time)) after creation, because \(problem); the run is inconclusive.")
+                notes.append("Ended the hold early, \(seconds(sample.time - created.time)) after creation, because \(problem); the run is inconclusive. The release's outcome is under Events.")
                 Console.out("  \(problem): releasing now")
                 releasedEarly = true
                 break
@@ -376,27 +400,12 @@ enum RunCommand {
         _ = chown(fileName, uid, gid)
     }
 
-    /// Writes one line to standard error and appends it to the report file,
-    /// with plain `write(2)` calls and no locks, for the sleep notification
-    /// when the probe is about to exit. Best effort.
-    static func recordAtOnce(_ line: String, reportFile: String) {
-        let text = "\n" + line + "\n"
-        text.withCString { pointer in
-            _ = write(STDERR_FILENO, pointer, strlen(pointer))
-            let file = open(reportFile, O_WRONLY | O_APPEND)
-            if file >= 0 {
-                _ = write(file, pointer, strlen(pointer))
-                close(file)
-            }
-        }
-    }
-
     /// SIGINT, SIGTERM and SIGHUP latch the stop (no assertion can be
     /// created after it), release the private assertion at once (the
-    /// teardown's first step), and ask the run to finish; a second signal
-    /// exits immediately (powerd releases both assertions on exit in any
-    /// case).
-    static func installSignalHandlers(teardown: Teardown, stop: StopRequest) -> [any DispatchSourceSignal] {
+    /// teardown's first step), say how that went (`ReleaseWording`), and ask
+    /// the run to finish; a second signal exits immediately (powerd releases
+    /// both assertions on exit in any case).
+    static func installSignalHandlers(kind: AssertionKind, teardown: Teardown, stop: StopRequest) -> [any DispatchSourceSignal] {
         let queue = DispatchQueue(label: "charge-inhibit-probe.signals")
         return [SIGINT, SIGTERM, SIGHUP].map { number in
             signal(number, SIG_IGN)
@@ -404,12 +413,7 @@ enum RunCommand {
             source.setEventHandler {
                 let outcome = teardown.stop()
                 if stop.recordSignal(number) {
-                    let held = if case .failed = outcome {
-                        "releasing the assertion failed; the probe tries again as it finishes, and powerd frees it when the probe exits"
-                    } else {
-                        "any assertion the probe held is released"
-                    }
-                    Console.error("\n\(signalName(number)): stopping. No assertion will be created, and \(held). Finishing the report; press Ctrl-C again to quit at once.")
+                    Console.error("\n" + ReleaseWording.signalLine(signalName(number), outcome: outcome, assertion: kind))
                 } else {
                     Console.error("\n\(signalName(number)) again: quitting.")
                     exit(128 + number)

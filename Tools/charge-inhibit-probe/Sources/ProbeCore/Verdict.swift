@@ -471,18 +471,17 @@ public enum Verdict: Sendable, Equatable {
         if let problem = baselineFreshnessProblem(baseline, at: creation.time, unixTime: creation.unixTime, criteria: criteria) {
             return .inconclusive(reason: problem)
         }
-        if let notice = run.sleepNotices.first {
-            return .inconclusive(reason: """
-                the system sent \(notice.message) at +\(seconds(notice.time)); the \
-                probe released the assertion on a sleep notice, and a sleeping Mac's \
-                readings say nothing
-                """)
-        }
         guard let release = run.release else {
             return .inconclusive(reason: "the probe did not release the assertion itself")
         }
         if let problem = releaseProblem(release, creation: creation, assertion: run.assertion) {
             return .inconclusive(reason: problem)
+        }
+        if let notice = run.sleepNotices.first {
+            return .inconclusive(reason: """
+                the system sent \(notice.message) at +\(seconds(notice.time)), and the \
+                probe ended the hold; a sleeping Mac's readings say nothing
+                """)
         }
         if let gap = largestGap(samples: samples, events: [creation.time, release.time]),
            gap.length > criteria.maxReadingGap {

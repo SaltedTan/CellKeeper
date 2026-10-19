@@ -99,12 +99,34 @@ public struct Report: Sendable {
     }
 
     /// Whether the report must open with the recovery steps: an assertion
-    /// was held, and the last reading does not show charging on adapter
-    /// power.
+    /// was held, and either its release is not confirmed (no release, a
+    /// failed one, or one `pmset -g assertions` still listed or could not
+    /// check) or the last reading does not show charging on adapter power.
     public func needsRecovery(criteria: Criteria = .standard) -> Bool {
-        guard let run, run.creation?.result == 0 else { return false }
-        guard let last = run.samples.max(by: { $0.time < $1.time }) else { return true }
-        return !Verdict.isChargingOnAdapter(last, criteria: criteria)
+        recoveryReason(criteria: criteria) != nil
+    }
+
+    /// Why the report opens with the recovery steps, or nil.
+    func recoveryReason(criteria: Criteria) -> String? {
+        guard let run, run.creation?.result == 0 else { return nil }
+        let type = assertion.type
+        guard let release = run.release else {
+            return "The probe did not release its \(type) assertion itself."
+        }
+        if release.result != 0 {
+            return "For the \(type) assertion, \(ReleaseWording.failed(attempts: release.attempts, result: release.result))."
+        }
+        if release.stillListed != false {
+            return """
+                The release of the \(type) assertion is not confirmed: pmset -g assertions \
+                \(release.stillListed == true ? "still listed it" : "could not be run to check") — \
+                powerd releases it at its timeout or when the probe exits.
+                """
+        }
+        guard let last = run.samples.max(by: { $0.time < $1.time }), Verdict.isChargingOnAdapter(last, criteria: criteria) else {
+            return "The last reading did not show charging on adapter power."
+        }
+        return nil
     }
 
     public func render(criteria: Criteria = .standard) -> String {
@@ -125,12 +147,9 @@ public struct Report: Sendable {
         out.append("           name \"\(assertion.name)\", hold \(hold) s, timeout \(ProbeAssertion.timeout(hold: hold)) s with TimeoutActionRelease")
         out.append("")
 
-        if needsRecovery(criteria: criteria) {
+        if let reason = recoveryReason(criteria: criteria) {
             heading("CHECK RECOVERY FIRST")
-            out.append(Self.wrap("""
-                The last reading did not show charging on adapter power. \
-                \(Verdict.recoverySteps(assertion))
-                """))
+            out.append(Self.wrap("\(reason) \(Verdict.recoverySteps(assertion))"))
             out.append("")
         }
 

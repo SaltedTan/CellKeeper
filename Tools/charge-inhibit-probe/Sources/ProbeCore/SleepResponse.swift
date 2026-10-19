@@ -20,13 +20,14 @@ public enum SleepResponse {
 
     /// Releases the private assertion through `release` (which also latches
     /// the run's stop), then:
-    /// - if it was released, or none was held, records that and calls
-    ///   `acknowledge`, which allows the sleep;
-    /// - if every attempt failed, records one line saying so, never
-    ///   acknowledges, and calls `terminate` with
-    ///   ``failedReleaseExitStatus``. In the probe, `terminate` ends the
-    ///   process at once and does not return: powerd frees every assertion
-    ///   of a process that exits (`HandleProcessExit` in Apple's published
+    /// - if `IOPMAssertionRelease` succeeded, or none was held, records that
+    ///   and calls `acknowledge`, which allows the sleep;
+    /// - if every attempt failed, never acknowledges, and hands one line
+    ///   saying so, and ``failedReleaseExitStatus``, to `emergencyExit`. In
+    ///   the probe that is ``EmergencyExit/perform(_:status:steps:)``: a 2 s
+    ///   exit deadline, the line in the report and on the console, and
+    ///   `_exit`; it does not return. powerd frees every assertion of a
+    ///   process that exits (`HandleProcessExit` in Apple's published
     ///   PowerManagement source), and without an acknowledgement the system
     ///   waits until the client is gone, or for its acknowledgement timeout
     ///   (about 30 s), before it sleeps.
@@ -36,7 +37,7 @@ public enum SleepResponse {
         release: () -> ReleaseOutcome,
         acknowledge: () -> Void,
         record: (String) -> Void,
-        terminate: (Int32) -> Void
+        emergencyExit: (_ line: String, _ status: Int32) -> Void
     ) -> ReleaseOutcome {
         let outcome = release()
         switch outcome {
@@ -47,8 +48,7 @@ public enum SleepResponse {
             record("kIOMessageSystemWillSleep: no \(assertion.type) assertion was held; allowed the sleep; the run is inconclusive.")
             acknowledge()
         case let .failed(result, attempts):
-            record(failureLine(assertion, result: result, attempts: attempts))
-            terminate(failedReleaseExitStatus)
+            emergencyExit(failureLine(assertion, result: result, attempts: attempts), failedReleaseExitStatus)
         }
         return outcome
     }
@@ -57,10 +57,10 @@ public enum SleepResponse {
     /// assertion was released.
     static func failureLine(_ assertion: AssertionKind, result: Int32, attempts: Int) -> String {
         """
-        kIOMessageSystemWillSleep: IOPMAssertionRelease (\(assertion.type)) failed \(attempts) \
-        \(attempts == 1 ? "time" : "times") (\(IOReturnName.describe(result))); the probe does not allow the \
-        sleep and exits now, and powerd frees every assertion of a process that exits. Run \
-        `pmset -g assertions` and follow the recovery steps (\(assertion.note) §7).
+        kIOMessageSystemWillSleep: for the \(assertion.type) assertion, \
+        \(ReleaseWording.failed(attempts: attempts, result: result)). The probe does not allow \
+        the sleep and exits now. Run `pmset -g assertions` and follow the recovery steps \
+        (\(assertion.note) §7).
         """
     }
 }
