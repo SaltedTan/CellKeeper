@@ -4,22 +4,25 @@ import IOKit.ps
 import ProbeCore
 
 /// Every read the probe makes of the system. All of them are read-only:
-/// IOPowerSources (public API), properties of the `AppleSmartBattery` and
-/// `IODeviceTree:/chosen` registry entries (`IORegistryEntryCreateCFProperty`;
-/// no user client is opened), `sysctlbyname`, the three fixed commands of
-/// ``ReadOnlyCommand`` (`pmset -g battlimit`, `pmset -g assertions`,
+/// IOPowerSources (public API, including `IOPSCopyExternalPowerAdapterDetails`),
+/// properties of the `AppleSmartBattery` and `IODeviceTree:/chosen`
+/// registry entries (`IORegistryEntryCreateCFProperty`; no user client is
+/// opened), `sysctlbyname`, the three fixed commands of ``ReadOnlyCommand``
+/// (`pmset -g battlimit`, `pmset -g assertions`,
 /// `launchctl print system/<AlDente helper>`), file existence checks,
 /// directory listings (names only), and the process table's executable
 /// paths and names (`proc_listallpids`, `proc_pidpath`, `proc_name`).
 ///
-/// Only allowlisted values are kept. The battery's description and registry
-/// entry also carry serial numbers; those keys are never read into a sample.
+/// Only allowlisted values are kept. The battery's description, its
+/// registry entry and the adapter details also carry serial numbers; those
+/// keys are never read into a sample.
 enum SystemReads {
     // MARK: Battery
 
-    /// One reading of the battery's charging state.
-    static func sample(time: Double, phase: Sample.Phase) -> Sample {
-        var sample = Sample(time: time, wallTime: Clock.wallTime(), phase: phase)
+    /// One reading of the battery's charging state, at `time` run seconds
+    /// and `unixTime` on the wall clock.
+    static func sample(time: Double, unixTime: Double, phase: Sample.Phase) -> Sample {
+        var sample = Sample(time: time, wallTime: Clock.wallTime(), phase: phase, unixTime: unixTime)
         readPowerSources(into: &sample)
         readSmartBattery(into: &sample)
         return sample
@@ -49,6 +52,13 @@ enum SystemReads {
             }
         }
 
+        // Whether there is an adapter, and its Watts; nothing else from the
+        // dictionary is kept (`Sample.adapter(from:)`).
+        let details = IOPSCopyExternalPowerAdapterDetails()?.takeRetainedValue() as? [String: Any]
+        let adapter = Sample.adapter(from: details)
+        sample.adapterAttached = adapter.attached
+        sample.adapterWatts = adapter.watts
+
         guard let battery else {
             sample.batteryPresent = false
             return
@@ -76,6 +86,8 @@ enum SystemReads {
         sample.instantCurrent = milliamps(property("InstantAmperage"))
         sample.registryIsCharging = bool(property("IsCharging"))
         sample.registryExternalConnected = bool(property("ExternalConnected"))
+        sample.rawExternalConnected = bool(property("AppleRawExternalConnected"))
+        sample.updateTime = int(property("UpdateTime"))
         if let charger = property("ChargerData") as? [String: Any],
            let reason = int(charger["NotChargingReason"]), reason >= 0 {
             sample.notChargingReason = UInt64(reason)
@@ -147,7 +159,7 @@ enum SystemReads {
         let others = Preconditions.batteryToolNames(in: daemonNames).map { Privacy.safeName($0, names: names) }
         let service = ReadOnlyCommand.launchctlPrintAlDente.run()
         return SystemState(
-            reading: sample(time: 0, phase: .baseline),
+            reading: sample(time: 0, unixTime: Clock.unixNow, phase: .baseline),
             chargeLimit: ChargeLimitReport.parse(ReadOnlyCommand.battlimit.run()?.successOutput),
             aldenteHelperFiles: aldente,
             aldenteService: LaunchdServiceState.parse(status: service?.status, output: (service?.output ?? "") + (service?.error ?? "")),
@@ -157,8 +169,8 @@ enum SystemReads {
         )
     }
 
-    /// `pmset -g assertions`, reduced to its ChargeInhibit fields; nil if
-    /// pmset could not be run.
+    /// `pmset -g assertions`, reduced to its DisableInflow and ChargeInhibit
+    /// fields; nil if pmset could not be run.
     static func assertionListing(redacting names: [String]) -> AssertionListing? {
         ReadOnlyCommand.assertions.run()?.successOutput.map { AssertionListing.parse($0, redacting: names) }
     }

@@ -102,7 +102,12 @@ public enum Preconditions {
             .sorted()
     }
 
-    public static func evaluate(_ state: SystemState, criteria: Criteria = .standard) -> [Check] {
+    /// For `disable-inflow`: the lowest charge to start at. If the adapter is
+    /// cut, the Mac runs from its battery for the hold, and longer if adapter
+    /// power does not come back; 40% leaves 15 points above the 25% floor.
+    public static let minimumStartCharge = 40
+
+    public static func evaluate(_ state: SystemState, assertion: AssertionKind, criteria: Criteria = .standard) -> [Check] {
         let reading = state.reading
         var checks: [Check] = []
 
@@ -132,6 +137,22 @@ public enum Preconditions {
             checks.append(Check(.fail, "Charge below 95%", "the charge could not be read"))
         }
 
+        if assertion == .disableInflow {
+            let title = "Charge at least \(minimumStartCharge)%"
+            if let percent = reading.percent {
+                if percent >= minimumStartCharge {
+                    checks.append(Check(.pass, title, "\(percent)%"))
+                } else {
+                    checks.append(Check(.fail, title, """
+                        \(percent)%: if the adapter's power is cut, the Mac runs from its \
+                        battery; charge it to \(minimumStartCharge)% or more (50–74% is best) first
+                        """))
+                }
+            } else {
+                checks.append(Check(.fail, title, "the charge could not be read"))
+            }
+        }
+
         let current = reading.current.map { "\($0) mA" } ?? "unknown"
         switch (reading.isCharging, reading.current) {
         case (nil, _):
@@ -157,6 +178,38 @@ public enum Preconditions {
             checks.append(Check(.pass, "Battery current readable", "Amperage \(average) mA (InstantAmperage not available; the average lags)"))
         } else {
             checks.append(Check(.fail, "Battery current readable", "AppleSmartBattery reports no battery current"))
+        }
+
+        if let age = reading.updateAge {
+            checks.append(Check(.pass, "Battery update time readable", "AppleSmartBattery UpdateTime, \(String(format: "%.0f", age)) s old"))
+        } else {
+            checks.append(Check(.fail, "Battery update time readable", """
+                AppleSmartBattery reports no UpdateTime, so readings that repeat one \
+                battery update cannot be told apart
+                """))
+        }
+
+        if let input = reading.systemPowerIn {
+            checks.append(Check(.pass, "System power input readable", "PowerTelemetryData.SystemPowerIn \(input) mW"))
+        } else {
+            checks.append(Check(.fail, "System power input readable", """
+                AppleSmartBattery reports no PowerTelemetryData.SystemPowerIn, so a \
+                cut adapter cannot be told from a weak one
+                """))
+        }
+
+        if assertion == .disableInflow {
+            let raw = reading.rawExternalConnected.map { $0 ? "yes" : "no" } ?? "unknown"
+            let details = reading.adapterAttached.map { $0 ? "an adapter" : "no adapter" } ?? "nothing"
+            let detail = "AppleRawExternalConnected: \(raw); IOPSCopyExternalPowerAdapterDetails: \(details)"
+            if reading.reportsAdapter {
+                checks.append(Check(.pass, "Adapter reported attached", detail))
+            } else {
+                checks.append(Check(.warn, "Adapter reported attached", """
+                    \(detail). Without either, an adapter cut cannot be told from an \
+                    unplugged adapter, and such a run is inconclusive
+                    """))
+            }
         }
 
         switch state.chargeLimit {
@@ -225,19 +278,21 @@ public enum Preconditions {
                 """))
         }
 
+        let held = "No ChargeInhibit or DisableInflow assertion held"
         if let assertions = state.assertions {
             if assertions.listsAny {
-                checks.append(Check(.fail, "No ChargeInhibit assertion held", """
+                checks.append(Check(.fail, held, """
                     pmset -g assertions lists \(assertions.summary). In Apple's \
-                    published source, powerd passes ChargeInhibit on to the battery \
-                    only when the first one is raised, so this probe's assertion \
-                    would change nothing: quit the process that holds it first
+                    published source, powerd passes each type on to the battery only \
+                    when the first one is raised, and either type held by another \
+                    process would confound the result: quit the process that holds \
+                    it first
                     """))
             } else {
-                checks.append(Check(.pass, "No ChargeInhibit assertion held", "pmset -g assertions lists none"))
+                checks.append(Check(.pass, held, "pmset -g assertions lists neither"))
             }
         } else {
-            checks.append(Check(.fail, "No ChargeInhibit assertion held", "pmset -g assertions could not be run, so an existing ChargeInhibit cannot be ruled out"))
+            checks.append(Check(.fail, held, "pmset -g assertions could not be run, so an existing one cannot be ruled out"))
         }
 
         if let percent = reading.percent, percent < 95 {
@@ -258,16 +313,23 @@ public enum Preconditions {
             }
         }
 
+        if assertion == .disableInflow {
+            checks.append(Check(.warn, "Optimized Battery Charging off", """
+                the probe cannot read this setting: turn it off for the whole test \
+                (\(chargeLimitAdvice)), so that macOS does not pause charging by itself
+                """))
+        }
+
         return checks
     }
 
     /// "READY …" or "NOT READY …", for the end of `check`.
-    public static func summary(_ checks: [Check]) -> String {
+    public static func summary(_ checks: [Check], assertion: AssertionKind) -> String {
         let failures = checks.filter { $0.status == .fail }.count
         let warnings = checks.filter { $0.status == .warn }.count
         let warned = warnings == 0 ? "" : " Read the \(warnings == 1 ? "warning" : "\(warnings) warnings") above."
         if failures == 0 {
-            return "READY: every precondition holds; `sudo charge-inhibit-probe run` may be started.\(warned)"
+            return "READY: every precondition holds; `sudo charge-inhibit-probe run --assertion \(assertion.rawValue)` may be started.\(warned)"
         }
         return "NOT READY: \(failures) \(failures == 1 ? "precondition fails" : "preconditions fail"); `run` would refuse.\(warned)"
     }

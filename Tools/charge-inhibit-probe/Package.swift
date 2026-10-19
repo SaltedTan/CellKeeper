@@ -1,8 +1,9 @@
 // swift-tools-version: 6.0
 //
-// charge-inhibit-probe — a standalone, owner-run test of Apple's private
-// `ChargeInhibit` power assertion (research note 09,
-// docs/research/09-charge-inhibit-probe.md).
+// charge-inhibit-probe — a standalone, owner-run test of one of Apple's
+// private power assertions, `DisableInflow` (research note 10,
+// docs/research/10-disable-inflow-probe.md) or `ChargeInhibit` (note 09,
+// docs/research/09-charge-inhibit-probe.md), chosen with `--assertion`.
 //
 // Not part of the CellKeeper app, its Xcode project or CellKeeperKit, and
 // never shipped. No third-party dependencies.
@@ -12,11 +13,14 @@
 //   `pmset -g assertions` output, and report formatting. No IOKit, no
 //   processes, no files. This is what the tests exercise.
 // - charge-inhibit-probe: the executable. `check` reads public
-//   IOPowerSources data, AppleSmartBattery registry properties, two
-//   `pmset -g` getters, `launchctl print` for AlDente's helper service, and
-//   the process table's executable paths and names, and changes nothing.
-//   `run` (root only, started by the owner with sudo) additionally creates
-//   and releases one `ChargeInhibit` assertion with a timeout.
+//   IOPowerSources data (including the adapter's presence and wattage),
+//   AppleSmartBattery registry properties, two `pmset -g` getters,
+//   `launchctl print` for AlDente's helper service, and the process table's
+//   executable paths and names, and changes nothing. `run` (root only,
+//   started by the owner with sudo) additionally registers for system sleep
+//   notifications (`IORegisterForSystemPower`), holds one public
+//   `PreventUserIdleSystemSleep` assertion for the run, and creates and
+//   releases one private assertion with a timeout.
 
 import PackageDescription
 

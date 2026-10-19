@@ -19,11 +19,17 @@ struct Clock: Sendable {
         Double(Self.nanoseconds() &- start) / 1_000_000_000
     }
 
+    /// Seconds since 1970, on the wall clock, for comparison with the
+    /// battery's `UpdateTime`.
+    static var unixNow: Double {
+        Date().timeIntervalSince1970
+    }
+
     /// Sleeps until `target` run seconds, in short steps so a stop request
     /// is seen quickly. Returns false if a stop was requested.
     func pause(until target: Double, stop: StopRequest) -> Bool {
         while true {
-            if stop.signal != nil { return false }
+            if stop.reason != nil { return false }
             let remaining = target - now
             if remaining <= 0 { return true }
             Thread.sleep(forTimeInterval: min(remaining, 0.1))
@@ -53,24 +59,48 @@ struct Clock: Sendable {
     }
 }
 
-/// The first SIGINT, SIGTERM or SIGHUP the probe received, if any.
+/// Why the run stopped early.
+enum StopReason: Equatable, CustomStringConvertible {
+    /// SIGINT, SIGTERM or SIGHUP.
+    case signal(Int32)
+    /// A system sleep notification, by its `IOMessage.h` name.
+    case sleep(String)
+
+    var description: String {
+        switch self {
+        case let .signal(number): signalName(number)
+        case let .sleep(message): "the system's \(message)"
+        }
+    }
+}
+
+/// The first reason the probe was asked to stop, if any, and how many
+/// signals it received.
 final class StopRequest: @unchecked Sendable {
     private let lock = NSLock()
-    private var received: Int32?
+    private var first: StopReason?
+    private var signals = 0
 
-    /// Records `signal`; returns false if one was already recorded.
-    func record(_ signal: Int32) -> Bool {
+    /// Records `reason` if it is the first.
+    func record(_ reason: StopReason) {
         lock.lock()
         defer { lock.unlock() }
-        guard received == nil else { return false }
-        received = signal
-        return true
+        if first == nil { first = reason }
     }
 
-    var signal: Int32? {
+    /// Records a signal; returns false if a signal was already received.
+    func recordSignal(_ number: Int32) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        return received
+        if first == nil { first = .signal(number) }
+        signals += 1
+        return signals == 1
+    }
+
+    var reason: StopReason? {
+        lock.lock()
+        defer { lock.unlock() }
+        return first
     }
 }
 
