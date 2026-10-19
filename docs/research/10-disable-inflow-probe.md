@@ -1,8 +1,10 @@
 # 10 — The DisableInflow probe (owner-run, on the maintainer's Mac)
 
 - **Date:** 2026-10-19
-- **Status:** Designed and built, not run. The owner authorized one run
-  (§2); its results go in §10.
+- **Status:** The owner ran the probe once, on 2026-10-20. Result: **no
+  effect observed**. powerd accepted and released the assertion, and every
+  reading while it was held, over three battery updates, showed adapter
+  power and charging (§10).
 - **Machine:** Mac16,1 (MacBook Pro, Apple M4), macOS 27.0.1 (26A434),
   system firmware mBoot-20457.1.29. This is the maintainer's own Mac.
 - **Tool:** [`Tools/charge-inhibit-probe/`](../../Tools/charge-inhibit-probe/),
@@ -642,24 +644,159 @@ was reported attached by both reads, at 68 W, and the system drew about
 
 ## 10. Results
 
-Not run yet. The owner sends the report; the lead fills in:
+The owner ran the probe once, on 2026-10-20, with the default options
+(`sudo .build/release/charge-inhibit-probe run --assertion disable-inflow`),
+following §6. This was the one experiment authorized in §2. It was also the
+first run of the root-only parts this note added to the probe: the sleep
+registration, the idle-sleep assertion and both releases worked as
+designed, and no sleep notification arrived.
 
 | Field | Value |
 |---|---|
-| Date and time | |
-| macOS build, firmware | |
-| Assertion, hold | `DisableInflow`, … s (timeout … s, `TimeoutActionRelease`) |
-| Sleep notifications registered; idle-sleep assertion IOReturn (creation / release) | |
-| IOReturn of creation | |
-| IOReturn of release (attempts) | |
-| Listed by `pmset -g assertions` 2 s after creation / before / after the release | |
-| Battery updates in the baseline / during the hold / after the release | |
-| Effect, and when it began | |
-| Adapter reported attached, and system power input, during the effect | |
-| Adapter power back, and charging resumed, after the release | |
-| Verdict | |
-| Adapter stayed plugged in (the owner's account) | |
-| Notes | |
+| Date and time | 2026-10-20 00:00:12 +11:00 |
+| macOS build, firmware | Mac16,1, macOS 27.0.1 (26A434), mBoot-20457.1.29 |
+| Assertion, hold | `DisableInflow`, 180 s (timeout 210 s, `TimeoutActionRelease`), after a 20 s baseline of 11 readings; readings continued for 180 s after the release |
+| Sleep notifications registered; idle-sleep assertion IOReturn (creation / release) | yes; `0x0` at +0.0 s / `0x0` at +380.1 s |
+| IOReturn of creation | `0x0` (`kIOReturnSuccess`), at +20.0 s |
+| IOReturn of release (attempts) | `0x0` (`kIOReturnSuccess`), at +200.1 s, first attempt |
+| Listed by `pmset -g assertions` 2 s after creation / before / after the release | yes / yes / no |
+| Battery updates in the baseline / during the hold / after the release | 2 (one 50 s before the run, one at +10.0 s) / 3 (about 50, 110 and 147 s after creation) / 4 |
+| Effect, and when it began | None observed. Every reading showed charging: the three updates during the hold showed 3056, 2551 and 2541 mA into the battery, and the charge rose from 80 to 81% |
+| Adapter reported attached, and system power input, during the hold | Attached in every reading (IOPowerSources AC power, `ExternalConnected` and `AppleRawExternalConnected` yes, a 68 W adapter); system power input 56 920, 50 493 and 51 316 mW at the three updates, against 65 770 mW in the baseline |
+| Adapter power back, and charging resumed, after the release | Not applicable: neither stopped. At +380.1 s it was still charging, at 2580 mA and 83% |
+| Verdict | `no effect observed` |
+| Adapter stayed plugged in (the owner's account) | Not stated in the owner's message. Every reading reports AC power and the adapter attached |
+| Notes | The charge was 80% at the start (`check` warned, §5); Optimized Battery Charging was to be off for the whole test (§6). After the run, the owner's `pmset -g assertions` listed neither `DisableInflow` nor `ChargeInhibit`, and no assertion of the probe's |
+
+The report follows, with runs of sample rows whose values only differ in
+the update's age shortened, the warnings' text and the criteria (§4) left
+out, and the title and section underlines removed; bracketed text is not
+in the report. It contains no serial numbers, user names or home paths.
+
+```text
+started:   2026-10-20 00:00:12 +11:00
+machine:   Mac16,1, macOS 27.0.1 (26A434), system firmware mBoot-20457.1.29
+assertion: type "DisableInflow" (private; Apple open source, IOKitUser IOPMLibPrivate.h)
+           name "CellKeeper disable-inflow probe", hold 180 s, timeout 210 s with TimeoutActionRelease
+
+Preconditions
+PASS  On AC power: IOPowerSources reports AC power (AppleSmartBattery ExternalConnected: yes)
+PASS  Battery present: the internal battery is present
+PASS  Charge below 95%: 80%
+PASS  Charge at least 40%: 80%
+PASS  macOS is charging now: IOPowerSources reports charging; battery current 3230 mA
+PASS  Battery current readable: InstantAmperage 3230 mA, Amperage 3230 mA
+PASS  Battery update time readable: AppleSmartBattery UpdateTime, 50 s old
+PASS  System power input readable: PowerTelemetryData.SystemPowerIn 64758 mW
+PASS  Adapter reported attached: AppleRawExternalConnected: yes; IOPSCopyExternalPowerAdapterDetails: an adapter
+PASS  macOS's Charge Limit is 100%: pmset -g battlimit: no battery level limits set
+PASS  No AlDente helper files: neither of its helper files exists
+PASS  AlDente helper not loaded: launchctl print system/com.apphousekitchen.aldente-pro-setapp.helper: could not find service
+PASS  No AlDente process running: no executable path or name in the process table matches AlDente
+PASS  No other battery-control daemon: no file name in /Library/LaunchDaemons or /Library/PrivilegedHelperTools suggests one
+PASS  No ChargeInhibit or DisableInflow assertion held: pmset -g assertions lists neither
+WARN  Charge in the recommended 50–74%: 80%: [warning about Optimized Battery Charging]
+WARN  Optimized Battery Charging off: the probe cannot read this setting: [reminder to turn it off]
+
+READY: every precondition holds; `sudo charge-inhibit-probe run --assertion disable-inflow` may be started. Read the 2 warnings above.
+
+Events
+sleep notifications: registered (IORegisterForSystemPower)
++0.0 s: IOPMAssertionCreateWithProperties (PreventUserIdleSystemSleep) returned 0x0 (kIOReturnSuccess)
++380.1 s: IOPMAssertionRelease (PreventUserIdleSystemSleep) returned 0x0 (kIOReturnSuccess)
+baseline: 11 readings before the assertion
++20.0 s: IOPMAssertionCreateWithProperties (DisableInflow) returned 0x0 (kIOReturnSuccess)
++200.1 s: IOPMAssertionRelease (DisableInflow) returned 0x0 (kIOReturnSuccess)
++22.1 s: 2 s after creation: pmset -g assertions listed the probe's DisableInflow
+    DisableInflow held by charge-inhibit-probe (the probe's assertion)
++200.1 s: just before the release: pmset -g assertions listed the probe's DisableInflow
+    DisableInflow held by charge-inhibit-probe (the probe's assertion)
++200.1 s: just after the release: pmset -g assertions did not list the probe's DisableInflow
+
+Samples (every 2 s)
+clock          time phase     AC   charging   charged     %  mA instant/avg   reg.charging  reg.ext  raw.ext  adapter  NotChargingReason  SysPowerIn mW  upd.age  state
+00:00:12    +0.0 baseline  yes  yes        -          80   3230/3230        yes           yes      yes      68 W     0x0                64758          50 s     charging
+  [… 3 rows with the same values, the update age rising …]
+00:00:20    +8.0 baseline  yes  yes        -          80   3230/3230        yes           yes      yes      68 W     0x0                64758          58 s     charging
+00:00:22   +10.0 baseline  yes  yes        -          80   3265/3265        yes           yes      yes      68 W     0x0                65770          0 s      charging
+  [… 4 rows with the same values, the update age rising …]
+00:00:32   +20.0 baseline  yes  yes        -          80   3265/3265        yes           yes      yes      68 W     0x0                65770          10 s     charging
+00:00:34   +22.1 held      yes  yes        -          80   3265/3265        yes           yes      yes      68 W     0x0                65770          12 s     charging
+  [… 22 rows with the same values, the update age rising …]
+00:01:20   +68.1 held      yes  yes        -          80   3265/3265        yes           yes      yes      68 W     0x0                65770          58 s     charging
+00:01:22   +70.1 held      yes  yes        -          80   3056/3056        yes           yes      yes      68 W     0x0                56920          0 s      charging
+  [… 28 rows with the same values, the update age rising …]
+00:02:20  +128.1 held      yes  yes        -          80   3056/3056        yes           yes      yes      68 W     0x0                56920          58 s     charging
+00:02:22  +130.1 held      yes  yes        -          80   2551/2551        yes           yes      yes      68 W     0x0                50493          0 s      charging
+  [… 17 rows with the same values, the update age rising …]
+00:02:58  +166.1 held      yes  yes        -          80   2551/2551        yes           yes      yes      68 W     0x0                50493          36 s     charging
+00:03:00  +168.0 held      yes  yes        -          81   2541/2541        yes           yes      yes      68 W     0x0                51316          1 s      charging
+  [… 15 rows with the same values, the update age rising …]
+00:03:32  +200.1 held      yes  yes        -          81   2541/2541        yes           yes      yes      68 W     0x0                51316          33 s     charging
+00:03:34  +202.1 after     yes  yes        -          81   2541/2541        yes           yes      yes      68 W     0x0                51316          35 s     charging
+  [… 11 rows with the same values, the update age rising …]
+00:03:58  +226.1 after     yes  yes        -          81   2541/2541        yes           yes      yes      68 W     0x0                51316          59 s     charging
+00:04:00  +228.1 after     yes  yes        -          81   2446/2446        yes           yes      yes      68 W     0x0                57602          1 s      charging
+  [… 12 rows with the same values, the update age rising …]
+00:04:26  +254.1 after     yes  yes        -          81   2446/2446        yes           yes      yes      68 W     0x0                57602          27 s     charging
+00:04:28  +256.1 after     yes  yes        -          82   2531/2531        yes           yes      yes      68 W     0x0                51730          1 s      charging
+  [… 28 rows with the same values, the update age rising …]
+00:05:26  +314.1 after     yes  yes        -          82   2531/2531        yes           yes      yes      68 W     0x0                51730          59 s     charging
+00:05:28  +316.1 after     yes  yes        -          82   2579/2579        yes           yes      yes      68 W     0x0                52854          1 s      charging
+  [… 12 rows with the same values, the update age rising …]
+00:05:54  +342.1 after     yes  yes        -          82   2579/2579        yes           yes      yes      68 W     0x0                52854          27 s     charging
+00:05:56  +344.1 after     yes  yes        -          83   2580/2580        yes           yes      yes      68 W     0x0                52071          2 s      charging
+  [… 17 rows with the same values, the update age rising …]
+00:06:32  +380.1 after     yes  yes        -          83   2580/2580        yes           yes      yes      68 W     0x0                52071          38 s     charging
+
+Verdict: no effect observed
+powerd accepted the assertion, and every reading in the 180.0 s it was held
+showed charging, over at least 2 battery updates made after its creation. No
+effect was observed during the measured hold on this Mac, macOS build and
+firmware.
+```
+
+### Interpretation
+
+- `[VERIFIED-EXPERIMENTALLY]` On this Mac, macOS build and firmware,
+  powerd accepts a `DisableInflow` assertion from a root process, lists it
+  while it is held, and no longer lists it just after
+  `IOPMAssertionRelease`, as it did for `ChargeInhibit` (note 09 §10).
+- `[VERIFIED-EXPERIMENTALLY]` No effect on adapter power or charging was
+  observed while it was held. All three battery updates made during the
+  180 s hold showed 2.5–3.1 A into the battery, the adapter attached and
+  50–57 W of system power input; an adapter cut would have shown
+  discharging and an input near zero, an inhibit a current near zero. The
+  input fell from about 66 W as the charging current fell; it never
+  approached the 1000 mW the verdict uses for a cut.
+- `[VERIFIED-EXPERIMENTALLY]` The probe's battery-update rules (§4) worked
+  as designed: `UpdateTime` advanced about once a minute, and also when the
+  charge changed (+168.0 s and +256.1 s, 80→81% and 81→82%, 37 and 28 s
+  after the previous update).
+- `[INFERRED/UNVERIFIED]` The result matches what Apple's published source
+  predicts when read literally (§3): `AppleSmartBatteryManager` acts on an
+  inflow-disable request only in Intel builds. Whether the shipping
+  macOS 27 powerd forwards the request, and the driver ignores it, or
+  powerd never forwards it, the run cannot tell.
+- **Not ruled out:** an effect after more than about 147 s (the last
+  update inside the hold), an effect in sleep, or one on other Macs,
+  macOS builds or firmware. With three updates during the hold showing
+  steady charging, a delayed effect is unlikely `[INFERRED/UNVERIFIED]`.
+
+### What it means for phase 4c
+
+- No effect was observed for either of Apple's private assertions on this
+  Mac (note 09 §10, and this run). Both stay unverified for CellKeeper on
+  macOS 27.0.1 with firmware 20457.1.29, and nothing is added to the
+  helper's allowlist.
+- The only mechanism left in note 02 that is reported to work on this
+  firmware is the SMC adapter cut (`CHIE`), known only from third-party
+  claims (note 02 §3.4). Using it needs owner decisions that were not
+  made: SMC writes (not authorized, §2), and the clean-room rule
+  (CONTRIBUTING.md §1), because the value to write is known only from
+  other tools' code.
+- Until then, macOS's own Charge Limit (80–100%) stays CellKeeper's only
+  real control, and limits below 80% stay simulated.
 
 ## 11. Sources
 
