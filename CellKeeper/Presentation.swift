@@ -297,6 +297,32 @@ enum Format {
         return "\(full) of \(design) mAh (\(ratio.formatted(.number.precision(.fractionLength(0))))%)"
     }
 
+    /// What VoiceOver reads for the readings above: units in words
+    /// (``AccessibilityWording``), not abbreviations.
+    enum Spoken {
+        static func celsius(_ value: Double?) -> String {
+            value.map { AccessibilityWording.celsius($0) } ?? Format.unavailable
+        }
+
+        static func volts(fromMillivolts value: Int?) -> String {
+            value.map { AccessibilityWording.volts(fromMillivolts: $0) } ?? Format.unavailable
+        }
+
+        static func milliamps(_ value: Int?) -> String {
+            value.map { AccessibilityWording.milliamps($0) } ?? Format.unavailable
+        }
+
+        static func capacity(_ health: BatteryHealth) -> String {
+            guard let full = health.fullChargeCapacityMilliampHours else { return Format.unavailable }
+            return AccessibilityWording.capacity(fullChargeMilliampHours: full, designMilliampHours: health.designCapacityMilliampHours, percentOfDesign: health.fullChargeCapacityPercentOfDesign)
+        }
+
+        static func minutes(_ value: Int?) -> String? {
+            guard let value else { return nil }
+            return Duration.seconds(value * 60).formatted(.units(allowed: [.hours, .minutes], width: .wide))
+        }
+    }
+
     /// A moment in Settings › Diagnostics, in local time: the time, with
     /// the date unless it is today. The diagnostics report writes the same
     /// moment in ISO 8601.
