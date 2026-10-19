@@ -260,7 +260,12 @@ and an Apple Developer ID.
   verified.
 - Distribution: notarized DMG on GitHub Releases, Homebrew cask, optional
   update mechanism.
-- Localization and accessibility review.
+- Accessibility review. *Done* (owner approval 2026-10-19): the menu and
+  every Settings tab audited for VoiceOver, the keyboard, contrast, colour,
+  motion and announcements, and the findings fixed (see
+  [accessibility-review.md](accessibility-review.md), D109). Still to try
+  on a Mac with VoiceOver, Full Keyboard Access and Increase Contrast on.
+- Localization.
 - A tidier Settings window ([issue #4](https://github.com/SaltedTan/CellKeeper/issues/4)).
 
 ## Explicit non-goals
