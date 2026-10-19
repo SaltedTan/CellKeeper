@@ -26,18 +26,38 @@ public enum QuantityUnit: Sendable, Equatable, CaseIterable {
         }
     }
 
-    /// `number`, as written, followed by the unit's name: singular when the
-    /// number is 1 or -1 as written ("1 milliamp", "-1 milliamp"), plural
-    /// otherwise ("0 milliamps", "1.5 degrees Celsius", "-845 milliamps").
-    public func words(_ number: String) -> String {
-        let magnitude = number.drop { $0 == "-" || $0 == "−" }
-        return "\(number) \(magnitude == "1" ? singular : plural)"
+    /// A whole number in `locale`'s format, with the unit in words, singular
+    /// for 1 and -1: "12,427 millivolts", "-845 milliamps", "1 milliamp".
+    /// Exact for every `Int`.
+    public func spoken(_ value: Int, locale: Locale = .current) -> String {
+        "\(value.formatted(.number.locale(locale))) \(name(singular: value.magnitude == 1))"
     }
 
-    /// `value` in `locale`'s number format, with the unit in words:
-    /// "12,427 millivolts", "-12 milliamps", "31.25 degrees Celsius".
-    public func spoken(_ value: Double, locale: Locale = .current) -> String {
-        words(value.formatted(.number.locale(locale)))
+    /// `value` in `locale`'s format with `fractionDigits` decimals, with the
+    /// unit in words: "31.25 degrees Celsius", "12.43 volts". Singular when
+    /// the value as shown, rounded to the most decimals shown, is 1 or -1
+    /// ("1 degree Celsius", "1.0 degree Celsius" for 1.04 with one decimal),
+    /// whatever digits the locale writes it in.
+    public func spoken(_ value: Double, fractionDigits: ClosedRange<Int>, locale: Locale = .current) -> String {
+        let number = value.formatted(.number.precision(.fractionLength(fractionDigits)).locale(locale))
+        return "\(number) \(name(singular: Self.isOne(value, roundedTo: fractionDigits.upperBound)))"
+    }
+
+    /// The unit's name: "milliamp" or "milliamps".
+    public func name(singular: Bool) -> String {
+        singular ? self.singular : plural
+    }
+
+    /// Whether `value`, rounded to `fractionDigits` decimals as the number
+    /// formatter rounds it, is 1 or -1: what decides between "1.0 degree"
+    /// and "1.1 degrees". The formatter rounds the shortest decimal form of
+    /// the double half to even ("1.05" to "1.0"), and so does this, from
+    /// the value, not from the text the formatter writes.
+    public static func isOne(_ value: Double, roundedTo fractionDigits: Int) -> Bool {
+        guard value.isFinite, var decimal = Decimal(string: value.description, locale: Locale(identifier: "en_US_POSIX")) else { return false }
+        var rounded = Decimal()
+        NSDecimalRound(&rounded, &decimal, fractionDigits, .bankers)
+        return rounded.magnitude == 1
     }
 
     private var singular: String {

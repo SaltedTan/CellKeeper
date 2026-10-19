@@ -22,46 +22,42 @@ public enum AccessibilityWording {
     /// A temperature in degrees Celsius, as on screen: "40 degrees Celsius",
     /// "35.5 degrees Celsius".
     public static func celsius(_ value: Double, locale: Locale = .current) -> String {
-        QuantityUnit.degreesCelsius.words(number(value, fractionDigits: 0...1, locale: locale))
+        QuantityUnit.degreesCelsius.spoken(value, fractionDigits: 0...1, locale: locale)
     }
 
     /// A battery voltage from millivolts, with two decimals as on screen:
     /// "12.43 volts".
     public static func volts(fromMillivolts value: Int, locale: Locale = .current) -> String {
-        QuantityUnit.volts.words(number(Double(value) / 1000, fractionDigits: 2...2, locale: locale))
+        QuantityUnit.volts.spoken(Double(value) / 1000, fractionDigits: 2...2, locale: locale)
     }
 
     /// A battery current: "312 milliamps", negative while discharging.
     public static func milliamps(_ value: Int, locale: Locale = .current) -> String {
-        QuantityUnit.milliamps.words(number(Double(value), locale: locale))
+        QuantityUnit.milliamps.spoken(value, locale: locale)
     }
 
     /// The adapter's power: "70 watts".
     public static func watts(_ value: Int, locale: Locale = .current) -> String {
-        QuantityUnit.watts.words(number(Double(value), locale: locale))
+        QuantityUnit.watts.spoken(value, locale: locale)
     }
 
     /// The full-charge capacity, and the design capacity with the ratio
     /// when both are known: "6,131 of 6,249 milliamp-hours (98%)".
     public static func capacity(fullChargeMilliampHours full: Int, designMilliampHours design: Int?, percentOfDesign ratio: Double?, locale: Locale = .current) -> String {
         guard let design, let ratio else {
-            return QuantityUnit.milliampHours.words(number(Double(full), locale: locale))
+            return QuantityUnit.milliampHours.spoken(full, locale: locale)
         }
-        let percent = number(ratio, locale: locale)
-        return "\(number(Double(full), locale: locale)) of \(QuantityUnit.milliampHours.words(number(Double(design), locale: locale))) (\(percent)%)"
+        let percent = ratio.formatted(.number.precision(.fractionLength(0)).locale(locale))
+        return "\(full.formatted(.number.locale(locale))) of \(QuantityUnit.milliampHours.spoken(design, locale: locale)) (\(percent)%)"
     }
 
     /// A duration in whole hours: "1 hour", "12 hours".
     public static func hours(_ value: Int, locale: Locale = .current) -> String {
-        "\(number(Double(value), locale: locale)) \(abs(value) == 1 ? "hour" : "hours")"
+        "\(value.formatted(.number.locale(locale))) \(value.magnitude == 1 ? "hour" : "hours")"
     }
 
     /// Announced when Copy Diagnostics has put the report on the clipboard.
     public static let diagnosticsCopied = "Diagnostics report copied."
-
-    private static func number(_ value: Double, fractionDigits: ClosedRange<Int> = 0...0, locale: Locale) -> String {
-        value.formatted(.number.precision(.fractionLength(fractionDigits)).locale(locale))
-    }
 }
 
 extension BannerChange {

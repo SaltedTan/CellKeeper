@@ -60,13 +60,13 @@ in one follow-up (D110), G10 in another (D111), both below. Verified in
 the accessibility tree after the fixes: the slider and steppers carry
 their value with its unit; the battery header, the menu's labelled
 values, the Battery details rows, the diagnostics rows and the activity
-events are one element each, and no element has an unknown role (33 before, 0 after); "Charging control" and
-"Charge limit" are headings; the limit segments, Cancel and OK buttons and
-weekday buttons have their full names; the dialogs' default and cancel
-buttons are as before. The status item reads "CellKeeper, 80%, Not
-charging, Charging to limit" on the preview build. `swift test` (1,280
-tests in five test targets) and the Debug and Release builds pass with
-warnings as errors.
+events are one element each, and no element has an unknown role (33
+before, 0 after); "Charging control" and "Charge limit" are headings; the
+limit segments, Cancel and OK buttons and weekday buttons have their full
+names; the dialogs' default and cancel buttons are as before. The status
+item reads "CellKeeper, 80%, Not charging, Charging to limit" on the
+preview build. `swift test` (1,280 tests in five test targets) and the
+Debug and Release builds pass with warnings as errors.
 
 The code review of #93 found two problems in the first fixes, both fixed:
 
@@ -108,21 +108,20 @@ to the limit" (D110).
 
 ### Follow-up: units in Settings › Diagnostics (G10)
 
-- **G10** (nit), Settings › Diagnostics' units (D111). The section model
-  keeps a number with a unit as a quantity, which the report and the tab
-  write as before ("12427 mV", "31 °C"; the golden tests are unchanged)
-  and VoiceOver reads in words, with the menu's words and the locale's
-  numbers: "Voltage, 12,427 millivolts", "Current, -845 milliamps",
-  "Full-charge capacity, 6,131 milliamp-hours", "Adapter, 70 watts",
-  "Temperature protection, on (pause 40 degrees Celsius, resume 35
-  degrees Celsius)", and one of a unit in the singular ("1 milliamp").
-  Temperatures in the policy's sentences are read so too ("Reason,
-  Battery at 41.5 degrees Celsius (pause at 40 degrees Celsius); charging
-  paused."). Verified in the accessibility tree of the harness, before and
-  after: the rows with a unit read their units in words, and every other
-  row and every element's role are as before. A test over every
-  diagnostics fixture requires words for each row whose value writes a
-  unit's symbol.
+The section model keeps a number with a unit as a quantity, which the
+report and the tab write as before ("12427 mV", "31 °C"; the golden tests
+are unchanged) and VoiceOver reads in words, with the menu's words and the
+locale's numbers: "Voltage, 12,427 millivolts", "Current, -845
+milliamps", "Full-charge capacity, 6,131 milliamp-hours", "Adapter, 70
+watts", "Temperature protection, on (pause 40 degrees Celsius, resume 35
+degrees Celsius)", and a unit in the singular when its number, as shown,
+is one, in any locale's digits ("1 milliamp", "١ milliamp"). Temperatures
+in the policy's sentences are read so too ("Reason, Battery at 41.5
+degrees Celsius (pause at 40 degrees Celsius); charging paused.").
+Verified in the accessibility tree of the harness, before and after: the
+rows with a unit read their units in words, and every other row and
+every element's role are as before. A test over every diagnostics fixture
+requires words for each row whose value writes a unit's symbol (D111).
 
 ### For the owner's Mac
 

@@ -51,8 +51,57 @@ struct AccessibilityWordingTests {
         #expect(AccessibilityWording.watts(70, locale: english) == QuantityUnit.watts.spoken(70, locale: english))
         #expect(AccessibilityWording.celsius(1, locale: english) == "1 degree Celsius")
         #expect(AccessibilityWording.celsius(40, locale: english) == QuantityUnit.degreesCelsius.spoken(40, locale: english))
-        #expect(AccessibilityWording.volts(fromMillivolts: 1000, locale: english) == "1.00 volts")
         #expect(AccessibilityWording.capacity(fullChargeMilliampHours: 1, designMilliampHours: nil, percentOfDesign: nil, locale: english) == "1 milliamp-hour")
+    }
+
+    @Test("A decimal is singular when it is one as shown, rounded to the decimals shown")
+    func shownDecimals() {
+        #expect(AccessibilityWording.volts(fromMillivolts: 1000, locale: english) == "1.00 volt")
+        #expect(AccessibilityWording.volts(fromMillivolts: -1000, locale: english) == "-1.00 volt")
+        #expect(AccessibilityWording.volts(fromMillivolts: 1004, locale: english) == "1.00 volt")
+        #expect(AccessibilityWording.volts(fromMillivolts: 1006, locale: english) == "1.01 volts")
+        #expect(AccessibilityWording.celsius(1.04, locale: english) == "1 degree Celsius")
+        #expect(AccessibilityWording.celsius(1.06, locale: english) == "1.1 degrees Celsius")
+        #expect(AccessibilityWording.celsius(0.96, locale: english) == "1 degree Celsius")
+        #expect(AccessibilityWording.celsius(0.94, locale: english) == "0.9 degrees Celsius")
+        // Halfway, the formatter rounds to even, and so does the choice.
+        #expect(AccessibilityWording.celsius(1.05, locale: english) == "1 degree Celsius")
+        #expect(AccessibilityWording.celsius(1.15, locale: english) == "1.2 degrees Celsius")
+    }
+
+    @Test("Whole numbers stay exact and never trap")
+    func exactWholeNumbers() {
+        #expect(AccessibilityWording.milliamps(9_007_199_254_740_993, locale: english) == "9,007,199,254,740,993 milliamps")
+        #expect(AccessibilityWording.milliamps(Int.min, locale: english) == "-9,223,372,036,854,775,808 milliamps")
+        #expect(AccessibilityWording.watts(Int.max, locale: english) == "9,223,372,036,854,775,807 watts")
+        #expect(AccessibilityWording.hours(Int.min, locale: english) == "-9,223,372,036,854,775,808 hours")
+        #expect(AccessibilityWording.capacity(fullChargeMilliampHours: 9_007_199_254_740_993, designMilliampHours: 9_007_199_254_740_995, percentOfDesign: 100, locale: english) == "9,007,199,254,740,993 of 9,007,199,254,740,995 milliamp-hours (100%)")
+    }
+
+    @Test("Singular or plural follows the number, in any locale's digits and signs", arguments: ["en_US", "de_DE", "ar_EG", "fa_IR", "he_IL"])
+    func localizedNumbers(_ identifier: String) {
+        let locale = Locale(identifier: identifier)
+        func shown(_ value: Int) -> String { value.formatted(.number.locale(locale)) }
+        func shown(_ value: Double, _ digits: ClosedRange<Int>) -> String { value.formatted(.number.precision(.fractionLength(digits)).locale(locale)) }
+        #expect(AccessibilityWording.milliamps(1, locale: locale) == "\(shown(1)) milliamp")
+        #expect(AccessibilityWording.milliamps(-1, locale: locale) == "\(shown(-1)) milliamp")
+        #expect(AccessibilityWording.milliamps(-845, locale: locale) == "\(shown(-845)) milliamps")
+        #expect(AccessibilityWording.watts(1, locale: locale) == "\(shown(1)) watt")
+        #expect(AccessibilityWording.hours(1, locale: locale) == "\(shown(1)) hour")
+        #expect(AccessibilityWording.capacity(fullChargeMilliampHours: 1, designMilliampHours: nil, percentOfDesign: nil, locale: locale) == "\(shown(1)) milliamp-hour")
+        #expect(AccessibilityWording.celsius(1, locale: locale) == "\(shown(1, 0...1)) degree Celsius")
+        #expect(AccessibilityWording.celsius(1.04, locale: locale) == "\(shown(1.04, 0...1)) degree Celsius")
+        #expect(AccessibilityWording.celsius(35.5, locale: locale) == "\(shown(35.5, 0...1)) degrees Celsius")
+        #expect(AccessibilityWording.volts(fromMillivolts: -1000, locale: locale) == "\(shown(-1.0, 2...2)) volt")
+        #expect(AccessibilityWording.volts(fromMillivolts: 12_427, locale: locale) == "\(shown(12.427, 2...2)) volts")
+        // Not vacuous: these locales write their own digits, or a mark
+        // before the minus sign.
+        switch identifier {
+        case "ar_EG": #expect(shown(1) == "١")
+        case "fa_IR": #expect(shown(1) == "۱" && shown(-1).unicodeScalars.first == "\u{200E}")
+        case "he_IL": #expect(shown(-1) == "\u{200E}-1")
+        default: break
+        }
     }
 
     @Test("Hours are counted in words")

@@ -50,11 +50,30 @@ public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpol
         /// ("2026-10-23T07:00:00+01:00"), so that a change of offset shows
         /// without naming a time zone.
         case offsetTime(Date, utcOffset: Int)
-        /// A number and its unit, which the report and the view write as
-        /// `written` and the unit's symbol ("12427 mV", "31 °C"), and
-        /// VoiceOver reads in words ("12,427 millivolts").
-        case quantity(Double, written: String, unit: QuantityUnit)
+        /// A number and its unit, which the report and the view write with
+        /// the unit's symbol ("12427 mV", "31 °C"), and VoiceOver reads in
+        /// words ("12,427 millivolts").
+        case quantity(Number, unit: QuantityUnit)
     }
+
+    /// The number of a quantity.
+    enum Number: Sendable, Equatable {
+        /// A whole number, kept exact: the report writes it as is.
+        case integer(Int)
+        /// A decimal number, and the text the report writes for it.
+        case decimal(Double, written: String)
+
+        var written: String {
+            switch self {
+            case .integer(let value): "\(value)"
+            case .decimal(_, let written): written
+            }
+        }
+    }
+
+    /// The most decimals a decimal quantity shows: as many as `formatted()`
+    /// shows, which writes it in the report.
+    static let decimalPlaces = 6
 
     let parts: [Part]
 
@@ -80,7 +99,7 @@ public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpol
             case .identified(let words, let identifier): "\(words) (\(identifier))"
             case .time(let date): DiagnosticsReport.timestamp(date)
             case .offsetTime(let date, let utcOffset): DiagnosticsReport.timestamp(date, utcOffset: utcOffset)
-            case .quantity(_, let written, let unit): "\(written) \(unit.symbol)"
+            case .quantity(let number, let unit): "\(number.written) \(unit.symbol)"
             }
         }.joined())
     }
@@ -94,7 +113,7 @@ public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpol
             case .text(let text): text
             case .identified(let words, _): words
             case .time(let date), .offsetTime(let date, _): formatTime(date)
-            case .quantity(_, let written, let unit): "\(written) \(unit.symbol)"
+            case .quantity(let number, let unit): "\(number.written) \(unit.symbol)"
             }
         }.joined())
     }
@@ -103,15 +122,17 @@ public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpol
     /// text with units in words and numbers in `locale`'s format ("12,427
     /// millivolts", "-12 milliamps", "31 degrees Celsius"), also the
     /// temperatures in the sentences of the policy and the settings check
-    /// ("Battery at 41.5 degrees Celsius"). Nil if the plain text names no
-    /// unit, so that the view leaves the text as it is.
+    /// ("Battery at 41.5 degrees Celsius"). A unit is singular when its
+    /// number, as shown, is 1 or -1. Nil if the plain text names no unit,
+    /// so that the view leaves the text as it is.
     public func spokenText(formattingTime formatTime: (Date) -> String, locale: Locale = .current) -> String? {
         let spoken = DiagnosticsReport.redactingAccountNames(parts.map { part in
             switch part {
             case .text(let text): Self.speakingTemperatures(in: text)
             case .identified(let words, _): words
             case .time(let date), .offsetTime(let date, _): formatTime(date)
-            case .quantity(let value, _, let unit): unit.spoken(value, locale: locale)
+            case .quantity(.integer(let value), let unit): unit.spoken(value, locale: locale)
+            case .quantity(.decimal(let value, _), let unit): unit.spoken(value, fractionDigits: 0...Self.decimalPlaces, locale: locale)
             }
         }.joined())
         return spoken == plainText(formattingTime: formatTime) ? nil : spoken
@@ -120,10 +141,15 @@ public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpol
     /// `text` with each temperature written after a number ("41.5°C",
     /// "40 °C") in words. The policy's reasons and the settings check's
     /// messages, which the menu, notifications and the activity log share,
-    /// write temperatures so.
+    /// write temperatures so, in the current locale's digits. The number is
+    /// already rounded as shown, so it is one if its whole part is 1 and
+    /// its decimals are 0, read by the digits' values.
     private static func speakingTemperatures(in text: String) -> String {
-        text.replacing(/(\d+(?:[.,]\d+)?)\s?°C/) { match in
-            QuantityUnit.degreesCelsius.words(String(match.output.1))
+        text.replacing(/((\d+)(?:[.,٫](\d+))?)\s?°C/) { match in
+            let whole = match.output.2.compactMap(\.wholeNumberValue).drop { $0 == 0 }
+            let decimals = match.output.3?.compactMap(\.wholeNumberValue) ?? []
+            let isOne = Array(whole) == [1] && decimals.allSatisfy { $0 == 0 }
+            return "\(match.output.1) \(QuantityUnit.degreesCelsius.name(singular: isOne))"
         }
     }
 
@@ -159,13 +185,13 @@ public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpol
 
         /// A whole number and its unit, the number written as is: "12427 mV".
         public mutating func appendInterpolation(_ value: Int, unit: QuantityUnit) {
-            parts.append(.quantity(Double(value), written: "\(value)", unit: unit))
+            parts.append(.quantity(.integer(value), unit: unit))
         }
 
         /// A number and its unit, the number in the current locale's format,
         /// as the report writes temperatures: "31.5 °C".
         public mutating func appendInterpolation(_ value: Double, unit: QuantityUnit) {
-            parts.append(.quantity(value, written: value.formatted(), unit: unit))
+            parts.append(.quantity(.decimal(value, written: value.formatted()), unit: unit))
         }
     }
 }

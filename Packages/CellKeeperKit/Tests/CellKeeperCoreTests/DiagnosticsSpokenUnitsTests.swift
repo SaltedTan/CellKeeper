@@ -55,16 +55,88 @@ struct DiagnosticsSpokenUnitsTests {
         case .watts: "watt"
         case .degreesCelsius: "degree Celsius"
         }
-        let many = unit.spoken(2, locale: english).replacingOccurrences(of: "2 ", with: "")
+        let many = unit.name(singular: false)
+        #expect(unit.name(singular: true) == one)
         #expect(many != one)
         #expect(spoken("\(1, unit: unit)") == "1 \(one)")
         #expect(spoken("\(-1, unit: unit)") == "-1 \(one)")
-        #expect(spoken("\(1.0, unit: unit)") == "1 \(one)")
         #expect(spoken("\(0, unit: unit)") == "0 \(many)")
-        #expect(spoken("\(1.5, unit: unit)") == "1.5 \(many)")
         #expect(spoken("\(-12, unit: unit)") == "-12 \(many)")
-        // A locale's minus sign counts as one too.
-        #expect(unit.words("−1") == "−1 \(one)")
+        #expect(spoken("\(1.0, unit: unit)") == "1 \(one)")
+        #expect(spoken("\(-1.0, unit: unit)") == "-1 \(one)")
+        #expect(spoken("\(1.5, unit: unit)") == "1.5 \(many)")
+        // Decided by the value as shown, with at most six decimals.
+        #expect(spoken("\(1.000_000_1, unit: unit)") == "1 \(one)")
+        #expect(spoken("\(1.000_001, unit: unit)") == "1.000001 \(many)")
+    }
+
+    @Test("Whole numbers stay exact, beyond 2^53 and at the ends of Int")
+    func exactWholeNumbers() {
+        let large: DiagnosticsValue = "\(9_007_199_254_740_993, unit: .milliampHours)"
+        #expect(large.reportText == "9007199254740993 mAh")
+        #expect(spoken(large) == "9,007,199,254,740,993 milliamp-hours")
+        #expect(spoken("\(Int.max, unit: .milliampHours)") == "9,223,372,036,854,775,807 milliamp-hours")
+        let smallest: DiagnosticsValue = "\(Int.min, unit: .milliamps)"
+        #expect(smallest.reportText == "-9223372036854775808 mA")
+        #expect(spoken(smallest) == "-9,223,372,036,854,775,808 milliamps")
+    }
+
+    /// Locales whose numbers are written with other digits or with a
+    /// directional mark before the minus sign.
+    static let locales = ["en_US", "de_DE", "ar_EG", "fa_IR", "he_IL"]
+
+    @Test("Singular or plural follows the number, in any locale's digits and signs", arguments: DiagnosticsSpokenUnitsTests.locales)
+    func localizedNumbers(_ identifier: String) {
+        let locale = Locale(identifier: identifier)
+        func shown(_ value: Int) -> String { value.formatted(.number.locale(locale)) }
+        func shown(_ value: Double) -> String { value.formatted(.number.precision(.fractionLength(0...6)).locale(locale)) }
+        #expect(spoken("\(1, unit: .milliamps)", locale: locale) == "\(shown(1)) milliamp")
+        #expect(spoken("\(-1, unit: .milliamps)", locale: locale) == "\(shown(-1)) milliamp")
+        #expect(spoken("\(2, unit: .milliamps)", locale: locale) == "\(shown(2)) milliamps")
+        #expect(spoken("\(-845, unit: .milliamps)", locale: locale) == "\(shown(-845)) milliamps")
+        #expect(spoken("\(1.0, unit: .degreesCelsius)", locale: locale) == "\(shown(1.0)) degree Celsius")
+        #expect(spoken("\(-1.0, unit: .degreesCelsius)", locale: locale) == "\(shown(-1.0)) degree Celsius")
+        #expect(spoken("\(1.5, unit: .degreesCelsius)", locale: locale) == "\(shown(1.5)) degrees Celsius")
+        // Not vacuous: these locales write their own digits, or a mark
+        // before the minus sign.
+        switch identifier {
+        case "ar_EG": #expect(shown(1) == "١")
+        case "fa_IR": #expect(shown(1) == "۱" && shown(-1).unicodeScalars.first == "\u{200E}")
+        case "he_IL": #expect(shown(-1) == "\u{200E}-1")
+        default: break
+        }
+    }
+
+    @Test("Whether a decimal is one agrees with the number the formatter shows, also halfway", arguments: 0...6)
+    func isOneAsShown(_ fractionDigits: Int) throws {
+        let posix = Locale(identifier: "en_US_POSIX")
+        let step = 1 / pow(10, Double(fractionDigits))
+        var values: [Double] = [.infinity, -.infinity, .nan, 0, 2, -2]
+        for k in -200...200 {
+            // Around 1 and -1, at and between the halfway points of the
+            // last decimal shown.
+            for offset in [Double(k) * step / 10, (Double(k) + 0.5) * step] {
+                values.append(1 + offset)
+                values.append(-1 - offset)
+            }
+        }
+        var ones = 0
+        for value in values {
+            let shown = value.formatted(.number.precision(.fractionLength(0...fractionDigits)).grouping(.never).locale(posix))
+            let isShownOne = Double(shown).map { abs($0) == 1 } ?? false
+            #expect(QuantityUnit.isOne(value, roundedTo: fractionDigits) == isShownOne, "\(value) shown as \(shown)")
+            ones += isShownOne ? 1 : 0
+        }
+        #expect(ones > 4)
+    }
+
+    @Test("A decimal is read with as many decimals as the report writes in the current locale")
+    func decimalsAsWritten() {
+        for value in [31.25, 41.5, 1.123_456_789, 1.000_000_1, 1_234_567.891, 0.1, -3.5] {
+            let written = value.formatted()
+            let words = spoken("\(value, unit: .degreesCelsius)", locale: .current)
+            #expect(words?.hasPrefix("\(written) degree") == true, "\(value): \(words ?? "nil")")
+        }
     }
 
     @Test("A discharging current is read with its minus sign, as the menu reads it")
@@ -119,6 +191,26 @@ struct DiagnosticsSpokenUnitsTests {
         #expect(spoken("Battery at 1°C, then -1 °C.") == "Battery at 1 degree Celsius, then -1 degree Celsius.")
         // Only after a number.
         #expect(spoken("°C") == nil)
+    }
+
+    @Test("A temperature in a sentence is singular when its number, as shown, is one, in any locale's digits")
+    func sentenceNumbers() {
+        #expect(spoken("Battery at 1.0°C.") == "Battery at 1.0 degree Celsius.")
+        #expect(spoken("Battery at 01°C.") == "Battery at 01 degree Celsius.")
+        #expect(spoken("Battery at 1.1°C.") == "Battery at 1.1 degrees Celsius.")
+        #expect(spoken("Battery at 11°C.") == "Battery at 11 degrees Celsius.")
+        #expect(spoken("Battery at 10°C.") == "Battery at 10 degrees Celsius.")
+        #expect(spoken("Battery at 0.1°C.") == "Battery at 0.1 degrees Celsius.")
+        // Arabic-Indic and Persian digits, the Arabic decimal separator, and
+        // a directional mark before the minus sign.
+        #expect(spoken("Battery at ١°C.") == "Battery at ١ degree Celsius.")
+        #expect(spoken("Battery at ١٫٠°C.") == "Battery at ١٫٠ degree Celsius.")
+        #expect(spoken("Battery at ٤١٫٥°C.") == "Battery at ٤١٫٥ degrees Celsius.")
+        #expect(spoken("Battery at \u{200E}−۱°C.") == "Battery at \u{200E}−۱ degree Celsius.")
+        #expect(spoken("Battery at \u{200E}-1°C.") == "Battery at \u{200E}-1 degree Celsius.")
+        // The policy's own sentence, in the current locale's digits.
+        let reason = DecisionReason.temperatureHigh(celsius: 1, pauseAt: 1).description
+        #expect(spoken("\(reason)") == reason.replacingOccurrences(of: "°C", with: " degree Celsius"))
     }
 
     @Test("The Simulated fixture's rows with units are read in words; the others have no spoken form")
