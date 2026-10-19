@@ -6,7 +6,7 @@ required before any real control backend may be enabled. The underlying
 analysis, sources, and full rule set (R1–R33) are in
 [research/06-safety-analysis.md](research/06-safety-analysis.md).
 
-## Current status (milestone 2)
+## Current status
 
 **By default, CellKeeper does not change how your Mac charges.** It reads
 battery telemetry through public, read-only interfaces and computes what it
