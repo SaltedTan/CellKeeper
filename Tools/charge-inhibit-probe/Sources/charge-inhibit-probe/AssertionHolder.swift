@@ -50,20 +50,31 @@ final class AssertionHolder: @unchecked Sendable {
         ]
     }
 
-    /// Creates the assertion and returns powerd's IOReturn, or nil without
-    /// calling powerd if the process is not root, a stop was requested, or
-    /// an assertion was attempted before.
-    func create(hold: Int) -> Int32? {
+    enum CreateOutcome: Equatable {
+        /// powerd was asked; its IOReturn.
+        case attempted(Int32)
+        /// powerd was not asked, for this reason.
+        case notAttempted(String)
+    }
+
+    /// Creates the assertion, unless the process is not root, a stop was
+    /// requested, an assertion was attempted before, or `lastCheck` (run
+    /// under the lock, immediately before the call to powerd) returns a
+    /// reason not to.
+    func create(hold: Int, lastCheck: () -> String?) -> CreateOutcome {
         lock.lock()
         defer { lock.unlock() }
-        guard geteuid() == 0, !cancelled, !attempted else { return nil }
+        guard geteuid() == 0 else { return .notAttempted("the probe is not running as root") }
+        guard !cancelled else { return .notAttempted("a stop was requested") }
+        guard !attempted else { return .notAttempted("an assertion was already attempted") }
+        if let reason = lastCheck() { return .notAttempted(reason) }
         attempted = true
         var newID = IOPMAssertionID(0)
         let result = IOPMAssertionCreateWithProperties(Self.properties(hold: hold) as CFDictionary, &newID)
         if result == kIOReturnSuccess {
             assertionID = newID
         }
-        return result
+        return .attempted(result)
     }
 
     /// Latches the stop, so ``create(hold:)`` refuses from now on, and

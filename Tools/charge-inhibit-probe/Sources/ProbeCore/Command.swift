@@ -5,8 +5,8 @@ public enum Command: Sendable, Equatable {
     case help
 
     public static let defaultHold = 60
-    /// At least the 30 s stop window plus 10 s of sustained stopped
-    /// readings.
+    /// At least the 30 s stop window plus the 8 s that five readings 2 s
+    /// apart span, and one reading of margin.
     public static let holdRange = 40...300
 
     public static let usage = """

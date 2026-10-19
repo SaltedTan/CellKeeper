@@ -11,9 +11,16 @@ public struct Criteria: Sendable, Equatable {
     public var resumeWindow: Double
     /// A battery current at or below this many mA counts as not charging.
     public var currentThreshold: Int
-    /// A stop, and a resume, count only when this many consecutive readings
-    /// (2 s apart) agree: 5 readings, 10 s.
+    /// A stop, and a resume, count only when this many counted readings in
+    /// a row agree (N = 5)…
     public var sustainedReadings: Int
+    /// …each at least this many seconds after the previous counted one
+    /// (closer readings are ignored for counting, but a contradicting one
+    /// still breaks the run)…
+    public var minimumSpacing: Double
+    /// …spanning at least this many seconds from the first to the last
+    /// counted reading: (N − 1) × 2 s = 8 s.
+    public var sustainedSpan: Double
     /// A gap between consecutive readings longer than this (the Mac slept,
     /// or the probe was stopped) makes the run inconclusive.
     public var maxReadingGap: Double
@@ -30,6 +37,8 @@ public struct Criteria: Sendable, Equatable {
         resumeWindow: Double = 60,
         currentThreshold: Int = 50,
         sustainedReadings: Int = 5,
+        minimumSpacing: Double = 1.5,
+        sustainedSpan: Double = 8,
         maxReadingGap: Double = 10,
         minimumBaselineReadings: Int = 5,
         baselineDuration: ClosedRange<Double> = 18...24,
@@ -39,6 +48,8 @@ public struct Criteria: Sendable, Equatable {
         self.resumeWindow = resumeWindow
         self.currentThreshold = currentThreshold
         self.sustainedReadings = sustainedReadings
+        self.minimumSpacing = minimumSpacing
+        self.sustainedSpan = sustainedSpan
         self.maxReadingGap = maxReadingGap
         self.minimumBaselineReadings = minimumBaselineReadings
         self.baselineDuration = baselineDuration
@@ -56,6 +67,49 @@ public enum ChargeState: Sendable, Equatable {
     case stopped
     /// The charging flag and the current disagree.
     case mixed
+}
+
+/// A run of readings in one state, counted as the verdict counts them: a
+/// reading counts only if it is at least `Criteria.minimumSpacing` after the
+/// previous counted one; closer readings are ignored. Callers end the run on
+/// a contradicting reading.
+public struct SustainedRun: Sendable, Equatable {
+    public private(set) var first: Sample
+    public private(set) var lastCounted: Sample
+    public private(set) var counted: Int
+
+    public init(first: Sample) {
+        self.first = first
+        lastCounted = first
+        counted = 1
+    }
+
+    /// Counts `sample` if it is far enough after the last counted reading;
+    /// otherwise ignores it.
+    public mutating func add(_ sample: Sample, criteria: Criteria = .standard) {
+        guard sample.time - lastCounted.time >= criteria.minimumSpacing else { return }
+        lastCounted = sample
+        counted += 1
+    }
+
+    /// Seconds from the first to the last counted reading.
+    public var span: Double { lastCounted.time - first.time }
+
+    /// At least `sustainedReadings` counted readings spanning at least
+    /// `sustainedSpan`.
+    public func isSustained(criteria: Criteria = .standard) -> Bool {
+        counted >= criteria.sustainedReadings && span >= criteria.sustainedSpan
+    }
+}
+
+/// What the readings after the release show so far.
+public enum ResumeAnalysis: Sendable, Equatable {
+    /// Charging resumed: a sustained run of charging readings, from `start`.
+    case resumed(start: Sample)
+    /// A reading could not be used before charging had resumed.
+    case problem(Sample, ReadingProblem)
+    /// No sustained resume yet; whether any reading showed charging.
+    case pending(sawCharging: Bool)
 }
 
 /// Why a reading cannot be used. Any of these while the assertion matters
@@ -167,13 +221,13 @@ public enum Verdict: Sendable, Equatable {
 
     /// What the verdict means, for the owner.
     public func explanation(criteria: Criteria = .standard) -> String {
-        let sustained = "\(criteria.sustainedReadings) readings in a row"
+        let sustained = Self.sustainedNeeded(criteria)
         switch self {
         case let .inhibited(stopped, resumed):
             return """
                 Charging stopped \(seconds(stopped)) after the assertion was created, \
                 stayed stopped in every reading while it was held, and resumed \
-                \(seconds(resumed)) after a confirmed release (\(sustained) each), \
+                \(seconds(resumed)) after a confirmed release (each over \(sustained)), \
                 all on AC power. On this Mac, macOS build and firmware, the \
                 ChargeInhibit assertion stops charging and releasing it lets \
                 charging resume.
@@ -286,57 +340,51 @@ public enum Verdict: Sendable, Equatable {
                 cannot be attributed to it
                 """)
         }
-        for index in held.indices.dropFirst(stopIndex + 1) where states[index] != .stopped {
-            let at = seconds(held[index].time - creation.time)
-            return .inconclusive(reason: states[index] == .charging
-                ? """
-                    charging stopped \(seconds(stoppedAfter)) after the assertion was \
-                    created but started again \(at) after it, while it was still held
-                    """
-                : """
-                    charging stopped \(seconds(stoppedAfter)) after the assertion was \
-                    created, but \(at) after it the charging flag and the battery \
-                    current disagreed (\(chargingSummary(held[index]))), while it was \
-                    still held
-                    """)
+        var stopRun = SustainedRun(first: firstStop)
+        for index in held.indices.dropFirst(stopIndex + 1) {
+            guard states[index] == .stopped else {
+                let at = seconds(held[index].time - creation.time)
+                return .inconclusive(reason: states[index] == .charging
+                    ? """
+                        charging stopped \(seconds(stoppedAfter)) after the assertion was \
+                        created but started again \(at) after it, while it was still held
+                        """
+                    : """
+                        charging stopped \(seconds(stoppedAfter)) after the assertion was \
+                        created, but \(at) after it the charging flag and the battery \
+                        current disagreed (\(chargingSummary(held[index]))), while it was \
+                        still held
+                        """)
+            }
+            stopRun.add(held[index], criteria: criteria)
         }
-        let stoppedReadings = held.count - stopIndex
-        guard stoppedReadings >= criteria.sustainedReadings else {
+        guard stopRun.isSustained(criteria: criteria) else {
             return .inconclusive(reason: """
                 charging stopped \(seconds(stoppedAfter)) after the assertion was \
-                created, but only \(stoppedReadings) \(stoppedReadings == 1 ? "reading" : "readings") \
-                showed it stopped before the release (\(criteria.sustainedReadings) needed)
+                created, but only \(stopRun.counted) \(stopRun.counted == 1 ? "reading" : "readings") \
+                at least \(seconds(criteria.minimumSpacing)) apart, spanning \
+                \(seconds(stopRun.span)), showed it stopped before the release \
+                (\(sustainedNeeded(criteria)) needed)
                 """)
         }
 
         // After the release.
         let after = samples.filter { $0.phase == .after }
-        var runStart: Sample?
-        var runLength = 0
-        var sawCharging = false
-        for sample in after {
-            if let problem = problem(of: sample) {
-                return .inconclusive(reason: """
-                    charging stopped \(seconds(stoppedAfter)) after the assertion was \
-                    created, but \(problem) \(seconds(sample.time - release.time)) after \
-                    the release, before charging had resumed for \
-                    \(criteria.sustainedReadings) readings in a row
-                    """)
-            }
-            guard state(of: sample, criteria: criteria) == .charging else {
-                runStart = nil
-                runLength = 0
-                continue
-            }
-            sawCharging = true
-            if runStart == nil { runStart = sample }
-            runLength += 1
-            if runLength >= criteria.sustainedReadings, let start = runStart {
-                let resumedAfter = start.time - release.time
-                return resumedAfter <= criteria.resumeWindow
-                    ? .inhibited(stoppedAfter: stoppedAfter, resumedAfter: resumedAfter)
-                    : .inhibitedResumedLate(stoppedAfter: stoppedAfter, resumedAfter: resumedAfter)
-            }
+        let sawCharging: Bool
+        switch analyzeResume(after, criteria: criteria) {
+        case let .resumed(start):
+            let resumedAfter = start.time - release.time
+            return resumedAfter <= criteria.resumeWindow
+                ? .inhibited(stoppedAfter: stoppedAfter, resumedAfter: resumedAfter)
+                : .inhibitedResumedLate(stoppedAfter: stoppedAfter, resumedAfter: resumedAfter)
+        case let .problem(sample, problem):
+            return .inconclusive(reason: """
+                charging stopped \(seconds(stoppedAfter)) after the assertion was \
+                created, but \(problem) \(seconds(sample.time - release.time)) after \
+                the release, before charging had resumed (\(sustainedNeeded(criteria)))
+                """)
+        case let .pending(saw):
+            sawCharging = saw
         }
         let watched = (after.last?.time ?? release.time) - release.time
         guard watched >= criteria.resumeWindow else {
@@ -350,10 +398,62 @@ public enum Verdict: Sendable, Equatable {
             return .inconclusive(reason: """
                 charging stopped \(seconds(stoppedAfter)) after the assertion was \
                 created; after the release it charged in some readings, but never in \
-                \(criteria.sustainedReadings) readings in a row
+                \(criteria.sustainedReadings) readings in a row (\(sustainedNeeded(criteria)))
                 """)
         }
         return .inhibitedDidNotResume(stoppedAfter: stoppedAfter, watchedFor: watched)
+    }
+
+    /// Looks for a sustained run of charging readings after the release:
+    /// a non-charging reading breaks a run; a reading closer than
+    /// `minimumSpacing` to the last counted one is ignored. The probe's
+    /// watch after the release uses the same function.
+    public static func analyzeResume(_ after: [Sample], criteria: Criteria = .standard) -> ResumeAnalysis {
+        var run: SustainedRun?
+        var sawCharging = false
+        for sample in after.sorted(by: { $0.time < $1.time }) {
+            if let problem = problem(of: sample) {
+                return .problem(sample, problem)
+            }
+            guard state(of: sample, criteria: criteria) == .charging else {
+                run = nil
+                continue
+            }
+            sawCharging = true
+            if run == nil {
+                run = SustainedRun(first: sample)
+            } else {
+                run?.add(sample, criteria: criteria)
+            }
+            if let run, run.isSustained(criteria: criteria) {
+                return .resumed(start: run.first)
+            }
+        }
+        return .pending(sawCharging: sawCharging)
+    }
+
+    /// Why the assertion must not be created now: the last baseline reading
+    /// is missing or more than `maxBaselineGap` old. The probe checks this
+    /// immediately before it creates the assertion.
+    public static func baselineFreshnessProblem(lastBaselineTime: Double?, now: Double, criteria: Criteria = .standard) -> String? {
+        guard let last = lastBaselineTime else { return "there was no baseline reading before the assertion" }
+        let age = now - last
+        guard age <= criteria.maxBaselineGap else {
+            return """
+                the last baseline reading was \(seconds(age)) old when the assertion \
+                was about to be created (more than \(seconds(criteria.maxBaselineGap))), \
+                so nothing was created
+                """
+        }
+        return nil
+    }
+
+    /// "5 readings at least 1.5 s apart, spanning at least 8.0 s".
+    static func sustainedNeeded(_ criteria: Criteria) -> String {
+        """
+        \(criteria.sustainedReadings) readings at least \(seconds(criteria.minimumSpacing)) \
+        apart, spanning at least \(seconds(criteria.sustainedSpan))
+        """
     }
 
     /// Why the release cannot be trusted, or nil if powerd accepted it and

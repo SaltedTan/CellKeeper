@@ -22,6 +22,10 @@ struct Scenario {
     var releaseResult: Int32 = 0
     var releaseAttempts = 1
     var stillListed: Bool? = false
+    /// Extra readings while held, at seconds after creation.
+    var extraHeld: [(Double, Sample.Reading)] = []
+    /// If set, exactly these readings after the release, at seconds after it.
+    var afterReadings: [(Double, Sample.Reading)]?
 
     var run: ProbeRun {
         var samples = baselineTimes.map { baseline($0).sample(at: $0, .baseline) }
@@ -31,8 +35,10 @@ struct Scenario {
         }
         let heldTimes = stride(from: 2.0, through: Double(hold), by: 2)
         samples += heldTimes.map { held($0).sample(at: Self.creationTime + $0, .held) }
+        samples += extraHeld.map { $0.1.sample(at: Self.creationTime + $0.0, .held) }
         let releasedAt = Self.creationTime + Double(hold) + 0.5
-        samples += stride(from: 2.0, through: afterDuration, by: 2).map { after($0).sample(at: releasedAt + $0, .after) }
+        let afterReadings = afterReadings ?? stride(from: 2.0, through: afterDuration, by: 2).map { ($0, after($0)) }
+        samples += afterReadings.map { $0.1.sample(at: releasedAt + $0.0, .after) }
         let release = ProbeRun.Release(time: releasedAt, result: releaseResult, attempts: releaseAttempts, stillListed: stillListed)
         return ProbeRun(samples: samples, creation: creation, release: release)
     }
@@ -270,15 +276,163 @@ struct VerdictTests {
         scenario.held = { $0 < 28 ? .charging : .stopped }
         let reason = scenario.inconclusiveReason
         #expect(reason?.contains("only 4 readings") == true)
-        #expect(reason?.contains("5 needed") == true)
+        #expect(reason?.contains("5 readings at least 1.5 s apart, spanning at least 8.0 s needed") == true)
     }
 
-    @Test("Exactly 5 stopped readings are enough")
+    @Test("Exactly 5 stopped readings, 2 s apart and spanning 8 s, are enough")
     func stopExactlySustained() {
         var scenario = Scenario()
-        scenario.hold = 40
+        scenario.hold = 38
         scenario.held = { $0 < 30 ? .charging : .stopped }
+        let stopped = scenario.run.samples.filter { $0.phase == .held && Verdict.state(of: $0) == .stopped }
+        #expect(stopped.map(\.time) == [30, 32, 34, 36, 38].map { Scenario.creationTime + $0 })
         #expect(scenario.verdict == .inhibited(stoppedAfter: 30, resumedAfter: 6))
+    }
+
+    // MARK: Clustered readings (finding: clustered samples confirmed a stop or a resume)
+
+    @Test("The reviewer's case: four charging readings within 0.1 s and one more are not a resume")
+    func reviewerClusteredResume() {
+        var scenario = Scenario()
+        let charging: [(Double, Sample.Reading)] = [9.900, 9.901, 9.902, 9.903, 10.000].map { ($0, .charging) }
+        let stopped: [(Double, Sample.Reading)] = stride(from: 12.0, through: 180, by: 2).map { ($0, .stopped) }
+        scenario.afterReadings = [(2, .stopped), (4, .stopped), (6, .stopped), (8, .stopped)] + charging + stopped
+        let verdict = scenario.verdict
+        #expect(verdict.title == "inconclusive")
+        #expect(scenario.inconclusiveReason?.contains("never in 5 readings in a row") == true)
+    }
+
+    @Test("Clustered charging readings after the release count as one")
+    func clusteredResumeCountsOnce() {
+        var scenario = Scenario()
+        let cluster: [(Double, Sample.Reading)] = stride(from: 6.0, through: 6.8, by: 0.1).map { ($0, .charging) }
+        // One cluster, then two more charging readings 2 s apart: three counted, not five.
+        scenario.afterReadings = [(2, .stopped), (4, .stopped)] + cluster + [(8.8, .charging), (10.8, .charging)]
+            + stride(from: 12.8, through: 180, by: 2).map { ($0, .stopped) }
+        #expect(scenario.inconclusiveReason?.contains("never in 5 readings in a row") == true)
+    }
+
+    @Test("Five charging readings 1.5 s apart span only 6 s; the resume counts once the run spans 8 s")
+    func resumeNeedsSpan() {
+        let fiveOnly: [(Double, Sample.Reading)] = [6, 7.5, 9, 10.5, 12].map { ($0, .charging) }
+        var short = Scenario()
+        short.afterReadings = [(2, .stopped), (4, .stopped)] + fiveOnly
+            + stride(from: 14.0, through: 180, by: 2).map { ($0, .stopped) }
+        #expect(short.inconclusiveReason?.contains("never in 5 readings in a row") == true)
+
+        var long = Scenario()
+        long.afterReadings = [(2, .stopped), (4, .stopped)] + fiveOnly + [(13.5, .charging), (15, .charging)]
+            + stride(from: 17.0, through: 70, by: 2).map { ($0, .charging) }
+        #expect(long.verdict == .inhibited(stoppedAfter: 4, resumedAfter: 6))
+    }
+
+    @Test("Clustered stopped readings do not make a sustained stop")
+    func clusteredStop() {
+        var scenario = Scenario()
+        scenario.hold = 30
+        scenario.held = { $0 < 28 ? .charging : .stopped }
+        scenario.extraHeld = [28.4, 28.8, 29.2, 29.6].map { ($0, .stopped) }
+        let reason = scenario.inconclusiveReason
+        #expect(reason?.contains("only 2 readings") == true)
+    }
+
+    @Test("Five stopped readings 1.5 s apart span only 6 s: not a sustained stop")
+    func stopNeedsSpan() {
+        var scenario = Scenario()
+        scenario.hold = 30
+        scenario.held = { $0 < 24 ? .charging : .stopped }
+        // Replace the regular stopped readings with ones 1.5 s apart.
+        var run = scenario.run
+        run.samples.removeAll { $0.phase == .held && $0.time >= Scenario.creationTime + 24 }
+        run.samples += [24, 25.5, 27, 28.5, 30].map { Sample.Reading.stopped.sample(at: Scenario.creationTime + $0, .held) }
+        guard case let .inconclusive(reason) = Verdict.evaluate(run) else {
+            Issue.record("expected inconclusive, got \(Verdict.evaluate(run))")
+            return
+        }
+        #expect(reason.contains("only 5 readings"))
+        #expect(reason.contains("spanning 6.0 s"))
+    }
+
+    @Test("Extra readings closer than 1.5 s neither count nor break a stop")
+    func closeReadingsIgnored() {
+        var scenario = Scenario()
+        scenario.extraHeld = [4.3, 10.2, 10.9, 31.1].map { ($0, .stopped) }
+        #expect(scenario.verdict == .inhibited(stoppedAfter: 4, resumedAfter: 6))
+    }
+
+    @Test("A contradicting reading breaks the stop even when it is close to the last one")
+    func closeContradictionBreaks() {
+        var scenario = Scenario()
+        scenario.extraHeld = [(10.3, .flagOnly)]
+        #expect(scenario.inconclusiveReason?.contains("disagreed") == true)
+    }
+
+    @Test("A contradicting reading close to a charging one breaks a resume run")
+    func closeContradictionBreaksResume() {
+        var scenario = Scenario()
+        // Charging from 6 s, with a stopped reading 0.3 s after the one at 10 s:
+        // the run restarts at 12 s.
+        scenario.afterReadings = [(2, .stopped), (4, .stopped), (6, .charging), (8, .charging), (10, .charging), (10.3, .stopped)]
+            + stride(from: 12.0, through: 70, by: 2).map { ($0, .charging) }
+        #expect(scenario.verdict == .inhibited(stoppedAfter: 4, resumedAfter: 12))
+    }
+
+    @Test("A sustained run counts readings at least 1.5 s apart and needs 8 s")
+    func sustainedRunRule() {
+        func sample(_ time: Double) -> Sample { Sample.Reading.stopped.sample(at: time, .held) }
+        var run = SustainedRun(first: sample(0))
+        for time in [0.5, 1.0, 1.4] { run.add(sample(time)) }
+        #expect(run.counted == 1)
+        run.add(sample(1.5))
+        #expect(run.counted == 2)
+        for time in [3.5, 5.5, 7.5] { run.add(sample(time)) }
+        #expect(run.counted == 5)
+        #expect(run.span == 7.5)
+        #expect(!run.isSustained())
+        run.add(sample(9.5))
+        #expect(run.isSustained())
+    }
+
+    // MARK: Sampling (finding: overdue deadlines ran back to back)
+
+    @Test("The sampler never catches up: after a late reading, the next is due an interval later")
+    func nextDeadline() {
+        #expect(ProbeSchedule.nextDeadline(after: 10, readAt: 10.05) == 12)
+        #expect(ProbeSchedule.nextDeadline(after: 10, readAt: 10.5) == 12)
+        #expect(ProbeSchedule.nextDeadline(after: 10, readAt: 16) == 18)
+        #expect(abs(ProbeSchedule.nextDeadline(after: 10, readAt: 10.6) - 12.6) < 1e-9)
+        for lateness in stride(from: 0.0, through: 30, by: 0.05) {
+            let readAt = 10 + lateness
+            #expect(ProbeSchedule.nextDeadline(after: 10, readAt: readAt) - readAt >= 1.5 - 1e-9)
+        }
+    }
+
+    @Test("A stall in the middle of a phase yields one late reading, not a burst")
+    func stallSimulation() {
+        // A sampler that wakes at its deadline, except that nothing runs
+        // between 7 s and 15 s.
+        var deadline = 0.0
+        var times: [Double] = []
+        while deadline <= 40 {
+            let readAt = (7..<15).contains(deadline) ? 15 : deadline
+            times.append(readAt)
+            deadline = ProbeSchedule.nextDeadline(after: deadline, readAt: readAt)
+        }
+        let spacings = zip(times, times.dropFirst()).map { $1 - $0 }
+        #expect(spacings.allSatisfy { $0 >= 1.5 })
+        #expect(times.filter { $0 == 15 }.count == 1)
+    }
+
+    // MARK: Baseline freshness at creation
+
+    @Test("The assertion is created only while the last baseline reading is at most 4 s old")
+    func baselineFreshness() {
+        #expect(Verdict.baselineFreshnessProblem(lastBaselineTime: 20, now: 20.5) == nil)
+        #expect(Verdict.baselineFreshnessProblem(lastBaselineTime: 20, now: 24) == nil)
+        let stale = Verdict.baselineFreshnessProblem(lastBaselineTime: 20, now: 26)
+        #expect(stale?.contains("6.0 s old") == true)
+        #expect(stale?.contains("nothing was created") == true)
+        #expect(Verdict.baselineFreshnessProblem(lastBaselineTime: nil, now: 1) != nil)
     }
 
     @Test("A single charging reading after the release is not a resume")
