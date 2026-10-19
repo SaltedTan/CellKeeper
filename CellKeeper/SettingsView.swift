@@ -77,9 +77,11 @@ private struct ChargingSettingsTab: View {
                             in: ChargingSettings.chargeLimitRange) {
                         LabeledContent("Stop charging at", value: settings.chargeLimit >= 100 ? "100% (no limit)" : "\(settings.chargeLimit)%")
                     }
+                    .accessibilityValue(AccessibilityWording.chargeLimit(settings.chargeLimit))
                     Stepper(value: binding(\.resumeThreshold), in: resumeRange) {
                         LabeledContent("Resume charging at", value: "\(settings.resumeThreshold)%")
                     }
+                    .accessibilityValue(AccessibilityWording.percent(settings.resumeThreshold))
                     Text("After reaching the limit, charging stays paused until the battery falls to the resume threshold. The gap avoids switching charging on and off repeatedly.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -355,11 +357,13 @@ private struct TemperatureProtectionControls: View {
                     in: ChargingSettings.temperaturePauseRange, step: 1) {
                 LabeledContent("Pause at", value: Format.celsius(settings.temperatureProtection.pauseAtCelsius))
             }
+            .accessibilityValue(AccessibilityWording.celsius(settings.temperatureProtection.pauseAtCelsius))
             Stepper(value: binding(\.temperatureProtection.resumeAtCelsius),
                     in: ChargingSettings.minimumTemperatureResume...(settings.temperatureProtection.pauseAtCelsius - ChargingSettings.minimumTemperatureHysteresis),
                     step: 1) {
                 LabeledContent("Resume at", value: Format.celsius(settings.temperatureProtection.resumeAtCelsius))
             }
+            .accessibilityValue(AccessibilityWording.celsius(settings.temperatureProtection.resumeAtCelsius))
             Text("Once paused, charging stays paused for at least \(Int(ChargingPolicy.minimumTemperaturePause / 60)) minutes unless the temperature reading is lost.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -697,6 +701,11 @@ private struct ActivityTab: View {
                             .font(.caption)
                             .textSelection(.enabled)
                     }
+                    // One element per event: kind, time and message. The
+                    // trait keeps it a text: combined selectable text would
+                    // otherwise have no role.
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.isStaticText)
                 }
             }
             HStack {
@@ -767,7 +776,9 @@ private struct DiagnosticsTab: View {
     }
 
     /// Each row is one accessibility element made of its label and its
-    /// value; the value can be selected and copied.
+    /// value; the value can be selected and copied. The trait keeps the
+    /// element a text: combined selectable text would otherwise have no
+    /// role (AXUnknown).
     private func rows(of section: DiagnosticsSection) -> some View {
         ForEach(Array(section.rows.enumerated()), id: \.offset) { _, row in
             LabeledContent(row.label) {
@@ -776,6 +787,7 @@ private struct DiagnosticsTab: View {
                     .textSelection(.enabled)
             }
             .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isStaticText)
         }
     }
 
@@ -783,6 +795,9 @@ private struct DiagnosticsTab: View {
         guard let report = model.diagnosticsReport() else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(report, forType: .string)
+        // The button's title says "Copied", which VoiceOver does not read
+        // out by itself.
+        Announcement.post(AccessibilityWording.diagnosticsCopied, priority: .medium)
         isCopied = true
         Task {
             try? await Task.sleep(for: .seconds(2))
@@ -798,6 +813,7 @@ private struct AboutTab: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("CellKeeper \(version)")
                     .font(.title2.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
                 Text("Open-source battery charge management for macOS. Early development: telemetry is real; charging control is simulated unless you choose macOS Charge Limit, which lets macOS enforce your limit.")
                 Text("CellKeeper is an independent open-source project and is not affiliated with Apple, AppHouseKitchen, AlDente, or their respective developers.")
                     .font(.callout)

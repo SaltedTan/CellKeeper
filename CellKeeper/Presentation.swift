@@ -129,6 +129,8 @@ struct MacOSChargeLimitGuideView: View {
                     Text(step)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                // The number and its step read as one.
+                .accessibilityElement(children: .combine)
             }
             ForEach(Array(MacOSChargeLimitGuide.notes(isSimulated: isSimulated).enumerated()), id: \.offset) { index, note in
                 Label(note, systemImage: isSimulated && index == 0 ? "exclamationmark.triangle" : "info.circle")
@@ -390,6 +392,21 @@ struct StatusBadge: View {
             .foregroundStyle(.primary)
             .background(color.opacity(0.18), in: Capsule())
             .overlay(Capsule().strokeBorder(color.opacity(0.6), lineWidth: 1))
+    }
+}
+
+/// Asks VoiceOver, or another assistive app, to read a short text now. Only
+/// for the outcome of something the user just did that would otherwise go
+/// unnoticed; status updates are not announced. Without an assistive app,
+/// nothing happens.
+@MainActor
+enum Announcement {
+    static func post(_ text: String, priority: NSAccessibilityPriorityLevel) {
+        NSAccessibility.post(
+            element: NSApplication.shared,
+            notification: .announcementRequested,
+            userInfo: [.announcement: text, .priority: priority.rawValue]
+        )
     }
 }
 

@@ -76,12 +76,22 @@ final class AppModel {
     private(set) var status: ControllerStatus?
     private(set) var settings: ChargingSettings
     private(set) var backendChoice: ControlBackendChoice
+    // These three are shown away from the control the user just used (at the
+    // foot of Settings › Charging, below an editor), so a new one is also
+    // announced to VoiceOver. Each comes from the user's own change.
+
     /// Validation or persistence problem with the most recent settings change.
-    private(set) var settingsError: String?
+    private(set) var settingsError: String? {
+        didSet { announce(problem: settingsError, replacing: oldValue) }
+    }
     /// Why the most recent scheduled full charge was not set.
-    private(set) var scheduleError: String?
+    private(set) var scheduleError: String? {
+        didSet { announce(problem: scheduleError, replacing: oldValue) }
+    }
     /// Why the most recent weekly full charge was not saved.
-    private(set) var weeklyError: String?
+    private(set) var weeklyError: String? {
+        didSet { announce(problem: weeklyError, replacing: oldValue) }
+    }
     /// Set when stored settings were unusable and defaults were loaded.
     private(set) var settingsRecoveryMessage: String?
     /// macOS's system-wide thermal state and Low Power Mode, shown for
@@ -684,6 +694,13 @@ final class AppModel {
 
     func dismissDiagnosticsSaveFailure() {
         diagnosticsSaveFailure = nil
+    }
+
+    /// Announces a new problem with the user's own change
+    /// (``AccessibilityWording/announcement(forProblem:replacing:)``).
+    private func announce(problem: String?, replacing old: String?) {
+        guard let text = AccessibilityWording.announcement(forProblem: problem, replacing: old) else { return }
+        Announcement.post(text, priority: .high)
     }
 
     /// The charge limits the UI offers for the backend in charge: every
