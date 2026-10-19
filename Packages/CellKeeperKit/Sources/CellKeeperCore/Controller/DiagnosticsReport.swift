@@ -122,34 +122,59 @@ public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpol
     /// text with units in words and numbers in `locale`'s format ("12,427
     /// millivolts", "-12 milliamps", "31 degrees Celsius"), also the
     /// temperatures in the sentences of the policy and the settings check
-    /// ("Battery at 41.5 degrees Celsius"). A unit is singular when its
-    /// number, as shown, is 1 or -1. Nil if the plain text names no unit,
-    /// so that the view leaves the text as it is.
+    /// ("Battery at 41.5 degrees Celsius"), whose numbers are read with
+    /// `locale`'s separators. A unit is singular when its number, as shown,
+    /// is 1 or -1. Nil if the plain text names no unit, so that the view
+    /// leaves the text as it is.
     public func spokenText(formattingTime formatTime: (Date) -> String, locale: Locale = .current) -> String? {
-        let spoken = DiagnosticsReport.redactingAccountNames(parts.map { part in
-            switch part {
-            case .text(let text): Self.speakingTemperatures(in: text)
-            case .identified(let words, _): words
-            case .time(let date), .offsetTime(let date, _): formatTime(date)
-            case .quantity(.integer(let value), let unit): unit.spoken(value, locale: locale)
-            case .quantity(.decimal(let value, _), let unit): unit.spoken(value, fractionDigits: 0...Self.decimalPlaces, locale: locale)
+        var pieces: [String] = []
+        // Text parts next to each other are read as one, so that a number
+        // and its "°C" from different parts are read together.
+        var text = ""
+        for part in parts {
+            if case .text(let next) = part {
+                text += next
+                continue
             }
-        }.joined())
+            pieces.append(Self.speakingTemperatures(in: text, locale: locale))
+            text = ""
+            switch part {
+            case .text: break
+            case .identified(let words, _): pieces.append(words)
+            case .time(let date), .offsetTime(let date, _): pieces.append(formatTime(date))
+            case .quantity(.integer(let value), let unit): pieces.append(unit.spoken(value, locale: locale))
+            case .quantity(.decimal(let value, _), let unit): pieces.append(unit.spoken(value, fractionDigits: 0...Self.decimalPlaces, locale: locale))
+            }
+        }
+        pieces.append(Self.speakingTemperatures(in: text, locale: locale))
+        let spoken = DiagnosticsReport.redactingAccountNames(pieces.joined())
         return spoken == plainText(formattingTime: formatTime) ? nil : spoken
     }
 
     /// `text` with each temperature written after a number ("41.5°C",
-    /// "40 °C") in words. The policy's reasons and the settings check's
-    /// messages, which the menu, notifications and the activity log share,
-    /// write temperatures so, in the current locale's digits. The number is
-    /// already rounded as shown, so it is one if its whole part is 1 and
-    /// its decimals are 0, read by the digits' values.
-    private static func speakingTemperatures(in text: String) -> String {
-        text.replacing(/((\d+)(?:[.,٫](\d+))?)\s?°C/) { match in
-            let whole = match.output.2.compactMap(\.wholeNumberValue).drop { $0 == 0 }
-            let decimals = match.output.3?.compactMap(\.wholeNumberValue) ?? []
-            let isOne = Array(whole) == [1] && decimals.allSatisfy { $0 == 0 }
-            return "\(match.output.1) \(QuantityUnit.degreesCelsius.name(singular: isOne))"
+    /// "40 °C", "1,000°C") in words. The policy's reasons and the settings
+    /// check's messages, which the menu, notifications and the activity log
+    /// share, write temperatures so, in the current locale's format, which
+    /// is `locale` in the app. The whole number is read with `locale`'s
+    /// grouping and decimal separators (a space-like grouping separator in
+    /// any of its forms: space, no-break space, narrow no-break space). It
+    /// is already rounded as shown, so it is one if the digits of its whole
+    /// part are exactly 1 and its decimals are 0, by the digits' values.
+    private static func speakingTemperatures(in text: String, locale: Locale) -> String {
+        let spaces = [" ", "\u{00A0}", "\u{202F}"]
+        let grouping = locale.groupingSeparator.map { spaces.contains($0) ? spaces : [$0] } ?? []
+        let decimal = locale.decimalSeparator ?? "."
+        // Separators as code points, which need no escaping.
+        func anyOf(_ separators: [String]) -> String {
+            "(?:" + separators.map { $0.unicodeScalars.map { "\\x{\(String($0.value, radix: 16))}" }.joined() }.joined(separator: "|") + ")"
+        }
+        let groups = grouping.isEmpty ? "" : "(?:\(anyOf(grouping))\\d+)*"
+        guard let number = try? Regex("((\\d+\(groups))(?:\(anyOf([decimal]))(\\d+))?)\\s?°C") else { return text }
+        return text.replacing(number) { match in
+            let whole = match.output[2].substring?.compactMap(\.wholeNumberValue) ?? []
+            let decimals = match.output[3].substring?.compactMap(\.wholeNumberValue) ?? []
+            let isOne = whole == [1] && decimals.allSatisfy { $0 == 0 }
+            return "\(match.output[1].substring ?? "") \(QuantityUnit.degreesCelsius.name(singular: isOne))"
         }
     }
 

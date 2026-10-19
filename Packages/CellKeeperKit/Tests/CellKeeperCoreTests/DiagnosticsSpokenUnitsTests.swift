@@ -182,35 +182,79 @@ struct DiagnosticsSpokenUnitsTests {
 
     @Test("Temperatures in the policy's and the settings check's sentences are read in words")
     func temperaturesInSentences() {
+        // The policy writes its numbers in the current locale.
         let reason = DecisionReason.temperatureHigh(celsius: 41.5, pauseAt: 40).description
         #expect(reason.contains("°C"))
-        #expect(spoken("\(reason)") == reason.replacingOccurrences(of: "°C", with: " degrees Celsius"))
+        #expect(spoken("\(reason)", locale: .current) == reason.replacingOccurrences(of: "°C", with: " degrees Celsius"))
         #expect(spoken("Battery at 41.5°C (pause at 40°C); charging paused.") == "Battery at 41.5 degrees Celsius (pause at 40 degrees Celsius); charging paused.")
         #expect(spoken("Temperature pause threshold 70°C is outside 30–60°C.") == "Temperature pause threshold 70 degrees Celsius is outside 30–60 degrees Celsius.")
         #expect(spoken("Battery at 41,5°C.") == "Battery at 41,5 degrees Celsius.")
         #expect(spoken("Battery at 1°C, then -1 °C.") == "Battery at 1 degree Celsius, then -1 degree Celsius.")
         // Only after a number.
         #expect(spoken("°C") == nil)
+        // A number and its "°C" in different parts of a value.
+        #expect(spoken("Battery at \("1,000")°C.") == "Battery at 1,000 degrees Celsius.")
     }
 
     @Test("A temperature in a sentence is singular when its number, as shown, is one, in any locale's digits")
     func sentenceNumbers() {
         #expect(spoken("Battery at 1.0°C.") == "Battery at 1.0 degree Celsius.")
-        #expect(spoken("Battery at 01°C.") == "Battery at 01 degree Celsius.")
         #expect(spoken("Battery at 1.1°C.") == "Battery at 1.1 degrees Celsius.")
         #expect(spoken("Battery at 11°C.") == "Battery at 11 degrees Celsius.")
         #expect(spoken("Battery at 10°C.") == "Battery at 10 degrees Celsius.")
         #expect(spoken("Battery at 0.1°C.") == "Battery at 0.1 degrees Celsius.")
+        // Digits after a separator that is not the locale's are not one.
+        #expect(spoken("Battery at 01°C.") == "Battery at 01 degrees Celsius.")
+        #expect(spoken("Battery at 1 001°C.") == "Battery at 1 001 degrees Celsius.")
         // Arabic-Indic and Persian digits, the Arabic decimal separator, and
         // a directional mark before the minus sign.
-        #expect(spoken("Battery at ١°C.") == "Battery at ١ degree Celsius.")
-        #expect(spoken("Battery at ١٫٠°C.") == "Battery at ١٫٠ degree Celsius.")
-        #expect(spoken("Battery at ٤١٫٥°C.") == "Battery at ٤١٫٥ degrees Celsius.")
-        #expect(spoken("Battery at \u{200E}−۱°C.") == "Battery at \u{200E}−۱ degree Celsius.")
-        #expect(spoken("Battery at \u{200E}-1°C.") == "Battery at \u{200E}-1 degree Celsius.")
-        // The policy's own sentence, in the current locale's digits.
+        let arabic = Locale(identifier: "ar_EG")
+        #expect(spoken("Battery at ١°C.", locale: arabic) == "Battery at ١ degree Celsius.")
+        #expect(spoken("Battery at ١٫٠°C.", locale: arabic) == "Battery at ١٫٠ degree Celsius.")
+        #expect(spoken("Battery at ٤١٫٥°C.", locale: arabic) == "Battery at ٤١٫٥ degrees Celsius.")
+        #expect(spoken("Battery at \u{200E}−۱°C.", locale: Locale(identifier: "fa_IR")) == "Battery at \u{200E}−۱ degree Celsius.")
+        #expect(spoken("Battery at \u{200E}-1°C.", locale: Locale(identifier: "he_IL")) == "Battery at \u{200E}-1 degree Celsius.")
+        // The policy's own sentence, in the current locale's format.
         let reason = DecisionReason.temperatureHigh(celsius: 1, pauseAt: 1).description
-        #expect(spoken("\(reason)") == reason.replacingOccurrences(of: "°C", with: " degree Celsius"))
+        #expect(spoken("\(reason)", locale: .current) == reason.replacingOccurrences(of: "°C", with: " degree Celsius"))
+    }
+
+    @Test("A grouped temperature in a sentence is read whole, with the locale's separators", arguments: ["en_US", "de_DE", "fr_FR", "ar_EG"])
+    func groupedSentenceNumbers(_ identifier: String) {
+        let locale = Locale(identifier: identifier)
+        func sentence(_ value: Double, _ digits: ClosedRange<Int>) -> DiagnosticsValue {
+            "Battery at \(value.formatted(.number.precision(.fractionLength(digits)).locale(locale)))°C."
+        }
+        func read(_ value: Double, _ digits: ClosedRange<Int>, _ name: String) -> String {
+            "Battery at \(value.formatted(.number.precision(.fractionLength(digits)).locale(locale))) \(name)."
+        }
+        for (value, digits) in [(1_000.0, 0...0), (1_001.0, 0...0), (1_000.0, 1...1), (1_001.5, 1...1), (-1_000.0, 0...0), (10_001.0, 0...0)] {
+            #expect(spoken(sentence(value, digits), locale: locale) == read(value, digits, "degrees Celsius"), "\(value)")
+        }
+        for (value, digits) in [(1.0, 0...0), (1.0, 1...1), (-1.0, 1...1), (1.04, 0...1)] {
+            #expect(spoken(sentence(value, digits), locale: locale) == read(value, digits, "degree Celsius"), "\(value)")
+        }
+        // Not vacuous: each locale groups thousands with its own separator.
+        let grouped = (1_000).formatted(.number.locale(locale))
+        switch identifier {
+        case "en_US": #expect(grouped == "1,000")
+        case "de_DE": #expect(grouped == "1.000")
+        case "fr_FR": #expect(grouped == "1\u{202F}000")
+        case "ar_EG": #expect(grouped == "١٬٠٠٠")
+        default: break
+        }
+    }
+
+    @Test("A space-like grouping separator is read in any of its forms")
+    func spaceGrouping() {
+        let french = Locale(identifier: "fr_FR")
+        for space in [" ", "\u{00A0}", "\u{202F}"] {
+            #expect(spoken("Battery at 1\(space)001°C.", locale: french) == "Battery at 1\(space)001 degrees Celsius.")
+            #expect(spoken("Battery at 1\(space)000,0°C.", locale: french) == "Battery at 1\(space)000,0 degrees Celsius.")
+        }
+        #expect(spoken("Battery at 1,0°C.", locale: french) == "Battery at 1,0 degree Celsius.")
+        // English groups with a comma: "1,000" is a thousand.
+        #expect(spoken("Battery at 1,000°C and 1°C.") == "Battery at 1,000 degrees Celsius and 1 degree Celsius.")
     }
 
     @Test("The Simulated fixture's rows with units are read in words; the others have no spoken form")
