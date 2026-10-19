@@ -132,20 +132,40 @@ As in note 09 §4, with these changes:
    becomes likelier during a run of several minutes. If either fails, the
    probe refuses (exit 1) before it creates the private assertion. The
    idle-sleep assertion does not stop a lid-close or Apple-menu sleep.
-3. **Sleep.** On `kIOMessageSystemWillSleep`, the probe latches its stop,
-   releases the private assertion (with retries), and only then allows the
-   sleep (`IOAllowPowerChange`); it never creates the assertion again. On
-   `kIOMessageCanSystemSleep` it allows at once: the idle-sleep assertion
-   already covers idle sleep, and the probe does not fight a forced one.
-   Any sleep notification makes the run inconclusive. Whether an
-   assertion's timeout counts while the Mac sleeps is not known, which is
-   why the probe does not rely on it here.
+3. **Sleep.** On `kIOMessageSystemWillSleep`, the probe latches its stop
+   and releases the private assertion (with retries); it never creates the
+   assertion again. What happens next depends on that release
+   (`SleepResponse.willSleep`, a pure decision the tests drive with fakes):
+   - Released, or none was held: the probe records it and allows the sleep
+     (`IOAllowPowerChange`).
+   - Every attempt failed: the probe never allows the sleep and never says
+     the assertion was released. It writes one line to the console and to
+     the report file with plain `write(2)` calls, without waiting on the
+     main thread or its locks, and ends the process at once with
+     `_exit(3)` (the exit status of a run after which charging did not
+     resume). Exiting is the strongest release left: powerd frees every
+     assertion of a process that exits (`HandleProcessExit`, B; note 09
+     §7). Without an acknowledgement, the system waits until the client is
+     gone, or for its acknowledgement timeout (about 30 s, S3), before it
+     sleeps; that only delays the sleep, which is the safe direction
+     `[INFERRED/UNVERIFIED]` for the shipping kernel. `_exit` rather than
+     `exit`: it runs no exit handlers, which could wait on locks the main
+     thread holds, and nothing is left to flush.
+
+   On `kIOMessageCanSystemSleep` the probe allows at once: the idle-sleep
+   assertion already covers idle sleep, and the probe does not fight a
+   forced one. Any sleep notification makes the run inconclusive. Whether
+   an assertion's timeout counts while the Mac sleeps is not known, which
+   is why the probe does not rely on it here.
 4. **Baseline:** readings every 2 s for at least 20 s and until they show 2
    battery updates (2 strictly advancing `UpdateTime` values), all steady
    charging on AC power; at most 150 s. If it has not seen 2 updates by
-   then, or a reading is not steady charging, nothing is created. At the
-   creation, the last baseline reading must be at most 4 s old (as in
-   note 09) and the latest battery update at most 70 s old.
+   then, a reading is not steady charging, or the baseline breaks a clock
+   rule (below), nothing is created. At the creation, checked under the
+   holder's lock immediately before the call, the last baseline reading
+   must be at most 4 s old (as in note 09), the latest battery update at
+   most 70 s old, and the clock rules must still hold from the baseline up
+   to that moment; otherwise nothing is created, and the report says why.
 5. **Hold:** 180 s by default, 165–300 s with `--hold`. The probe releases
    early when a reading is unreadable, shows 100% or charged, shows a
    charge below 25%, or shows a battery update more than 150 s old (2.5
@@ -155,8 +175,11 @@ As in note 09 §4, with these changes:
    resumed (a sustained run, below) by then, the probe keeps reading for up
    to 120 s more. The longest run is therefore 150 + 300 + 180 + 120 s,
    about 12½ minutes; with the default hold, it is usually about 6½ minutes.
-7. **Cleanup**, on every path and in this order: the private assertion
-   (with retries), the idle-sleep assertion, the sleep notifications.
+7. **Cleanup**, in this order: the private assertion (with retries), the
+   idle-sleep assertion, the sleep notifications (`Teardown`). A stop
+   signal or a sleep notification takes the first step at once; the run
+   then finishes and takes all three, at its end and in a `defer` on every
+   path out of it.
 8. The report is written to
    `charge-inhibit-probe-<assertion>-<timestamp>.txt`, for example
    `charge-inhibit-probe-disable-inflow-20261020-101500.txt` (`.gitignore`
@@ -190,10 +213,15 @@ to whole seconds. Readings with the same value repeat one update. An update
 counts as made after a moment (the creation, the release) only if its
 `UpdateTime` is at least the moment's whole second plus one; an update in
 the same second is ambiguous and never counts as evidence. Only strictly
-advancing values are counted. An `UpdateTime` that goes backward, lies more
-than 2 s ahead of the reading's wall time, or wall-clock and run-clock
-intervals between consecutive readings that differ by more than 2 s (the
-wall clock was set) make the run inconclusive.
+advancing values are counted. An `UpdateTime` that goes backward between
+readings, or lies more than 2 s ahead of the reading's wall time, or
+wall-clock and run-clock intervals that differ by more than 2 s (the wall
+clock was set) make the run inconclusive; during the baseline, they stop
+the assertion from being created. The intervals are compared between
+consecutive readings directly, and also between the creation or the
+release and the readings just before and after it, so that an event
+between two readings never splits their disagreement into two smaller,
+accepted steps.
 
 **A sustained run** is as in note 09 (N = 5 counted readings in a row that
 agree, each at least 1.5 s after the previous counted one, spanning at least
@@ -290,12 +318,12 @@ every report prints them:
 | `discharging, did not resume` | A sustained discharge while held, a confirmed release, then not a single charging reading in at least 120 s of readings after the release, over at least 2 updates made after it, whatever the adapter reads said. The report says whether the readings looked like a cut, and tells the owner to follow the recovery steps (§7). | 3 |
 | `no effect observed` | Every reading while held showed charging, from at least 2 battery updates made after the creation, and the release was confirmed. Outcome (a), for the measured hold only. | 0 |
 | `refused` | `IOPMAssertionCreateWithProperties` did not return `kIOReturnSuccess`. Nothing was held. | 0 |
-| `inconclusive` | Anything that prevents a conclusion, including every case of note 09 §4 except battery power while held, and: a baseline without 2 updates in 150 s, or with its latest update more than 70 s old at creation; a sleep notification; an `UpdateTime` that goes backward or runs ahead, or a wall clock that jumps; an effect, or a stretch of charging readings, that does not span 2 battery updates; an effect whose first update was not made after the creation; an effect that ends or changes while held; discharging readings that did not all report the adapter attached (the reason gives the times, and says that an unplug at those moments would look the same); a battery update more than 150 s old, or a charge below 25%, while held; battery power after the release following a stopped effect; no charging after the release, but fewer than 2 updates made after it. | 2 |
+| `inconclusive` | Anything that prevents a conclusion, including every case of note 09 §4 except battery power while held, and: a baseline without 2 updates in 150 s, or with its latest update more than 70 s old at creation; a sleep notification; an `UpdateTime` that goes backward or runs ahead, or a wall clock that jumps (during the baseline or up to the creation, nothing is created); an effect, or a stretch of charging readings, that does not span 2 battery updates; an effect whose first update was not made after the creation; an effect that ends or changes while held; discharging readings that did not all report the adapter attached (the reason gives the times, and says that an unplug at those moments would look the same); a battery update more than 150 s old, or a charge below 25%, while held; battery power after the release following a stopped effect; no charging after the release, but fewer than 2 updates made after it. | 2 |
 
 The function is pure and covered by unit tests over synthetic runs, on
 the probe's real schedule, with every reading its own battery update or
 with the battery updating once a minute as on this Mac
-(`swift test --package-path Tools/charge-inhibit-probe`, 113 tests). Beyond
+(`swift test --package-path Tools/charge-inhibit-probe`, 126 tests). Beyond
 the cases note 09 §4 lists, which still pass with the new windows, they
 cover:
 
@@ -315,20 +343,34 @@ cover:
   30 s window), and a resume that needs its second update;
 - an update in the creation's second; the same-second rule itself;
   `UpdateTime` going backward or running ahead; a wall clock that jumps;
+- the same clock faults in the baseline (backward, ahead, a jump) and a
+  jump between the last baseline reading and the creation, each refused
+  before anything is created; and the code review's case of a 3 s jump
+  that an event between two readings split into two 1.5 s steps, across
+  the creation and across the release, each inconclusive;
+- on a sleep notification: a successful release before the
+  acknowledgement; nothing held; and a failed release, with no
+  acknowledgement, no claim that it was released, and an exit with status
+  3; the teardown order on the normal path, after a stop signal and after
+  a sleep notification;
 - a "did not resume" without 2 updates after the release (inconclusive,
   with the recovery steps first in the report); a stale update while held;
   a baseline of one update; a baseline update too old at creation;
 - a sleep notification; a charge below 25%; a hold shorter than the 90 s
   window; a failed release, no resume and a sleep gap, as before.
 
-Each key rule was mutation-checked on 2026-10-19: with any one of 20 rules
+Each key rule was mutation-checked on 2026-10-19: with any one of 30 rules
 disabled (the 2-update requirement, the same-second rule, the adapter and
 power-input conditions of a cut, the 90 s window, the floor, the sleep
 notices, the staleness and clock checks, the 2 updates after the release,
 the release check, the gap rule, the update-after-creation rule, the
 baseline's 2 updates and update age, the reading states, the effect lasting
-until the release, and the report's recovery section), at least one test
-fails. `charge-inhibit-probe` builds with `-warnings-as-errors`, and CI
+until the release, the report's recovery section, the baseline's and the
+creation's clock checks, the direct comparison of consecutive readings and
+of events with the reading before them, and, on a sleep notification, the
+release before the acknowledgement, no acknowledgement and an exit after a
+failed release, the failure line, and the teardown order), at least one
+test fails. `charge-inhibit-probe` builds with `-warnings-as-errors`, and CI
 runs those tests on every matrix toolchain.
 
 ## 5. Preconditions
@@ -423,7 +465,9 @@ and Optimized Battery Charging may pause near 80%).
   the private assertion after the hold, on SIGINT, SIGTERM or SIGHUP, on a
   sleep notification, on a reading that ends the hold early, and in a
   `defer`; a failed release is retried; after a signal or a sleep
-  notification, nothing is created. The assertion carries a timeout of
+  notification, nothing is created. If the release fails on a sleep
+  notification, the probe does not allow the sleep and exits at once
+  (§4), so that powerd frees the assertion with the process. The assertion carries a timeout of
   hold + 30 s with `TimeoutActionRelease`, and powerd releases every
   assertion of a process that exits. The idle-sleep assertion has its own
   timeout (the longest run plus 120 s) and is released after the private

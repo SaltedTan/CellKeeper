@@ -83,35 +83,41 @@ final class AssertionHolder: @unchecked Sendable {
     }
 
     /// Latches the stop, so ``create(hold:lastCheck:)`` refuses from now on,
-    /// and releases the assertion if one is held. For the signal handler and
-    /// the sleep notification.
-    func cancel() {
+    /// and releases the assertion if one is held. For the signal handler,
+    /// the sleep notification and the teardown.
+    @discardableResult
+    func cancel() -> ReleaseOutcome {
         lock.lock()
         cancelled = true
         lock.unlock()
-        release()
+        return release()
     }
 
     /// Releases the assertion if the probe still holds it, trying up to
-    /// ``releaseAttemptsPerCall`` times. The ID is forgotten only once
-    /// `IOPMAssertionRelease` succeeds. Safe to call from any thread.
-    func release() {
+    /// ``releaseAttemptsPerCall`` times, and says how that went. The ID is
+    /// forgotten only once `IOPMAssertionRelease` succeeds. Safe to call
+    /// from any thread; it holds the lock for at most the attempts (0.4 s of
+    /// pauses).
+    @discardableResult
+    func release() -> ReleaseOutcome {
         lock.lock()
         defer { lock.unlock() }
-        guard let id = assertionID else { return }
+        guard let id = assertionID else { return .nothingHeld }
         if firstReleaseTime == nil { firstReleaseTime = clock.now }
         defer { releaseUnixTime = Clock.unixNow }
+        var result = kIOReturnError
         for attempt in 1...Self.releaseAttemptsPerCall {
-            let result = IOPMAssertionRelease(id)
+            result = IOPMAssertionRelease(id)
             releaseResults.append(result)
             if result == kIOReturnSuccess {
                 assertionID = nil
-                return
+                return .released
             }
             if attempt < Self.releaseAttemptsPerCall {
                 Thread.sleep(forTimeInterval: 0.2)
             }
         }
+        return .failed(result: result, attempts: Self.releaseAttemptsPerCall)
     }
 
     /// The release as the verdict needs it, without the listing check: when
@@ -141,7 +147,21 @@ final class AssertionHolder: @unchecked Sendable {
 /// the private assertion, in a `defer`, and by powerd when the probe exits.
 final class IdleSleepAssertion: @unchecked Sendable {
     private let lock = NSLock()
+    private let clock: Clock
     private var assertionID: IOPMAssertionID?
+    private var lastRelease: (time: Double, result: Int32)?
+
+    init(clock: Clock) {
+        self.clock = clock
+    }
+
+    /// When the probe released it, and the IOReturn of the last attempt;
+    /// nil if it never tried.
+    var released: (time: Double, result: Int32)? {
+        lock.lock()
+        defer { lock.unlock() }
+        return lastRelease
+    }
 
     static func properties(hold: Int) -> [String: Any] {
         [
@@ -168,13 +188,12 @@ final class IdleSleepAssertion: @unchecked Sendable {
         return result
     }
 
-    /// Releases the assertion if it is held, trying up to 3 times; returns
-    /// the last IOReturn, or nil if nothing was held.
-    @discardableResult
-    func release() -> Int32? {
+    /// Releases the assertion if it is held, trying up to 3 times, and
+    /// records the outcome (``released``).
+    func release() {
         lock.lock()
         defer { lock.unlock() }
-        guard let id = assertionID else { return nil }
+        guard let id = assertionID else { return }
         var result = kIOReturnError
         for attempt in 1...AssertionHolder.releaseAttemptsPerCall {
             result = IOPMAssertionRelease(id)
@@ -186,6 +205,6 @@ final class IdleSleepAssertion: @unchecked Sendable {
                 Thread.sleep(forTimeInterval: 0.2)
             }
         }
-        return result
+        lastRelease = (clock.now, result)
     }
 }

@@ -78,27 +78,43 @@ enum RunCommand {
         // 4. Signals: latch the stop, release at once, then finish the
         // report. Sleep: the same, before the system is allowed to sleep.
         let holder = AssertionHolder(clock: clock, kind: kind)
-        let idleSleep = IdleSleepAssertion()
+        let idleSleep = IdleSleepAssertion(clock: clock)
         let sleepWatch = SleepWatch(clock: clock)
         let stop = StopRequest()
-        let signalSources = installSignalHandlers(holder: holder, stop: stop)
         // Cleanup on every path, in this order: the private assertion, the
         // idle-sleep assertion, the sleep notifications.
+        let teardown = Teardown(
+            releasePrivate: { holder.cancel() },
+            releaseIdleSleep: { idleSleep.release() },
+            deregisterSleep: { sleepWatch.stop() }
+        )
+        let signalSources = installSignalHandlers(teardown: teardown, stop: stop)
         defer {
-            holder.release()
-            idleSleep.release()
-            sleepWatch.stop()
+            teardown.finish()
             signalSources.forEach { $0.cancel() }
         }
 
         var samples: [Sample] = []
         var notes: [String] = []
         var listings: [Report.ListingCheck] = []
-        let registered = sleepWatch.start(onWillSleep: { message in
-            // On the notification queue, before the system may sleep.
-            stop.record(.sleep(message))
-            holder.cancel()
-            Console.error("\n\(message): released the assertion before allowing sleep; the run is inconclusive.")
+        let registered = sleepWatch.start(onWillSleep: { acknowledge in
+            // On the notification queue, before the system may sleep: allow
+            // it only once the private assertion is released; if that
+            // fails, exit without allowing it (`SleepResponse`).
+            stop.record(.sleep("kIOMessageSystemWillSleep"))
+            SleepResponse.willSleep(
+                assertion: kind,
+                release: { teardown.stop() },
+                acknowledge: acknowledge,
+                record: { recordAtOnce($0, reportFile: fileName) },
+                terminate: { status in
+                    // `_exit`, not `exit`: it runs no exit handlers, which
+                    // could wait on locks the main thread holds; the line
+                    // above is already written, and powerd frees the
+                    // process's assertions however it ends.
+                    _exit(status)
+                }
+            )
         })
         var sleepGuard = Report.SleepGuard(registered: registered)
 
@@ -138,7 +154,10 @@ enum RunCommand {
             }
         }
         if let refusal {
-            sleepWatch.stop()
+            teardown.finish()
+            if let released = idleSleep.released {
+                sleepGuard.released = released
+            }
             notes.append("Refused to run: \(refusal). No \(kind.type) assertion was created.")
             Console.out("Refusing to run: \(refusal). No \(kind.type) assertion was created.")
             writeReport(run: nil, verdict: nil)
@@ -177,9 +196,11 @@ enum RunCommand {
             guard clock.pause(until: deadline, stop: stop) else { break }
             let sample = read(.baseline)
             baseline.append(sample)
-            // A reading that is not steady charging fails the baseline:
-            // nothing will be created, so there is no point waiting.
+            // A reading that is not steady charging, or clocks that cannot
+            // be trusted, fail the baseline: nothing will be created, so
+            // there is no point waiting.
             if !Verdict.isChargingOnAdapter(sample) { break }
+            if Verdict.clockProblem(samples: baseline, events: []) != nil { break }
             if Verdict.baselineReady(baseline, minimumSpan: Double(ProbeSchedule.baseline) - ProbeSchedule.lateness) { break }
             deadline = ProbeSchedule.nextDeadline(after: deadline, readAt: sample.time)
         }
@@ -214,11 +235,10 @@ enum RunCommand {
 
         // Cleanup, in order: the private assertion, the idle-sleep
         // assertion, the sleep notifications.
-        holder.release()
-        if let result = idleSleep.release() {
-            sleepGuard.released = (clock.now, result)
+        teardown.finish()
+        if let released = idleSleep.released {
+            sleepGuard.released = released
         }
-        sleepWatch.stop()
 
         let run = ProbeRun(assertion: kind, samples: samples, creation: creation, release: release, sleepNotices: sleepWatch.notices)
         var verdict = Verdict.evaluate(run)
@@ -356,19 +376,40 @@ enum RunCommand {
         _ = chown(fileName, uid, gid)
     }
 
+    /// Writes one line to standard error and appends it to the report file,
+    /// with plain `write(2)` calls and no locks, for the sleep notification
+    /// when the probe is about to exit. Best effort.
+    static func recordAtOnce(_ line: String, reportFile: String) {
+        let text = "\n" + line + "\n"
+        text.withCString { pointer in
+            _ = write(STDERR_FILENO, pointer, strlen(pointer))
+            let file = open(reportFile, O_WRONLY | O_APPEND)
+            if file >= 0 {
+                _ = write(file, pointer, strlen(pointer))
+                close(file)
+            }
+        }
+    }
+
     /// SIGINT, SIGTERM and SIGHUP latch the stop (no assertion can be
-    /// created after it), release the private assertion at once, and ask the
-    /// run to finish; a second signal exits immediately (powerd releases
-    /// both assertions on exit in any case).
-    static func installSignalHandlers(holder: AssertionHolder, stop: StopRequest) -> [any DispatchSourceSignal] {
+    /// created after it), release the private assertion at once (the
+    /// teardown's first step), and ask the run to finish; a second signal
+    /// exits immediately (powerd releases both assertions on exit in any
+    /// case).
+    static func installSignalHandlers(teardown: Teardown, stop: StopRequest) -> [any DispatchSourceSignal] {
         let queue = DispatchQueue(label: "charge-inhibit-probe.signals")
         return [SIGINT, SIGTERM, SIGHUP].map { number in
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: queue)
             source.setEventHandler {
-                holder.cancel()
+                let outcome = teardown.stop()
                 if stop.recordSignal(number) {
-                    Console.error("\n\(signalName(number)): stopping. No assertion will be created, and any the probe holds is released. Finishing the report; press Ctrl-C again to quit at once.")
+                    let held = if case .failed = outcome {
+                        "releasing the assertion failed; the probe tries again as it finishes, and powerd frees it when the probe exits"
+                    } else {
+                        "any assertion the probe held is released"
+                    }
+                    Console.error("\n\(signalName(number)): stopping. No assertion will be created, and \(held). Finishing the report; press Ctrl-C again to quit at once.")
                 } else {
                     Console.error("\n\(signalName(number)) again: quitting.")
                     exit(128 + number)

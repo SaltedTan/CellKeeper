@@ -686,22 +686,29 @@ public enum Verdict: Sendable, Equatable {
     }
 
     /// Whether the baseline is long enough to create the assertion: at least
-    /// `minimumSpan` seconds, all usable charging readings, of at least
-    /// `distinctUpdates` battery updates. The probe's baseline reads until
-    /// this holds, or until its time limit.
+    /// `minimumSpan` seconds, of at least `distinctUpdates` battery updates,
+    /// with clocks that can be trusted (``clockProblem(samples:events:criteria:)``).
+    /// The probe's baseline reads until this holds, or until its time limit;
+    /// ``baselineProblem(_:criteria:)`` then decides.
     public static func baselineReady(_ baseline: [Sample], minimumSpan: Double, criteria: Criteria = .standard) -> Bool {
         guard let first = baseline.first, let last = baseline.last, last.time - first.time >= minimumSpan else { return false }
+        guard clockProblem(samples: baseline, events: [], criteria: criteria) == nil else { return false }
         return Set(baseline.compactMap(\.updateTime)).count >= criteria.distinctUpdates
     }
 
     /// Why the assertion must not be created at `now` (run seconds;
     /// `unixTime` is the same moment as Unix time): the last baseline
-    /// reading is missing or more than `maxBaselineGap` old, or the
-    /// baseline's latest battery update is more than `maxBaselineUpdateAge`
-    /// old. The probe checks this immediately before it creates the
+    /// reading is missing or more than `maxBaselineGap` old, the clocks
+    /// cannot be trusted over the baseline and up to this moment
+    /// (``clockProblem(samples:events:criteria:)``), or the baseline's latest
+    /// battery update is more than `maxBaselineUpdateAge` old. The probe
+    /// checks this under the holder's lock immediately before it creates the
     /// assertion, and the verdict again.
     public static func baselineFreshnessProblem(_ baseline: [Sample], at now: Double, unixTime: Double, criteria: Criteria = .standard) -> String? {
         guard let last = baseline.max(by: { $0.time < $1.time }) else { return "there was no baseline reading before the assertion" }
+        if let problem = clockProblem(samples: baseline, events: [(now, unixTime)], criteria: criteria) {
+            return "\(problem) before the assertion was to be created, so nothing was created"
+        }
         let age = now - last.time
         guard age <= criteria.maxBaselineGap else {
             return """
@@ -753,9 +760,12 @@ public enum Verdict: Sendable, Equatable {
     /// Why the clocks cannot be trusted, or nil: an `UpdateTime` that goes
     /// backward between consecutive readings or lies more than
     /// `clockTolerance` ahead of its reading's wall time, or wall-clock and
-    /// run-clock intervals between consecutive moments (readings and
-    /// `events`, given as run time and Unix time) that differ by more than
-    /// `clockTolerance` (the wall clock was set while the probe ran).
+    /// run-clock intervals that differ by more than `clockTolerance` (the
+    /// wall clock was set while the probe ran). The intervals are compared
+    /// between consecutive readings directly, and also between each of the
+    /// `events` (run time and Unix time) and the readings just before and
+    /// after it; an event between two readings never splits their interval
+    /// into two smaller ones.
     public static func clockProblem(samples: [Sample], events: [(Double, Double)], criteria: Criteria = .standard) -> String? {
         let samples = samples.sorted { $0.time < $1.time }
         var previousUpdate: (time: Double, value: Int)?
@@ -775,9 +785,13 @@ public enum Verdict: Sendable, Equatable {
             }
             previousUpdate = (sample.time, update)
         }
-        let moments = (samples.compactMap { sample in sample.unixTime.map { (sample.time, $0) } } + events)
-            .sorted { $0.0 < $1.0 }
-        for (earlier, later) in zip(moments, moments.dropFirst()) {
+        let readings = samples.compactMap { sample in sample.unixTime.map { (sample.time, $0) } }
+        var pairs = Array(zip(readings, readings.dropFirst()))
+        for event in events {
+            if let before = readings.last(where: { $0.0 <= event.0 }) { pairs.append((before, event)) }
+            if let after = readings.first(where: { $0.0 > event.0 }) { pairs.append((event, after)) }
+        }
+        for (earlier, later) in pairs {
             let difference = (later.1 - earlier.1) - (later.0 - earlier.0)
             if abs(difference) > criteria.clockTolerance {
                 return """
@@ -854,6 +868,9 @@ public enum Verdict: Sendable, Equatable {
                     +\(seconds(sample.time)) it reported \(chargingSummary(sample))
                     """
             }
+        }
+        if let problem = clockProblem(samples: baseline, events: [], criteria: criteria) {
+            return "during the baseline, \(problem), so nothing was created"
         }
         let updates = Set(baseline.compactMap(\.updateTime)).count
         guard updates >= criteria.distinctUpdates else {

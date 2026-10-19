@@ -633,9 +633,131 @@ struct VerdictTests {
         let late = Verdict.baselineFreshnessProblem(baseline, at: 10, unixTime: Scenario.epoch + 10)
         #expect(late?.contains("6.0 s old") == true)
         #expect(late?.contains("nothing was created") == true)
-        let stale = Verdict.baselineFreshnessProblem(baseline, at: 4.5, unixTime: Scenario.epoch + 75)
-        #expect(stale?.contains("latest battery update was 71.0 s old") == true)
+        // The battery's latest update was made 67 s before the run began.
+        let old = baseline.map { sample in
+            var sample = sample
+            sample.updateTime = Int(Scenario.epoch) - 67
+            return sample
+        }
+        let stale = Verdict.baselineFreshnessProblem(old, at: 4.5, unixTime: Scenario.epoch + 4.5)
+        #expect(stale?.contains("latest battery update was 71.5 s old") == true)
         #expect(Verdict.baselineFreshnessProblem([], at: 1, unixTime: Scenario.epoch) != nil)
+    }
+
+    // MARK: Clocks before the creation (code review r1, MUST 2)
+
+    /// The default baseline with `change` applied to every reading.
+    func baseline(_ change: (inout Sample) -> Void) -> [Sample] {
+        Scenario().run.samples.filter { $0.phase == .baseline }.map { sample in
+            var sample = sample
+            change(&sample)
+            return sample
+        }
+    }
+
+    @Test("A baseline whose UpdateTime goes backward creates nothing")
+    func baselineUpdateBackward() {
+        // The reviewer's case: charging readings stamped epoch−10, then epoch−20.
+        let backward = baseline { $0.updateTime = Int(Scenario.epoch) - ($0.time < 10 ? 10 : 20) }
+        #expect(Set(backward.compactMap(\.updateTime)).count == 2)
+        #expect(!Verdict.baselineReady(backward, minimumSpan: 19.5))
+        let problem = Verdict.baselineProblem(backward)
+        #expect(problem?.contains("UpdateTime went backward") == true)
+        #expect(problem?.contains("nothing was created") == true)
+        #expect(Verdict.baselineFreshnessProblem(backward, at: 20.5, unixTime: Scenario.epoch + 20.5) != nil)
+    }
+
+    @Test("A baseline whose UpdateTime lies ahead of the wall clock creates nothing")
+    func baselineUpdateAhead() {
+        let ahead = baseline { $0.updateTime = Int(Scenario.epoch + $0.time) + 5 }
+        #expect(!Verdict.baselineReady(ahead, minimumSpan: 19.5))
+        #expect(Verdict.baselineProblem(ahead)?.contains("ahead of the reading's wall time") == true)
+        #expect(Verdict.baselineFreshnessProblem(ahead, at: 20.5, unixTime: Scenario.epoch + 20.5) != nil)
+    }
+
+    @Test("A baseline across which the wall clock jumps creates nothing")
+    func baselineClockJump() {
+        let jumped = baseline { sample in
+            if sample.time > 10 {
+                sample.unixTime! += 5
+                sample.updateTime! += 5
+            }
+        }
+        #expect(!Verdict.baselineReady(jumped, minimumSpan: 19.5))
+        #expect(Verdict.baselineProblem(jumped)?.contains("wall clock and the run's clock disagreed") == true)
+        var scenario = Scenario()
+        scenario.held = { _ in .charging }
+        var run = scenario.run
+        for index in run.samples.indices where run.samples[index].phase == .baseline && run.samples[index].time > 10 {
+            run.samples[index].unixTime! += 5
+            run.samples[index].updateTime! += 5
+        }
+        guard case let .inconclusive(reason) = Verdict.evaluate(run) else {
+            Issue.record("expected inconclusive")
+            return
+        }
+        #expect(reason.contains("nothing was created"))
+    }
+
+    @Test("A wall clock that jumps between the last baseline reading and the creation creates nothing")
+    func clockJumpAtCreation() {
+        let baseline = Scenario().run.samples.filter { $0.phase == .baseline }
+        #expect(Verdict.baselineFreshnessProblem(baseline, at: 20.5, unixTime: Scenario.epoch + 20.5) == nil)
+        let problem = Verdict.baselineFreshnessProblem(baseline, at: 20.5, unixTime: Scenario.epoch + 24)
+        #expect(problem?.contains("wall clock and the run's clock disagreed") == true)
+        #expect(problem?.contains("nothing was created") == true)
+    }
+
+    // MARK: Clock intervals between readings (code review r1, MUST 3)
+
+    @Test("An event between two readings does not split their clock disagreement into smaller steps")
+    func clockEventDoesNotSplit() {
+        // The reviewer's numbers: readings at (20, 20) and (22.5, 25.5),
+        // the creation at (20.5, 22) between them.
+        func reading(_ time: Double, _ wall: Double) -> Sample {
+            var sample = Sample.Reading.charging.sample(at: time, .baseline)
+            sample.unixTime = Scenario.epoch + wall
+            sample.updateTime = Int(Scenario.epoch + wall)
+            return sample
+        }
+        let samples = [reading(20, 20), reading(22.5, 25.5)]
+        #expect(Verdict.clockProblem(samples: samples, events: [(20.5, Scenario.epoch + 22)]) != nil)
+        #expect(Verdict.clockProblem(samples: [reading(20, 20), reading(22.5, 22.5)], events: [(20.5, Scenario.epoch + 20.5)]) == nil)
+        // An event out of line with the readings around it is caught too.
+        #expect(Verdict.clockProblem(samples: [reading(20, 20), reading(22.5, 22.5)], events: [(20.5, Scenario.epoch + 24)]) != nil)
+    }
+
+    @Test("The reviewer's 3 s jump across the creation makes a whole run inconclusive")
+    func clockJumpAcrossCreation() {
+        var run = Scenario().run
+        let creation = Scenario().creationTime
+        run.creation?.unixTime += 1.5
+        run.release?.unixTime += 3
+        for index in run.samples.indices where run.samples[index].time > creation {
+            run.samples[index].unixTime! += 3
+            run.samples[index].updateTime! += 3
+        }
+        guard case let .inconclusive(reason) = Verdict.evaluate(run) else {
+            Issue.record("expected inconclusive, got \(Verdict.evaluate(run))")
+            return
+        }
+        #expect(reason.contains("disagreed by 3.0 s between +20.0 s and +22.5 s"))
+    }
+
+    @Test("The reviewer's 3 s jump across the release makes a whole run inconclusive")
+    func clockJumpAcrossRelease() {
+        var run = Scenario().run
+        let released = Scenario().releasedAt
+        run.release?.unixTime += 1.5
+        for index in run.samples.indices where run.samples[index].time > released {
+            run.samples[index].unixTime! += 3
+            run.samples[index].updateTime! += 3
+        }
+        guard case let .inconclusive(reason) = Verdict.evaluate(run) else {
+            Issue.record("expected inconclusive, got \(Verdict.evaluate(run))")
+            return
+        }
+        #expect(reason.contains("disagreed by 3.0 s"))
     }
 
     @Test("An UpdateTime that goes backward, or lies ahead of the wall clock, is inconclusive")

@@ -12,9 +12,11 @@ import ProbeCore
 /// notifications and to answer them with `IOAllowPowerChange`; it is not
 /// the battery manager's or the SMC's user client (research note 10 §4).
 ///
-/// - `kIOMessageSystemWillSleep`: `onWillSleep` runs first (the run latches
-///   its stop and releases the private assertion), then the probe allows
-///   the sleep. It never vetoes sleep.
+/// - `kIOMessageSystemWillSleep`: `onWillSleep` decides
+///   (`SleepResponse.willSleep`): the run latches its stop and releases the
+///   private assertion, and calls the acknowledgement it is given only once
+///   the assertion is released; if the release fails, it exits without
+///   acknowledging. Without a handler, the sleep is allowed.
 /// - `kIOMessageCanSystemSleep`: allowed at once; the idle-sleep assertion
 ///   already covers idle sleep, and the probe does not fight a forced one.
 /// - `kIOMessageSystemHasPoweredOn`: recorded.
@@ -36,7 +38,7 @@ final class SleepWatch: @unchecked Sendable {
     private let clock: Clock
     private let queue = DispatchQueue(label: "charge-inhibit-probe.sleep")
     private let lock = NSLock()
-    private var onWillSleep: (@Sendable (String) -> Void)?
+    private var onWillSleep: (@Sendable (_ acknowledge: () -> Void) -> Void)?
     private var rootPort: io_connect_t = 0
     private var port: IONotificationPortRef?
     private var notifier: io_object_t = 0
@@ -47,8 +49,10 @@ final class SleepWatch: @unchecked Sendable {
     }
 
     /// Registers for sleep notifications; returns false if
-    /// `IORegisterForSystemPower` did not register the probe.
-    func start(onWillSleep: @escaping @Sendable (String) -> Void) -> Bool {
+    /// `IORegisterForSystemPower` did not register the probe. `onWillSleep`
+    /// runs on the notification queue and is given the acknowledgement
+    /// (`IOAllowPowerChange`) to call, or not.
+    func start(onWillSleep: @escaping @Sendable (_ acknowledge: () -> Void) -> Void) -> Bool {
         lock.lock()
         defer { lock.unlock() }
         guard rootPort == 0 else { return true }
@@ -119,8 +123,11 @@ final class SleepWatch: @unchecked Sendable {
             lock.lock()
             let handler = onWillSleep
             lock.unlock()
-            handler?("kIOMessageSystemWillSleep")
-            allowPowerChange(notificationID)
+            if let handler {
+                handler { allowPowerChange(notificationID) }
+            } else {
+                allowPowerChange(notificationID)
+            }
         case Self.systemHasPoweredOn:
             record("kIOMessageSystemHasPoweredOn")
         default:
