@@ -10,7 +10,7 @@ exactly what it would do — and whether it can actually do it.
 > **CellKeeper is an independent open-source project and is not affiliated
 > with Apple, AppHouseKitchen, AlDente, or their respective developers.**
 
-## Status: early development (milestone 2)
+## Status: early development
 
 CellKeeper is **pre-alpha**. The architecture, telemetry, and charging policy
 engine work. By default the app runs with a *simulated* control backend that
