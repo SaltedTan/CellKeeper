@@ -164,12 +164,14 @@ struct DischargeStartTests {
                 }
             }
         }
-        #expect(checked == 2 * 9 * 4 * 42 * 3)
+        let allCases: Int = 2 * 9 * 4 * 42 * 3
+        #expect(checked == allCases)
         // Manage charging on, the simulated backend, no override, plugged
         // in with a charge above a limit of 20–95%: 8 + 7 + 6 + 5 + 4 + 3 + 2
         // charges above the seven limits in range, with a battery present
         // or not (the old predicate did not check).
-        #expect(enabled == 35 * 2)
+        let enabledCases: Int = 35 * 2
+        #expect(enabled == enabledCases)
     }
 
     @Test("A stored limit below 20%, which the settings' own setter clamps, is refused for its range, as before")
@@ -238,6 +240,7 @@ struct FullChargeStartReasonTests {
         }
         // Manage charging on, four limits below 100%, any of the four
         // backends, plugged in with a battery (six readings), no override.
-        #expect(enabled == 4 * 4 * 6)
+        let enabledCases: Int = 4 * 4 * 6
+        #expect(enabled == enabledCases)
     }
 }
