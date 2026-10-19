@@ -615,9 +615,10 @@ responsible; see Apple's guidance on the "Not Charging" status.
 
 After a run of the `ChargeInhibit` probe (research note 09): check that
 `pmset -g assertions` lists no `ChargeInhibit`, stop the probe if it still
-runs (Ctrl-C), unplug and replug the adapter, quit any battery tool, and
-restart the Mac; then set macOS's Charge Limit and Optimized Battery
-Charging back as you want them. Note 09 §7 has the details.
+runs (Ctrl-C), unplug and replug the adapter, quit any battery tool,
+and, if charging still does not resume, restart the Mac; then set macOS's
+Charge Limit and Optimized Battery Charging back as you want them. Note 09
+§7 has the details.
 
 ### Getting your own Charge Limit back
 

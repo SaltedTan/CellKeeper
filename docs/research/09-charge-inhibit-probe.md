@@ -44,9 +44,14 @@ restart, or anything SMC-based.
   clean-room rule on third-party write encodings. Each needs a separate
   owner decision after this result.
 - **AlDente Pro's helper** (installed through Setapp) is being removed by the
-  owner before the test. The probe checks, by file existence only, that its
-  two files are gone; it never reads them. The read-only check on
-  2026-10-19 (§9) found neither file.
+  owner before the test. The owner cannot restart the Mac during this work
+  (an agent session runs on it), so its absence is established read-only
+  instead (lead decision, 2026-10-19): `check` requires that its two files
+  do not exist (existence only; they are never read), that
+  `launchctl print system/com.apphousekitchen.aldente-pro-setapp.helper`
+  reports that it cannot find the service, and that no running process's
+  executable path or name matches AlDente. A restart is needed only if one
+  of these fails. The read-only check on 2026-10-19 (§9) passed all three.
 
 ## 3. Mechanism and sources
 
@@ -102,14 +107,18 @@ probe never uses it.
 | `ChargerData.NotChargingReason` | AppleSmartBattery registry, undocumented bit field, not decoded | report only |
 | `PowerTelemetryData.SystemPowerIn` | AppleSmartBattery registry, undocumented, mW by inference (note 01) | report only |
 | Charge Limit | `pmset -g battlimit` (`[PRIVATE/UNDOCUMENTED]` getter, notes 02 and 08) | precondition |
-| Assertions | `pmset -g assertions`; only lines that mention `ChargeInhibit` are kept | precondition, listing checks |
+| Assertions | `pmset -g assertions`, reduced to structured fields: the system-wide `ChargeInhibit` level and, per `ChargeInhibit` holder, its process name (plain names only) and whether its assertion name is exactly the probe's. Assertion names, details and every other line are dropped. | precondition, listing checks |
+| AlDente's helper service | `launchctl print system/com.apphousekitchen.aldente-pro-setapp.helper`: exit 113 with "Could not find service" means not loaded (observed on macOS 27.0.1); exit 0 means loaded | precondition |
+| AlDente processes | the process table: `proc_listallpids`, then each process's executable path (`proc_pidpath`) or, failing that, its name (`proc_name`); names only, no process memory | precondition |
 | Model, macOS, firmware | `sysctlbyname` (`hw.model`, `kern.osproductversion`, `kern.osversion`); `system-firmware-version` of `IODeviceTree:/chosen` | report header |
 
 Registry values are read one key at a time with
 `IORegistryEntryCreateCFProperty`; no user client is opened. Serial numbers,
 which the battery's description and registry entry also carry, are never
-read into a sample, and the report contains no user names or home paths
-(the tests check this). Note 08 observed that `pmset` itself tries to open
+read into a sample. Text from outside the probe (daemon file names, process
+names) reaches the report only as short plain names, without a path or the
+user's names; anything else becomes "[redacted]", and arbitrary assertion
+names are never kept (the tests check this). Note 08 observed that `pmset` itself tries to open
 the SMC user client as it starts; under `sudo` that attempt is pmset's own,
 for its read-only getters, as when an administrator runs `pmset -g`.
 
@@ -121,18 +130,25 @@ for its read-only getters, as when an administrator runs `pmset -g`.
 2. Re-check every precondition (§5); refuse on any failure.
 3. Create the report file in the current directory; refuse if it cannot be
    written.
-4. Install handlers for SIGINT, SIGTERM and SIGHUP.
-5. **Baseline:** 11 readings, every 2 s for 20 s. Create nothing unless every
-   reading shows steady charging on AC power.
+4. Install handlers for SIGINT, SIGTERM and SIGHUP. A signal latches a stop
+   under the same lock as creation: from then on the probe never creates an
+   assertion, and it releases one it holds at once.
+5. **Baseline:** 11 readings, every 2 s for 20 s, timed from the baseline's
+   own start. Create nothing unless the readings span 18–24 s with no gap
+   over 4 s, and every one shows steady charging on AC power.
 6. **Hold:** create the assertion; record the IOReturn; read every 2 s for the
-   hold (default 60 s, 30–300 s with `--hold`); check `pmset -g assertions`
+   hold (default 60 s, 40–300 s with `--hold`); check `pmset -g assertions`
    2 s after creation and just before the release. If a reading shows the
    Mac on battery, at 100%, or unreadable, release at once (the run is
    inconclusive).
-7. **Release** with `IOPMAssertionRelease`; record the IOReturn; check
-   `pmset -g assertions` again.
-8. **After:** read every 2 s for 60 s. If charging has not resumed by then,
-   keep reading for up to 120 s more, to tell a late resume from none.
+7. **Release** with `IOPMAssertionRelease`, up to 3 attempts 0.2 s apart. A
+   failed release keeps the assertion's ID, and every later release path
+   (stop signal, the final release, the `defer`) tries again. Record the
+   IOReturn; check `pmset -g assertions` just after, and once more 1 s later
+   if it still lists the assertion.
+8. **After:** read every 2 s for 60 s. If charging has not resumed for 5
+   readings in a row by then, keep reading for up to 120 s more, to tell a
+   late resume from none.
 9. Compute the verdict and write the report to standard output and to
    `charge-inhibit-probe-<timestamp>.txt`.
 
@@ -144,49 +160,76 @@ the local wall-clock time, to match the report against the system log.
 
 A reading is **charging** when the charging flag is on and the battery
 current is above 50 mA, **stopped** when the flag is off and the current is
-at most 50 mA, and **mixed** otherwise. Both are required because Apple's
-published fallback path changes only the `IsCharging` flag; a flag alone
-could be cosmetic.
+at most 50 mA, and **mixed** (the two disagree) otherwise. Both are required
+because Apple's published fallback path changes only the `IsCharging` flag;
+a flag alone could be cosmetic.
+
+A stop counts only if it is **sustained**: from the first stopped reading to
+the release, every reading is stopped, and there are at least N = 5 of them
+(10 s). Any later disagreement or charging reading while the assertion is
+still held makes the run inconclusive, so a flag-only effect with a single
+current dip cannot pass as a stop. A resume, likewise, is 5 charging
+readings in a row; it counts from the first of them.
+
+**The thresholds are judgment calls**, not values from any source, and every
+report prints them: 50 mA for "not charging"; a stop within 30 s of
+creation; N = 5 consecutive readings for a stop and for a resume (long
+enough that one passing reading cannot decide, short enough that the
+minimum hold of 40 s covers the 30 s stop window plus 10 s of stop); a
+resume starting within 60 s of the release; a baseline spanning 18–24 s
+with no gap over 4 s; and no gap over 10 s between any readings (a sleep).
 
 | Verdict | When | Exit status |
 |---|---|---|
-| `inhibited` | Steady charging in the baseline; the assertion created; charging **stopped** within 30 s of creation and stayed stopped while held, on AC power; charging resumed within 60 s of the release. | 0 |
-| `inhibited, resumed late` | As above, but charging resumed more than 60 s after the release. | 0 |
-| `inhibited, did not resume` | Charging stopped as above and had not resumed after at least 60 s of readings after the release (normally 180 s). The report tells the owner to follow the recovery steps (§7). | 3 |
-| `no effect` | The assertion was created and every reading while it was held showed charging. | 0 |
+| `inhibited` | Steady charging over the whole baseline; the assertion created; a sustained stop beginning within 30 s of creation, on AC power; `IOPMAssertionRelease` succeeded and `pmset -g assertions` no longer listed the assertion; then 5 charging readings in a row, starting within 60 s of the release. | 0 |
+| `inhibited, resumed late` | As above, but the 5 charging readings in a row started more than 60 s after the release. | 0 |
+| `inhibited, did not resume` | A sustained stop as above and a confirmed release, then not a single charging reading in at least 60 s of readings after the release (normally 180 s). The report tells the owner to follow the recovery steps (§7). | 3 |
+| `no effect observed` | No effect observed during the measured hold: the assertion was created, the release was confirmed, and every reading while it was held showed charging. It says nothing about longer holds, sleep or other conditions. | 0 |
 | `refused` | `IOPMAssertionCreateWithProperties` did not return `kIOReturnSuccess`. Nothing was held. | 0 |
-| `inconclusive` | Anything that prevents a conclusion: the baseline was not steady charging or had fewer than 5 readings; a reading showed battery power, 100% or charged, or an unreadable value while it mattered; a gap of more than 10 s between readings (a sleep); a stop later than 30 s after creation; charging that restarted while the assertion was held; readings that never clearly stopped but disagreed; readings after the release that end before the 60 s window; a stop signal before the assertion. | 2 |
+| `inconclusive` | Anything that prevents a conclusion: a baseline that was not steady charging, had fewer than 5 readings, spanned less than 18 s or more than 24 s, or had a gap over 4 s; a reading that showed battery power, 100% or charged, or an unreadable value while it mattered; a gap of more than 10 s between readings (a sleep); a stop later than 30 s after creation; a disagreeing or charging reading after the stop began, while held; a stop of fewer than 5 readings; readings that never clearly stopped but disagreed; charging after the release that never lasted 5 readings in a row; readings after the release that end before the 60 s window; **a failed `IOPMAssertionRelease`, or an assertion still listed (or not checkable) after the release**, in which case the report says that powerd releases it at its timeout or when the probe exits; a stop signal before the assertion. | 2 |
 
 The function is pure and covered by unit tests over synthetic runs on the
 probe's real schedule (`swift test --package-path Tools/charge-inhibit-probe`):
-inhibited; no effect; refused; unplugged while held and after the release;
-reached 100%; resumed late; resumed exactly at the window's end; never
-resumed; late stop; restart while held; mixed readings; non-charging or short
-baseline; unreadable values; a sleep gap; an assertion not released by the
-probe; unordered samples. `charge-inhibit-probe` also builds with
+inhibited, with disagreeing readings during the fall and the ramp-up; no
+effect observed; refused; a flag-only effect with and without a single
+current dip; current or the flag returning after a real stop; a dip followed
+by charging; a stop of 4 readings (too short) and of exactly 5; a resume
+flicker; a resume after a flicker; a failed release (with a timeout that
+would otherwise look like a resume 30 s later); an assertion still listed,
+or not checkable, after the release; a baseline that was not charging, too
+short, too brief, gapped, or too long before the creation; unplugged while
+held and after the release; reached 100%; resumed late; resumed at the
+window's end; never resumed; late stop; restart while held; unreadable
+values; a sleep gap; no release; unordered samples. `charge-inhibit-probe` also builds with
 `-warnings-as-errors`, and CI runs those tests on every matrix toolchain.
 
 ## 5. Preconditions
 
 `check` prints these and exits 0 if none fails, 1 otherwise. `run` checks
-them again and refuses on any failure. Warnings never stop a run.
+them again and refuses on any failure. Anything the verdict depends on that
+cannot be read fails. Warnings never stop a run.
 
 | Check | Fails / warns when | Why |
 |---|---|---|
 | On AC power | **fails** on battery or unknown | The assertion inhibits charging; without AC there is nothing to inhibit. |
 | Battery present | **fails** without a readable internal battery | |
 | Charge below 95% | **fails** at 95% or more | Near full, charging tapers and stops by itself. |
-| macOS is charging now | **fails** unless the charging flag is on and the current is above 50 mA. Not charging: "macOS isn't charging the battery now — raise macOS's Charge Limit to 100% (System Settings › Battery) and wait until it charges" | Without charging in progress, a stop cannot be observed. |
+| macOS is charging now | **fails** unless the charging flag is on and the current is above 50 mA, and if either cannot be read. Not charging: "macOS isn't charging the battery now — raise macOS's Charge Limit to 100% (System Settings › Battery) and wait until it charges" | Without charging in progress, a stop cannot be observed. |
 | Battery current readable | **fails** without `InstantAmperage` or `Amperage` | The verdict needs it. |
-| macOS's Charge Limit is 100% | **fails** if `pmset -g battlimit` reports a limit below 100%; **warns** if it cannot be read | A native limit can stop charging by itself during the run; reports also say firmware owns the power path while the native limit is active (note 02 §3.10). |
-| No AlDente helper | **fails** if `/Library/PrivilegedHelperTools/com.apphousekitchen.aldente-pro-setapp.helper` or `/Library/LaunchDaemons/com.apphousekitchen.aldente-pro-setapp.helper.plist` exists (existence only) | Another charge controller would confound the result. |
-| No other battery-control daemon | **warns** if a file name in `/Library/LaunchDaemons` or `/Library/PrivilegedHelperTools` contains `aldente`, `apphousekitchen`, `batt`, `charg`, `bclm` or `smc` (names only) | A name says nothing certain, so it only warns. |
-| No ChargeInhibit assertion held | **fails** if `pmset -g assertions` lists one; **warns** if pmset cannot be run | powerd forwards only the first raise (§3), so the probe's own assertion would change nothing. |
+| macOS's Charge Limit is 100% | **fails** if `pmset -g battlimit` reports a limit below 100%, or cannot be read | A native limit can stop charging by itself during the run; reports also say firmware owns the power path while the native limit is active (note 02 §3.10). |
+| No AlDente helper files | **fails** if `/Library/PrivilegedHelperTools/com.apphousekitchen.aldente-pro-setapp.helper` or `/Library/LaunchDaemons/com.apphousekitchen.aldente-pro-setapp.helper.plist` exists (existence only) | Another charge controller would confound the result. |
+| AlDente helper not loaded | **fails** unless `launchctl print system/com.apphousekitchen.aldente-pro-setapp.helper` reports that it cannot find the service (a loaded service, or an answer it cannot interpret, fails) | Files can be gone while launchd still runs the job; this check stands in for a restart. |
+| No AlDente process running | **fails** if a running process's executable path or name contains `aldente` or `apphousekit` (the latter also catches a name cut to 15 characters), or if the process table, or any listed process that has not exited, cannot be read | The helper, or AlDente's app, could still change charging. |
+| No other battery-control daemon | **warns** if a file name in `/Library/LaunchDaemons` or `/Library/PrivilegedHelperTools` contains `aldente`, `apphousekit`, `batt`, `charg`, `bclm` or `smc` (names only) | A name says nothing certain, so it only warns. |
+| No ChargeInhibit assertion held | **fails** if `pmset -g assertions` lists one, or cannot be run | powerd forwards only the first raise (§3), so the probe's own assertion would change nothing. |
 | Charge in the recommended 50–74% | **warns** at 75–94% (Optimized Battery Charging may pause near 80%) and below 50% (note 02 §7 recommends 50–75%, for margin) | |
 
 ## 6. Owner steps
 
-1. Make sure AlDente is fully removed, then restart the Mac.
+1. Make sure AlDente is fully removed (its app and its helper). No restart
+   is needed if `check` (step 5) passes "No AlDente helper files", "AlDente
+   helper not loaded" and "No AlDente process running"; restart only if one
+   of them still fails after the removal.
 2. In Terminal, at the top of the repository, build the probe:
 
    ```sh
@@ -207,6 +250,8 @@ them again and refuses on any failure. Warnings never stop a run.
    ```
 
    It must end with `READY`. Fix any `FAIL` line first; read any `WARN`.
+   If an AlDente line still fails after AlDente has been removed, restart
+   the Mac and check again.
 6. Run the test:
 
    ```sh
@@ -214,7 +259,7 @@ them again and refuses on any failure. Warnings never stop a run.
    ```
 
    It takes about 2½ minutes (20 s baseline, 60 s hold, 60 s after), up to
-   4½ minutes if charging is slow to resume. Do not unplug the adapter, close
+   4½ minutes if charging is slow to resume. `--hold` takes 40–300 s. Do not unplug the adapter, close
    the lid or let the Mac sleep. Ctrl-C at any time releases the assertion
    and ends the run with a report.
 7. Send the file `Tools/charge-inhibit-probe/charge-inhibit-probe-<timestamp>.txt`
@@ -233,16 +278,22 @@ them again and refuses on any failure. Warnings never stop a run.
 - **Fail-safe release, in layers.**
   1. The probe releases the assertion after the hold, on SIGINT, SIGTERM or
      SIGHUP (from the signal handler, at once), when a reading shows the run
-     cannot conclude, and in a `defer` on every path out of `run`. A lock
-     makes creation and release safe against the signal handler.
+     cannot conclude, and in a `defer` on every path out of `run`. One lock
+     covers creation, release and a stop latch: once a signal has arrived,
+     the probe never creates an assertion. A release that fails keeps the
+     assertion's ID and is retried, up to 3 attempts each time, on every
+     later release path.
   2. The assertion carries a timeout of hold + 30 s with
      `TimeoutActionRelease`: powerd releases it if the probe stalls (B).
   3. powerd releases every assertion a process owns when the process exits,
      however it exits, including `kill -9` (B).
 
   Whether the shipping powerd on Apple silicon behaves like the published
-  source is part of what the run shows: the report records whether
-  `pmset -g assertions` still lists the assertion just after the release.
+  source is part of what the run shows: the report records the release's
+  IOReturn and whether `pmset -g assertions` still lists the assertion just
+  after the release. If the release failed or is unconfirmed, the verdict is
+  inconclusive and the report says that powerd releases the assertion at
+  its timeout or when the probe exits.
 - **If charging does not resume** (verdict `inhibited, did not resume`, or at
   any time):
   1. Run `pmset -g assertions`. If it lists a `ChargeInhibit` and the probe
@@ -250,7 +301,7 @@ them again and refuses on any failure. Warnings never stop a run.
      assertion when the probe exits.
   2. Unplug the adapter, wait a few seconds, and plug it back in.
   3. Quit any battery tool (and CellKeeper, if it is running).
-  4. Restart the Mac.
+  4. If charging still does not resume, restart the Mac.
   5. Check macOS's own Charge Limit and Optimized Battery Charging (System
      Settings › Battery › ⓘ next to Charging); you set them for the test.
 
@@ -262,7 +313,8 @@ them again and refuses on any failure. Warnings never stop a run.
   with `sudo`; create more than one assertion; use `DisableInflow` or any
   other assertion type; open an IOUserClient (powerd may, as part of Apple's
   own handling); write SMC keys; change `pmset` settings; read the AlDente
-  helper's files.
+  helper's files; read any process's memory (only executable paths and
+  names).
 
 ## 8. Open questions
 
@@ -282,10 +334,13 @@ them again and refuses on any failure. Warnings never stop a run.
 ## 9. Pre-run state: read-only `check` on 2026-10-19
 
 Run by the agent as an ordinary user (uid 501), before the owner prepared
-the Mac. Nothing was created. `run` without `sudo` was also tried, to
-confirm it refuses: it printed that it must be started with `sudo`, exited 1,
-wrote no report, and `pmset -g assertions` listed no `ChargeInhibit`
-afterwards.
+the Mac, with the probe as revised after the first review. Nothing was
+created. `run` without `sudo` was also tried, to confirm it refuses: it
+printed that it must be started with `sudo`, exited 1, wrote no report, and
+`pmset -g assertions` listed no `ChargeInhibit` afterwards. A separate
+scratch build of the same process-table scan, matching powerd instead of
+AlDente, found it by its executable path with no unreadable processes, so
+the scan does see root-owned processes from an ordinary account.
 
 ```text
 CellKeeper ChargeInhibit probe: check (read-only; creates nothing)
@@ -293,7 +348,7 @@ machine: Mac16,1, macOS 27.0.1 (26A434), system firmware mBoot-20457.1.29
 
 Current reading
 clock          time phase     AC   charging   charged     %  mA instant/avg   reg.charging  reg.ext  NotChargingReason  SysPowerIn mW  state
-12:45:45    +0.0 baseline  yes  no         no         80   0/0              no            yes      0x1000000          16117          stopped
+13:16:38    +0.0 baseline  yes  no         no         80   0/0              no            yes      0x1000000          10120          stopped
 
 Preconditions
 PASS  On AC power: IOPowerSources reports AC power (AppleSmartBattery ExternalConnected: yes)
@@ -302,7 +357,9 @@ PASS  Charge below 95%: 80%
 FAIL  macOS is charging now: macOS isn't charging the battery now — raise macOS's Charge Limit to 100% (System Settings › Battery) and wait until it charges
 PASS  Battery current readable: InstantAmperage 0 mA, Amperage 0 mA
 FAIL  macOS's Charge Limit is 100%: pmset -g battlimit reports 80%: set the Charge Limit to 100% (System Settings › Battery › ⓘ next to Charging)
-PASS  No AlDente helper: neither of its helper files exists
+PASS  No AlDente helper files: neither of its helper files exists
+PASS  AlDente helper not loaded: launchctl print system/com.apphousekitchen.aldente-pro-setapp.helper: could not find service
+PASS  No AlDente process running: no executable path or name in the process table matches AlDente
 PASS  No other battery-control daemon: no file name in /Library/LaunchDaemons or /Library/PrivilegedHelperTools suggests one
 PASS  No ChargeInhibit assertion held: pmset -g assertions lists none
 WARN  Charge in the recommended 50–74%: 80%: if Optimized Battery Charging is on, macOS may pause charging near 80% by itself and confuse the result. Turn it off for the test (System Settings › Battery › ⓘ next to Charging), or start below 75%
@@ -311,8 +368,9 @@ NOT READY: 2 preconditions fail; `run` would refuse. Read the warning above.
 ```
 
 `[VERIFIED-EXPERIMENTALLY]` (read-only): the Mac was held at 80% by macOS's
-native Charge Limit, as in notes 02 and 08, and the AlDente helper's two
-files were absent.
+native Charge Limit, as in notes 02 and 08; the AlDente helper's two files
+were absent, launchd did not know its service, and no AlDente process was
+running, so no restart is needed for the AlDente precondition.
 
 ## 10. Results
 
@@ -324,6 +382,7 @@ files were absent.
 | macOS build, firmware | |
 | Hold | |
 | IOReturn of creation | |
+| IOReturn of release (attempts) | |
 | Listed by `pmset -g assertions` 2 s after creation / before / after the release | |
 | Charging stopped after | |
 | Charging resumed after the release | |
