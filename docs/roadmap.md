@@ -47,8 +47,10 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
   free Personal Team signing. Phase
   4c has had a test Mac since 2026-10-19; its first step, the
   `ChargeInhibit` probe, ran that day and showed no effect on charging.
-  Its second, a `DisableInflow` probe, is built and waits for the owner's
-  run. Any mechanism after that needs a new owner decision.
+  Its second, a `DisableInflow` probe, ran on 2026-10-20 and showed no
+  effect either. The only mechanism left that is reported to work here,
+  the SMC adapter cut, needs new owner decisions (SMC writes and the
+  clean-room rule).
 - While both were blocked, the owner approved three smaller features on
   2026-10-18, all done: Save Diagnostics… (milestone 3), opt-in
   notifications (milestone 3) and a one-shot scheduled full charge
@@ -262,7 +264,11 @@ owner-run experiment, with Apple's private `DisableInflow` assertion.
   adapter's power cut, with the Mac running from its battery while plugged
   in. Its criteria now need readings of at least two battery updates,
   which came a minute apart on this Mac. Read literally, Apple's published source predicts no effect on
-  Apple silicon (note 10 §3). *Built; not run yet.*
+  Apple silicon (note 10 §3). *Run by the owner on 2026-10-20: no effect
+  observed.* powerd accepted and released the assertion, and every reading
+  while it was held, over three battery updates, showed adapter power and
+  charging, so `DisableInflow` stays unverified and is not added to the
+  helper's allowlist.
 - Follow research note 02 §7: a read-only, allowlisted capability probe,
   then single reversible writes, then the persistence matrix. Evaluate
   Apple's private `ChargeInhibit` power assertion first: Apple's published
