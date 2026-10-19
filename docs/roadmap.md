@@ -34,7 +34,10 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
   that the maintainer's Mac is that test Mac, and authorized one experiment
   on it, an owner-run test of Apple's private `ChargeInhibit` power
   assertion (phase 4c), and after its result one more, of the private
-  `DisableInflow` assertion. No SMC access is authorized.
+  `DisableInflow` assertion. After both showed no effect, the owner
+  authorized SMC access on this Mac on 2026-10-20 for one mechanism, the
+  adapter cut (`CHIE`), in an owner-run `sudo` test; agents never write
+  SMC keys.
 - Phase 4a was completed on 2026-10-11, and its follow-ups on
   2026-10-17: the request pacer (#67) and three timing-sensitive tests
   ([issue #1](https://github.com/SaltedTan/CellKeeper/issues/1)). The
@@ -49,8 +52,9 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
   `ChargeInhibit` probe, ran that day and showed no effect on charging.
   Its second, a `DisableInflow` probe, ran on 2026-10-20 and showed no
   effect either. The only mechanism left that is reported to work here,
-  the SMC adapter cut, needs new owner decisions (SMC writes and the
-  clean-room rule).
+  the SMC adapter cut, needed new owner decisions (SMC writes and the
+  clean-room rule); the owner made them on 2026-10-20, and its probe is
+  designed ([research note 11](research/11-smc-adapter-cut.md)).
 - While both were blocked, the owner approved three smaller features on
   2026-10-18, all done: Save Diagnostics… (milestone 3), opt-in
   notifications (milestone 3) and a one-shot scheduled full charge
@@ -244,7 +248,10 @@ once AlDente's helper is removed, and authorized one experiment: a test of
 `ChargeInhibit` that the owner runs with `sudo`. SMC reads and writes, the
 adapter cut, and any other private mechanism each need a separate owner
 decision after that result. After it, the owner authorized one more
-owner-run experiment, with Apple's private `DisableInflow` assertion.
+owner-run experiment, with Apple's private `DisableInflow` assertion, and
+after that one, on 2026-10-20, SMC access for the adapter cut (`CHIE`),
+with a narrow clean-room exception for the facts it needs
+([`CONTRIBUTING.md`](../CONTRIBUTING.md) §1).
 
 - **First step: the `ChargeInhibit` probe**
   ([research note 09](research/09-charge-inhibit-probe.md)). A standalone
@@ -269,12 +276,23 @@ owner-run experiment, with Apple's private `DisableInflow` assertion.
   while it was held, over three battery updates, showed adapter power and
   charging, so `DisableInflow` stays unverified and is not added to the
   helper's allowlist.
+- **Third step: the SMC adapter-cut probe**
+  ([research note 11](research/11-smc-adapter-cut.md)). The same tool,
+  run with `--mechanism smc-adapter-cut`: `check` reads the one SMC key
+  `CHIE` (its type, size and value) without privileges; `sudo … run`
+  writes `CHIE`'s reported cut value for 180 s, restores the value it read
+  before, reads each write back, and judges the run with note 10's rules
+  for an adapter cut. A written key is not released when the probe exits,
+  so the tool also has a `sudo … restore` command. The key's values come
+  from third-party open-source projects under the owner's clean-room
+  exception, and are claims until this run. *Designed; not run yet.*
 - Follow research note 02 §7: a read-only, allowlisted capability probe,
   then single reversible writes, then the persistence matrix. Evaluate
   Apple's private `ChargeInhibit` power assertion first: Apple's published
   source releases it when the owning process exits, and the test Mac must
   show whether it works, and is released, on shipping Apple silicon. Try the
-  SMC adapter-cut key only if a genuine need remains.
+  SMC adapter-cut key only if a genuine need remains. (Both assertions
+  showed no effect on this Mac; the adapter cut is the third step above.)
 - Record the results per Mac model and firmware in `docs/research/`. Add a
   verified mechanism to the helper's allowlist, with behavioural
   verification in independent telemetry (`safety.md` precondition 5) and a
