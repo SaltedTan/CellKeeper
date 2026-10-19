@@ -21,27 +21,27 @@ public enum SleepResponse {
     /// Releases the private assertion through `release` (which also latches
     /// the run's stop), then:
     /// - if `IOPMAssertionRelease` succeeded, or none was held, writes a
-    ///   line saying so to the report file, calls `acknowledge`, which
-    ///   allows the sleep, and only then writes the line to the console, so
-    ///   that a console that blocks delays the probe but never the release
-    ///   or the acknowledgement;
-    /// - if every attempt failed, never acknowledges and writes nothing to
-    ///   the console, and hands one line saying so, and
-    ///   ``failedReleaseExitStatus``, to `emergencyExit`. In the probe that
-    ///   is ``EmergencyExit/perform(_:status:steps:)``: a 2 s exit deadline,
-    ///   the line in the report file, and `_exit`; it does not return.
-    ///   powerd frees every assertion of a process that exits
+    ///   line saying so to the report file and calls `acknowledge`, which
+    ///   allows the sleep;
+    /// - if every attempt failed, never acknowledges, and hands one line
+    ///   saying so, and ``failedReleaseExitStatus``, to `emergencyExit`. In
+    ///   the probe that is ``EmergencyExit/perform(_:status:steps:)``: a 2 s
+    ///   exit deadline, the line in the report file, and `_exit`; it does not
+    ///   return. powerd frees every assertion of a process that exits
     ///   (`HandleProcessExit` in Apple's published PowerManagement source),
     ///   and without an acknowledgement the system waits until the client is
     ///   gone, or for its acknowledgement timeout (about 30 s), before it
     ///   sleeps.
+    ///
+    /// It writes nothing to the console on either path: it runs on the
+    /// sleep queue, where nothing may block (``SleepQueue``). The run's
+    /// final report, and its verdict, carry the sleep notice.
     @discardableResult
     public static func willSleep(
         assertion: AssertionKind,
         release: () -> ReleaseOutcome,
         writeReport: (String) -> Void,
         acknowledge: () -> Void,
-        console: (String) -> Void,
         emergencyExit: (_ line: String, _ status: Int32) -> Void
     ) -> ReleaseOutcome {
         let outcome = release()
@@ -57,8 +57,30 @@ public enum SleepResponse {
         }
         writeReport(line)
         acknowledge()
-        console(line)
         return outcome
+    }
+
+    /// The probe's handler for `kIOMessageSystemWillSleep`, as it runs on
+    /// the sleep queue: it records the run's stop, then decides through
+    /// ``willSleep(assertion:release:writeReport:acknowledge:emergencyExit:)``.
+    /// It is given no console.
+    public static func willSleepHandler(
+        assertion: AssertionKind,
+        recordStop: @escaping @Sendable () -> Void,
+        release: @escaping @Sendable () -> ReleaseOutcome,
+        writeReport: @escaping @Sendable (String) -> Void,
+        emergencyExit: @escaping @Sendable (_ line: String, _ status: Int32) -> Void
+    ) -> @Sendable (_ acknowledge: () -> Void) -> Void {
+        { acknowledge in
+            recordStop()
+            willSleep(
+                assertion: assertion,
+                release: release,
+                writeReport: writeReport,
+                acknowledge: acknowledge,
+                emergencyExit: emergencyExit
+            )
+        }
     }
 
     /// The one line recorded when the release failed. It never says the

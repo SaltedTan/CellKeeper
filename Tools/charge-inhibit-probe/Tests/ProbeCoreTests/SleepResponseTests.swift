@@ -35,7 +35,6 @@ struct SleepResponseTests {
             },
             writeReport: { calls.record($0, as: "report") },
             acknowledge: { calls.note("acknowledge") },
-            console: { calls.record($0, as: "console") },
             // A fake that returns, unlike the probe's: nothing may follow it.
             emergencyExit: { line, status in calls.record(line, as: "emergency exit \(status)") }
         )
@@ -43,24 +42,23 @@ struct SleepResponseTests {
 
     // MARK: The sleep notification
 
-    @Test("A successful release: the report line, then the acknowledgement, and only then the console")
+    @Test("A successful release: the report line, then the acknowledgement")
     func released() {
         let calls = Calls()
         #expect(willSleep(.released, calls) == .released)
-        #expect(calls.log == ["release", "report", "acknowledge", "console"])
-        #expect(calls.recorded.count == 2)
-        #expect(calls.recorded.allSatisfy { $0.contains("released the DisableInflow assertion, then allowed the sleep") })
+        #expect(calls.log == ["release", "report", "acknowledge"])
+        #expect(calls.recorded == ["kIOMessageSystemWillSleep: released the DisableInflow assertion, then allowed the sleep; the run is inconclusive."])
     }
 
-    @Test("With nothing held, the sleep is allowed, the console still after the acknowledgement")
+    @Test("With nothing held, the sleep is allowed")
     func nothingHeld() {
         let calls = Calls()
         #expect(willSleep(.nothingHeld, calls) == .nothingHeld)
-        #expect(calls.log == ["release", "report", "acknowledge", "console"])
+        #expect(calls.log == ["release", "report", "acknowledge"])
         #expect(calls.recorded.first?.contains("no DisableInflow assertion was held") == true)
     }
 
-    @Test("A failed release: the emergency exit with the recovery status, no acknowledgement, no console, no claim of a release")
+    @Test("A failed release: the emergency exit with the recovery status, no acknowledgement, no claim of a release")
     func failedRelease() throws {
         let calls = Calls()
         let outcome = willSleep(.failed(result: Self.notFound, attempts: 3), calls)
@@ -68,7 +66,6 @@ struct SleepResponseTests {
         // Even though the fake exit returned, nothing else happened.
         #expect(calls.log == ["release", "emergency exit 3"])
         #expect(!calls.log.contains("acknowledge"))
-        #expect(!calls.log.contains("console"))
         #expect(SleepResponse.failedReleaseExitStatus == 3)
         let line = try #require(calls.recorded.first)
         #expect(calls.recorded.count == 1)
@@ -95,44 +92,96 @@ struct SleepResponseTests {
         #expect(EmergencyExit.deadline == 2)
     }
 
-    @Test("The whole failed-release path writes nothing to the console, and the success path nothing before the acknowledgement")
-    func consoleOrder() {
-        // The probe's composition: the emergency exit inside the sleep
-        // response, with every step recorded.
-        func run(_ outcome: ReleaseOutcome) -> [String] {
-            let calls = Calls()
-            SleepResponse.willSleep(
-                assertion: .disableInflow,
-                release: {
-                    calls.note("release")
-                    return outcome
-                },
-                writeReport: { calls.record($0, as: "report") },
-                acknowledge: { calls.note("acknowledge") },
-                console: { calls.record($0, as: "console") },
-                emergencyExit: { line, status in
-                    EmergencyExit.perform(line, status: status, steps: EmergencyExit.Steps(
-                        armDeadline: { calls.note("deadline") },
-                        writeReport: { calls.record($0, as: "report") },
-                        exit: { calls.note("exit \($0)") }
-                    ))
-                }
-            )
-            return calls.log
-        }
-        let failed = run(.failed(result: Self.notFound, attempts: 3))
-        #expect(failed == ["release", "deadline", "report", "exit 3"])
-        #expect(!failed.contains("console"))
-        for outcome in [ReleaseOutcome.released, .nothingHeld] {
-            let log = run(outcome)
-            let acknowledged = log.firstIndex(of: "acknowledge")
-            let console = log.firstIndex(of: "console")
-            #expect(acknowledged != nil && console != nil)
-            if let acknowledged, let console {
-                #expect(acknowledged < console)
+    // MARK: Nothing on the sleep queue blocks (code review r4)
+
+    /// The probe's sleep handler with every step recorded, the emergency
+    /// exit inside it as the probe composes it.
+    func handler(_ outcome: ReleaseOutcome, _ calls: Calls) -> @Sendable (_ acknowledge: () -> Void) -> Void {
+        SleepResponse.willSleepHandler(
+            assertion: .disableInflow,
+            recordStop: { calls.note("stop") },
+            release: {
+                calls.note("release")
+                return outcome
+            },
+            writeReport: { calls.record($0, as: "report") },
+            emergencyExit: { line, status in
+                EmergencyExit.perform(line, status: status, steps: EmergencyExit.Steps(
+                    armDeadline: { calls.note("deadline") },
+                    writeReport: { calls.record($0, as: "report") },
+                    exit: { calls.note("exit \($0)") }
+                ))
             }
-            #expect(log.firstIndex(of: "report").map { $0 < (acknowledged ?? 0) } == true)
+        )
+    }
+
+    @Test("Run on the sleep queue, the handler releases, writes the report line and acknowledges, or exits; it writes nothing to the console")
+    func handlerOnSleepQueue() {
+        let sleepQueue = SleepQueue(label: "test.sleep")
+        // A console that fails the test if it is called from the sleep queue.
+        let console = ProbeConsole(sink: { _ in
+            if SleepQueue.isCurrent { Issue.record("the console was written from the sleep queue") }
+        })
+        for (outcome, expected) in [
+            (ReleaseOutcome.released, ["stop", "release", "report", "acknowledge"]),
+            (.nothingHeld, ["stop", "release", "report", "acknowledge"]),
+            (.failed(result: Self.notFound, attempts: 3), ["stop", "release", "deadline", "report", "exit 3"]),
+        ] {
+            let calls = Calls()
+            let handle = handler(outcome, calls)
+            sleepQueue.queue.sync { handle { calls.note("acknowledge") } }
+            #expect(calls.log == expected)
         }
+        #expect(console.droppedOnSleepQueue == 0)
+    }
+
+    @Test("A console write from the sleep queue never reaches the console; one from elsewhere does")
+    func consoleGuard() {
+        let sleepQueue = SleepQueue(label: "test.sleep")
+        let calls = Calls()
+        let console = ProbeConsole(sink: { line in
+            if SleepQueue.isCurrent { Issue.record("the console was written from the sleep queue") }
+            calls.record(line, as: "console")
+        })
+        sleepQueue.queue.sync { console.write("from the sleep queue") }
+        console.write("from elsewhere")
+        #expect(calls.recorded == ["from elsewhere"])
+        #expect(console.droppedOnSleepQueue == 1)
+        #expect(!SleepQueue.isCurrent)
+        #expect(sleepQueue.queue.sync { SleepQueue.isCurrent })
+    }
+
+    @Test("The teardown, which drains the sleep queue, completes while a console writer is blocked")
+    func teardownWithBlockedConsole() {
+        let sleepQueue = SleepQueue(label: "test.sleep")
+        let release = DispatchSemaphore(value: 0)
+        let blocked = DispatchSemaphore(value: 0)
+        // A console writer that blocks until the test lets it go, as stderr
+        // does on a full pipe.
+        let console = ProbeConsole(sink: { _ in
+            blocked.signal()
+            release.wait()
+        })
+        DispatchQueue.global().async { console.write("the main thread's line") }
+        #expect(blocked.wait(timeout: .now() + 2) == .success)
+
+        let calls = Calls()
+        let handle = handler(.released, calls)
+        sleepQueue.queue.async { handle { calls.note("acknowledge") } }
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            Teardown(
+                releasePrivate: { .nothingHeld },
+                releaseIdleSleep: {},
+                deregisterSleep: { sleepQueue.drain() }
+            ).finish()
+            finished.signal()
+        }
+        let completed = finished.wait(timeout: .now() + 2) == .success
+        // Let every blocked writer go, so that nothing is left waiting.
+        for _ in 0..<4 { release.signal() }
+        #expect(completed, "the teardown waited on the sleep queue while the console was blocked")
+        #expect(calls.log == ["stop", "release", "report", "acknowledge"])
     }
 
     @Test("The report line is appended to the report file")
@@ -297,10 +346,9 @@ struct SleepResponseTests {
             release: { teardown.stop() },
             writeReport: { calls.record($0, as: "report") },
             acknowledge: { calls.note("acknowledge") },
-            console: { calls.record($0, as: "console") },
             emergencyExit: { line, status in calls.record(line, as: "emergency exit \(status)") }
         )
         teardown.finish()
-        #expect(calls.log == ["private", "report", "acknowledge", "console", "private", "idle sleep", "deregister"])
+        #expect(calls.log == ["private", "report", "acknowledge", "private", "idle sleep", "deregister"])
     }
 }

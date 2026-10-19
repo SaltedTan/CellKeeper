@@ -1,4 +1,5 @@
 import Foundation
+import ProbeCore
 
 /// Run time on `CLOCK_MONOTONIC`, which on macOS keeps counting while the
 /// system sleeps (clock_gettime(3)), so a sleep shows up as a gap between
@@ -104,14 +105,18 @@ final class StopRequest: @unchecked Sendable {
     }
 }
 
-/// Writes to standard output or standard error at once, unbuffered.
+/// Writes to standard output or standard error at once, unbuffered, but
+/// never from the sleep queue: such a write is dropped (`ProbeConsole`).
 enum Console {
+    static let output = ProbeConsole { FileHandle.standardOutput.write(Data(($0 + "\n").utf8)) }
+    static let errors = ProbeConsole { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }
+
     static func out(_ line: String = "") {
-        FileHandle.standardOutput.write(Data((line + "\n").utf8))
+        output.write(line)
     }
 
     static func error(_ line: String) {
-        FileHandle.standardError.write(Data((line + "\n").utf8))
+        errors.write(line)
     }
 }
 

@@ -103,43 +103,39 @@ enum RunCommand {
         var samples: [Sample] = []
         var notes: [String] = []
         var listings: [Report.ListingCheck] = []
-        let registered = sleepWatch.start(onWillSleep: { acknowledge in
-            // On the notification queue, before the system may sleep: allow
-            // it only once the private assertion is released; if that
-            // fails, exit without allowing it (`SleepResponse`).
-            stop.record(.sleep("kIOMessageSystemWillSleep"))
-            SleepResponse.willSleep(
-                assertion: kind,
-                release: { teardown.stop() },
-                writeReport: { EmergencyExit.writeReport($0, to: reportDescriptor) },
-                acknowledge: acknowledge,
-                // After the acknowledgement, through the usual writer: a
-                // console that blocks only delays the probe.
-                console: { Console.error("\n" + $0) },
-                emergencyExit: { line, status in
-                    EmergencyExit.perform(line, status: status, steps: EmergencyExit.Steps(
-                        armDeadline: {
-                            // Before the write: SIGALRM's default action
-                            // ends the process in 2 s, with no lock, queue
-                            // or output involved.
-                            signal(SIGALRM, SIG_DFL)
-                            alarm(EmergencyExit.deadline)
-                        },
-                        // The report file only: the console's descriptors are
-                        // shared with the main thread and the shell, and are
-                        // left alone.
-                        writeReport: { EmergencyExit.writeReport($0, to: reportDescriptor) },
-                        exit: { status in
-                            // `_exit`, not `exit`: it runs no exit handlers,
-                            // which could wait on locks the main thread
-                            // holds, and nothing is left to flush. powerd
-                            // frees the process's assertions however it ends.
-                            _exit(status)
-                        }
-                    ))
-                }
-            )
-        })
+        // On the sleep queue, before the system may sleep: allow it only once
+        // the private assertion is released; if that fails, exit without
+        // allowing it (`SleepResponse`). Nothing here writes to the console
+        // or waits on the main thread (`SleepQueue`); the main thread
+        // reports the sleep notice from the run's state.
+        let registered = sleepWatch.start(onWillSleep: SleepResponse.willSleepHandler(
+            assertion: kind,
+            recordStop: { stop.record(.sleep("kIOMessageSystemWillSleep")) },
+            release: { teardown.stop() },
+            writeReport: { EmergencyExit.writeReport($0, to: reportDescriptor) },
+            emergencyExit: { line, status in
+                EmergencyExit.perform(line, status: status, steps: EmergencyExit.Steps(
+                    armDeadline: {
+                        // Before the write: SIGALRM's default action ends
+                        // the process in 2 s, with no lock, queue or output
+                        // involved.
+                        signal(SIGALRM, SIG_DFL)
+                        alarm(EmergencyExit.deadline)
+                    },
+                    // The report file only: the console's descriptors are
+                    // shared with the main thread and the shell, and are
+                    // left alone.
+                    writeReport: { EmergencyExit.writeReport($0, to: reportDescriptor) },
+                    exit: { status in
+                        // `_exit`, not `exit`: it runs no exit handlers,
+                        // which could wait on locks the main thread holds,
+                        // and nothing is left to flush. powerd frees the
+                        // process's assertions however it ends.
+                        _exit(status)
+                    }
+                ))
+            }
+        ))
         var sleepGuard = Report.SleepGuard(registered: registered)
 
         func writeReport(run: ProbeRun?, verdict: Verdict?) {

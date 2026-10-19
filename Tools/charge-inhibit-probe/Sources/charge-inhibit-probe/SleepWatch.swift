@@ -36,7 +36,8 @@ final class SleepWatch: @unchecked Sendable {
     }
 
     private let clock: Clock
-    private let queue = DispatchQueue(label: "charge-inhibit-probe.sleep")
+    /// Where the notifications run; nothing there may block (`SleepQueue`).
+    private let sleepQueue = SleepQueue(label: "charge-inhibit-probe.sleep")
     private let lock = NSLock()
     private var onWillSleep: (@Sendable (_ acknowledge: () -> Void) -> Void)?
     private var rootPort: io_connect_t = 0
@@ -69,17 +70,18 @@ final class SleepWatch: @unchecked Sendable {
         rootPort = newRoot
         port = newPort
         notifier = newNotifier
-        // Notifications arrive only from here on, on `queue`.
-        IONotificationPortSetDispatchQueue(newPort, queue)
+        // Notifications arrive only from here on, on the sleep queue.
+        IONotificationPortSetDispatchQueue(newPort, sleepQueue.queue)
         return true
     }
 
     /// Deregisters. Harmless if not registered. The probe keeps the watch
-    /// alive until this has returned.
+    /// alive until this has returned. It waits for a callback that is
+    /// running, which can never block (`SleepQueue`).
     func stop() {
         // On the queue, so that no callback is running while the ports are
         // torn down.
-        queue.sync {
+        sleepQueue.drain {
             lock.lock()
             defer { lock.unlock() }
             guard rootPort != 0 else { return }

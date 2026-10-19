@@ -11,7 +11,8 @@
 // - ProbeCore: pure logic, Foundation only: samples, the verdict function,
 //   the precondition rules, parsers for `pmset -g battlimit` and
 //   `pmset -g assertions` output, report formatting, the sleep and
-//   teardown decisions, and the emergency exit's one write to the report
+//   teardown decisions, the sleep queue and the console guard that keeps
+//   it from blocking, and the emergency exit's one write to the report
 //   file descriptor it is given. No IOKit, no processes, and it opens no
 //   files. This is what the tests exercise.
 // - charge-inhibit-probe: the executable. `check` reads public
