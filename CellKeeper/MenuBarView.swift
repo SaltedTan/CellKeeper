@@ -81,7 +81,7 @@ private struct BatteryHeader: View {
             Label("No battery detected on this Mac.", systemImage: "batteryblock.slash")
         } else {
             Label(telemetryError ?? "Battery telemetry unavailable.", systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.orange)
+                .foregroundStyle(.warningText)
         }
     }
 }
@@ -165,7 +165,7 @@ private struct ControlSummary: View {
                       : "The control backend failed repeatedly. Only normal charging will be requested.",
                       systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.criticalText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -193,7 +193,7 @@ private struct NativeLimitSummary: View {
                 // Shared with the restore notification.
                 if let problem = NativeLimitWording.restoreProblem(status) {
                     Text(problem)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.criticalText)
                 } else if let owner = native?.ownerLimit {
                     Text("Set by CellKeeper. Your own limit, \(Format.chargeLimit(owner)), is restored when CellKeeper stops managing it, quits, or fails.")
                 } else {
@@ -201,23 +201,23 @@ private struct NativeLimitSummary: View {
                 }
                 if let adopted = status.adoptedChange, !status.settings.isManagementEnabled {
                     Text("The limit was changed outside CellKeeper to \(Format.chargeLimit(adopted.limit)), so CellKeeper kept it as your own and turned off Manage charging. Turn it on to let CellKeeper manage the limit again.")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.warningText)
                     if adopted.isNoLimit, adopted.previousOwnerLimit != adopted.limit {
                         Text("If that was a temporary full charge rather than your choice, your earlier limit was \(Format.chargeLimit(adopted.previousOwnerLimit)).")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.warningText)
                     }
                 }
                 if native?.needsNoLimitConfirmation == true {
                     Text("macOS reports no limit. If your own limit is 100%, confirm it in Settings › Control before CellKeeper changes anything.")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.warningText)
                 }
                 if let problem = native?.readProblem {
                     Text("Could not read the Charge Limit: \(problem)")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.warningText)
                 }
                 if let owner = native?.ownerLimit, !status.capabilities.availability.acceptsRequests, !status.isOwnLimitRestorePending {
                     Text("CellKeeper cannot change the limit back right now. Set \(Format.chargeLimit(owner)) in System Settings › Battery › Charging.")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.criticalText)
                 }
             }
             .font(.caption)
@@ -271,7 +271,7 @@ private struct NativeChargeLimitPicker: View {
             if !steps.contains(limit) {
                 Text("\(ChargeLimitChoices.notSettableWithMacOSLimit(limit)) Choose one of the values above; until then your own limit stays in effect.")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
                     .fixedSize(horizontal: false, vertical: true)
             }
             ManageChargingToggle(model: model)
@@ -316,13 +316,13 @@ private struct ChargeLimitSlider: View {
             if let status = model.status, let note = ControlStatement.limitNote(for: status, includesOwnRestriction: false) {
                 Text(note)
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if shown < 50 {
                 Text("Limits below 50% leave little charge for unplugged use.")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
             }
             ManageChargingToggle(model: model)
         }
@@ -342,7 +342,7 @@ private struct ManageChargingToggle: View {
         if let error = model.settingsError {
             Text(error)
                 .font(.caption)
-                .foregroundStyle(.orange)
+                .foregroundStyle(.warningText)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -364,7 +364,7 @@ private struct FullChargeControl: View {
                             .fixedSize(horizontal: false, vertical: true)
                     case .dischargeToLimit:
                         Label(dischargeText(override), systemImage: "minus.plus.batteryblock")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.warningText)
                     }
                     Spacer()
                     Button("Cancel") { model.cancelOverride() }
@@ -441,7 +441,7 @@ private struct ScheduledFullChargeLines: View {
         if let schedule = status.fullChargeSchedule {
             HStack(alignment: .firstTextBaseline) {
                 Label(FullChargeScheduleWording.armedLine(schedule, wait: status.fullChargeScheduleWait, now: status.describedAt), systemImage: "calendar.badge.clock")
-                    .foregroundStyle(status.fullChargeScheduleWait == nil ? Color.primary : Color.orange)
+                    .foregroundStyle(status.fullChargeScheduleWait == nil ? Color.primary : Color.warningText)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()
                 Button("Cancel") { model.cancelFullChargeSchedule() }

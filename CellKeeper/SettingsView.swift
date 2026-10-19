@@ -65,7 +65,7 @@ private struct ChargingSettingsTab: View {
                     if !model.nativeLimitSteps.contains(settings.chargeLimit) {
                         Label("\(ChargeLimitChoices.notSettableWithMacOSLimit(settings.chargeLimit)) Choose one of the values offered; until then your own limit stays in effect.", systemImage: "exclamationmark.triangle")
                             .font(.caption)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.warningText)
                     }
                     // Settings macOS's Charge Limit cannot express are hidden
                     // rather than shown disabled; this says what macOS does instead.
@@ -86,13 +86,13 @@ private struct ChargingSettingsTab: View {
                     if let status = model.status, let note = ControlStatement.limitNote(for: status) {
                         Label(note, systemImage: "info.circle")
                             .font(.caption)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.warningText)
                     }
                 }
                 if settings.chargeLimit < 50 {
                     Label("Limits below 50% leave little charge for unplugged use.", systemImage: "exclamationmark.triangle")
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.warningText)
                 }
                 if !isNative {
                     LabeledContent("Discharge to the limit") {
@@ -136,11 +136,11 @@ private struct ChargingSettingsTab: View {
 
             if let error = model.settingsError {
                 Label(error, systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.criticalText)
             }
             if let recovery = model.settingsRecoveryMessage {
                 Label(recovery, systemImage: "info.circle")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
             }
         }
         .formStyle(.grouped)
@@ -196,7 +196,7 @@ private struct ScheduledFullChargeSection: View {
             if let wait = status?.fullChargeScheduleWait {
                 Label(FullChargeScheduleWording.armedLine(schedule, wait: wait, now: now), systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
             }
             Button("Cancel Schedule") { model.cancelFullChargeSchedule() }
         } else {
@@ -220,7 +220,7 @@ private struct ScheduledFullChargeSection: View {
         if let error = model.scheduleError {
             Label(error, systemImage: "exclamationmark.triangle")
                 .font(.caption)
-                .foregroundStyle(.red)
+                .foregroundStyle(.criticalText)
         }
         if let status {
             Text(FullChargeScheduleWording.explanation(for: status, end: status.fullChargeSchedule?.endsAt ?? end, now: now))
@@ -393,7 +393,7 @@ private struct NotificationSettingsSection: View {
             if let explanation = optIn.explanation {
                 Label(explanation, systemImage: optIn.offersSystemSettings ? "exclamationmark.triangle" : "info.circle")
                     .font(.caption)
-                    .foregroundStyle(optIn.offersSystemSettings ? Color.orange : Color.secondary)
+                    .foregroundStyle(optIn.offersSystemSettings ? Color.warningText : Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if optIn.offersSystemSettings || optIn.offersWithdrawal {
@@ -467,7 +467,7 @@ private struct ControlSettingsTab: View {
                         Label(faultExplanation(for: status),
                               systemImage: "exclamationmark.triangle")
                             .font(.caption)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(.criticalText)
                             .fixedSize(horizontal: false, vertical: true)
                         Button("Clear fault and retry") { model.resetBackendFault() }
                             .help(faultResetHelp(for: status))
@@ -579,18 +579,18 @@ private struct NativeLimitSetupSection: View {
             if let problem = native?.readProblem {
                 Label("Could not read the Charge Limit: \(problem)", systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
             }
             LabeledContent("Your own limit") {
                 if native?.isRecordUnreadable == true {
                     Text("Unknown: the record cannot be read")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.criticalText)
                 } else if let owner = native?.ownerLimit, let status = model.status, status.isOwnLimitRestorePending {
                     Text(status.capabilities.availability.acceptsRequests
                          ? "\(Format.chargeLimit(owner)), recorded; restoring it is not confirmed yet, CellKeeper keeps trying"
                          : "\(Format.chargeLimit(owner)), recorded; CellKeeper cannot restore it right now, set it in System Settings")
                         .multilineTextAlignment(.trailing)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.criticalText)
                 } else if let owner = native?.ownerLimit {
                     Text("\(Format.chargeLimit(owner)), recorded; restored when CellKeeper stops managing it")
                         .multilineTextAlignment(.trailing)
@@ -615,7 +615,7 @@ private struct NativeLimitSetupSection: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("CellKeeper's record of your own limit cannot be read, so it will neither change nor restore the limit. Set your limit in System Settings › Battery › Charging first, then discard the record.")
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.criticalText)
                         .fixedSize(horizontal: false, vertical: true)
                     Button("I've Set My Limit — Discard the Record…") { isConfirmingDiscard = true }
                 }

@@ -1,3 +1,4 @@
+import AppKit
 import CellKeeperCore
 import CellKeeperKit
 import SwiftUI
@@ -94,7 +95,7 @@ struct MacOSChargeLimitNotice: View {
                  ? MacOSChargeLimitWording.guidance(macOSLimit, ownRestriction: status.ownRestriction, isSimulated: status.isControlSimulated)
                  : MacOSChargeLimitWording.menuSummary(macOSLimit, ownRestriction: status.ownRestriction, isSimulated: status.isControlSimulated))
                 .font(.caption)
-                .foregroundStyle(macOSLimit.isLimiting ? Color.orange : Color.secondary)
+                .foregroundStyle(macOSLimit.isLimiting ? Color.warningText : Color.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Text("Read at \(macOSLimit.readAt.formatted(date: .omitted, time: .standard))")
@@ -131,7 +132,7 @@ struct MacOSChargeLimitGuideView: View {
             }
             ForEach(Array(MacOSChargeLimitGuide.notes(isSimulated: isSimulated).enumerated()), id: \.offset) { index, note in
                 Label(note, systemImage: isSimulated && index == 0 ? "exclamationmark.triangle" : "info.circle")
-                    .foregroundStyle(isSimulated && index == 0 ? Color.orange : Color.secondary)
+                    .foregroundStyle(isSimulated && index == 0 ? Color.warningText : Color.secondary)
             }
             HStack {
                 Button("Open Battery Settings", action: openBatterySettings)
@@ -336,7 +337,7 @@ struct PendingSwitchNotice: View {
             VStack(alignment: .leading, spacing: 6) {
                 Label(Format.pendingSwitch(from: active, to: requested, nativeLimit: status.nativeLimit, isNative: status.capabilities.isEnforcedByMacOS),
                       systemImage: "arrow.triangle.2.circlepath")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
                     .fixedSize(horizontal: false, vertical: true)
                 if let select, let activeChoice {
                     Button("Stay with \(active.displayName)") { select(activeChoice) }
@@ -348,7 +349,9 @@ struct PendingSwitchNotice: View {
     }
 }
 
-/// A small coloured capsule label.
+/// A small capsule label, tinted and outlined in `color`. The text keeps
+/// the label colour: coloured text on a tint of its own colour is too faint
+/// to read (2.2:1 to 4:1 against white).
 struct StatusBadge: View {
     let title: String
     let color: Color
@@ -358,7 +361,35 @@ struct StatusBadge: View {
             .font(.caption.weight(.semibold))
             .padding(.horizontal, 6)
             .padding(.vertical, 2)
-            .foregroundStyle(color)
-            .background(color.opacity(0.15), in: Capsule())
+            .foregroundStyle(.primary)
+            .background(color.opacity(0.18), in: Capsule())
+            .overlay(Capsule().strokeBorder(color.opacity(0.6), lineWidth: 1))
     }
+}
+
+extension TextTone {
+    /// The tone as a colour that follows the appearance, including the
+    /// high-contrast appearances macOS uses while Increase Contrast is on.
+    var nsColor: NSColor {
+        let tone = self
+        return NSColor(name: nil) { appearance in
+            let match = appearance.bestMatch(from: [.aqua, .darkAqua, .accessibilityHighContrastAqua, .accessibilityHighContrastDarkAqua])
+            let color = tone.color(
+                isDark: match == .darkAqua || match == .accessibilityHighContrastDarkAqua,
+                isIncreasedContrast: match == .accessibilityHighContrastAqua || match == .accessibilityHighContrastDarkAqua
+            )
+            return NSColor(srgbRed: color.red / 255, green: color.green / 255, blue: color.blue / 255, alpha: 1)
+        }
+    }
+}
+
+extension ShapeStyle where Self == Color {
+    /// Warning text: something to be aware of (``TextTone/warning``). Use
+    /// it instead of `.orange`, which is too light for text on a light
+    /// background.
+    static var warningText: Color { Color(nsColor: TextTone.warning.nsColor) }
+
+    /// Error text: something wrong (``TextTone/critical``). Use it instead
+    /// of `.red`.
+    static var criticalText: Color { Color(nsColor: TextTone.critical.nsColor) }
 }
