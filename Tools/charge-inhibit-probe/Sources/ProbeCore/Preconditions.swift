@@ -6,6 +6,11 @@ public struct SystemState: Sendable, Equatable {
     /// Those of ``Preconditions/aldenteHelperPaths`` that exist (checked by
     /// file existence only; their contents are never read).
     public var aldenteHelperFiles: [String]
+    /// What `launchctl print system/<AlDente helper label>` reported.
+    public var aldenteService: LaunchdServiceState
+    /// Running processes that look like AlDente; nil if the process table
+    /// could not be listed.
+    public var aldenteProcesses: ProcessScan?
     /// File names in ``Preconditions/daemonDirectories`` that suggest a
     /// battery or charge-control tool (names only; contents never read).
     public var otherBatteryDaemons: [String]
@@ -16,12 +21,16 @@ public struct SystemState: Sendable, Equatable {
         reading: Sample,
         chargeLimit: ChargeLimitReport,
         aldenteHelperFiles: [String],
+        aldenteService: LaunchdServiceState,
+        aldenteProcesses: ProcessScan?,
         otherBatteryDaemons: [String],
         assertions: AssertionListing?
     ) {
         self.reading = reading
         self.chargeLimit = chargeLimit
         self.aldenteHelperFiles = aldenteHelperFiles
+        self.aldenteService = aldenteService
+        self.aldenteProcesses = aldenteProcesses
         self.otherBatteryDaemons = otherBatteryDaemons
         self.assertions = assertions
     }
@@ -50,13 +59,17 @@ public struct Check: Sendable, Equatable {
 }
 
 /// The rules `check` prints and `run` enforces: `run` refuses if any check
-/// fails. Warnings are printed and recorded, and do not stop a run.
+/// fails. Anything the verdict depends on that cannot be read fails.
+/// Warnings are printed and recorded, and do not stop a run.
 public enum Preconditions {
+    /// AlDente Pro's (Setapp) helper's launchd label.
+    public static let aldenteHelperLabel = "com.apphousekitchen.aldente-pro-setapp.helper"
+
     /// The AlDente Pro (Setapp) helper's files on this Mac. Only their
     /// existence is checked.
     public static let aldenteHelperPaths = [
-        "/Library/PrivilegedHelperTools/com.apphousekitchen.aldente-pro-setapp.helper",
-        "/Library/LaunchDaemons/com.apphousekitchen.aldente-pro-setapp.helper.plist",
+        "/Library/PrivilegedHelperTools/\(aldenteHelperLabel)",
+        "/Library/LaunchDaemons/\(aldenteHelperLabel).plist",
     ]
 
     /// Where privileged helpers and launch daemons of third-party tools live.
@@ -65,13 +78,18 @@ public enum Preconditions {
 
     /// Fragments of a file name that suggest a battery or charge-control
     /// tool. A match is a warning only: the name says nothing certain.
-    public static let batteryToolNameFragments = ["aldente", "apphousekitchen", "batt", "charg", "bclm", "smc"]
+    public static let batteryToolNameFragments = ["aldente", "apphousekit", "batt", "charg", "bclm", "smc"]
 
     public static let chargeLimitAdvice = "System Settings › Battery › ⓘ next to Charging"
 
     public static let notChargingAdvice = """
         macOS isn't charging the battery now — raise macOS's Charge Limit to \
         100% (System Settings › Battery) and wait until it charges
+        """
+
+    static let aldenteRestartAdvice = """
+        restart the Mac only if this check still fails after AlDente has been \
+        quit and removed
         """
 
     /// The names among `fileNames` that suggest a battery tool.
@@ -115,16 +133,20 @@ public enum Preconditions {
         }
 
         let current = reading.current.map { "\($0) mA" } ?? "unknown"
-        switch (reading.isCharging, Verdict.state(of: reading, criteria: criteria)) {
-        case (true?, .charging):
+        switch (reading.isCharging, reading.current) {
+        case (nil, _):
+            checks.append(Check(.fail, "macOS is charging now", "macOS's charging state could not be read (IOPowerSources reports no \"Is Charging\")"))
+        case (_, nil):
+            checks.append(Check(.fail, "macOS is charging now", "the battery current could not be read, so charging cannot be confirmed"))
+        case (true?, _?) where Verdict.state(of: reading, criteria: criteria) == .charging:
             checks.append(Check(.pass, "macOS is charging now", "IOPowerSources reports charging; battery current \(current)"))
-        case (true?, _):
+        case (true?, _?):
             checks.append(Check(.fail, "macOS is charging now", """
                 macOS reports charging, but the battery current is \(current) \
                 (at most \(criteria.currentThreshold) mA counts as not charging): \
                 wait until charging is under way
                 """))
-        default:
+        case (false?, _?):
             checks.append(Check(.fail, "macOS is charging now", notChargingAdvice))
         }
 
@@ -146,16 +168,52 @@ public enum Preconditions {
             let shown = limits.map { "\($0)%" }.joined(separator: ", ")
             checks.append(Check(.fail, "macOS's Charge Limit is 100%", "pmset -g battlimit reports \(shown): set the Charge Limit to 100% (\(chargeLimitAdvice))"))
         case let .unreadable(reason):
-            checks.append(Check(.warn, "macOS's Charge Limit is 100%", "pmset -g battlimit could not be read (\(reason)): check in \(chargeLimitAdvice) that it is 100%"))
+            checks.append(Check(.fail, "macOS's Charge Limit is 100%", """
+                pmset -g battlimit could not be read (\(reason)), so a native limit \
+                that could stop charging during the run cannot be ruled out
+                """))
         }
 
         if state.aldenteHelperFiles.isEmpty {
-            checks.append(Check(.pass, "No AlDente helper", "neither of its helper files exists"))
+            checks.append(Check(.pass, "No AlDente helper files", "neither of its helper files exists"))
         } else {
-            checks.append(Check(.fail, "No AlDente helper", """
+            checks.append(Check(.fail, "No AlDente helper files", """
                 found \(state.aldenteHelperFiles.joined(separator: " and ")): remove \
-                AlDente completely and restart the Mac before the test
+                AlDente completely (its app and its helper)
                 """))
+        }
+
+        switch state.aldenteService {
+        case .notFound:
+            checks.append(Check(.pass, "AlDente helper not loaded", "launchctl print system/\(aldenteHelperLabel): could not find service"))
+        case .loaded:
+            checks.append(Check(.fail, "AlDente helper not loaded", """
+                launchd still has system/\(aldenteHelperLabel): remove AlDente's \
+                helper; \(aldenteRestartAdvice)
+                """))
+        case let .unknown(reason):
+            checks.append(Check(.fail, "AlDente helper not loaded", """
+                launchctl print system/\(aldenteHelperLabel) did not say (\(reason)), \
+                so a loaded helper cannot be ruled out
+                """))
+        }
+
+        switch state.aldenteProcesses {
+        case let scan? where !scan.matches.isEmpty:
+            checks.append(Check(.fail, "No AlDente process running", """
+                running: \(scan.matches.joined(separator: ", ")). Quit AlDente and \
+                remove it; \(aldenteRestartAdvice)
+                """))
+        case let scan? where scan.unreadable > 0:
+            checks.append(Check(.fail, "No AlDente process running", """
+                \(scan.unreadable) running \(scan.unreadable == 1 ? "process" : "processes") \
+                could not be read, so a running AlDente cannot be ruled out; run \
+                check again
+                """))
+        case .some:
+            checks.append(Check(.pass, "No AlDente process running", "no executable path or name in the process table matches AlDente"))
+        case nil:
+            checks.append(Check(.fail, "No AlDente process running", "the process table could not be listed, so a running AlDente cannot be ruled out"))
         }
 
         if state.otherBatteryDaemons.isEmpty {
@@ -163,24 +221,23 @@ public enum Preconditions {
         } else {
             checks.append(Check(.warn, "No other battery-control daemon", """
                 these names suggest a battery tool: \(state.otherBatteryDaemons.joined(separator: ", ")). \
-                If one controls charging, remove it and restart before the test
+                If one controls charging, remove it before the test
                 """))
         }
 
         if let assertions = state.assertions {
             if assertions.listsAny {
-                let lines = assertions.lines.isEmpty ? "system-wide level \(assertions.systemWideLevel ?? 0)" : assertions.lines.joined(separator: " | ")
                 checks.append(Check(.fail, "No ChargeInhibit assertion held", """
-                    pmset -g assertions lists \(lines). In Apple's published \
-                    source, powerd passes ChargeInhibit on to the battery only \
-                    when the first one is raised, so this probe's assertion \
+                    pmset -g assertions lists \(assertions.summary). In Apple's \
+                    published source, powerd passes ChargeInhibit on to the battery \
+                    only when the first one is raised, so this probe's assertion \
                     would change nothing: quit the process that holds it first
                     """))
             } else {
                 checks.append(Check(.pass, "No ChargeInhibit assertion held", "pmset -g assertions lists none"))
             }
         } else {
-            checks.append(Check(.warn, "No ChargeInhibit assertion held", "pmset -g assertions could not be run"))
+            checks.append(Check(.fail, "No ChargeInhibit assertion held", "pmset -g assertions could not be run, so an existing ChargeInhibit cannot be ruled out"))
         }
 
         if let percent = reading.percent, percent < 95 {

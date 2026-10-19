@@ -5,31 +5,30 @@ import ProbeCore
 /// The probe's one `ChargeInhibit` assertion.
 ///
 /// This is the only code in the project that creates a power assertion. It
-/// creates at most one, only as root, and releases it at most once; a lock
-/// makes creation and release safe against the signal handler, which
-/// releases from another thread.
+/// creates at most one, only as root, and never after a stop was requested.
+/// One lock covers creation, release and the stop latch, so the signal
+/// handler, which runs on another thread, cannot race them.
 ///
 /// Fail-safes, in order:
 /// 1. the probe releases it after the hold, on a stop signal, on an early
-///    end, and in a `defer` on every path out of `run`;
+///    end, and in a `defer` on every path out of `run`; a release that
+///    fails keeps the ID and is retried, a bounded number of times per call;
 /// 2. it carries a timeout (hold + 30 s) with `kIOPMAssertionTimeoutActionRelease`,
 ///    so powerd releases it if the probe stalls;
 /// 3. powerd releases every assertion a process owns when the process exits,
 ///    however it exits (`HandleProcessExit` in Apple's published
 ///    PowerManagement source).
 final class AssertionHolder: @unchecked Sendable {
-    /// `kIOReturnNotPrivileged` (IOReturn.h), returned without calling
-    /// powerd when the probe is not root.
-    static let notPrivileged = Int32(bitPattern: 0xE000_02C1)
-    /// `kIOReturnError`, returned if a second creation is attempted.
-    static let error = Int32(bitPattern: 0xE000_02BC)
+    /// Attempts per call to ``release()``, 0.2 s apart.
+    static let releaseAttemptsPerCall = 3
 
     private let lock = NSLock()
     private let clock: Clock
     private var assertionID: IOPMAssertionID?
-    private var created = false
-    private var releaseTime: Double?
-    private var releaseReturn: Int32?
+    private var attempted = false
+    private var cancelled = false
+    private var firstReleaseTime: Double?
+    private var releaseResults: [Int32] = []
 
     init(clock: Clock) {
         self.clock = clock
@@ -51,14 +50,14 @@ final class AssertionHolder: @unchecked Sendable {
         ]
     }
 
-    /// Creates the assertion. Refuses, without calling powerd, unless the
-    /// process runs as root, and if an assertion was created before.
-    func create(hold: Int) -> Int32 {
+    /// Creates the assertion and returns powerd's IOReturn, or nil without
+    /// calling powerd if the process is not root, a stop was requested, or
+    /// an assertion was attempted before.
+    func create(hold: Int) -> Int32? {
         lock.lock()
         defer { lock.unlock() }
-        guard geteuid() == 0 else { return Self.notPrivileged }
-        guard !created else { return Self.error }
-        created = true
+        guard geteuid() == 0, !cancelled, !attempted else { return nil }
+        attempted = true
         var newID = IOPMAssertionID(0)
         let result = IOPMAssertionCreateWithProperties(Self.properties(hold: hold) as CFDictionary, &newID)
         if result == kIOReturnSuccess {
@@ -67,29 +66,43 @@ final class AssertionHolder: @unchecked Sendable {
         return result
     }
 
-    /// Releases the assertion if the probe still holds it. Safe to call any
-    /// number of times, from any thread.
+    /// Latches the stop, so ``create(hold:)`` refuses from now on, and
+    /// releases the assertion if one is held. For the signal handler.
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+        release()
+    }
+
+    /// Releases the assertion if the probe still holds it, trying up to
+    /// ``releaseAttemptsPerCall`` times. The ID is forgotten only once
+    /// `IOPMAssertionRelease` succeeds. Safe to call from any thread.
     func release() {
         lock.lock()
         defer { lock.unlock() }
         guard let id = assertionID else { return }
-        assertionID = nil
-        releaseReturn = IOPMAssertionRelease(id)
-        releaseTime = clock.now
+        if firstReleaseTime == nil { firstReleaseTime = clock.now }
+        for attempt in 1...Self.releaseAttemptsPerCall {
+            let result = IOPMAssertionRelease(id)
+            releaseResults.append(result)
+            if result == kIOReturnSuccess {
+                assertionID = nil
+                return
+            }
+            if attempt < Self.releaseAttemptsPerCall {
+                Thread.sleep(forTimeInterval: 0.2)
+            }
+        }
     }
 
-    /// When the probe released the assertion, in run seconds.
-    var releasedAt: Double? {
+    /// The release as the verdict needs it, without the listing check; nil
+    /// if no release was attempted.
+    var releaseRecord: (time: Double, result: Int32, attempts: Int)? {
         lock.lock()
         defer { lock.unlock() }
-        return releaseTime
-    }
-
-    /// The IOReturn of `IOPMAssertionRelease`.
-    var releaseResult: Int32? {
-        lock.lock()
-        defer { lock.unlock() }
-        return releaseReturn
+        guard let time = firstReleaseTime, let last = releaseResults.last else { return nil }
+        return (time, last, releaseResults.count)
     }
 
     var isHeld: Bool {

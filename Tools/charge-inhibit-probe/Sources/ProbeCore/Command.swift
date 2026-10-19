@@ -5,7 +5,9 @@ public enum Command: Sendable, Equatable {
     case help
 
     public static let defaultHold = 60
-    public static let holdRange = 30...300
+    /// At least the 30 s stop window plus 10 s of sustained stopped
+    /// readings.
+    public static let holdRange = 40...300
 
     public static let usage = """
         usage: charge-inhibit-probe check

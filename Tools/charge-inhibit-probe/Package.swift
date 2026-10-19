@@ -12,10 +12,11 @@
 //   `pmset -g assertions` output, and report formatting. No IOKit, no
 //   processes, no files. This is what the tests exercise.
 // - charge-inhibit-probe: the executable. `check` reads public
-//   IOPowerSources data, AppleSmartBattery registry properties and two
-//   `pmset -g` getters, and changes nothing. `run` (root only, started by the
-//   owner with sudo) additionally creates and releases one `ChargeInhibit`
-//   assertion with a timeout.
+//   IOPowerSources data, AppleSmartBattery registry properties, two
+//   `pmset -g` getters, `launchctl print` for AlDente's helper service, and
+//   the process table's executable paths and names, and changes nothing.
+//   `run` (root only, started by the owner with sudo) additionally creates
+//   and releases one `ChargeInhibit` assertion with a timeout.
 
 import PackageDescription
 

@@ -1,6 +1,7 @@
 import Foundation
 
-/// The thresholds the verdict applies. They are printed in every report.
+/// The thresholds the verdict applies. They are judgment calls, not values
+/// from any source, and are printed in every report.
 public struct Criteria: Sendable, Equatable {
     /// Charging must stop within this many seconds of the assertion's
     /// creation to be attributed to it.
@@ -10,24 +11,38 @@ public struct Criteria: Sendable, Equatable {
     public var resumeWindow: Double
     /// A battery current at or below this many mA counts as not charging.
     public var currentThreshold: Int
+    /// A stop, and a resume, count only when this many consecutive readings
+    /// (2 s apart) agree: 5 readings, 10 s.
+    public var sustainedReadings: Int
     /// A gap between consecutive readings longer than this (the Mac slept,
     /// or the probe was stopped) makes the run inconclusive.
     public var maxReadingGap: Double
-    /// The baseline needs at least this many readings.
+    /// The baseline needs at least this many readings…
     public var minimumBaselineReadings: Int
+    /// …spanning this many seconds from the first to the last…
+    public var baselineDuration: ClosedRange<Double>
+    /// …with no gap longer than this between readings, nor between the last
+    /// reading and the assertion's creation.
+    public var maxBaselineGap: Double
 
     public init(
         stopWindow: Double = 30,
         resumeWindow: Double = 60,
         currentThreshold: Int = 50,
+        sustainedReadings: Int = 5,
         maxReadingGap: Double = 10,
-        minimumBaselineReadings: Int = 5
+        minimumBaselineReadings: Int = 5,
+        baselineDuration: ClosedRange<Double> = 18...24,
+        maxBaselineGap: Double = 4
     ) {
         self.stopWindow = stopWindow
         self.resumeWindow = resumeWindow
         self.currentThreshold = currentThreshold
+        self.sustainedReadings = sustainedReadings
         self.maxReadingGap = maxReadingGap
         self.minimumBaselineReadings = minimumBaselineReadings
+        self.baselineDuration = baselineDuration
+        self.maxBaselineGap = maxBaselineGap
     }
 
     public static let standard = Criteria()
@@ -39,8 +54,7 @@ public enum ChargeState: Sendable, Equatable {
     case charging
     /// macOS reports not charging and the current is at or below the threshold.
     case stopped
-    /// The charging flag and the current disagree (for example while the
-    /// current is still falling).
+    /// The charging flag and the current disagree.
     case mixed
 }
 
@@ -71,24 +85,44 @@ public struct ProbeRun: Sendable, Equatable {
         public var time: Double
         /// Its IOReturn.
         public var result: Int32
+        /// The assertion's `TimeoutSeconds`.
+        public var timeout: Int
 
-        public init(time: Double, result: Int32) {
+        public init(time: Double, result: Int32, timeout: Int = ProbeAssertion.timeout(hold: Command.defaultHold)) {
             self.time = time
             self.result = result
+            self.timeout = timeout
+        }
+    }
+
+    public struct Release: Sendable, Equatable {
+        /// When the probe first tried to release the assertion, in run seconds.
+        public var time: Double
+        /// The IOReturn of the last `IOPMAssertionRelease` attempt.
+        public var result: Int32
+        public var attempts: Int
+        /// Whether `pmset -g assertions` still listed the probe's assertion
+        /// after the release; nil if it could not be checked.
+        public var stillListed: Bool?
+
+        public init(time: Double, result: Int32, attempts: Int = 1, stillListed: Bool?) {
+            self.time = time
+            self.result = result
+            self.attempts = attempts
+            self.stillListed = stillListed
         }
     }
 
     public var samples: [Sample]
-    /// Nil when no assertion was attempted (the baseline already failed).
+    /// Nil when no assertion was attempted.
     public var creation: Creation?
-    /// When the probe released the assertion, in run seconds; nil if it
-    /// never did.
-    public var releasedAt: Double?
+    /// Nil if the probe never tried to release the assertion.
+    public var release: Release?
 
-    public init(samples: [Sample], creation: Creation?, releasedAt: Double?) {
+    public init(samples: [Sample], creation: Creation?, release: Release?) {
         self.samples = samples
         self.creation = creation
-        self.releasedAt = releasedAt
+        self.release = release
     }
 }
 
@@ -96,14 +130,15 @@ public struct ProbeRun: Sendable, Equatable {
 public enum Verdict: Sendable, Equatable {
     /// Charging stopped within the stop window of the creation, stayed
     /// stopped while held, on AC power, and resumed within the resume window
-    /// of the release.
+    /// of a confirmed release.
     case inhibited(stoppedAfter: Double, resumedAfter: Double)
     /// As `inhibited`, but charging resumed later than the resume window.
     case inhibitedResumedLate(stoppedAfter: Double, resumedAfter: Double)
     /// Charging stopped, and had not resumed by the end of the readings.
     case inhibitedDidNotResume(stoppedAfter: Double, watchedFor: Double)
-    /// The assertion was created, and charging continued while it was held.
-    case noEffect
+    /// The assertion was created, and every reading while it was held showed
+    /// charging.
+    case noEffect(heldFor: Double)
     /// `IOPMAssertionCreateWithProperties` did not return success.
     case refused(result: Int32)
     /// The run cannot decide; the reason says why.
@@ -115,7 +150,7 @@ public enum Verdict: Sendable, Equatable {
         case .inhibited: "inhibited"
         case .inhibitedResumedLate: "inhibited, resumed late"
         case .inhibitedDidNotResume: "inhibited, did not resume"
-        case .noEffect: "no effect"
+        case .noEffect: "no effect observed"
         case .refused: "refused"
         case .inconclusive: "inconclusive"
         }
@@ -132,51 +167,53 @@ public enum Verdict: Sendable, Equatable {
 
     /// What the verdict means, for the owner.
     public func explanation(criteria: Criteria = .standard) -> String {
+        let sustained = "\(criteria.sustainedReadings) readings in a row"
         switch self {
         case let .inhibited(stopped, resumed):
-            """
-            Charging stopped \(seconds(stopped)) after the assertion was created, \
-            stayed stopped while it was held, and resumed \(seconds(resumed)) after \
-            it was released, all on AC power. On this Mac, macOS build and \
-            firmware, the ChargeInhibit assertion stops charging and releasing \
-            it lets charging resume.
-            """
+            return """
+                Charging stopped \(seconds(stopped)) after the assertion was created, \
+                stayed stopped in every reading while it was held, and resumed \
+                \(seconds(resumed)) after a confirmed release (\(sustained) each), \
+                all on AC power. On this Mac, macOS build and firmware, the \
+                ChargeInhibit assertion stops charging and releasing it lets \
+                charging resume.
+                """
         case let .inhibitedResumedLate(stopped, resumed):
-            """
-            Charging stopped \(seconds(stopped)) after the assertion was created \
-            and stayed stopped while it was held, but resumed only \
-            \(seconds(resumed)) after it was released, later than the \
-            \(seconds(criteria.resumeWindow)) window. The assertion stops \
-            charging; the slow resume needs a second look before anything is \
-            built on it.
-            """
+            return """
+                Charging stopped \(seconds(stopped)) after the assertion was created \
+                and stayed stopped while it was held, but resumed only \
+                \(seconds(resumed)) after a confirmed release, later than the \
+                \(seconds(criteria.resumeWindow)) window. The assertion stops \
+                charging; the slow resume needs a second look before anything is \
+                built on it.
+                """
         case let .inhibitedDidNotResume(stopped, watched):
-            """
-            Charging stopped \(seconds(stopped)) after the assertion was created, \
-            and had not resumed \(seconds(watched)) after it was released. When \
-            the probe exits, powerd releases every assertion the probe still \
-            owns (Apple's published source). Follow the recovery steps now: run \
-            `pmset -g assertions` and check that no ChargeInhibit is listed; \
-            unplug the adapter and plug it back in; if charging still does not \
-            resume, restart the Mac (docs/safety.md, "If charging does not \
-            resume"). Then send this report to the lead.
-            """
-        case .noEffect:
-            """
-            powerd accepted the assertion, and charging continued while it was \
-            held. On this Mac, macOS build and firmware, ChargeInhibit does not \
-            stop charging.
-            """
+            return """
+                Charging stopped \(seconds(stopped)) after the assertion was created, \
+                and had not resumed \(seconds(watched)) after its release, although \
+                powerd accepted the release and no longer listed the assertion. \
+                Follow the recovery steps now: run `pmset -g assertions` and check \
+                that no ChargeInhibit is listed; unplug the adapter and plug it back \
+                in; quit any battery tool; if charging still does not resume, \
+                restart the Mac (docs/safety.md, "If charging does not resume"). \
+                Then send this report to the lead.
+                """
+        case let .noEffect(held):
+            return """
+                powerd accepted the assertion, and every reading in the \
+                \(seconds(held)) it was held showed charging. No effect was observed \
+                during the measured hold on this Mac, macOS build and firmware.
+                """
         case let .refused(result):
-            """
-            powerd refused the assertion (IOReturn \(IOReturnName.describe(result))). \
-            Nothing was held, and charging was not affected.
-            """
+            return """
+                powerd refused the assertion (IOReturn \(IOReturnName.describe(result))). \
+                Nothing was held, and charging was not affected.
+                """
         case let .inconclusive(reason):
-            """
-            The run cannot decide: \(reason). Nothing about the assertion is \
-            concluded from it. Fix the condition and run the probe again.
-            """
+            return """
+                The run cannot decide: \(reason). Nothing about the assertion is \
+                concluded from it.
+                """
         }
     }
 
@@ -193,10 +230,19 @@ public enum Verdict: Sendable, Equatable {
         guard creation.result == 0 else {
             return .refused(result: creation.result)
         }
-        guard let releasedAt = run.releasedAt else {
+        if let last = baseline.last, creation.time - last.time > criteria.maxBaselineGap {
+            return .inconclusive(reason: """
+                the assertion was created \(seconds(creation.time - last.time)) after \
+                the last baseline reading (more than \(seconds(criteria.maxBaselineGap)))
+                """)
+        }
+        guard let release = run.release else {
             return .inconclusive(reason: "the probe did not release the assertion itself")
         }
-        if let gap = largestGap(samples: samples, events: [creation.time, releasedAt]),
+        if let problem = releaseProblem(release, creation: creation) {
+            return .inconclusive(reason: problem)
+        }
+        if let gap = largestGap(samples: samples, events: [creation.time, release.time]),
            gap.length > criteria.maxReadingGap {
             return .inconclusive(reason: """
                 there was a gap of \(seconds(gap.length)) between readings at \
@@ -221,15 +267,17 @@ public enum Verdict: Sendable, Equatable {
                 \(seconds(criteria.stopWindow))
                 """)
         }
-        guard let firstStop = held.first(where: { state(of: $0, criteria: criteria) == .stopped }) else {
-            if held.allSatisfy({ state(of: $0, criteria: criteria) == .charging }) {
-                return .noEffect
+        let states = held.map { state(of: $0, criteria: criteria) }
+        guard let stopIndex = states.firstIndex(of: .stopped) else {
+            if states.allSatisfy({ $0 == .charging }) {
+                return .noEffect(heldFor: last.time - creation.time)
             }
             return .inconclusive(reason: """
                 while the assertion was held, charging never clearly stopped, but \
                 the charging flag and the battery current disagreed in some readings
                 """)
         }
+        let firstStop = held[stopIndex]
         let stoppedAfter = firstStop.time - creation.time
         guard stoppedAfter <= criteria.stopWindow else {
             return .inconclusive(reason: """
@@ -238,32 +286,59 @@ public enum Verdict: Sendable, Equatable {
                 cannot be attributed to it
                 """)
         }
-        if let restart = held.first(where: { $0.time > firstStop.time && state(of: $0, criteria: criteria) == .charging }) {
+        for index in held.indices.dropFirst(stopIndex + 1) where states[index] != .stopped {
+            let at = seconds(held[index].time - creation.time)
+            return .inconclusive(reason: states[index] == .charging
+                ? """
+                    charging stopped \(seconds(stoppedAfter)) after the assertion was \
+                    created but started again \(at) after it, while it was still held
+                    """
+                : """
+                    charging stopped \(seconds(stoppedAfter)) after the assertion was \
+                    created, but \(at) after it the charging flag and the battery \
+                    current disagreed (\(chargingSummary(held[index]))), while it was \
+                    still held
+                    """)
+        }
+        let stoppedReadings = held.count - stopIndex
+        guard stoppedReadings >= criteria.sustainedReadings else {
             return .inconclusive(reason: """
                 charging stopped \(seconds(stoppedAfter)) after the assertion was \
-                created but started again \(seconds(restart.time - creation.time)) \
-                after it, while it was still held
+                created, but only \(stoppedReadings) \(stoppedReadings == 1 ? "reading" : "readings") \
+                showed it stopped before the release (\(criteria.sustainedReadings) needed)
                 """)
         }
 
         // After the release.
         let after = samples.filter { $0.phase == .after }
+        var runStart: Sample?
+        var runLength = 0
+        var sawCharging = false
         for sample in after {
             if let problem = problem(of: sample) {
                 return .inconclusive(reason: """
                     charging stopped \(seconds(stoppedAfter)) after the assertion was \
-                    created, but \(problem) \(seconds(sample.time - releasedAt)) after \
-                    the release, before charging resumed
+                    created, but \(problem) \(seconds(sample.time - release.time)) after \
+                    the release, before charging had resumed for \
+                    \(criteria.sustainedReadings) readings in a row
                     """)
             }
-            if state(of: sample, criteria: criteria) == .charging {
-                let resumedAfter = sample.time - releasedAt
+            guard state(of: sample, criteria: criteria) == .charging else {
+                runStart = nil
+                runLength = 0
+                continue
+            }
+            sawCharging = true
+            if runStart == nil { runStart = sample }
+            runLength += 1
+            if runLength >= criteria.sustainedReadings, let start = runStart {
+                let resumedAfter = start.time - release.time
                 return resumedAfter <= criteria.resumeWindow
                     ? .inhibited(stoppedAfter: stoppedAfter, resumedAfter: resumedAfter)
                     : .inhibitedResumedLate(stoppedAfter: stoppedAfter, resumedAfter: resumedAfter)
             }
         }
-        let watched = (after.last?.time ?? releasedAt) - releasedAt
+        let watched = (after.last?.time ?? release.time) - release.time
         guard watched >= criteria.resumeWindow else {
             return .inconclusive(reason: """
                 charging stopped \(seconds(stoppedAfter)) after the assertion was \
@@ -271,15 +346,69 @@ public enum Verdict: Sendable, Equatable {
                 after it, before the \(seconds(criteria.resumeWindow)) window was over
                 """)
         }
+        if sawCharging {
+            return .inconclusive(reason: """
+                charging stopped \(seconds(stoppedAfter)) after the assertion was \
+                created; after the release it charged in some readings, but never in \
+                \(criteria.sustainedReadings) readings in a row
+                """)
+        }
         return .inhibitedDidNotResume(stoppedAfter: stoppedAfter, watchedFor: watched)
     }
 
+    /// Why the release cannot be trusted, or nil if powerd accepted it and
+    /// no longer listed the assertion.
+    static func releaseProblem(_ release: ProbeRun.Release, creation: ProbeRun.Creation) -> String? {
+        let fallback = """
+            powerd releases it at its timeout (\(creation.timeout) s after creation) \
+            and when the probe exits; check with `pmset -g assertions` after the \
+            probe has exited that no ChargeInhibit is listed
+            """
+        if release.result != 0 {
+            return """
+                IOPMAssertionRelease returned \(IOReturnName.describe(release.result)) \
+                (\(release.attempts) \(release.attempts == 1 ? "attempt" : "attempts")), \
+                so the assertion may have stayed held and what charging did after the \
+                release says nothing; \(fallback)
+                """
+        }
+        switch release.stillListed {
+        case false?:
+            return nil
+        case true?:
+            return """
+                pmset -g assertions still listed the probe's ChargeInhibit after the \
+                release, so the release is unconfirmed; \(fallback)
+                """
+        case nil:
+            return """
+                pmset -g assertions could not be run after the release, so the \
+                release is unconfirmed; \(fallback)
+                """
+        }
+    }
+
     /// Why the readings before the assertion do not show steady charging on
-    /// AC power, or nil if they do. The probe checks this before it creates
-    /// the assertion, and creates none if there is a problem.
+    /// AC power over the whole baseline, or nil if they do. The probe checks
+    /// this before it creates the assertion, and creates none if there is a
+    /// problem.
     public static func baselineProblem(_ baseline: [Sample], criteria: Criteria = .standard) -> String? {
-        guard baseline.count >= criteria.minimumBaselineReadings else {
+        let baseline = baseline.sorted { $0.time < $1.time }
+        guard baseline.count >= criteria.minimumBaselineReadings, let first = baseline.first, let last = baseline.last else {
             return "there were only \(baseline.count) readings before the assertion (\(criteria.minimumBaselineReadings) needed)"
+        }
+        let duration = last.time - first.time
+        guard criteria.baselineDuration.contains(duration) else {
+            return """
+                the baseline readings spanned \(seconds(duration)), outside \
+                \(seconds(criteria.baselineDuration.lowerBound))–\(seconds(criteria.baselineDuration.upperBound))
+                """
+        }
+        if let gap = largestGap(samples: baseline, events: []), gap.length > criteria.maxBaselineGap {
+            return """
+                the baseline had a gap of \(seconds(gap.length)) between readings at \
+                +\(seconds(gap.start)) (more than \(seconds(criteria.maxBaselineGap)))
+                """
         }
         for sample in baseline {
             if let problem = problem(of: sample) {
@@ -299,7 +428,7 @@ public enum Verdict: Sendable, Equatable {
     public static func problem(of sample: Sample) -> ReadingProblem? {
         if sample.externalPower == false { return .onBattery }
         guard sample.externalPower == true,
-              sample.batteryPresent != false,
+              sample.batteryPresent == true,
               let percent = sample.percent,
               sample.isCharging != nil,
               sample.current != nil
@@ -321,8 +450,8 @@ public enum Verdict: Sendable, Equatable {
         var length: Double
     }
 
-    /// The longest interval between consecutive moments (readings, creation,
-    /// release), from the first reading to the last.
+    /// The longest interval between consecutive moments (readings and
+    /// events), from the first to the last.
     static func largestGap(samples: [Sample], events: [Double]) -> Gap? {
         let moments = (samples.map(\.time) + events).sorted()
         guard moments.count >= 2 else { return nil }

@@ -7,14 +7,18 @@ import ProbeCore
 /// 1. Refuse unless the effective user is root. Nothing else happens first.
 /// 2. Re-check every precondition; refuse on any failure.
 /// 3. Create the report file; refuse if it cannot be written.
-/// 4. Install the signal handlers, so a stop during the baseline ends cleanly.
-/// 5. Baseline: 20 s of readings. Create no assertion unless it shows steady
-///    charging on AC power.
+/// 4. Install the signal handlers, so a stop during the baseline ends cleanly
+///    and latches the holder against a later creation.
+/// 5. Baseline: readings every 2 s for 20 s, timed from the baseline's own
+///    start. Create no assertion unless the readings span 18–24 s with no
+///    gap over 4 s and all show steady charging on AC power.
 /// 6. Create the assertion; read every 2 s while it is held; release it
 ///    early if a reading shows the run cannot conclude (unplugged, full,
 ///    unreadable).
-/// 7. Release it, read for 60 s more (up to 2 minutes beyond that if
-///    charging has not resumed), then write the report.
+/// 7. Release it (retrying a failed release), confirm with
+///    `pmset -g assertions` that it is gone, read for 60 s more (up to
+///    2 minutes beyond that until charging has resumed for 5 readings in a
+///    row), then write the report.
 enum RunCommand {
     static func main(hold: Int, invokedAs program: String) -> Int32 {
         // 1. Root only. This check comes before anything else in the run.
@@ -58,7 +62,7 @@ enum RunCommand {
         }
         giveToInvokingUser(fileName)
 
-        // 4. Signals: release at once, then let the run finish its report.
+        // 4. Signals: latch the stop, release at once, then finish the report.
         let holder = AssertionHolder(clock: clock)
         let stop = StopRequest()
         let signalSources = installSignalHandlers(holder: holder, stop: stop)
@@ -79,34 +83,37 @@ enum RunCommand {
             return sample
         }
 
-        func checkListing(_ moment: String) {
-            let output = Pmset.run(["-g", "assertions"])
-            let listing = output.map { AssertionListing.parse($0, redacting: names) }
-            let listed = listing.map { $0.lists(named: ProbeAssertion.name) }
-            listings.append(Report.ListingCheck(moment: moment, time: clock.now, listed: listed, lines: listing?.lines ?? []))
-            let text = listed.map { $0 ? "lists" : "does not list" } ?? "could not be run to check"
+        @discardableResult
+        func checkListing(_ moment: String) -> Bool? {
+            let listing = SystemReads.assertionListing(redacting: names)
+            let check = Report.ListingCheck(moment: moment, time: clock.now, listing: listing)
+            listings.append(check)
+            let text = check.listed.map { $0 ? "lists" : "does not list" } ?? "could not be run to check"
             Console.out("  \(moment): pmset -g assertions \(text) the probe's ChargeInhibit")
+            return check.listed
         }
 
-        // 5. Baseline.
+        // 5. Baseline, timed from its own start.
         Console.out("Baseline: \(ProbeSchedule.baseline) s of readings before the assertion. Ctrl-C stops at any time.")
         Console.out(ReportFormat.sampleHeader)
+        let baselineStart = clock.now
         for step in 0...(ProbeSchedule.baseline / ProbeSchedule.interval) {
-            guard clock.pause(until: Double(step) * interval, stop: stop) else { break }
+            guard clock.pause(until: baselineStart + Double(step) * interval, stop: stop) else { break }
             _ = read(.baseline)
         }
 
         var creation: ProbeRun.Creation?
+        var release: ProbeRun.Release?
         let baselineProblem = Verdict.baselineProblem(samples)
-        if stop.signal == nil, baselineProblem == nil {
+        if stop.signal == nil, baselineProblem == nil, let result = holder.create(hold: hold) {
             // 6. Create and hold.
-            let result = holder.create(hold: hold)
-            let created = ProbeRun.Creation(time: clock.now, result: result)
+            let created = ProbeRun.Creation(time: clock.now, result: result, timeout: ProbeAssertion.timeout(hold: hold))
             creation = created
             Console.out("+\(seconds(created.time)): IOPMAssertionCreateWithProperties returned \(IOReturnName.describe(result))")
             if result == kIOReturnSuccess {
-                Console.out("Holding ChargeInhibit for \(hold) s (powerd releases it by itself after \(ProbeAssertion.timeout(hold: hold)) s).")
+                Console.out("Holding ChargeInhibit for \(hold) s (powerd releases it by itself after \(created.timeout) s).")
                 var step = 1
+                var releasedEarly = false
                 while stop.signal == nil, Double(step) * interval <= Double(hold) {
                     guard clock.pause(until: created.time + Double(step) * interval, stop: stop) else { break }
                     let sample = read(.held)
@@ -114,29 +121,36 @@ enum RunCommand {
                     if let problem = Verdict.problem(of: sample) {
                         notes.append("Released early, \(seconds(sample.time - created.time)) after creation, because \(problem); the run is inconclusive.")
                         Console.out("  \(problem): releasing now")
+                        releasedEarly = true
                         break
                     }
                     step += 1
                 }
-                let releasedEarly = !notes.isEmpty
                 if stop.signal == nil, !releasedEarly { checkListing("just before the release") }
 
-                // 7. Release, then watch charging resume.
+                // 7. Release, confirm, then watch charging resume.
                 holder.release()
-                if let releasedAt = holder.releasedAt {
-                    let result = holder.releaseResult.map(IOReturnName.describe) ?? "?"
-                    Console.out("+\(seconds(releasedAt)): IOPMAssertionRelease returned \(result)")
-                    if let code = holder.releaseResult, code != kIOReturnSuccess {
+                if let record = holder.releaseRecord {
+                    let attempts = record.attempts == 1 ? "" : " (after \(record.attempts) attempts)"
+                    Console.out("+\(seconds(record.time)): IOPMAssertionRelease returned \(IOReturnName.describe(record.result))\(attempts)")
+                    // Also after a stop signal: it confirms the release.
+                    var stillListed = checkListing("just after the release")
+                    if stillListed == true {
+                        Thread.sleep(forTimeInterval: 1)
+                        stillListed = checkListing("1 s after the release")
+                    }
+                    release = ProbeRun.Release(time: record.time, result: record.result, attempts: record.attempts, stillListed: stillListed)
+                    if record.result != kIOReturnSuccess || stillListed != false {
                         notes.append("""
-                            IOPMAssertionRelease returned \(IOReturnName.describe(code)). powerd \
-                            releases the assertion at its timeout (\(ProbeAssertion.timeout(hold: hold)) s after creation) \
-                            and when the probe exits.
+                            The release is not confirmed. powerd releases the assertion at its \
+                            timeout (\(created.timeout) s after creation) and when the probe \
+                            exits. After the probe has exited, run `pmset -g assertions`: it \
+                            must list no ChargeInhibit. If it does, or if charging does not \
+                            resume, follow docs/safety.md, "If charging does not resume".
                             """)
                     }
-                    // Also after a stop signal: it confirms the release.
-                    checkListing("just after the release")
                     watchAfterRelease(
-                        releasedAt: releasedAt,
+                        releasedAt: record.time,
                         extend: !releasedEarly,
                         clock: clock,
                         stop: stop,
@@ -149,13 +163,16 @@ enum RunCommand {
         }
 
         holder.release()
-        let run = ProbeRun(samples: samples, creation: creation, releasedAt: holder.releasedAt)
+        let run = ProbeRun(samples: samples, creation: creation, release: release)
         var verdict = Verdict.evaluate(run)
         if let signal = stop.signal {
             notes.append("Stopped by \(signalName(signal)) at +\(seconds(clock.now)); the probe released the assertion at once (if it held one).")
             if creation == nil {
                 verdict = .inconclusive(reason: "the probe was stopped (\(signalName(signal))) before the assertion was created")
             }
+        }
+        if holder.isHeld {
+            notes.append("The probe could not release the assertion itself; powerd releases it when the probe exits, which happens now.")
         }
 
         let report = Report(
@@ -164,7 +181,6 @@ enum RunCommand {
             hold: hold,
             preconditionChecks: checks,
             run: run,
-            releaseResult: holder.releaseResult,
             listings: listings,
             verdict: verdict,
             notes: notes
@@ -182,9 +198,9 @@ enum RunCommand {
     }
 
     /// Reads for `ProbeSchedule.after` seconds after the release and, if
-    /// charging has not resumed by then and `extend`, for up to
-    /// `ProbeSchedule.lateResumeWatch` seconds more, stopping at the first
-    /// reading that shows charging.
+    /// charging has not resumed for `Criteria.sustainedReadings` readings in
+    /// a row by then and `extend`, for up to `ProbeSchedule.lateResumeWatch`
+    /// seconds more, stopping once it has.
     static func watchAfterRelease(
         releasedAt: Double,
         extend: Bool,
@@ -195,20 +211,23 @@ enum RunCommand {
         let interval = Double(ProbeSchedule.interval)
         let window = Double(ProbeSchedule.after)
         let limit = window + (extend ? Double(ProbeSchedule.lateResumeWatch) : 0)
-        var resumed = false
+        let needed = Criteria.standard.sustainedReadings
+        var inARow = 0
         var announced = false
         var step = 1
         while stop.signal == nil {
             let offset = Double(step) * interval
-            if offset > limit || (offset > window && resumed) { break }
+            if offset > limit || (offset > window && inARow >= needed) { break }
             if offset > window, !announced {
-                Console.out("Charging has not resumed \(ProbeSchedule.after) s after the release. Watching up to \(ProbeSchedule.lateResumeWatch) s more; Ctrl-C stops.")
+                Console.out("Charging has not yet resumed for \(needed) readings in a row. Watching up to \(Int(limit - window)) s more; Ctrl-C stops.")
                 announced = true
             }
             guard clock.pause(until: releasedAt + offset, stop: stop) else { break }
             let sample = read(.after)
             if Verdict.problem(of: sample) == nil, Verdict.state(of: sample) == .charging {
-                resumed = true
+                inARow += 1
+            } else if inARow < needed {
+                inARow = 0
             }
             step += 1
         }
@@ -224,18 +243,19 @@ enum RunCommand {
         _ = chown(fileName, uid, gid)
     }
 
-    /// SIGINT, SIGTERM and SIGHUP release the assertion at once and ask the
-    /// run to finish; a second signal exits immediately (powerd releases on
-    /// exit in any case).
+    /// SIGINT, SIGTERM and SIGHUP latch the stop (no assertion can be
+    /// created after it), release the assertion at once, and ask the run to
+    /// finish; a second signal exits immediately (powerd releases on exit in
+    /// any case).
     static func installSignalHandlers(holder: AssertionHolder, stop: StopRequest) -> [any DispatchSourceSignal] {
         let queue = DispatchQueue(label: "charge-inhibit-probe.signals")
         return [SIGINT, SIGTERM, SIGHUP].map { number in
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: queue)
             source.setEventHandler {
-                holder.release()
+                holder.cancel()
                 if stop.record(number) {
-                    Console.error("\n\(signalName(number)): the assertion is released; finishing the report. Press Ctrl-C again to quit at once.")
+                    Console.error("\n\(signalName(number)): stopping. No assertion will be created, and any the probe holds is released. Finishing the report; press Ctrl-C again to quit at once.")
                 } else {
                     Console.error("\n\(signalName(number)) again: quitting.")
                     exit(128 + number)

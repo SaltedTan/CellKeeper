@@ -27,16 +27,17 @@ public struct Report: Sendable {
         public var moment: String
         public var time: Double
         /// Nil if pmset could not be run.
-        public var listed: Bool?
-        /// The listing's ChargeInhibit lines, redacted.
-        public var lines: [String]
+        public var listing: AssertionListing?
 
-        public init(moment: String, time: Double, listed: Bool?, lines: [String]) {
+        public init(moment: String, time: Double, listing: AssertionListing?) {
             self.moment = moment
             self.time = time
-            self.listed = listed
-            self.lines = lines
+            self.listing = listing
         }
+
+        /// Whether the probe's assertion was listed; nil if pmset could not
+        /// be run.
+        public var listed: Bool? { listing?.listsProbe }
     }
 
     public var startedAt: String
@@ -44,8 +45,6 @@ public struct Report: Sendable {
     public var hold: Int
     public var preconditionChecks: [Check]
     public var run: ProbeRun?
-    /// The IOReturn of `IOPMAssertionRelease`, nil if it was not called.
-    public var releaseResult: Int32?
     public var listings: [ListingCheck]
     public var verdict: Verdict?
     public var notes: [String]
@@ -56,7 +55,6 @@ public struct Report: Sendable {
         hold: Int,
         preconditionChecks: [Check],
         run: ProbeRun? = nil,
-        releaseResult: Int32? = nil,
         listings: [ListingCheck] = [],
         verdict: Verdict? = nil,
         notes: [String] = []
@@ -66,7 +64,6 @@ public struct Report: Sendable {
         self.hold = hold
         self.preconditionChecks = preconditionChecks
         self.run = run
-        self.releaseResult = releaseResult
         self.listings = listings
         self.verdict = verdict
         self.notes = notes
@@ -102,15 +99,15 @@ public struct Report: Sendable {
             } else {
                 out.append("no assertion was created")
             }
-            if let releasedAt = run.releasedAt {
-                let result = releaseResult.map { " returned \(IOReturnName.describe($0))" } ?? ""
-                out.append("+\(seconds(releasedAt)): IOPMAssertionRelease\(result)")
+            if let release = run.release {
+                let attempts = release.attempts == 1 ? "" : " (after \(release.attempts) attempts)"
+                out.append("+\(seconds(release.time)): IOPMAssertionRelease returned \(IOReturnName.describe(release.result))\(attempts)")
             }
-            for listing in listings {
-                let listed = listing.listed.map { $0 ? "listed" : "did not list" } ?? "could not be run to check"
-                out.append("+\(seconds(listing.time)): \(listing.moment): pmset -g assertions \(listed) the probe's ChargeInhibit")
-                for line in listing.lines {
-                    out.append("    \(line)")
+            for check in listings {
+                let listed = check.listed.map { $0 ? "listed" : "did not list" } ?? "could not be run to check"
+                out.append("+\(seconds(check.time)): \(check.moment): pmset -g assertions \(listed) the probe's ChargeInhibit")
+                for holder in check.listing?.holders ?? [] {
+                    out.append("    \(holder.description)")
                 }
             }
             out.append("")
@@ -126,10 +123,14 @@ public struct Report: Sendable {
         }
 
         heading("Criteria")
-        out.append("not charging: macOS's charging flag is off and the battery current is at most \(criteria.currentThreshold) mA")
-        out.append("inhibited: stopped within \(seconds(criteria.stopWindow)) of creation, stayed stopped while held, on AC power,")
-        out.append("           and charging resumed within \(seconds(criteria.resumeWindow)) of the release")
-        out.append("inconclusive: unplugged, 100% or charged, unreadable, or a gap over \(seconds(criteria.maxReadingGap)) between readings")
+        out.append("(judgment calls, not values from any source)")
+        out.append("stopped: macOS's charging flag is off and the battery current is at most \(criteria.currentThreshold) mA;")
+        out.append("         charging: the flag is on and the current is above it; anything else disagrees")
+        out.append("inhibited: stopped within \(seconds(criteria.stopWindow)) of creation and in every reading after that while held")
+        out.append("           (\(criteria.sustainedReadings) readings at least), on AC power; the release accepted and no longer listed;")
+        out.append("           charging again for \(criteria.sustainedReadings) readings in a row, starting within \(seconds(criteria.resumeWindow)) of the release")
+        out.append("inconclusive: unplugged, 100% or charged, unreadable, a disagreeing reading after the stop, a failed or")
+        out.append("           unconfirmed release, or a gap over \(seconds(criteria.maxReadingGap)) between readings")
         out.append("")
 
         if let verdict {
