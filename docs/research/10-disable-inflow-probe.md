@@ -647,9 +647,9 @@ was reported attached by both reads, at 68 W, and the system drew about
 The owner ran the probe once, on 2026-10-20, with the default options
 (`sudo .build/release/charge-inhibit-probe run --assertion disable-inflow`),
 following §6. This was the one experiment authorized in §2. It was also the
-first time the probe's root-only path ran: the sleep registration, the
-idle-sleep assertion and both releases worked as designed, and no sleep
-notification arrived.
+first run of the root-only parts this note added to the probe: the sleep
+registration, the idle-sleep assertion and both releases worked as
+designed, and no sleep notification arrived.
 
 | Field | Value |
 |---|---|

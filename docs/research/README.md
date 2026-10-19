@@ -77,7 +77,7 @@ Some notes use their own evidence labels alongside these tags:
   tool, does the same with `DisableInflow`; its `run` also holds a public
   idle-sleep assertion and registers for sleep notifications, which
   connects it to the power-management root domain
-  (`IORegisterForSystemPower`). It has not run yet. In all notes no user
+  (`IORegisterForSystemPower`). The owner ran it once, on 2026-10-20. In all notes no user
   client of the battery or the SMC was opened by CellKeeper or its probes,
   no SMC key was read or written, no `pmset` setting was changed, and no
   proprietary binary (Apple's or anyone else's) was disassembled or
