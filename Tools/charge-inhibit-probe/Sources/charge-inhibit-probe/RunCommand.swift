@@ -213,6 +213,11 @@ enum RunCommand {
                 break
             }
         }
+        if stop.signal == nil, !releasedEarly {
+            // A rescheduled reading can move the last deadline past `end`:
+            // the hold still lasts the full requested time.
+            _ = clock.pause(until: end, stop: stop)
+        }
         if stop.signal == nil, !releasedEarly { _ = checkListing("just before the release") }
 
         // 7. Release, confirm, then watch charging resume.
