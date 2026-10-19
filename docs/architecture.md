@@ -1510,7 +1510,8 @@ candidates, in the order we intend to evaluate them:
    2026-10-09; roadmap milestone 4). Its foundations are developed against a
    simulated control first (phase 4a). Installing the helper needs a
    Developer ID (phase 4b), and hardware control needs a mechanism verified
-   on a dedicated test Mac and every precondition in `safety.md` (phase 4c).
+   on a test Mac and every precondition in `safety.md` (phase 4c; the
+   owner's `ChargeInhibit` probe of research note 09 is its first step).
    Design (see [04](research/04-privileged-helper.md)): `SMAppService` launch
    daemon; XPC with code-signing requirements on both sides; a fixed set of
    typed operations (no raw keys, no command execution); a lease that restores
