@@ -171,6 +171,17 @@ struct DischargeStartTests {
         // or not (the old predicate did not check).
         #expect(enabled == 35 * 2)
     }
+
+    @Test("A stored limit below 20%, which the settings' own setter clamps, is refused for its range, as before")
+    func limitBelowRange() async {
+        var settings = Fixture.settings()
+        settings.chargeLimit = 19
+        var status = await evaluatedActionStatus()
+        status.capabilities = Fixture.simulated
+        status.snapshot = Fixture.reading(90)
+        #expect(DischargeStart.refusal(settings: settings, status: status) == Self.limitRange)
+        #expect(!Self.legacyCanStart(settings: settings, status: status))
+    }
 }
 
 @Suite("Charge to 100% once: why it is disabled")
