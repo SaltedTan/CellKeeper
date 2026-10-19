@@ -161,6 +161,15 @@ enum DiagnosticsFixture {
         return await controller.evaluate(.launch)
     }
 
+    /// A temperature pause on the Simulated backend: the reason names
+    /// temperatures as the policy writes them ("41.5°C").
+    static func temperaturePause() async -> ControllerStatus {
+        let clock = TestClock()
+        let telemetry = StubTelemetry(snapshot(percent: 70, temperature: 41.5), clock: clock)
+        let controller = ChargeController(telemetry: telemetry, backend: MockChargingBackend(), settings: .default, now: { clock.now }, uptime: { clock.uptime })
+        return await controller.evaluate(.launch)
+    }
+
     /// A discharge to the limit the user started while plugged in.
     static func discharging() async -> ControllerStatus {
         let clock = TestClock()
@@ -509,6 +518,7 @@ enum DiagnosticsFixture {
             ("overrideAndSchedule.started", started),
             ("faulted", await faulted()),
             ("readOnlyConfirming", await readOnlyConfirming()),
+            ("temperaturePause", await temperaturePause()),
             ("discharging", await discharging()),
             ("nativeLimitUnreadable", await nativeLimitUnreadable()),
             ("nativeLimitPendingSwitch", await nativeLimitPendingSwitch()),

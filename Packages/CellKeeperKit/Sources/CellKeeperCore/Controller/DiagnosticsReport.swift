@@ -33,7 +33,8 @@ public struct DiagnosticsRow: Sendable, Equatable {
 }
 
 /// A value in the diagnostics report, kept in parts so that the report can
-/// name identifiers and the Diagnostics view can leave them out.
+/// name identifiers and the Diagnostics view can leave them out, and so
+/// that VoiceOver can read units in words.
 public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpolation {
     enum Part: Sendable, Equatable {
         /// Words the report and the view both show.
@@ -49,7 +50,30 @@ public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpol
         /// ("2026-10-23T07:00:00+01:00"), so that a change of offset shows
         /// without naming a time zone.
         case offsetTime(Date, utcOffset: Int)
+        /// A number and its unit, which the report and the view write with
+        /// the unit's symbol ("12427 mV", "31 °C"), and VoiceOver reads in
+        /// words ("12,427 millivolts").
+        case quantity(Number, unit: QuantityUnit)
     }
+
+    /// The number of a quantity.
+    enum Number: Sendable, Equatable {
+        /// A whole number, kept exact: the report writes it as is.
+        case integer(Int)
+        /// A decimal number, and the text the report writes for it.
+        case decimal(Double, written: String)
+
+        var written: String {
+            switch self {
+            case .integer(let value): "\(value)"
+            case .decimal(_, let written): written
+            }
+        }
+    }
+
+    /// The most decimals a decimal quantity shows: as many as `formatted()`
+    /// shows, which writes it in the report.
+    static let decimalPlaces = 6
 
     let parts: [Part]
 
@@ -75,6 +99,7 @@ public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpol
             case .identified(let words, let identifier): "\(words) (\(identifier))"
             case .time(let date): DiagnosticsReport.timestamp(date)
             case .offsetTime(let date, let utcOffset): DiagnosticsReport.timestamp(date, utcOffset: utcOffset)
+            case .quantity(let number, let unit): "\(number.written) \(unit.symbol)"
             }
         }.joined())
     }
@@ -88,8 +113,69 @@ public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpol
             case .text(let text): text
             case .identified(let words, _): words
             case .time(let date), .offsetTime(let date, _): formatTime(date)
+            case .quantity(let number, let unit): "\(number.written) \(unit.symbol)"
             }
         }.joined())
+    }
+
+    /// What VoiceOver reads for the value in the Diagnostics view: the plain
+    /// text with units in words and numbers in `locale`'s format ("12,427
+    /// millivolts", "-12 milliamps", "31 degrees Celsius"), also the
+    /// temperatures in the sentences of the policy and the settings check
+    /// ("Battery at 41.5 degrees Celsius"), whose numbers are read with
+    /// `locale`'s separators. A unit is singular when its number, as shown,
+    /// is 1 or -1. Nil if the plain text names no unit, so that the view
+    /// leaves the text as it is.
+    public func spokenText(formattingTime formatTime: (Date) -> String, locale: Locale = .current) -> String? {
+        var pieces: [String] = []
+        // Text parts next to each other are read as one, so that a number
+        // and its "°C" from different parts are read together.
+        var text = ""
+        for part in parts {
+            if case .text(let next) = part {
+                text += next
+                continue
+            }
+            pieces.append(Self.speakingTemperatures(in: text, locale: locale))
+            text = ""
+            switch part {
+            case .text: break
+            case .identified(let words, _): pieces.append(words)
+            case .time(let date), .offsetTime(let date, _): pieces.append(formatTime(date))
+            case .quantity(.integer(let value), let unit): pieces.append(unit.spoken(value, locale: locale))
+            case .quantity(.decimal(let value, _), let unit): pieces.append(unit.spoken(value, fractionDigits: 0...Self.decimalPlaces, locale: locale))
+            }
+        }
+        pieces.append(Self.speakingTemperatures(in: text, locale: locale))
+        let spoken = DiagnosticsReport.redactingAccountNames(pieces.joined())
+        return spoken == plainText(formattingTime: formatTime) ? nil : spoken
+    }
+
+    /// `text` with each temperature written after a number ("41.5°C",
+    /// "40 °C", "1,000°C") in words. The policy's reasons and the settings
+    /// check's messages, which the menu, notifications and the activity log
+    /// share, write temperatures so, in the current locale's format, which
+    /// is `locale` in the app. The whole number is read with `locale`'s
+    /// grouping and decimal separators (a space-like grouping separator in
+    /// any of its forms: space, no-break space, narrow no-break space). It
+    /// is already rounded as shown, so it is one if the digits of its whole
+    /// part are exactly 1 and its decimals are 0, by the digits' values.
+    private static func speakingTemperatures(in text: String, locale: Locale) -> String {
+        let spaces = [" ", "\u{00A0}", "\u{202F}"]
+        let grouping = locale.groupingSeparator.map { spaces.contains($0) ? spaces : [$0] } ?? []
+        let decimal = locale.decimalSeparator ?? "."
+        // Separators as code points, which need no escaping.
+        func anyOf(_ separators: [String]) -> String {
+            "(?:" + separators.map { $0.unicodeScalars.map { "\\x{\(String($0.value, radix: 16))}" }.joined() }.joined(separator: "|") + ")"
+        }
+        let groups = grouping.isEmpty ? "" : "(?:\(anyOf(grouping))\\d+)*"
+        guard let number = try? Regex("((\\d+\(groups))(?:\(anyOf([decimal]))(\\d+))?)\\s?°C") else { return text }
+        return text.replacing(number) { match in
+            let whole = match.output[2].substring?.compactMap(\.wholeNumberValue) ?? []
+            let decimals = match.output[3].substring?.compactMap(\.wholeNumberValue) ?? []
+            let isOne = whole == [1] && decimals.allSatisfy { $0 == 0 }
+            return "\(match.output[1].substring ?? "") \(QuantityUnit.degreesCelsius.name(singular: isOne))"
+        }
     }
 
     public struct StringInterpolation: StringInterpolationProtocol {
@@ -120,6 +206,17 @@ public struct DiagnosticsValue: Sendable, Equatable, ExpressibleByStringInterpol
 
         public mutating func appendInterpolation(time: Date, utcOffset: Int) {
             parts.append(.offsetTime(time, utcOffset: utcOffset))
+        }
+
+        /// A whole number and its unit, the number written as is: "12427 mV".
+        public mutating func appendInterpolation(_ value: Int, unit: QuantityUnit) {
+            parts.append(.quantity(.integer(value), unit: unit))
+        }
+
+        /// A number and its unit, the number in the current locale's format,
+        /// as the report writes temperatures: "31.5 °C".
+        public mutating func appendInterpolation(_ value: Double, unit: QuantityUnit) {
+            parts.append(.quantity(.decimal(value, written: value.formatted()), unit: unit))
         }
     }
 }
@@ -235,7 +332,7 @@ public enum DiagnosticsReport {
         field("Charge limit", "\(settings.chargeLimit)%")
         field("Resume threshold", "\(settings.resumeThreshold)%")
         let protection = settings.temperatureProtection
-        field("Temperature protection", "\(protection.isEnabled ? "on" : "off") (pause \(protection.pauseAtCelsius.formatted()) °C, resume \(protection.resumeAtCelsius.formatted()) °C)")
+        field("Temperature protection", "\(protection.isEnabled ? "on" : "off") (pause \(protection.pauseAtCelsius, unit: .degreesCelsius), resume \(protection.resumeAtCelsius, unit: .degreesCelsius))")
 
         section("Battery")
         if let snapshot = status.snapshot {
@@ -341,14 +438,14 @@ public enum DiagnosticsReport {
         field("Charge", optional(snapshot.chargePercent) { "\($0)%" })
         field("Power source", identified(snapshot.powerSource))
         field("Charging status", identified(snapshot.chargingStatus))
-        field("Temperature", optional(snapshot.temperatureCelsius) { "\($0.formatted()) °C" })
-        field("Voltage", optional(snapshot.voltageMillivolts) { "\($0) mV" })
-        field("Current", optional(snapshot.amperageMilliamps) { "\($0) mA" })
-        field("Adapter", optional(snapshot.adapterWatts) { "\($0) W" })
+        field("Temperature", optional(snapshot.temperatureCelsius) { "\($0, unit: .degreesCelsius)" })
+        field("Voltage", optional(snapshot.voltageMillivolts) { "\($0, unit: .millivolts)" })
+        field("Current", optional(snapshot.amperageMilliamps) { "\($0, unit: .milliamps)" })
+        field("Adapter", optional(snapshot.adapterWatts) { "\($0, unit: .watts)" })
         let health = snapshot.health
         field("Cycle count", optional(health.cycleCount) { "\($0)" })
-        field("Full-charge capacity", optional(health.fullChargeCapacityMilliampHours) { "\($0) mAh" })
-        field("Design capacity", optional(health.designCapacityMilliampHours) { "\($0) mAh" })
+        field("Full-charge capacity", optional(health.fullChargeCapacityMilliampHours) { "\($0, unit: .milliampHours)" })
+        field("Design capacity", optional(health.designCapacityMilliampHours) { "\($0, unit: .milliampHours)" })
         field("Condition", "\(health.condition ?? "not available")")
         return rows
     }
