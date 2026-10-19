@@ -111,22 +111,24 @@ enum RunCommand {
             SleepResponse.willSleep(
                 assertion: kind,
                 release: { teardown.stop() },
+                writeReport: { EmergencyExit.writeReport($0, to: reportDescriptor) },
                 acknowledge: acknowledge,
-                record: { EmergencyExit.writeWithoutBlocking($0, to: STDERR_FILENO) },
+                // After the acknowledgement, through the usual writer: a
+                // console that blocks only delays the probe.
+                console: { Console.error("\n" + $0) },
                 emergencyExit: { line, status in
                     EmergencyExit.perform(line, status: status, steps: EmergencyExit.Steps(
                         armDeadline: {
-                            // Before any write: SIGALRM's default action ends
-                            // the process in 2 s, with no lock, queue or
-                            // output involved.
+                            // Before the write: SIGALRM's default action
+                            // ends the process in 2 s, with no lock, queue
+                            // or output involved.
                             signal(SIGALRM, SIG_DFL)
                             alarm(EmergencyExit.deadline)
                         },
+                        // The report file only: the console's descriptors are
+                        // shared with the main thread and the shell, and are
+                        // left alone.
                         writeReport: { EmergencyExit.writeReport($0, to: reportDescriptor) },
-                        writeConsole: { line in
-                            EmergencyExit.writeWithoutBlocking(line, to: STDERR_FILENO)
-                            EmergencyExit.writeWithoutBlocking(line, to: STDOUT_FILENO)
-                        },
                         exit: { status in
                             // `_exit`, not `exit`: it runs no exit handlers,
                             // which could wait on locks the main thread

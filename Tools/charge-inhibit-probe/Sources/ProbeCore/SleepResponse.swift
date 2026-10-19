@@ -20,36 +20,44 @@ public enum SleepResponse {
 
     /// Releases the private assertion through `release` (which also latches
     /// the run's stop), then:
-    /// - if `IOPMAssertionRelease` succeeded, or none was held, records that
-    ///   and calls `acknowledge`, which allows the sleep;
-    /// - if every attempt failed, never acknowledges, and hands one line
-    ///   saying so, and ``failedReleaseExitStatus``, to `emergencyExit`. In
-    ///   the probe that is ``EmergencyExit/perform(_:status:steps:)``: a 2 s
-    ///   exit deadline, the line in the report and on the console, and
-    ///   `_exit`; it does not return. powerd frees every assertion of a
-    ///   process that exits (`HandleProcessExit` in Apple's published
-    ///   PowerManagement source), and without an acknowledgement the system
-    ///   waits until the client is gone, or for its acknowledgement timeout
-    ///   (about 30 s), before it sleeps.
+    /// - if `IOPMAssertionRelease` succeeded, or none was held, writes a
+    ///   line saying so to the report file, calls `acknowledge`, which
+    ///   allows the sleep, and only then writes the line to the console, so
+    ///   that a console that blocks delays the probe but never the release
+    ///   or the acknowledgement;
+    /// - if every attempt failed, never acknowledges and writes nothing to
+    ///   the console, and hands one line saying so, and
+    ///   ``failedReleaseExitStatus``, to `emergencyExit`. In the probe that
+    ///   is ``EmergencyExit/perform(_:status:steps:)``: a 2 s exit deadline,
+    ///   the line in the report file, and `_exit`; it does not return.
+    ///   powerd frees every assertion of a process that exits
+    ///   (`HandleProcessExit` in Apple's published PowerManagement source),
+    ///   and without an acknowledgement the system waits until the client is
+    ///   gone, or for its acknowledgement timeout (about 30 s), before it
+    ///   sleeps.
     @discardableResult
     public static func willSleep(
         assertion: AssertionKind,
         release: () -> ReleaseOutcome,
+        writeReport: (String) -> Void,
         acknowledge: () -> Void,
-        record: (String) -> Void,
+        console: (String) -> Void,
         emergencyExit: (_ line: String, _ status: Int32) -> Void
     ) -> ReleaseOutcome {
         let outcome = release()
+        let line: String
         switch outcome {
         case .released:
-            record("kIOMessageSystemWillSleep: released the \(assertion.type) assertion, then allowed the sleep; the run is inconclusive.")
-            acknowledge()
+            line = "kIOMessageSystemWillSleep: released the \(assertion.type) assertion, then allowed the sleep; the run is inconclusive."
         case .nothingHeld:
-            record("kIOMessageSystemWillSleep: no \(assertion.type) assertion was held; allowed the sleep; the run is inconclusive.")
-            acknowledge()
+            line = "kIOMessageSystemWillSleep: no \(assertion.type) assertion was held; allowed the sleep; the run is inconclusive."
         case let .failed(result, attempts):
             emergencyExit(failureLine(assertion, result: result, attempts: attempts), failedReleaseExitStatus)
+            return outcome
         }
+        writeReport(line)
+        acknowledge()
+        console(line)
         return outcome
     }
 

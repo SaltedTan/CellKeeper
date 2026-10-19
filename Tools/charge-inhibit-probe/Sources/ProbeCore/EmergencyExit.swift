@@ -2,64 +2,48 @@ import Foundation
 
 /// The last resort when the release fails on a sleep notification
 /// (research note 10 §4): arm an exit deadline that needs no lock, queue or
-/// output, record one line in the report file, write it to the console
-/// best effort, and exit. Each step is a closure, so the tests drive the
-/// order with fakes; ``writeReport(_:to:)`` and
-/// ``writeWithoutBlocking(_:to:)`` are the real writers.
+/// output, record one line in the report file, and exit. Nothing goes to
+/// the console, and no descriptor's flags are changed: the console's pipe
+/// or terminal is shared with the main thread and the shell. Each step is a
+/// closure, so the tests drive the order with fakes; ``writeReport(_:to:)``
+/// is the real writer.
 public enum EmergencyExit {
     /// Seconds until the deadline ends the process (SIGALRM's default
-    /// action, set with `alarm(2)`), whatever the writes do.
+    /// action, set with `alarm(2)`), whatever the report write does.
     public static let deadline: UInt32 = 2
 
     public struct Steps {
         public var armDeadline: () -> Void
         public var writeReport: (String) -> Void
-        public var writeConsole: (String) -> Void
         public var exit: (Int32) -> Void
 
         public init(
             armDeadline: @escaping () -> Void,
             writeReport: @escaping (String) -> Void,
-            writeConsole: @escaping (String) -> Void,
             exit: @escaping (Int32) -> Void
         ) {
             self.armDeadline = armDeadline
             self.writeReport = writeReport
-            self.writeConsole = writeConsole
             self.exit = exit
         }
     }
 
-    /// The deadline first, then the report line, then the console line,
-    /// then the exit. In the probe, `exit` does not return.
+    /// The deadline first, then the report line, then the exit. In the
+    /// probe, `exit` does not return.
     public static func perform(_ line: String, status: Int32, steps: Steps) {
         steps.armDeadline()
         steps.writeReport(line)
-        steps.writeConsole(line)
         steps.exit(status)
     }
 
-    /// One `write(2)` of `text` and a newline to `descriptor`: the report
-    /// file, already open with `O_APPEND`. A regular file does not wait for
-    /// a reader; the deadline covers a disk that hangs. Returns `write`'s
-    /// result.
+    /// One `write(2)` of `text`, between newlines, to `descriptor`: the
+    /// report file, already open with `O_APPEND`. A regular file does not
+    /// wait for a reader; on the emergency path, the deadline covers a disk
+    /// that hangs. Returns `write`'s result, -1 for a file that could not be
+    /// opened.
     @discardableResult
     public static func writeReport(_ text: String, to descriptor: Int32) -> Int {
         guard descriptor >= 0 else { return -1 }
-        let bytes = Array(("\n" + text + "\n").utf8)
-        return bytes.withUnsafeBytes { Darwin.write(descriptor, $0.baseAddress, $0.count) }
-    }
-
-    /// One `write(2)` of `text` to `descriptor` that cannot block: the
-    /// descriptor is made non-blocking with `fcntl` first, and its flags are
-    /// restored after, so that a terminal or pipe it shares with the shell
-    /// is not left non-blocking. A full pipe (`EAGAIN`) or a short write is
-    /// ignored. Returns `write`'s result.
-    @discardableResult
-    public static func writeWithoutBlocking(_ text: String, to descriptor: Int32) -> Int {
-        let flags = fcntl(descriptor, F_GETFL)
-        guard flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) >= 0 else { return -1 }
-        defer { _ = fcntl(descriptor, F_SETFL, flags) }
         let bytes = Array(("\n" + text + "\n").utf8)
         return bytes.withUnsafeBytes { Darwin.write(descriptor, $0.baseAddress, $0.count) }
     }
