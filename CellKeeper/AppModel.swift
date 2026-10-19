@@ -75,23 +75,24 @@ enum SettingsTab: Hashable {
 final class AppModel {
     private(set) var status: ControllerStatus?
     private(set) var settings: ChargingSettings
+    /// Counts every settings change accepted here, from any source: a saved
+    /// one, one that left the settings as they were (a Shortcuts action
+    /// setting the limit already in effect still came later), and
+    /// CellKeeper keeping Manage charging off after applying one. The menu's
+    /// slider applies an edit only at the revision it began from, so a newer
+    /// command always wins (D109).
+    private(set) var settingsRevision = 0
     private(set) var backendChoice: ControlBackendChoice
-    // These three are shown away from the control the user just used (at the
-    // foot of Settings › Charging, below an editor), so a new one is also
-    // announced to VoiceOver. Each comes from the user's own change.
+    // The next three are shown away from the control the user just used (at
+    // the foot of Settings › Charging, below an editor), so the action that
+    // sets one also announces it (`announce(_:)`), every time it ends that way.
 
     /// Validation or persistence problem with the most recent settings change.
-    private(set) var settingsError: String? {
-        didSet { announce(problem: settingsError, replacing: oldValue) }
-    }
+    private(set) var settingsError: String?
     /// Why the most recent scheduled full charge was not set.
-    private(set) var scheduleError: String? {
-        didSet { announce(problem: scheduleError, replacing: oldValue) }
-    }
+    private(set) var scheduleError: String?
     /// Why the most recent weekly full charge was not saved.
-    private(set) var weeklyError: String? {
-        didSet { announce(problem: weeklyError, replacing: oldValue) }
-    }
+    private(set) var weeklyError: String?
     /// Set when stored settings were unusable and defaults were loaded.
     private(set) var settingsRecoveryMessage: String?
     /// macOS's system-wide thermal state and Low Power Mode, shown for
@@ -460,7 +461,10 @@ final class AppModel {
     @discardableResult
     func changeSettings(_ proposed: ChargingSettings, source: SettingsChangeSource) -> SettingsChangeResult {
         let result = commitSettings(proposed, source: source)
-        settingsError = SettingsReconciliation.banner(after: result, source: source).applied(to: settingsError)
+        if case .refused = result {} else { settingsRevision += 1 }
+        let banner = SettingsReconciliation.banner(after: result, source: source)
+        settingsError = banner.applied(to: settingsError)
+        announce(banner)
         if let message = SettingsReconciliation.logMessage(after: result, source: source) {
             CellKeeperLog.settings.notice("\(message, privacy: .public)")
         }
@@ -500,8 +504,18 @@ final class AppModel {
         case .accepted(let proposed):
             changeSettings(proposed, source: .ui)
         case .refused(let text):
-            settingsError = SettingsReconciliation.banner(after: .refused(text), source: .ui).applied(to: settingsError)
+            let banner = SettingsReconciliation.banner(after: .refused(text), source: .ui)
+            settingsError = banner.applied(to: settingsError)
+            announce(banner)
         }
+    }
+
+    /// The menu slider's edit (``ChargeLimitSliderEdit``): applied only if
+    /// no settings change was accepted since the edit began at `revision`;
+    /// otherwise nothing, and the slider shows the newer limit.
+    func setChargeLimit(_ limit: Int, ifSettingsRevision revision: Int) {
+        guard revision == settingsRevision else { return }
+        setChargeLimit(limit)
     }
 
     /// Does nothing unless the menu's button would be enabled
@@ -528,7 +542,7 @@ final class AppModel {
         let schedule = FullChargeSchedule(startsAt: start, endsAt: end)
         let issues = schedule.issues(settingAt: Date())
         guard issues.isEmpty else {
-            scheduleError = issues.map(\.description).joined(separator: " ")
+            refuseSchedule(issues.map(\.description).joined(separator: " "))
             return
         }
         scheduleError = nil
@@ -550,11 +564,27 @@ final class AppModel {
     func setWeeklyFullCharge(_ pattern: WeeklyFullChargePattern) {
         let issues = pattern.issues
         guard issues.isEmpty else {
-            weeklyError = issues.map(\.description).joined(separator: " ")
+            refuseWeekly(issues.map(\.description).joined(separator: " "))
             return
         }
         weeklyError = nil
         send(.setWeekly(pattern))
+    }
+
+    /// Shows and announces why the user's scheduled full charge was not
+    /// set, every time, even with the same reason as before.
+    private func refuseSchedule(_ reason: String) {
+        let change = BannerChange.show(reason)
+        scheduleError = change.applied(to: scheduleError)
+        announce(change)
+    }
+
+    /// Shows and announces why the user's weekly full charge was not saved,
+    /// every time.
+    private func refuseWeekly(_ reason: String) {
+        let change = BannerChange.show(reason)
+        weeklyError = change.applied(to: weeklyError)
+        announce(change)
     }
 
     func removeWeeklyFullCharge() {
@@ -696,10 +726,13 @@ final class AppModel {
         diagnosticsSaveFailure = nil
     }
 
-    /// Announces a new problem with the user's own change
-    /// (``AccessibilityWording/announcement(forProblem:replacing:)``).
-    private func announce(problem: String?, replacing old: String?) {
-        guard let text = AccessibilityWording.announcement(forProblem: problem, replacing: old) else { return }
+    /// Announces the problem a step of the user's own action shows
+    /// (``BannerChange/announcement``): every time it shows one, even the
+    /// same as before; never for a step that keeps or clears the line.
+    /// Called where the action ends, not when the line changes, so status
+    /// updates and launch never announce.
+    private func announce(_ change: BannerChange) {
+        guard let text = change.announcement else { return }
         Announcement.post(text, priority: .high)
     }
 
@@ -747,13 +780,17 @@ final class AppModel {
             let outcome = SettingsReconciliation.outcome(sent: newSettings, current: settings, controller: applied, source: source)
             if outcome.keepsManagementOff {
                 settings.isManagementEnabled = false
+                settingsRevision += 1
                 do {
                     try store.save(settings)
                 } catch {
                     CellKeeperLog.settings.error("Could not save settings: \(String(describing: error), privacy: .private)")
                 }
             }
+            // Set, and announced, only for a change the user just made in
+            // the UI; every other reconciliation keeps the banner.
             settingsError = outcome.banner.applied(to: settingsError)
+            announce(outcome.banner)
             if let message = outcome.logMessage {
                 CellKeeperLog.settings.notice("\(message, privacy: .public)")
             }
@@ -777,10 +814,10 @@ final class AppModel {
                     false
                 }
                 if newStatus.fullChargeSchedule != schedule, !wasUsed {
-                    scheduleError = "The schedule could not be set; Settings › Activity says why."
+                    refuseSchedule("The schedule could not be set; Settings › Activity says why.")
                 }
             } catch {
-                scheduleError = "The schedule was not set: \(error)"
+                refuseSchedule("The schedule was not set: \(error)")
             }
         case .cancelSchedule:
             status = await controller.cancelFullChargeSchedule()
@@ -790,7 +827,7 @@ final class AppModel {
             do {
                 status = try await controller.setWeeklyFullCharge(pattern)
             } catch {
-                weeklyError = "The weekly full charge was not saved: \(error)"
+                refuseWeekly("The weekly full charge was not saved: \(error)")
             }
         case .removeWeekly:
             status = await controller.removeWeeklyFullCharge()

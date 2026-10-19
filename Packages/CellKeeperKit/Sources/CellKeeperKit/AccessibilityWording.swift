@@ -55,14 +55,6 @@ public enum AccessibilityWording {
         counted(value, "hour", "hours", locale: locale)
     }
 
-    /// What to announce when the problem shown for the user's own change
-    /// (the Settings banner, a schedule that was not set) becomes `new`:
-    /// the new problem, unless it is gone or the same as before.
-    public static func announcement(forProblem new: String?, replacing old: String?) -> String? {
-        guard let new, new != old else { return nil }
-        return new
-    }
-
     /// Announced when Copy Diagnostics has put the report on the clipboard.
     public static let diagnosticsCopied = "Diagnostics report copied."
 
@@ -72,5 +64,19 @@ public enum AccessibilityWording {
 
     private static func counted(_ value: Int, _ one: String, _ many: String, locale: Locale) -> String {
         "\(number(Double(value), locale: locale)) \(abs(value) == 1 ? one : many)"
+    }
+}
+
+extension BannerChange {
+    /// What to announce for this step of an action the user just took (a
+    /// settings change in the UI, Schedule Full Charge, saving the weekly
+    /// full charge): the problem it shows, every time, even when the same
+    /// text is already shown, so a refusal repeated is heard again. A step
+    /// that keeps or clears the line announces nothing. Only the UI's
+    /// settings changes show a banner (``SettingsReconciliation``), so a
+    /// Shortcuts action's change and CellKeeper's own announce nothing.
+    public var announcement: String? {
+        if case .show(let text) = self { return text }
+        return nil
     }
 }

@@ -296,17 +296,18 @@ private struct NativeChargeLimitPicker: View {
     }
 }
 
-/// Charge-limit slider. A drag is applied when it ends, so dragging never
-/// produces a burst of control requests. A change made without a drag (the
-/// arrow keys, VoiceOver's increment and decrement) is applied once the
-/// value has stayed put for a moment, so holding a key does not either.
+/// Charge-limit slider. ``ChargeLimitSliderEdit`` (Kit) decides what is
+/// applied and when; this view only feeds it events and carries out what it
+/// returns. A drag is applied when it ends, a change made without a drag
+/// (the arrow keys, VoiceOver's increment and decrement) once the value has
+/// stayed put for a moment, and only if no other settings change came first:
+/// a newer command, from anywhere, wins.
 private struct ChargeLimitSlider: View {
     let model: AppModel
-    @State private var draftLimit: Double?
-    /// True from the start of a drag to its end.
-    @State private var isDragging = false
-    /// Applies a change made without a drag, after a pause.
-    @State private var pendingApply: Task<Void, Never>?
+    /// Made when the slider appears, closed when it goes away.
+    @State private var edit: ChargeLimitSliderEdit?
+    /// The pause before a change made without a drag is applied.
+    @State private var timer: Task<Void, Never>?
 
     /// How long a value changed without a drag stays put before it is
     /// applied.
@@ -314,8 +315,7 @@ private struct ChargeLimitSlider: View {
     private static let range = ChargingSettings.chargeLimitRange
 
     var body: some View {
-        let committed = Double(model.settings.chargeLimit)
-        let shown = Int(draftLimit ?? committed)
+        let shown = edit?.draft ?? model.settings.chargeLimit
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text("Charge limit")
@@ -327,16 +327,12 @@ private struct ChargeLimitSlider: View {
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
             Slider(
-                value: Binding(get: { draftLimit ?? committed }, set: { newValue in
-                    draftLimit = newValue.rounded()
-                    if !isDragging { applyAfterPause() }
-                }),
+                value: Binding(get: { Double(shown) }, set: { send(.userChanged(Int($0.rounded()))) }),
                 in: Double(Self.range.lowerBound)...Double(Self.range.upperBound)
             ) {
                 Text("Charge limit")
             } onEditingChanged: { editing in
-                isDragging = editing
-                if !editing { applyDraft() }
+                send(editing ? .dragBegan : .dragEnded(edit?.draft ?? model.settings.chargeLimit))
             }
             .labelsHidden()
             .disabled(!model.settings.isManagementEnabled)
@@ -349,8 +345,7 @@ private struct ChargeLimitSlider: View {
                 case .decrement: step = -1
                 @unknown default: return
                 }
-                draftLimit = Double(min(max(shown + step, Self.range.lowerBound), Self.range.upperBound))
-                applyAfterPause()
+                send(.userChanged(min(max(shown + step, Self.range.lowerBound), Self.range.upperBound)))
             }
             Text("Resumes charging at \(model.settings.resumeThreshold)%.")
                 .font(.caption)
@@ -369,23 +364,46 @@ private struct ChargeLimitSlider: View {
             }
             ManageChargingToggle(model: model)
         }
+        .onAppear {
+            edit = ChargeLimitSliderEdit(limit: model.settings.chargeLimit, revision: model.settingsRevision)
+        }
+        .onChange(of: model.settingsRevision) {
+            send(.settingsChanged(revision: model.settingsRevision, limit: model.settings.chargeLimit))
+        }
+        .onDisappear {
+            // Applies the current edit once, at once; the timer then does
+            // nothing.
+            send(.closed)
+            timer?.cancel()
+            timer = nil
+        }
     }
 
-    private func applyDraft() {
-        pendingApply?.cancel()
-        pendingApply = nil
-        guard let draftLimit else { return }
-        model.setChargeLimit(Int(draftLimit))
-        self.draftLimit = nil
-    }
-
-    private func applyAfterPause() {
-        pendingApply?.cancel()
-        pendingApply = Task {
-            try? await Task.sleep(for: Self.applyDelay)
-            // A drag that started meanwhile is applied when it ends.
-            guard !Task.isCancelled, !isDragging else { return }
-            applyDraft()
+    private func send(_ event: ChargeLimitSliderEdit.Event) {
+        guard var current = edit else { return }
+        let output = current.handle(event)
+        edit = current
+        switch output {
+        case .nothing:
+            break
+        case .showModelValue:
+            // The draft is gone: the slider shows the model's limit.
+            timer?.cancel()
+            timer = nil
+        case .startTimer(let token):
+            timer?.cancel()
+            timer = Task {
+                try? await Task.sleep(for: Self.applyDelay)
+                guard !Task.isCancelled else { return }
+                send(.timerFired(token: token))
+            }
+        case .apply(let limit, let revision):
+            timer?.cancel()
+            timer = nil
+            model.setChargeLimit(limit, ifSettingsRevision: revision)
+            // What the model holds now, before any later event: an edit
+            // that starts next begins from it.
+            send(.settingsChanged(revision: model.settingsRevision, limit: model.settings.chargeLimit))
         }
     }
 }

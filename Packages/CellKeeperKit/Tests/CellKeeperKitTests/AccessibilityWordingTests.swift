@@ -1,3 +1,4 @@
+import CellKeeperCore
 import CellKeeperKit
 import Foundation
 import Testing
@@ -49,13 +50,52 @@ struct AccessibilityWordingTests {
         #expect(AccessibilityWording.hours(12, locale: english) == "12 hours")
     }
 
-    @Test("Only a new problem with the user's own change is announced")
-    func announcements() {
-        #expect(AccessibilityWording.announcement(forProblem: "Refused", replacing: nil) == "Refused")
-        #expect(AccessibilityWording.announcement(forProblem: "Other", replacing: "Refused") == "Other")
-        #expect(AccessibilityWording.announcement(forProblem: "Refused", replacing: "Refused") == nil)
-        #expect(AccessibilityWording.announcement(forProblem: nil, replacing: "Refused") == nil)
-        #expect(AccessibilityWording.announcement(forProblem: nil, replacing: nil) == nil)
+    @Test("A refused settings change made in the UI is announced, every time, even with the same text")
+    func refusedUIChange() {
+        let refused = SettingsChangeResult.refused("The resume threshold must be below the limit.")
+        let first = SettingsReconciliation.banner(after: refused, source: .ui)
+        #expect(first.announcement == "The resume threshold must be below the limit.")
+        // The banner already shows it; the same refusal again is heard again.
+        let banner = first.applied(to: nil)
+        let second = SettingsReconciliation.banner(after: refused, source: .ui)
+        #expect(second.applied(to: banner) == banner)
+        #expect(second.announcement == "The resume threshold must be below the limit.")
+        #expect(SettingsReconciliation.banner(after: .refused(SettingsChangeResult.saveFailed), source: .ui).announcement == SettingsChangeResult.saveFailed)
+    }
+
+    @Test("A saved or unchanged change, which clears or keeps the banner, is not announced")
+    func keptOrCleared() {
+        #expect(SettingsReconciliation.banner(after: .saved(previous: .default), source: .ui).announcement == nil)
+        #expect(SettingsReconciliation.banner(after: .unchanged, source: .ui).announcement == nil)
+        #expect(BannerChange.keep.announcement == nil)
+        #expect(BannerChange.clear.announcement == nil)
+    }
+
+    @Test("Changes from Shortcuts actions and CellKeeper's own are not announced", arguments: [SettingsChangeSource.shortcuts, .adoption])
+    func otherSources(_ source: SettingsChangeSource) {
+        #expect(SettingsReconciliation.banner(after: .refused("Refused"), source: source).announcement == nil)
+        var sent = ChargingSettings.default
+        sent.isManagementEnabled = true
+        let keptOff = SettingsReconciliation.outcome(sent: sent, current: sent, controller: .applied(isManagementEnabled: false, managementRefusal: "Kept off."), source: source)
+        #expect(keptOff.banner.announcement == nil)
+        let rejected = SettingsReconciliation.outcome(sent: sent, current: sent, controller: .rejected("Invalid."), source: source)
+        #expect(rejected.banner.announcement == nil)
+    }
+
+    @Test("After the controller applied a change made in the UI, a kept-off Manage charging is announced; an ordinary apply is not")
+    func reconciliation() {
+        var sent = ChargingSettings.default
+        sent.isManagementEnabled = true
+        let keptOff = SettingsReconciliation.outcome(sent: sent, current: sent, controller: .applied(isManagementEnabled: false, managementRefusal: "Kept off."), source: .ui)
+        #expect(keptOff.banner.announcement == "Kept off.")
+        let applied = SettingsReconciliation.outcome(sent: sent, current: sent, controller: .applied(isManagementEnabled: true, managementRefusal: nil), source: .ui)
+        #expect(applied.banner.announcement == nil)
+    }
+
+    @Test("A scheduled or weekly full charge that was not set is announced every time it is not")
+    func scheduleRefusals() {
+        let refusal = BannerChange.show("The start must be in the future.")
+        #expect(refusal.announcement == "The start must be in the future.")
     }
 }
 
