@@ -136,7 +136,10 @@ for its read-only getters, as when an administrator runs `pmset -g`.
 5. **Baseline:** 11 readings, every 2 s for 20 s, timed from the baseline's
    own start. Create nothing unless the readings span 18–24 s with no gap
    over 4 s, and every one shows steady charging on AC power.
-6. **Hold:** create the assertion; record the IOReturn; read every 2 s for the
+6. **Hold:** create the assertion, unless the last baseline reading is more
+   than 4 s old at that moment (checked under the holder's lock,
+   immediately before the call; if it is, nothing is created and the run is
+   inconclusive); record the IOReturn; read every 2 s for the
    hold (default 60 s, 40–300 s with `--hold`); check `pmset -g assertions`
    2 s after creation and just before the release. If a reading shows the
    Mac on battery, at 100%, or unreadable, release at once (the run is
@@ -146,15 +149,19 @@ for its read-only getters, as when an administrator runs `pmset -g`.
    (stop signal, the final release, the `defer`) tries again. Record the
    IOReturn; check `pmset -g assertions` just after, and once more 1 s later
    if it still lists the assertion.
-8. **After:** read every 2 s for 60 s. If charging has not resumed for 5
-   readings in a row by then, keep reading for up to 120 s more, to tell a
-   late resume from none.
+8. **After:** read every 2 s for 60 s. If charging has not resumed
+   (a sustained run, below) by then, keep reading for up to 120 s more, to
+   tell a late resume from none.
 9. Compute the verdict and write the report to standard output and to
    `charge-inhibit-probe-<timestamp>.txt`.
 
-Times are on `CLOCK_MONOTONIC`, which keeps counting while the Mac sleeps
-(clock_gettime(3)), so a sleep shows up as a gap; every reading also carries
-the local wall-clock time, to match the report against the system log.
+Readings never catch up: when a deadline has passed by more than 0.5 s, the
+probe takes one reading and schedules the next 2 s after it, instead of
+taking the overdue readings back to back (`ProbeSchedule.nextDeadline`).
+Readings are therefore at least 1.5 s apart. Times are on `CLOCK_MONOTONIC`,
+which keeps counting while the Mac sleeps (clock_gettime(3)), so a sleep
+shows up as a gap; every reading also carries the local wall-clock time, to
+match the report against the system log.
 
 ### The verdict (a pure function, `Verdict.evaluate`)
 
@@ -164,37 +171,51 @@ at most 50 mA, and **mixed** (the two disagree) otherwise. Both are required
 because Apple's published fallback path changes only the `IsCharging` flag;
 a flag alone could be cosmetic.
 
-A stop counts only if it is **sustained**: from the first stopped reading to
-the release, every reading is stopped, and there are at least N = 5 of them
-(10 s). Any later disagreement or charging reading while the assertion is
-still held makes the run inconclusive, so a flag-only effect with a single
-current dip cannot pass as a stop. A resume, likewise, is 5 charging
-readings in a row; it counts from the first of them.
+A run of readings is **sustained** when N = 5 counted readings agree, each
+at least 1.5 s after the previous counted one, spanning at least
+(N − 1) × 2 s = 8 s from the first to the last. A reading closer than 1.5 s
+to the last counted one is ignored for counting but still breaks the run if
+it contradicts it, so clustered readings can neither confirm a run nor hide
+a contradiction. A stop counts only if every reading from the first stopped
+one to the release is stopped and those readings form a sustained run; any
+later disagreement or charging reading while the assertion is still held
+makes the run inconclusive, so a flag-only effect with a single current dip
+cannot pass as a stop. A resume is a sustained run of charging readings; a
+non-charging reading starts the count again; it counts from its first
+reading. Because readings 2 s apart can jitter by a few milliseconds, five of
+them may span just under 8 s, and the run is then confirmed by a sixth.
 
 **The thresholds are judgment calls**, not values from any source, and every
 report prints them: 50 mA for "not charging"; a stop within 30 s of
-creation; N = 5 consecutive readings for a stop and for a resume (long
-enough that one passing reading cannot decide, short enough that the
-minimum hold of 40 s covers the 30 s stop window plus 10 s of stop); a
-resume starting within 60 s of the release; a baseline spanning 18–24 s
-with no gap over 4 s; and no gap over 10 s between any readings (a sleep).
+creation; N = 5 counted readings at least 1.5 s apart, spanning at least
+8 s, for a stop and for a resume (long enough that one passing reading
+cannot decide; the minimum hold of 40 s covers the 30 s stop window, the
+8 s that five readings 2 s apart span, and one reading of margin); a resume
+starting within 60 s of the release; a baseline spanning 18–24 s with no
+gap over 4 s, and at most 4 s old when the assertion is created; and no gap
+over 10 s between any readings (a sleep).
 
 | Verdict | When | Exit status |
 |---|---|---|
-| `inhibited` | Steady charging over the whole baseline; the assertion created; a sustained stop beginning within 30 s of creation, on AC power; `IOPMAssertionRelease` succeeded and `pmset -g assertions` no longer listed the assertion; then 5 charging readings in a row, starting within 60 s of the release. | 0 |
-| `inhibited, resumed late` | As above, but the 5 charging readings in a row started more than 60 s after the release. | 0 |
+| `inhibited` | Steady charging over the whole baseline; the assertion created; a sustained stop beginning within 30 s of creation, on AC power; `IOPMAssertionRelease` succeeded and `pmset -g assertions` no longer listed the assertion; then a sustained run of charging readings, starting within 60 s of the release. | 0 |
+| `inhibited, resumed late` | As above, but the sustained run of charging readings started more than 60 s after the release. | 0 |
 | `inhibited, did not resume` | A sustained stop as above and a confirmed release, then not a single charging reading in at least 60 s of readings after the release (normally 180 s). The report tells the owner to follow the recovery steps (§7). | 3 |
 | `no effect observed` | No effect observed during the measured hold: the assertion was created, the release was confirmed, and every reading while it was held showed charging. It says nothing about longer holds, sleep or other conditions. | 0 |
 | `refused` | `IOPMAssertionCreateWithProperties` did not return `kIOReturnSuccess`. Nothing was held. | 0 |
-| `inconclusive` | Anything that prevents a conclusion: a baseline that was not steady charging, had fewer than 5 readings, spanned less than 18 s or more than 24 s, or had a gap over 4 s; a reading that showed battery power, 100% or charged, or an unreadable value while it mattered; a gap of more than 10 s between readings (a sleep); a stop later than 30 s after creation; a disagreeing or charging reading after the stop began, while held; a stop of fewer than 5 readings; readings that never clearly stopped but disagreed; charging after the release that never lasted 5 readings in a row; readings after the release that end before the 60 s window; **a failed `IOPMAssertionRelease`, or an assertion still listed (or not checkable) after the release**, in which case the report says that powerd releases it at its timeout or when the probe exits; a stop signal before the assertion. | 2 |
+| `inconclusive` | Anything that prevents a conclusion: a baseline that was not steady charging, had fewer than 5 readings, spanned less than 18 s or more than 24 s, had a gap over 4 s, or was more than 4 s old at creation (then nothing is created); a reading that showed battery power, 100% or charged, or an unreadable value while it mattered; a gap of more than 10 s between readings (a sleep); a stop later than 30 s after creation; a disagreeing or charging reading after the stop began, while held; a stop that is not a sustained run (fewer than 5 counted readings, or spanning less than 8 s); readings that never clearly stopped but disagreed; charging after the release that never formed a sustained run; readings after the release that end before the 60 s window; **a failed `IOPMAssertionRelease`, or an assertion still listed (or not checkable) after the release**, in which case the report says that powerd releases it at its timeout or when the probe exits; a stop signal before the assertion. | 2 |
 
 The function is pure and covered by unit tests over synthetic runs on the
 probe's real schedule (`swift test --package-path Tools/charge-inhibit-probe`):
 inhibited, with disagreeing readings during the fall and the ramp-up; no
 effect observed; refused; a flag-only effect with and without a single
 current dip; current or the flag returning after a real stop; a dip followed
-by charging; a stop of 4 readings (too short) and of exactly 5; a resume
-flicker; a resume after a flicker; a failed release (with a timeout that
+by charging; a stop of 4 readings (too short) and of exactly 5 (2 s apart,
+spanning 8 s); the reviewer's clustered case (charging readings at 9.900,
+9.901, 9.902, 9.903 and 10.000 s after the release, then stopped readings)
+and other clustered runs, which neither confirm a stop or resume nor hide a
+contradiction; five readings 1.5 s apart, which span only 6 s; the
+no-catch-up sampling rule and a simulated stall; a baseline too old at
+creation; a resume flicker; a resume after a flicker; a failed release (with a timeout that
 would otherwise look like a resume 30 s later); an assertion still listed,
 or not checkable, after the release; a baseline that was not charging, too
 short, too brief, gapped, or too long before the creation; unplugged while
