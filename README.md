@@ -63,7 +63,10 @@ distribution, on an Apple Developer ID (milestone 4 on the
 [roadmap](docs/roadmap.md)). The first
 test, of Apple's private `ChargeInhibit` power assertion on the
 maintainer's Mac, ran on 2026-10-19 and observed no effect on charging
-([research note 09](docs/research/09-charge-inhibit-probe.md)).
+([research note 09](docs/research/09-charge-inhibit-probe.md)). The
+second, of the private `DisableInflow` assertion, is built and waits for
+the owner's run
+([research note 10](docs/research/10-disable-inflow-probe.md)).
 
 ## Using macOS's Charge Limit (experimental)
 

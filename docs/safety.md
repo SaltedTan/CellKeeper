@@ -38,10 +38,13 @@ helper process.
 
 The repository also holds a separate research tool,
 `Tools/charge-inhibit-probe`, which is not part of the app. The owner runs
-it with `sudo` on the maintainer's Mac to test whether Apple's private
-`ChargeInhibit` power assertion stops charging; it holds one assertion for
-a bounded time, with a timeout, and releases it ([research note
-09](research/09-charge-inhibit-probe.md)). Nothing ships from it.
+it with `sudo` on the maintainer's Mac to test whether one of Apple's
+private power assertions, `ChargeInhibit` ([research note
+09](research/09-charge-inhibit-probe.md)) or `DisableInflow` ([research
+note 10](research/10-disable-inflow-probe.md)), stops charging or cuts the
+adapter's power; it holds one assertion for a bounded time, with a
+timeout, and releases it, also before the Mac sleeps. Nothing ships from
+it.
 
 Your Mac's own protections — the battery pack's management system, firmware
 charge termination and thermal limits, and macOS battery health management —
@@ -154,7 +157,9 @@ list.
    maintainer has no separate test Mac. On 2026-10-19 the owner chose to
    test one private mechanism, Apple's `ChargeInhibit` power assertion, on
    the maintainer's Mac, with a probe the owner runs with `sudo`
-   ([research note 09](research/09-charge-inhibit-probe.md)). The probe is
+   ([research note 09](research/09-charge-inhibit-probe.md)), and after its
+   result one more, Apple's `DisableInflow` assertion, with the same probe
+   ([research note 10](research/10-disable-inflow-probe.md)). The probe is
    a separate tool outside the app; nothing ships from it, and no SMC
    access is authorized. Include the persistence matrix (sleep, wake,
    restart, shutdown, helper crash, unplug), and record the results in
@@ -613,12 +618,14 @@ Charging", macOS's own Charge Limit, Optimized Battery Charging, battery
 health management, a weak adapter, or another battery tool may be
 responsible; see Apple's guidance on the "Not Charging" status.
 
-After a run of the `ChargeInhibit` probe (research note 09): check that
-`pmset -g assertions` lists no `ChargeInhibit`, stop the probe if it still
-runs (Ctrl-C), unplug and replug the adapter, quit any battery tool,
-and, if charging still does not resume, restart the Mac; then set macOS's
-Charge Limit and Optimized Battery Charging back as you want them. Note 09
-§7 has the details.
+After a run of the probe (research notes 09 and 10): stop the probe if it
+still runs (Ctrl-C), check that `pmset -g assertions` lists no
+`ChargeInhibit` or `DisableInflow`, unplug and replug the adapter, quit any
+battery tool, and, if charging or adapter power still does not come back,
+restart the Mac; on Apple silicon there is no SMC reset, and shutting
+down, waiting about 30 seconds and starting again is the strongest step.
+Then set macOS's Charge Limit and Optimized Battery Charging back as you
+want them. Note 09 §7 and note 10 §7 have the details.
 
 ### Getting your own Charge Limit back
 
