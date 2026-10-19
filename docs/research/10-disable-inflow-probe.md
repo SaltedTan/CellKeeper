@@ -137,43 +137,49 @@ As in note 09 §4, with these changes:
    assertion again. What happens next depends on that release
    (`SleepResponse.willSleep`, a pure decision the tests drive with fakes):
    - Released (`IOPMAssertionRelease` succeeded), or none was held: the
-     probe appends a line saying so to the report file, which it keeps
-     open (`O_APPEND`), and allows the sleep (`IOAllowPowerChange`).
+     probe records the sleep notice in memory (in the run's state, under a
+     lock held only briefly) and allows the sleep (`IOAllowPowerChange`).
+     No I/O at all: the main thread later writes the notice into the
+     report, and the verdict is inconclusive.
    - Every attempt failed: the probe never allows the sleep and never says
      the assertion was released. It takes these steps, in this order
      (`EmergencyExit`):
      1. It arms a 2 s exit deadline that depends on no lock, queue or
         output: SIGALRM back to its default action, which ends the
         process, and `alarm(2)`.
-     2. It appends one line to the report file.
+     2. It appends one line to the report file, which it keeps open for
+        this (`O_APPEND`): the process cannot finish the report itself on
+        this path.
      3. It ends the process with `_exit(3)` (the exit status of a run
         after which charging did not resume).
 
      The console shows nothing on this path; the report file and the exit
      status carry it. If the report write hangs (a disk that does not
-     answer), the deadline ends the process within 2 s.
-
-   The notification runs on its own serial queue (`SleepQueue`), and
-   nothing there may block: it writes nothing to the console on either
-   path, takes no lock that the main thread holds across a blocking call,
-   and uses no Foundation file handle. Its only work is the release (with
-   its bounded retries), the one-line append to the report file, and the
-   acknowledgement or the exit. This matters because the main thread waits
-   for that queue when it deregisters from the notifications at the end of
-   the run: a console write there, blocked on a full pipe, would stop the
-   run from finishing. As a second guard, the probe's console drops any
-   write made from that queue (`ProbeConsole`). The sleep notice reaches
-   the console through the main thread, in the final report it prints,
-   and the verdict is inconclusive. The probe never changes the flags of
-   its console's descriptors: they are shared with the shell.
-     Exiting is the strongest release left: powerd frees every assertion
-     of a process that exits (`HandleProcessExit`, B; note 09 §7). Without
-     an acknowledgement, the system waits until the client is gone, or for
+     answer), the deadline ends the process within 2 s. Exiting is the
+     strongest release left: powerd frees every assertion of a process
+     that exits (`HandleProcessExit`, B; note 09 §7). Without an
+     acknowledgement, the system waits until the client is gone, or for
      its acknowledgement timeout (about 30 s, S3), before it sleeps; that
      only delays the sleep, which is the safe direction
      `[INFERRED/UNVERIFIED]` for the shipping kernel. `_exit` rather than
      `exit`: it runs no exit handlers, which could wait on locks the main
      thread holds, and nothing is left to flush.
+
+   The notification runs on its own serial queue (`SleepQueue`), and
+   nothing there may block. Its whole work is the release (with its
+   bounded retries), a lock held only briefly, and `IOAllowPowerChange`;
+   on a failed release, instead of the acknowledgement, `alarm`, one write
+   under that deadline, and `_exit`. It writes nothing to the console,
+   takes no lock that the main thread holds across a blocking call, uses
+   no Foundation file handle, and, after a release, touches no file. This
+   matters because the main thread waits for that queue when it
+   deregisters from the notifications at the end of the run: anything
+   blocked there, a console on a full pipe or a disk that does not answer,
+   would stop the run from finishing. As a second guard, the probe's
+   console drops any write made from that queue (`ProbeConsole`). The
+   sleep notice reaches the console through the main thread, in the final
+   report it prints. The probe never changes the flags of its console's
+   descriptors: they are shared with the shell.
 
    On `kIOMessageCanSystemSleep` the probe allows at once: the idle-sleep
    assertion already covers idle sleep, and the probe does not fight a
@@ -354,7 +360,7 @@ every report prints them:
 The function is pure and covered by unit tests over synthetic runs, on
 the probe's real schedule, with every reading its own battery update or
 with the battery updating once a minute as on this Mac
-(`swift test --package-path Tools/charge-inhibit-probe`, 137 tests). Beyond
+(`swift test --package-path Tools/charge-inhibit-probe`, 139 tests). Beyond
 the cases note 09 §4 lists, which still pass with the new windows, they
 cover:
 
@@ -379,17 +385,21 @@ cover:
   before anything is created; and the code review's case of a 3 s jump
   that an event between two readings split into two 1.5 s steps, across
   the creation and across the release, each inconclusive;
-- on a sleep notification: a successful release, then the report line
-  and the acknowledgement; nothing held, in the same order; and a failed
-  release, with no acknowledgement, no claim that it was released, and
-  the emergency exit with status 3, after which nothing else happens even
-  when a fake exit returns; the teardown order on the normal path, after a
-  stop signal and after a sleep notification;
+- on a sleep notification: a successful release, then the notice in
+  memory and the acknowledgement, with no I/O; nothing held, in the same
+  order; and a failed release, with no acknowledgement, no claim that it
+  was released, and the emergency exit with status 3, after which nothing
+  else happens even when a fake exit returns; the teardown order on the
+  normal path, after a stop signal and after a sleep notification;
 - the probe's sleep handler run on a real sleep queue, for each outcome,
-  with a console that fails the test if the queue writes to it; the
-  console dropping a write from the sleep queue; and the teardown, which
-  drains the sleep queue, completing within 2 s while a console writer is
-  blocked (a writer that waits until the test lets it go);
+  with a console that fails the test if the queue writes to it; after a
+  release or with nothing held, an acknowledgement within 2 s with a
+  report writer that fails the test and blocks if it is called; after a
+  failed release, the deadline armed before a report write that blocks,
+  and the exit once it returns; the console dropping a write from the
+  sleep queue; and the teardown, which drains the sleep queue, completing
+  within 2 s while a console writer is blocked (a writer that waits until
+  the test lets it go);
 - the emergency exit's order (deadline, report line, exit, and no console
   step), alone and inside the sleep response; the report line appended to
   a real report file; a report file that could not be opened, after which
@@ -406,7 +416,7 @@ cover:
 - a sleep notification; a charge below 25%; a hold shorter than the 90 s
   window; a failed release, no resume and a sleep gap, as before.
 
-Each key rule was mutation-checked on 2026-10-19: with any one of 44 rules
+Each key rule was mutation-checked on 2026-10-19: with any one of 45 rules
 disabled (the 2-update requirement, the same-second rule, the adapter and
 power-input conditions of a cut, the 90 s window, the floor, the sleep
 notices, the staleness and clock checks, the 2 updates after the release,
@@ -416,12 +426,13 @@ until the release, the report's recovery section, the baseline's and the
 creation's clock checks, the direct comparison of consecutive readings and
 of events with the reading before them, and, on a sleep notification, the
 release before the acknowledgement, no acknowledgement and an exit after a
-failed release, the failure line, and the teardown order; the report line
-before the acknowledgement; the emergency exit's deadline before the
-report line, the report line before the exit, and the report line itself;
-the console dropping writes from the sleep queue, the queue being
-recognised, the handler recording the stop, and a handler that blocks on
-the queue (the teardown then misses its 2 s bound); and "released" only
+failed release, the failure line, and the teardown order; no report write
+after a successful release, the notice recorded, and the notice before the
+acknowledgement; the emergency exit's deadline before the report line, the
+report line before the exit, and the report line itself; the console
+dropping writes from the sleep queue, the queue being recognised, and a
+handler that blocks on the queue (the teardown then misses its 2 s bound);
+and "released" only
 when confirmed in the signal line, the stop note, the recovery block and
 the sleep-notice verdict), at least one test fails.
 `charge-inhibit-probe` builds with `-warnings-as-errors`, and CI

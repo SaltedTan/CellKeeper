@@ -2,8 +2,9 @@ import Foundation
 import ProbeCore
 import Testing
 
-/// Records, in order, what the fakes for the release, the acknowledgement,
-/// the record, the emergency exit and the teardown steps were asked to do.
+/// Records, in order, what the fakes for the release, the notice, the
+/// acknowledgement, the emergency exit and the teardown steps were asked to
+/// do.
 final class Calls: @unchecked Sendable {
     private let lock = NSLock()
     private var entries: [String] = []
@@ -33,7 +34,7 @@ struct SleepResponseTests {
                 calls.note("release")
                 return outcome
             },
-            writeReport: { calls.record($0, as: "report") },
+            recordNotice: { calls.note("notice") },
             acknowledge: { calls.note("acknowledge") },
             // A fake that returns, unlike the probe's: nothing may follow it.
             emergencyExit: { line, status in calls.record(line, as: "emergency exit \(status)") }
@@ -42,20 +43,20 @@ struct SleepResponseTests {
 
     // MARK: The sleep notification
 
-    @Test("A successful release: the report line, then the acknowledgement")
+    @Test("A successful release: the notice in memory, then the acknowledgement; no I/O")
     func released() {
         let calls = Calls()
         #expect(willSleep(.released, calls) == .released)
-        #expect(calls.log == ["release", "report", "acknowledge"])
-        #expect(calls.recorded == ["kIOMessageSystemWillSleep: released the DisableInflow assertion, then allowed the sleep; the run is inconclusive."])
+        #expect(calls.log == ["release", "notice", "acknowledge"])
+        #expect(calls.recorded.isEmpty)
     }
 
-    @Test("With nothing held, the sleep is allowed")
+    @Test("With nothing held, the sleep is allowed the same way")
     func nothingHeld() {
         let calls = Calls()
         #expect(willSleep(.nothingHeld, calls) == .nothingHeld)
-        #expect(calls.log == ["release", "report", "acknowledge"])
-        #expect(calls.recorded.first?.contains("no DisableInflow assertion was held") == true)
+        #expect(calls.log == ["release", "notice", "acknowledge"])
+        #expect(calls.recorded.isEmpty)
     }
 
     @Test("A failed release: the emergency exit with the recovery status, no acknowledgement, no claim of a release")
@@ -92,30 +93,34 @@ struct SleepResponseTests {
         #expect(EmergencyExit.deadline == 2)
     }
 
-    // MARK: Nothing on the sleep queue blocks (code review r4)
+    // MARK: Nothing on the sleep queue blocks (code reviews r4, r5)
 
     /// The probe's sleep handler with every step recorded, the emergency
-    /// exit inside it as the probe composes it.
-    func handler(_ outcome: ReleaseOutcome, _ calls: Calls) -> @Sendable (_ acknowledge: () -> Void) -> Void {
+    /// exit inside it as the probe composes it, and `writeReport` as its
+    /// report writer.
+    func handler(
+        _ outcome: ReleaseOutcome,
+        _ calls: Calls,
+        writeReport: @escaping @Sendable (String) -> Void
+    ) -> @Sendable (_ acknowledge: () -> Void) -> Void {
         SleepResponse.willSleepHandler(
             assertion: .disableInflow,
-            recordStop: { calls.note("stop") },
             release: {
                 calls.note("release")
                 return outcome
             },
-            writeReport: { calls.record($0, as: "report") },
+            recordNotice: { calls.note("notice") },
             emergencyExit: { line, status in
                 EmergencyExit.perform(line, status: status, steps: EmergencyExit.Steps(
                     armDeadline: { calls.note("deadline") },
-                    writeReport: { calls.record($0, as: "report") },
+                    writeReport: writeReport,
                     exit: { calls.note("exit \($0)") }
                 ))
             }
         )
     }
 
-    @Test("Run on the sleep queue, the handler releases, writes the report line and acknowledges, or exits; it writes nothing to the console")
+    @Test("Run on the sleep queue, the handler releases and acknowledges, or exits; it writes nothing to the console")
     func handlerOnSleepQueue() {
         let sleepQueue = SleepQueue(label: "test.sleep")
         // A console that fails the test if it is called from the sleep queue.
@@ -123,16 +128,68 @@ struct SleepResponseTests {
             if SleepQueue.isCurrent { Issue.record("the console was written from the sleep queue") }
         })
         for (outcome, expected) in [
-            (ReleaseOutcome.released, ["stop", "release", "report", "acknowledge"]),
-            (.nothingHeld, ["stop", "release", "report", "acknowledge"]),
-            (.failed(result: Self.notFound, attempts: 3), ["stop", "release", "deadline", "report", "exit 3"]),
+            (ReleaseOutcome.released, ["release", "notice", "acknowledge"]),
+            (.nothingHeld, ["release", "notice", "acknowledge"]),
+            (.failed(result: Self.notFound, attempts: 3), ["release", "deadline", "report", "exit 3"]),
         ] {
             let calls = Calls()
-            let handle = handler(outcome, calls)
+            let handle = handler(outcome, calls, writeReport: { calls.record($0, as: "report") })
             sleepQueue.queue.sync { handle { calls.note("acknowledge") } }
             #expect(calls.log == expected)
         }
         #expect(console.droppedOnSleepQueue == 0)
+    }
+
+    @Test("After a release, or with nothing held, the handler acknowledges without touching the report file")
+    func successWithoutReport() {
+        let sleepQueue = SleepQueue(label: "test.sleep")
+        let unblock = DispatchSemaphore(value: 0)
+        for outcome in [ReleaseOutcome.released, .nothingHeld] {
+            let calls = Calls()
+            let acknowledged = DispatchSemaphore(value: 0)
+            // A report writer that fails the test and blocks if it is called.
+            let handle = handler(outcome, calls, writeReport: { _ in
+                Issue.record("the report file was written after a successful release")
+                unblock.wait()
+            })
+            sleepQueue.queue.async {
+                handle {
+                    calls.note("acknowledge")
+                    acknowledged.signal()
+                }
+            }
+            #expect(acknowledged.wait(timeout: .now() + 2) == .success, "no acknowledgement within 2 s")
+            #expect(calls.log == ["release", "notice", "acknowledge"])
+        }
+        for _ in 0..<4 { unblock.signal() }
+        sleepQueue.drain()
+    }
+
+    @Test("After a failed release, the deadline is armed before a report write that blocks")
+    func deadlineBeforeBlockedReport() {
+        let sleepQueue = SleepQueue(label: "test.sleep")
+        let calls = Calls()
+        let writing = DispatchSemaphore(value: 0)
+        let unblock = DispatchSemaphore(value: 0)
+        // A report writer that blocks, as on a disk that does not answer.
+        let handle = handler(.failed(result: Self.notFound, attempts: 3), calls, writeReport: { line in
+            calls.record(line, as: "report")
+            writing.signal()
+            unblock.wait()
+        })
+        let done = DispatchSemaphore(value: 0)
+        sleepQueue.queue.async {
+            handle { calls.note("acknowledge") }
+            done.signal()
+        }
+        #expect(writing.wait(timeout: .now() + 2) == .success)
+        // While the write blocks, the deadline is already armed: in the
+        // probe, SIGALRM's default action would end the process in 2 s.
+        #expect(calls.log == ["release", "deadline", "report"])
+        unblock.signal()
+        #expect(done.wait(timeout: .now() + 2) == .success)
+        #expect(calls.log == ["release", "deadline", "report", "exit 3"])
+        #expect(calls.recorded.first?.contains("release attempted (3 tries) and failed") == true)
     }
 
     @Test("A console write from the sleep queue never reaches the console; one from elsewhere does")
@@ -166,7 +223,7 @@ struct SleepResponseTests {
         #expect(blocked.wait(timeout: .now() + 2) == .success)
 
         let calls = Calls()
-        let handle = handler(.released, calls)
+        let handle = handler(.released, calls, writeReport: { calls.record($0, as: "report") })
         sleepQueue.queue.async { handle { calls.note("acknowledge") } }
         let finished = DispatchSemaphore(value: 0)
         DispatchQueue.global().async {
@@ -181,7 +238,7 @@ struct SleepResponseTests {
         // Let every blocked writer go, so that nothing is left waiting.
         for _ in 0..<4 { release.signal() }
         #expect(completed, "the teardown waited on the sleep queue while the console was blocked")
-        #expect(calls.log == ["stop", "release", "report", "acknowledge"])
+        #expect(calls.log == ["release", "notice", "acknowledge"])
     }
 
     @Test("The report line is appended to the report file")
@@ -344,11 +401,11 @@ struct SleepResponseTests {
         SleepResponse.willSleep(
             assertion: .disableInflow,
             release: { teardown.stop() },
-            writeReport: { calls.record($0, as: "report") },
+            recordNotice: { calls.note("notice") },
             acknowledge: { calls.note("acknowledge") },
             emergencyExit: { line, status in calls.record(line, as: "emergency exit \(status)") }
         )
         teardown.finish()
-        #expect(calls.log == ["private", "report", "acknowledge", "private", "idle sleep", "deregister"])
+        #expect(calls.log == ["private", "notice", "acknowledge", "private", "idle sleep", "deregister"])
     }
 }

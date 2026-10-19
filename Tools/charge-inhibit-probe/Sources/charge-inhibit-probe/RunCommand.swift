@@ -105,14 +105,14 @@ enum RunCommand {
         var listings: [Report.ListingCheck] = []
         // On the sleep queue, before the system may sleep: allow it only once
         // the private assertion is released; if that fails, exit without
-        // allowing it (`SleepResponse`). Nothing here writes to the console
-        // or waits on the main thread (`SleepQueue`); the main thread
-        // reports the sleep notice from the run's state.
+        // allowing it (`SleepResponse`). On success there is no I/O at all,
+        // and nothing waits on the main thread (`SleepQueue`); the main
+        // thread writes the sleep notice into the report from the run's
+        // state.
         let registered = sleepWatch.start(onWillSleep: SleepResponse.willSleepHandler(
             assertion: kind,
-            recordStop: { stop.record(.sleep("kIOMessageSystemWillSleep")) },
             release: { teardown.stop() },
-            writeReport: { EmergencyExit.writeReport($0, to: reportDescriptor) },
+            recordNotice: { stop.record(.sleep("kIOMessageSystemWillSleep")) },
             emergencyExit: { line, status in
                 EmergencyExit.perform(line, status: status, steps: EmergencyExit.Steps(
                     armDeadline: {
