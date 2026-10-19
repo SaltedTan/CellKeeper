@@ -1,8 +1,9 @@
 # 09 — The ChargeInhibit probe (owner-run, on the maintainer's Mac)
 
 - **Date:** 2026-10-19
-- **Status:** The probe is written and its logic is unit-tested. The owner's
-  run is **pending**; the Results section is empty until then.
+- **Status:** The owner ran the probe once, on 2026-10-19. Result: **no
+  effect observed**. powerd accepted and released the assertion, and the
+  Mac kept charging while it was held (§10).
 - **Machine:** Mac16,1 (MacBook Pro, Apple M4), macOS 27.0.1 (26A434),
   system firmware mBoot-20457.1.29. This is the maintainer's own Mac.
 - **Tool:** [`Tools/charge-inhibit-probe/`](../../Tools/charge-inhibit-probe/),
@@ -395,22 +396,139 @@ running, so no restart is needed for the AlDente precondition.
 
 ## 10. Results
 
-*To be filled in from the owner's report after the run.*
+The owner ran the probe once, on 2026-10-19, with the default options
+(`sudo .build/release/charge-inhibit-probe run`), following §6. This was
+the one experiment authorized in §2.
 
 | Field | Value |
 |---|---|
-| Date and time | |
-| macOS build, firmware | |
-| Hold | |
-| IOReturn of creation | |
-| IOReturn of release (attempts) | |
-| Listed by `pmset -g assertions` 2 s after creation / before / after the release | |
-| Charging stopped after | |
-| Charging resumed after the release | |
-| Verdict | |
-| Notes | |
+| Date and time | 2026-10-19 21:37:13 +11:00 |
+| macOS build, firmware | Mac16,1, macOS 27.0.1 (26A434), mBoot-20457.1.29 |
+| Hold | 60 s (timeout 90 s, `TimeoutActionRelease`), after a 20 s baseline of 11 readings; readings continued for 60 s after the release |
+| IOReturn of creation | `0x0` (`kIOReturnSuccess`), at +20.0 s |
+| IOReturn of release (attempts) | `0x0` (`kIOReturnSuccess`), at +80.1 s, first attempt |
+| Listed by `pmset -g assertions` 2 s after creation / before / after the release | yes / yes / no |
+| Charging stopped after | Never. Every reading showed charging. The one battery update inside the hold, 46 s after creation, showed 2459 mA into the battery and 47 055 mW of system power input |
+| Charging resumed after the release | Not applicable: charging never stopped. At +140.1 s it was still charging, at 2536 mA and 81% |
+| Verdict | `no effect observed` |
+| Notes | The charge was 80% at the start, so `check` warned about Optimized Battery Charging (§5). That did not matter: charging went on. The battery's values changed only at +6.0, +66.0 and +92.1 s. The probe reads every 2 s, but the values it reads were updated only about once a minute and when the charge changed, so most rows repeat the last update |
 
-Interpretation, and what it means for phase 4c: *pending.*
+The report follows, with runs of identical sample rows shortened, the
+warning's text and the criteria (§4) left out, and the title and section
+underlines removed; bracketed text is not in the report. It contains no serial
+numbers, user names or home paths.
+
+```text
+started:   2026-10-19 21:37:13 +11:00
+machine:   Mac16,1, macOS 27.0.1 (26A434), system firmware mBoot-20457.1.29
+assertion: type "ChargeInhibit" (private; Apple open source, IOKitUser IOPMLibPrivate.h)
+           name "CellKeeper charge-inhibit probe", hold 60 s, timeout 90 s with TimeoutActionRelease
+
+Preconditions
+PASS  On AC power: IOPowerSources reports AC power (AppleSmartBattery ExternalConnected: yes)
+PASS  Battery present: the internal battery is present
+PASS  Charge below 95%: 80%
+PASS  macOS is charging now: IOPowerSources reports charging; battery current 107 mA
+PASS  Battery current readable: InstantAmperage 107 mA, Amperage 107 mA
+PASS  macOS's Charge Limit is 100%: pmset -g battlimit: no battery level limits set
+PASS  No AlDente helper files: neither of its helper files exists
+PASS  AlDente helper not loaded: launchctl print system/com.apphousekitchen.aldente-pro-setapp.helper: could not find service
+PASS  No AlDente process running: no executable path or name in the process table matches AlDente
+PASS  No other battery-control daemon: no file name in /Library/LaunchDaemons or /Library/PrivilegedHelperTools suggests one
+PASS  No ChargeInhibit assertion held: pmset -g assertions lists none
+WARN  Charge in the recommended 50–74%: 80%: [warning about Optimized Battery Charging, as in §9]
+
+READY: every precondition holds; `sudo charge-inhibit-probe run` may be started. Read the warning above.
+
+Events
+baseline: 11 readings before the assertion
++20.0 s: IOPMAssertionCreateWithProperties returned 0x0 (kIOReturnSuccess)
++80.1 s: IOPMAssertionRelease returned 0x0 (kIOReturnSuccess)
++22.1 s: 2 s after creation: pmset -g assertions listed the probe's ChargeInhibit
+    ChargeInhibit held by charge-inhibit-probe (the probe's assertion)
++80.1 s: just before the release: pmset -g assertions listed the probe's ChargeInhibit
+    ChargeInhibit held by charge-inhibit-probe (the probe's assertion)
++80.1 s: just after the release: pmset -g assertions did not list the probe's ChargeInhibit
+
+Samples (every 2 s)
+clock          time phase     AC   charging   charged     %  mA instant/avg   reg.charging  reg.ext  NotChargingReason  SysPowerIn mW  state
+21:37:13    +0.0 baseline  yes  yes        -          80   107/107          yes           yes      0x0                15883          charging
+21:37:15    +2.0 baseline  yes  yes        -          80   107/107          yes           yes      0x0                15883          charging
+21:37:17    +4.0 baseline  yes  yes        -          80   107/107          yes           yes      0x0                15883          charging
+21:37:19    +6.0 baseline  yes  yes        -          80   2762/2762        yes           yes      0x0                50992          charging
+  [… 6 identical rows …]
+21:37:33   +20.0 baseline  yes  yes        -          80   2762/2762        yes           yes      0x0                50992          charging
+21:37:35   +22.0 held      yes  yes        -          80   2762/2762        yes           yes      0x0                50992          charging
+  [… 20 identical rows …]
+21:38:17   +64.0 held      yes  yes        -          80   2762/2762        yes           yes      0x0                50992          charging
+21:38:19   +66.0 held      yes  yes        -          80   2459/2459        yes           yes      0x0                47055          charging
+  [… 6 identical rows …]
+21:38:33   +80.0 held      yes  yes        -          80   2459/2459        yes           yes      0x0                47055          charging
+21:38:35   +82.1 after     yes  yes        -          80   2459/2459        yes           yes      0x0                47055          charging
+  [… 3 identical rows …]
+21:38:43   +90.1 after     yes  yes        -          80   2459/2459        yes           yes      0x0                47055          charging
+21:38:45   +92.1 after     yes  yes        -          81   2536/2536        yes           yes      0x0                48044          charging
+  [… 23 identical rows …]
+21:39:33  +140.1 after     yes  yes        -          81   2536/2536        yes           yes      0x0                48044          charging
+
+Verdict: no effect observed
+powerd accepted the assertion, and every reading in the 60.0 s it was held
+showed charging. No effect was observed during the measured hold on this Mac,
+macOS build and firmware.
+```
+
+### Interpretation
+
+- `[VERIFIED-EXPERIMENTALLY]` On this Mac, macOS build and firmware,
+  powerd accepts a `ChargeInhibit` assertion from a root process, lists it
+  while it is held, and no longer lists it just after
+  `IOPMAssertionRelease`. The release on request, one layer of §7's
+  fail-safe, behaves as Apple's published source describes. Release at the
+  timeout and on process exit were not exercised.
+- `[VERIFIED-EXPERIMENTALLY]` Holding it did not stop charging. The battery
+  update inside the hold, 46 s after creation, showed 2.46 A into the
+  battery and about 47 W of system power input. For comparison, while
+  macOS's own limit held the battery at 80% (§9), the input was about 10 W
+  with 0 mA into the battery.
+- `[INFERRED/UNVERIFIED]` Either the shipping powerd no longer forwards the
+  assertion to the battery driver (note 02 §1.7, "Forwarding"), or the
+  driver or the 20457.x firmware ignores it. The run cannot tell which. It
+  is consistent with note 02's finding that charge-inhibit paths are gated
+  on this firmware.
+- **Not ruled out:** an effect that takes longer than about 46 s, or one
+  the battery reports only at a later update. Only one battery update fell
+  inside the 60 s hold. A run with `--hold 300` would cover about five; it
+  would be a second experiment, which needs a new owner decision (§2).
+- **About the probe's criteria.** They assume a fresh reading every 2 s,
+  but the battery's values here changed about once a minute. Two
+  consequences for any later run, neither of which changes this verdict
+  (no reading showed a stop):
+  - A stop that first showed at the update 46 s after creation would have
+    been graded `inconclusive` (a stop later than the 30 s window), not
+    `inhibited`. The stop window should cover at least one update, for
+    example 90 s.
+  - Five readings 2 s apart can all repeat one update, so they do not
+    confirm a sustained stop or resume on their own. A sustained run
+    should need readings from more than one update.
+
+### What it means for phase 4c
+
+- `ChargeInhibit` is not a usable mechanism for CellKeeper on this Mac as
+  it is today (macOS 27.0.1, firmware 20457.1.29). Nothing is added to the
+  helper's allowlist.
+- The candidates left in note 02 each need a separate owner decision (§2).
+  By their descriptions, both stop the adapter's power rather than only
+  the charging, so the Mac would run from its battery while plugged in
+  `[INFERRED/UNVERIFIED]`.
+  - The SMC adapter cut (`CHIE`; third-party claims, note 02 §3.4) needs
+    SMC writes, is reportedly ignored while macOS's own limit is on, and
+    holds a level only by letting the battery run down a little and charge
+    again (note 02 §5).
+  - `DisableInflow`, the other private assertion: "Disables AC Power
+    Inflow (requires root to initiate)" in Apple's published header (note
+    02 §1.7).
+- Until one of them is verified, macOS's own Charge Limit (80–100%) stays
+  CellKeeper's only real control, and limits below 80% stay simulated.
 
 ## 11. Sources
 

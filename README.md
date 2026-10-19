@@ -62,7 +62,7 @@ control stays gated on a mechanism verified on a test Mac and, for
 distribution, on an Apple Developer ID (milestone 4 on the
 [roadmap](docs/roadmap.md)). The first
 test, of Apple's private `ChargeInhibit` power assertion on the
-maintainer's Mac, is prepared and waits for the owner's run
+maintainer's Mac, ran on 2026-10-19: it did not stop charging
 ([research note 09](docs/research/09-charge-inhibit-probe.md)).
 
 ## Using macOS's Charge Limit (experimental)

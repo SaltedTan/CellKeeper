@@ -16,7 +16,7 @@ before being committed. Architecture decisions based on them live in
 | 06 | [Safety analysis](06-safety-analysis.md) | Battery ageing, hazards (FMEA), safety rules R1–R33, defaults |
 | 07 | [Repository and CI](07-repository-and-ci.md) | Layout, toolchains, GitHub Actions |
 | 08 | [Native Charge Limit through Shortcuts](08-native-charge-limit.md) | Can CellKeeper set, read back and restore macOS's Charge Limit from the sandbox? |
-| 09 | [The ChargeInhibit probe](09-charge-inhibit-probe.md) | Does Apple's private `ChargeInhibit` power assertion stop charging on this Mac, and does charging resume when it is released? (owner-run; results pending) |
+| 09 | [The ChargeInhibit probe](09-charge-inhibit-probe.md) | Does Apple's private `ChargeInhibit` power assertion stop charging on this Mac, and does charging resume when it is released? (owner-run 2026-10-19: no effect observed) |
 
 ## Classification legend
 
@@ -70,11 +70,11 @@ Some notes use their own evidence labels alongside these tags:
   user-level setting, the Charge Limit, only through the owner's shortcut and
   the documented `shortcuts` tool, and restored and read back the owner's
   80% after every change. Note 09's probe holds one private power
-  assertion, and only when the owner runs it with `sudo`; agents only ran
-  its read-only `check`. In all notes no IOUserClient was opened by
-  CellKeeper or its probes, no SMC key was read or written, no `pmset`
-  setting was changed, and no proprietary
-  binary (Apple's or anyone else's) was disassembled or string-dumped.
+  assertion, and only when the owner runs it with `sudo`; the owner ran it
+  once, and agents only ran its read-only `check`. In all notes no
+  IOUserClient was opened by CellKeeper or its probes, no SMC key was read
+  or written, no `pmset` setting was changed, and no proprietary binary
+  (Apple's or anyone else's) was disassembled or string-dumped.
 
 ## Key findings (lead's synthesis)
 
@@ -89,7 +89,7 @@ Some notes use their own evidence labels alongside these tags:
 | Health / condition / "Maximum Capacity" | Gated by a private entitlement; only undocumented `system_profiler` output | PRIVILEGED / PRIVATE | Not shown; CellKeeper shows its own computed full-charge ÷ design ratio, labelled as such |
 | Native Charge Limit (80–100%) | System Settings; “Set Battery Charge Limit” Shortcuts action run with the `shortcuts` CLI | PUBLIC (user setting, CLI), ARCH-SPECIFIC (Apple silicon, macOS 26.4+), verified from the App Sandbox (08) | Used by the opt-in macOS Charge Limit backend |
 | Read native limit state | `pmset -g battlimit` | PRIVATE/UNDOCUMENTED, verified read-only (08) | Used read-only to confirm every change; unrecognised output blocks changes |
-| Inhibit charging / force discharge | Only private: SMC keys (largely gated on macOS 27 firmware), private `ChargeInhibit`/`DisableInflow` assertions (root) | PRIVATE, PRIVILEGED, SMC/HW, unverified | Not implemented; simulated. An owner-run probe of `ChargeInhibit` is prepared (09) |
+| Inhibit charging / force discharge | Only private: SMC keys (largely gated on macOS 27 firmware), private `ChargeInhibit`/`DisableInflow` assertions (root) | PRIVATE, PRIVILEGED, SMC/HW, unverified | Not implemented; simulated. An owner-run probe of `ChargeInhibit` showed no effect on this Mac (09) |
 | Privileged helper | `SMAppService` daemon + XPC with code-signing requirements | PUBLIC-API | Logic and NSXPC transport implemented and tested, on a simulated control; the daemon exists and serves the authenticated transport, but controls no hardware, is neither embedded nor registered, and the app does not connect to it yet |
 | Mac App Store with control | Incompatible (sandbox, no root, no helpers) | — | Not a goal |
 | Intel | macOS 26 is the last Intel release; no supported control | — | Telemetry only (code is architecture-neutral) |
