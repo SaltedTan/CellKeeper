@@ -97,9 +97,17 @@ private struct ChargingSettingsTab: View {
                         .foregroundStyle(.warningText)
                 }
                 if !isNative {
-                    LabeledContent("Discharge to the limit") {
+                    // One predicate enables the button and gives the reason.
+                    let dischargeRefusal = DischargeStart.refusal(settings: settings, status: model.status)
+                    LabeledContent {
                         Button("Discharge Now…") { isConfirmingDischarge = true }
-                            .disabled(!canStartDischarge)
+                            .disabled(dischargeRefusal != nil)
+                            .disabledReasonHint(dischargeRefusal)
+                    } label: {
+                        Text("Discharge to the limit")
+                        if let dischargeRefusal {
+                            DisabledReason(text: dischargeRefusal)
+                        }
                     }
                     .confirmationDialog("Discharge to \(settings.chargeLimit)% while plugged in?", isPresented: $isConfirmingDischarge) {
                         Button("Start Discharge") { model.startDischargeToLimit() }
@@ -146,16 +154,6 @@ private struct ChargingSettingsTab: View {
             }
         }
         .formStyle(.grouped)
-    }
-
-    private var canStartDischarge: Bool {
-        guard let status = model.status, let snapshot = status.snapshot, let percent = snapshot.chargePercent else { return false }
-        return model.settings.isManagementEnabled
-            && status.activeOverride == nil
-            && snapshot.isOnExternalPower
-            && percent > model.settings.chargeLimit
-            && ChargingPolicy.dischargeTargetRange.contains(model.settings.chargeLimit)
-            && status.capabilities.supports(.forceDischarge)
     }
 
     private func binding<Value>(_ keyPath: WritableKeyPath<ChargingSettings, Value>) -> Binding<Value> {
