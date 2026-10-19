@@ -64,8 +64,29 @@ element has an unknown role (33 before, 0 after); "Charging control" and
 "Charge limit" are headings; the limit segments, Cancel and OK buttons and
 weekday buttons have their full names; the dialogs' default and cancel
 buttons are as before. The status item reads "CellKeeper, 80%, Not
-charging, Charging to limit" on the preview build. `swift test` (811
-tests) and the Debug and Release builds pass with warnings as errors.
+charging, Charging to limit" on the preview build. `swift test` (1,280
+tests in five test targets) and the Debug and Release builds pass with
+warnings as errors.
+
+The code review of #93 found two problems in the first fixes, both fixed:
+
+- **The slider's pending edit could undo a newer command.** An edit made
+  without a drag waited 0.6 s and then saved its value, even if a Shortcuts
+  action or Settings had set the limit meanwhile. The slider is now a
+  state machine in Kit (`ChargeLimitSliderEdit`), and `AppModel` counts
+  every settings change it accepts (`settingsRevision`). An edit is
+  applied only at the revision it began from, and the model checks that
+  revision again when it applies: any settings change the edit did not
+  make wins, even one to the same value. A superseded edit is dropped at
+  once, or at the end of a drag; closing the menu applies the current edit
+  once.
+- **A refusal repeated was not announced again.** The announcement
+  followed changes of the problem line, so a second identical refusal
+  (Schedule Full Charge twice with a past start, a retried save) said
+  nothing. Each action now announces where it ends refused or failed,
+  every time; steps that keep or clear the line, Shortcuts actions'
+  changes, CellKeeper's own and status updates announce nothing
+  (`BannerChange.announcement`).
 
 ### Deferred
 
@@ -99,7 +120,7 @@ the arrow keys (M2). With Increase Contrast: the warning and error text
 | ID | Element | Finding | Class | Result |
 |---|---|---|---|---|
 | M1 | Slider, `MenuBarView.swift:299-311` | VoiceOver reads the value as a bare number ("80"); no unit, and 100 is not said to mean no limit | must | Fixed: "80%", "100% (no limit)" |
-| M2 | Slider, `MenuBarView.swift:300-309` | A change is applied only in `onEditingChanged(false)`, the end of a drag. Arrow keys and VoiceOver's increment move the knob through the binding; if AppKit reports no editing end for them (not verifiable without interaction), the menu shows a limit that is never applied | must | Fixed: a change made without a drag is applied once the value has stayed put for 0.6 s; VoiceOver's increment and decrement move 1% (D109) |
+| M2 | Slider, `MenuBarView.swift:300-309` | A change is applied only in `onEditingChanged(false)`, the end of a drag. Arrow keys and VoiceOver's increment move the knob through the binding; if AppKit reports no editing end for them (not verifiable without interaction), the menu shows a limit that is never applied | must | Fixed: a change made without a drag is applied once the value has stayed put for 0.6 s, a drag when it ends, either only if no other settings change came first (`ChargeLimitSliderEdit`); VoiceOver's increment and decrement move 1% (D109) |
 | M3 | Battery header, `MenuBarView.swift:56-66` | Three separate elements, "81%", "Power adapter", "Charging": the bare percentage has no context | should | Fixed: "Charge 81%, Power adapter, Charging" |
 | M4 | "Charging control" and "Charge limit" rows, `MenuBarView.swift:105-110`, `252-258`, `292-298` | Section titles are plain text, not headings, and their value (the badge, the limit) is a separate element | should | Fixed: headings with their value ("Charging control, Simulated") |
 | M5 | Status badge, `Presentation.swift:352-364` | Coloured text on a 15% tint of the same colour: about 2.2:1 (green, orange) to 4:1 (purple) against white, less on the tint; WCAG asks 4.5:1 for text this small | should | Fixed: label-coloured text on a tinted capsule with a border of the colour |
@@ -119,7 +140,7 @@ the arrow keys (M2). With Increase Contrast: the warning and error text
 | ID | Element | Finding | Class | Result |
 |---|---|---|---|---|
 | G1 | Steppers, `SettingsView.swift:76-82, 243-254` | VoiceOver reads the stepper's value as a bare number ("80", "40"); the "80%" beside it is a separate element | should | Fixed: "80%", "75%", "40 degrees Celsius" |
-| G2 | Settings banner and schedule error, `SettingsView.swift:133-140, 215-219`; set in `AppModel.swift:436, 478, 504, 700, 724, 727` | A refused or failed change shows its reason at the foot of the form or below the editor, away from the control just used, and nothing announces it | should | Fixed: a new one is announced (D109) |
+| G2 | Settings banner and schedule error, `SettingsView.swift:133-140, 215-219`; set in `AppModel.swift:436, 478, 504, 700, 724, 727` | A refused or failed change shows its reason at the foot of the form or below the editor, away from the control just used, and nothing announces it | should | Fixed: the action that ends refused or failed announces it, every time, even with the same text (D109) |
 | G3 | Diagnostics rows, `SettingsView.swift:663-671` | Combining `LabeledContent` with selectable text gives an element of role AXUnknown (verified), which VoiceOver may skip or read without a role | should | Fixed: static-text trait; the rows are AXStaticText |
 | G4 | Copy Diagnostics, `SettingsView.swift:647, 674-683` | The title turns to "Copied" for two seconds; VoiceOver does not say so | should | Fixed: "Diagnostics report copied." is announced |
 | G5 | macOS Charge Limit steps, `Presentation.swift:124-131` | The number ("1.") and the step are two elements | should | Fixed |
