@@ -40,9 +40,9 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
   2026-10-18, all done: Save Diagnostics… (milestone 3), opt-in
   notifications (milestone 3) and a one-shot scheduled full charge
   (milestone 2).
-- On 2026-10-19 the owner approved four more: Shortcuts actions, the
-  diagnostics view (milestone 3) and a weekly scheduled full charge are
-  done; the accessibility review is in progress.
+- On 2026-10-19 the owner approved four more, all done: Shortcuts
+  actions, the diagnostics view (milestone 3), a weekly scheduled full
+  charge and an accessibility review.
 
 ## Milestone 1 — Architecture and vertical slice ✅
 
