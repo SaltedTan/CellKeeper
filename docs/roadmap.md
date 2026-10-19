@@ -45,7 +45,8 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
   Apple Developer ID; a local build for the maintainer's Mac can use the
   free Personal Team signing. Phase
   4c has had a test Mac since 2026-10-19; its first step, the
-  `ChargeInhibit` probe, waits for the owner's run.
+  `ChargeInhibit` probe, ran that day and showed no effect on charging.
+  Any next mechanism needs a new owner decision.
 - While both were blocked, the owner approved three smaller features on
   2026-10-18, all done: Save Diagnostics… (milestone 3), opt-in
   notifications (milestone 3) and a one-shot scheduled full charge
@@ -245,8 +246,11 @@ decision after that result.
   tool in `Tools/charge-inhibit-probe`, outside the app: `check` reads the
   preconditions without privileges; `sudo … run` holds one `ChargeInhibit`
   assertion for 60 s with a timeout, releases it, and reports whether
-  charging stopped and resumed. *Written and unit-tested; the owner's run is
-  pending.* Nothing ships from it.
+  charging stopped and resumed. Nothing ships from it. *Run by the owner on
+  2026-10-19: no effect observed.* powerd accepted and released the
+  assertion, and every reading while it was held showed charging, so
+  `ChargeInhibit` stays unverified and is not added to the helper's
+  allowlist.
 - Follow research note 02 §7: a read-only, allowlisted capability probe,
   then single reversible writes, then the persistence matrix. Evaluate
   Apple's private `ChargeInhibit` power assertion first: Apple's published
