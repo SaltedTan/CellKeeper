@@ -58,8 +58,12 @@ charging itself, and every known way to do that is private and needs root.
 This is CellKeeper's current priority: the parts that need no hardware
 writes (phase 4a) were completed on 2026-10-11
 ([issue #1](https://github.com/SaltedTan/CellKeeper/issues/1)), and real
-control stays gated on a dedicated test Mac and an Apple Developer ID
-(milestone 4 on the [roadmap](docs/roadmap.md)).
+control stays gated on a mechanism verified on a test Mac and, for
+distribution, on an Apple Developer ID (milestone 4 on the
+[roadmap](docs/roadmap.md)). The first
+test, of Apple's private `ChargeInhibit` power assertion on the
+maintainer's Mac, is prepared and waits for the owner's run
+([research note 09](docs/research/09-charge-inhibit-probe.md)).
 
 ## Using macOS's Charge Limit (experimental)
 

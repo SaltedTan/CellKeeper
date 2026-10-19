@@ -24,9 +24,16 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
 85, 90, 95 and 100% steps.
 
 - Everything that needs no hardware write is built first (phase 4a).
-- The hardware gates are unchanged. No private mechanism is tried until a
-  dedicated test Mac is available, and no privileged helper ships without an
-  Apple Developer ID.
+- No privileged helper ships to other Macs without an Apple Developer
+  ID. For the maintainer's own Mac, the owner chose on 2026-10-19 to sign
+  local helper builds with a free Apple ID (Personal Team, Apple
+  Development certificate); whether `SMAppService` registers a daemon
+  signed that way is unverified, and a manual `sudo` launch-daemon install
+  is the fallback. Private
+  mechanisms are tried only on a test Mac: on 2026-10-19 the owner decided
+  that the maintainer's Mac is that test Mac, and authorized one experiment
+  on it, an owner-run test of Apple's private `ChargeInhibit` power
+  assertion (phase 4c). No SMC access is authorized.
 - Phase 4a was completed on 2026-10-11, and its follow-ups on
   2026-10-17: the request pacer (#67) and three timing-sensitive tests
   ([issue #1](https://github.com/SaltedTan/CellKeeper/issues/1)). The
@@ -34,9 +41,12 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
   ([issue #74](https://github.com/SaltedTan/CellKeeper/issues/74)). The
   removal button and in-app recovery help moved to phase 4b (owner
   decision, 2026-10-18): until a helper is registered, there is nothing
-  real to remove. Phases 4b and 4c stay blocked on an Apple Developer ID
-  and a dedicated test Mac.
-- While they are blocked, the owner approved three smaller features on
+  real to remove. Phase 4b's distributable form stays blocked on an
+  Apple Developer ID; a local build for the maintainer's Mac can use the
+  free Personal Team signing. Phase
+  4c has had a test Mac since 2026-10-19; its first step, the
+  `ChargeInhibit` probe, waits for the owner's run.
+- While both were blocked, the owner approved three smaller features on
   2026-10-18, all done: Save Diagnostics… (milestone 3), opt-in
   notifications (milestone 3) and a one-shot scheduled full charge
   (milestone 2).
@@ -191,6 +201,11 @@ hardware.
 ### Phase 4b — Signed helper (needs an Apple Developer ID)
 
 Tracked in [issue #57](https://github.com/SaltedTan/CellKeeper/issues/57).
+Distribution needs a Developer ID. For the maintainer's own Mac only, the
+owner decided on 2026-10-19 to use a free Personal Team (Apple
+Development) signature for local helper builds first ([research note 04](research/04-privileged-helper.md)
+§10 Q1: unverified with `SMAppService`; fallback: a manual `sudo`
+launch-daemon install).
 
 - Register the daemon with `SMAppService` and guide the user through
   approving it. Non-sandboxed, Hardened Runtime, notarized app and helper
@@ -212,14 +227,26 @@ Tracked in [issue #57](https://github.com/SaltedTan/CellKeeper/issues/57).
   the removal flow reports "nothing to remove" and leaves the Simulated
   helper running.
 
-### Phase 4c — A verified mechanism (needs a dedicated test Mac)
+### Phase 4c — A verified mechanism (on a test Mac)
 
 Tracked in [issue #58](https://github.com/SaltedTan/CellKeeper/issues/58).
 
-Hardware experiments with private mechanisms must not run on a daily-use
-Mac, and the maintainer currently has only one (owner decision, confirmed
-2026-10-09).
+Until 2026-10-19, hardware experiments with private mechanisms were not to
+run on a daily-use Mac, and the maintainer has only one (owner decision,
+confirmed 2026-10-09). On 2026-10-19 the owner decided to use that Mac
+(Mac16,1, Apple M4, macOS 27.0.1, firmware 20457.1.29) as the test Mac,
+once AlDente's helper is removed, and authorized one experiment: a test of
+`ChargeInhibit` that the owner runs with `sudo`. SMC reads and writes, the
+adapter cut, and any other private mechanism each need a separate owner
+decision after that result.
 
+- **First step: the `ChargeInhibit` probe**
+  ([research note 09](research/09-charge-inhibit-probe.md)). A standalone
+  tool in `Tools/charge-inhibit-probe`, outside the app: `check` reads the
+  preconditions without privileges; `sudo … run` holds one `ChargeInhibit`
+  assertion for 60 s with a timeout, releases it, and reports whether
+  charging stopped and resumed. *Written and unit-tested; the owner's run is
+  pending.* Nothing ships from it.
 - Follow research note 02 §7: a read-only, allowlisted capability probe,
   then single reversible writes, then the persistence matrix. Evaluate
   Apple's private `ChargeInhibit` power assertion first: Apple's published
@@ -233,8 +260,11 @@ Mac, and the maintainer currently has only one (owner decision, confirmed
 - Then offer the backend as experimental and opt-in, per verified model,
   with every precondition in `safety.md`.
 
-Blocked until both exist: a dedicated test Mac with no other battery tools,
-and an Apple Developer ID.
+There has been a test Mac since 2026-10-19 (the maintainer's, once no
+other battery tool is installed). Distributing a helper backend to other
+Macs still needs an Apple Developer ID (phase 4b); a local build on the
+maintainer's Mac can use the free Personal Team signing (unverified with
+`SMAppService`; a manual `sudo` launch-daemon install is the fallback).
 
 ## Later
 

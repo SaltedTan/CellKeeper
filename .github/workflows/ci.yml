@@ -107,6 +107,16 @@ jobs:
           fi
           swift test --package-path Packages/CellKeeperKit ${flags[@]+"${flags[@]}"}
 
+      # The owner-run probe of research note 09. Its tests cover only its
+      # pure logic: nothing runs as root and no assertion is created.
+      - name: Test charge-inhibit-probe (Swift Testing)
+        run: |
+          flags=()
+          if [ "${WARNINGS_AS_ERRORS}" = "true" ]; then
+            flags+=(-Xswiftc -warnings-as-errors)
+          fi
+          swift test --package-path Tools/charge-inhibit-probe ${flags[@]+"${flags[@]}"}
+
       - name: Build CellKeeper (Debug and Release, ad-hoc signed)
         run: |
           flags=()

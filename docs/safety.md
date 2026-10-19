@@ -36,6 +36,13 @@ CellKeeper only; built without a team identifier, as every development
 build is, it refuses to listen. Nothing registers, starts or connects to a
 helper process.
 
+The repository also holds a separate research tool,
+`Tools/charge-inhibit-probe`, which is not part of the app. The owner runs
+it with `sudo` on the maintainer's Mac to test whether Apple's private
+`ChargeInhibit` power assertion stops charging; it holds one assertion for
+a bounded time, with a timeout, and releases it ([research note
+09](research/09-charge-inhibit-probe.md)). Nothing ships from it.
+
 Your Mac's own protections — the battery pack's management system, firmware
 charge termination and thermal limits, and macOS battery health management —
 are always in effect and cannot be overridden by CellKeeper.
@@ -142,11 +149,16 @@ list.
 
 1. **Verified mechanism per model.** Run the verification protocol in research
    note 02 §7 (a read-only, allowlisted capability probe, then single
-   reversible writes) on a dedicated test Mac with no other battery tools
-   installed. Private mechanisms are never tried on a daily-use Mac; the
-   maintainer currently has no separate test Mac, so this is blocked. Include
-   the persistence matrix (sleep, wake, restart, shutdown, helper crash,
-   unplug), and record the results in `docs/research/`.
+   reversible writes) on a test Mac with no other battery tools installed.
+   Private mechanisms were never to be tried on a daily-use Mac, and the
+   maintainer has no separate test Mac. On 2026-10-19 the owner chose to
+   test one private mechanism, Apple's `ChargeInhibit` power assertion, on
+   the maintainer's Mac, with a probe the owner runs with `sudo`
+   ([research note 09](research/09-charge-inhibit-probe.md)). The probe is
+   a separate tool outside the app; nothing ships from it, and no SMC
+   access is authorized. Include the persistence matrix (sleep, wake,
+   restart, shutdown, helper crash, unplug), and record the results in
+   `docs/research/`.
 2. **Allowlist, never probe.** Writes only to keys or interfaces on a reviewed
    per-model, per-firmware allowlist with expected type and size. Unknown
    hardware or a changed OS/firmware build means monitor-only (R12, R15).
@@ -600,6 +612,13 @@ macOS's Charge Limit, which never goes below 80%. If your Mac shows "Not
 Charging", macOS's own Charge Limit, Optimized Battery Charging, battery
 health management, a weak adapter, or another battery tool may be
 responsible; see Apple's guidance on the "Not Charging" status.
+
+After a run of the `ChargeInhibit` probe (research note 09): check that
+`pmset -g assertions` lists no `ChargeInhibit`, stop the probe if it still
+runs (Ctrl-C), unplug and replug the adapter, quit any battery tool,
+and, if charging still does not resume, restart the Mac; then set macOS's
+Charge Limit and Optimized Battery Charging back as you want them. Note 09
+§7 has the details.
 
 ### Getting your own Charge Limit back
 

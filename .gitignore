@@ -25,6 +25,9 @@ DerivedData/
 .build/
 .swiftpm/
 
+# Reports written by Tools/charge-inhibit-probe (sent to the lead, not committed)
+charge-inhibit-probe-*.txt
+
 # Local, per-developer configuration (see Config/Local.xcconfig.example)
 Config/Local.xcconfig
 
