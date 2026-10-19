@@ -65,7 +65,7 @@ private struct ChargingSettingsTab: View {
                     if !model.nativeLimitSteps.contains(settings.chargeLimit) {
                         Label("\(ChargeLimitChoices.notSettableWithMacOSLimit(settings.chargeLimit)) Choose one of the values offered; until then your own limit stays in effect.", systemImage: "exclamationmark.triangle")
                             .font(.caption)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.warningText)
                     }
                     // Settings macOS's Charge Limit cannot express are hidden
                     // rather than shown disabled; this says what macOS does instead.
@@ -77,22 +77,24 @@ private struct ChargingSettingsTab: View {
                             in: ChargingSettings.chargeLimitRange) {
                         LabeledContent("Stop charging at", value: settings.chargeLimit >= 100 ? "100% (no limit)" : "\(settings.chargeLimit)%")
                     }
+                    .accessibilityValue(AccessibilityWording.chargeLimit(settings.chargeLimit))
                     Stepper(value: binding(\.resumeThreshold), in: resumeRange) {
                         LabeledContent("Resume charging at", value: "\(settings.resumeThreshold)%")
                     }
+                    .accessibilityValue(AccessibilityWording.percent(settings.resumeThreshold))
                     Text("After reaching the limit, charging stays paused until the battery falls to the resume threshold. The gap avoids switching charging on and off repeatedly.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if let status = model.status, let note = ControlStatement.limitNote(for: status) {
                         Label(note, systemImage: "info.circle")
                             .font(.caption)
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.warningText)
                     }
                 }
                 if settings.chargeLimit < 50 {
                     Label("Limits below 50% leave little charge for unplugged use.", systemImage: "exclamationmark.triangle")
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.warningText)
                 }
                 if !isNative {
                     LabeledContent("Discharge to the limit") {
@@ -136,11 +138,11 @@ private struct ChargingSettingsTab: View {
 
             if let error = model.settingsError {
                 Label(error, systemImage: "exclamationmark.triangle")
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.criticalText)
             }
             if let recovery = model.settingsRecoveryMessage {
                 Label(recovery, systemImage: "info.circle")
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
             }
         }
         .formStyle(.grouped)
@@ -196,7 +198,7 @@ private struct ScheduledFullChargeSection: View {
             if let wait = status?.fullChargeScheduleWait {
                 Label(FullChargeScheduleWording.armedLine(schedule, wait: wait, now: now), systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
             }
             Button("Cancel Schedule") { model.cancelFullChargeSchedule() }
         } else {
@@ -220,7 +222,7 @@ private struct ScheduledFullChargeSection: View {
         if let error = model.scheduleError {
             Label(error, systemImage: "exclamationmark.triangle")
                 .font(.caption)
-                .foregroundStyle(.red)
+                .foregroundStyle(.criticalText)
         }
         if let status {
             Text(FullChargeScheduleWording.explanation(for: status, end: status.fullChargeSchedule?.endsAt ?? end, now: now))
@@ -270,7 +272,7 @@ private struct WeeklyFullChargeSection: View {
                 if let due = status?.weeklyFullChargeDue {
                     Label(WeeklyFullChargeWording.dueLine(due, now: now), systemImage: "exclamationmark.triangle")
                         .font(.caption)
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.warningText)
                 }
                 if let last = WeeklyFullChargeWording.lastLine(weekly.handled, now: now) {
                     Text(last)
@@ -281,7 +283,7 @@ private struct WeeklyFullChargeSection: View {
             if let problem = status?.weeklyFullChargeStoreProblem {
                 Label(WeeklyFullChargeWording.storeProblemLine(problem), systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Group {
@@ -295,6 +297,7 @@ private struct WeeklyFullChargeSection: View {
                                 }
                             ))
                             .toggleStyle(.button)
+                            .accessibilityLabel(WeeklyFullChargeWording.name(of: day))
                         }
                     }
                 }
@@ -303,9 +306,12 @@ private struct WeeklyFullChargeSection: View {
                 DatePicker("Start", selection: $draft.pickerTime, displayedComponents: .hourAndMinute)
                     .environment(\.timeZone, WeeklyFullChargeDraft.pickerTimeZone)
                     .environment(\.calendar, WeeklyFullChargeDraft.pickerCalendar)
+                    // Its value is a moment in GMT; say the time it shows.
+                    .accessibilityValue(WeeklyFullChargeWording.timeOfDay(hour: draft.hour, minute: draft.minute))
                 Stepper(value: $draft.durationHours, in: WeeklyFullChargePattern.durationHoursRange) {
                     LabeledContent("Duration", value: draft.durationHours == 1 ? "1 hour" : "\(draft.durationHours) hours")
                 }
+                .accessibilityValue(AccessibilityWording.hours(draft.durationHours))
                 Button(weekly == nil ? "Save Weekly Full Charge" : "Save Changes") { model.setWeeklyFullCharge(draft.pattern) }
                     .disabled(!draft.pattern.issues.isEmpty || draft.pattern == weekly?.pattern)
                     .help(WeeklyFullChargeWording.saveHelp)
@@ -323,7 +329,7 @@ private struct WeeklyFullChargeSection: View {
             if let error = model.weeklyError {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.criticalText)
             }
             Text(WeeklyFullChargeWording.explanation)
                 .font(.caption)
@@ -355,11 +361,13 @@ private struct TemperatureProtectionControls: View {
                     in: ChargingSettings.temperaturePauseRange, step: 1) {
                 LabeledContent("Pause at", value: Format.celsius(settings.temperatureProtection.pauseAtCelsius))
             }
+            .accessibilityValue(AccessibilityWording.celsius(settings.temperatureProtection.pauseAtCelsius))
             Stepper(value: binding(\.temperatureProtection.resumeAtCelsius),
                     in: ChargingSettings.minimumTemperatureResume...(settings.temperatureProtection.pauseAtCelsius - ChargingSettings.minimumTemperatureHysteresis),
                     step: 1) {
                 LabeledContent("Resume at", value: Format.celsius(settings.temperatureProtection.resumeAtCelsius))
             }
+            .accessibilityValue(AccessibilityWording.celsius(settings.temperatureProtection.resumeAtCelsius))
             Text("Once paused, charging stays paused for at least \(Int(ChargingPolicy.minimumTemperaturePause / 60)) minutes unless the temperature reading is lost.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -393,7 +401,7 @@ private struct NotificationSettingsSection: View {
             if let explanation = optIn.explanation {
                 Label(explanation, systemImage: optIn.offersSystemSettings ? "exclamationmark.triangle" : "info.circle")
                     .font(.caption)
-                    .foregroundStyle(optIn.offersSystemSettings ? Color.orange : Color.secondary)
+                    .foregroundStyle(optIn.offersSystemSettings ? Color.warningText : Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if optIn.offersSystemSettings || optIn.offersWithdrawal {
@@ -467,7 +475,7 @@ private struct ControlSettingsTab: View {
                         Label(faultExplanation(for: status),
                               systemImage: "exclamationmark.triangle")
                             .font(.caption)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(.criticalText)
                             .fixedSize(horizontal: false, vertical: true)
                         Button("Clear fault and retry") { model.resetBackendFault() }
                             .help(faultResetHelp(for: status))
@@ -579,18 +587,18 @@ private struct NativeLimitSetupSection: View {
             if let problem = native?.readProblem {
                 Label("Could not read the Charge Limit: \(problem)", systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
             }
             LabeledContent("Your own limit") {
                 if native?.isRecordUnreadable == true {
                     Text("Unknown: the record cannot be read")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.criticalText)
                 } else if let owner = native?.ownerLimit, let status = model.status, status.isOwnLimitRestorePending {
                     Text(status.capabilities.availability.acceptsRequests
                          ? "\(Format.chargeLimit(owner)), recorded; restoring it is not confirmed yet, CellKeeper keeps trying"
                          : "\(Format.chargeLimit(owner)), recorded; CellKeeper cannot restore it right now, set it in System Settings")
                         .multilineTextAlignment(.trailing)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.criticalText)
                 } else if let owner = native?.ownerLimit {
                     Text("\(Format.chargeLimit(owner)), recorded; restored when CellKeeper stops managing it")
                         .multilineTextAlignment(.trailing)
@@ -615,7 +623,7 @@ private struct NativeLimitSetupSection: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("CellKeeper's record of your own limit cannot be read, so it will neither change nor restore the limit. Set your limit in System Settings › Battery › Charging first, then discard the record.")
                         .font(.caption)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.criticalText)
                         .fixedSize(horizontal: false, vertical: true)
                     Button("I've Set My Limit — Discard the Record…") { isConfirmingDiscard = true }
                 }
@@ -697,6 +705,11 @@ private struct ActivityTab: View {
                             .font(.caption)
                             .textSelection(.enabled)
                     }
+                    // One element per event: kind, time and message. The
+                    // trait keeps it a text: combined selectable text would
+                    // otherwise have no role.
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.isStaticText)
                 }
             }
             HStack {
@@ -767,7 +780,9 @@ private struct DiagnosticsTab: View {
     }
 
     /// Each row is one accessibility element made of its label and its
-    /// value; the value can be selected and copied.
+    /// value; the value can be selected and copied. The trait keeps the
+    /// element a text: combined selectable text would otherwise have no
+    /// role (AXUnknown).
     private func rows(of section: DiagnosticsSection) -> some View {
         ForEach(Array(section.rows.enumerated()), id: \.offset) { _, row in
             LabeledContent(row.label) {
@@ -776,6 +791,7 @@ private struct DiagnosticsTab: View {
                     .textSelection(.enabled)
             }
             .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isStaticText)
         }
     }
 
@@ -783,6 +799,9 @@ private struct DiagnosticsTab: View {
         guard let report = model.diagnosticsReport() else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(report, forType: .string)
+        // The button's title says "Copied", which VoiceOver does not read
+        // out by itself.
+        Announcement.post(AccessibilityWording.diagnosticsCopied, priority: .medium)
         isCopied = true
         Task {
             try? await Task.sleep(for: .seconds(2))
@@ -798,6 +817,7 @@ private struct AboutTab: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("CellKeeper \(version)")
                     .font(.title2.weight(.semibold))
+                    .accessibilityAddTraits(.isHeader)
                 Text("Open-source battery charge management for macOS. Early development: telemetry is real; charging control is simulated unless you choose macOS Charge Limit, which lets macOS enforce your limit.")
                 Text("CellKeeper is an independent open-source project and is not affiliated with Apple, AppHouseKitchen, AlDente, or their respective developers.")
                     .font(.callout)

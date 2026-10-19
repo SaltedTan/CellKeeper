@@ -35,10 +35,12 @@ struct MenuBarView: View {
                     NSApp.activate()
                     openSettings()
                 }
+                .keyboardShortcut(",", modifiers: .command)
                 Spacer()
                 Button("Quit CellKeeper") {
                     NSApp.terminate(nil)
                 }
+                .keyboardShortcut("q", modifiers: .command)
             }
         }
         .padding(14)
@@ -50,13 +52,18 @@ private struct BatteryHeader: View {
     let snapshot: BatterySnapshot?
     let telemetryError: String?
     let nativeLimit: NativeLimitStatus?
+    /// 30 points at the standard text size, scaled with it where macOS
+    /// applies one.
+    @ScaledMetric(relativeTo: .largeTitle) private var chargeSize: CGFloat = 30
 
     var body: some View {
         if let snapshot, snapshot.isBatteryPresent {
+            // One element for VoiceOver: "Charge 81%, Power adapter, Charging".
             HStack(alignment: .firstTextBaseline) {
                 Text(Format.percent(snapshot.chargePercent))
-                    .font(.system(size: 30, weight: .semibold, design: .rounded))
+                    .font(.system(size: chargeSize, weight: .semibold, design: .rounded))
                     .monospacedDigit()
+                    .accessibilityLabel("Charge \(Format.percent(snapshot.chargePercent))")
                 VStack(alignment: .leading, spacing: 2) {
                     Label(snapshot.powerSource.title, systemImage: snapshot.isOnExternalPower ? "powerplug" : "battery.100percent")
                     Text(snapshot.chargingStatus.title)
@@ -64,6 +71,7 @@ private struct BatteryHeader: View {
                 }
                 .font(.callout)
             }
+            .accessibilityElement(children: .combine)
             if snapshot.chargingStatus == .notCharging {
                 // macOS does not report why charging is paused.
                 Group {
@@ -81,7 +89,7 @@ private struct BatteryHeader: View {
             Label("No battery detected on this Mac.", systemImage: "batteryblock.slash")
         } else {
             Label(telemetryError ?? "Battery telemetry unavailable.", systemImage: "exclamationmark.triangle")
-                .foregroundStyle(.orange)
+                .foregroundStyle(.warningText)
         }
     }
 }
@@ -108,6 +116,8 @@ private struct ControlSummary: View {
                 Spacer()
                 StatusBadge(title: status.capabilities.availability.badgeTitle, color: status.capabilities.availability.badgeColor)
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
             if !isSettled {
                 // What controls charging, in one line (macOS's Charge Limit:
                 // what its availability means).
@@ -137,8 +147,10 @@ private struct ControlSummary: View {
                 // notice above say all its state and reason would.
                 if decision.state != .deferringToMacOS {
                     LabeledContent(isApplied ? "Policy" : "Policy (not applied)", value: decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS))
+                        .accessibilityElement(children: .combine)
                 }
                 LabeledContent(isApplied ? "Wants" : "Would want", value: decision.desiredMode.intentTitle(nativeLimit: status.capabilities.isEnforcedByMacOS))
+                    .accessibilityElement(children: .combine)
                 if decision.state != .deferringToMacOS, isApplied {
                     Text(status.displayedReason ?? decision.reason.description)
                         .font(.caption)
@@ -151,6 +163,7 @@ private struct ControlSummary: View {
                             .multilineTextAlignment(.trailing)
                     }
                     .font(.caption)
+                    .accessibilityElement(children: .combine)
                 }
                 ForEach(Array((isApplied ? decision.notes : []).enumerated()), id: \.offset) { _, note in
                     Label(note.description, systemImage: "info.circle")
@@ -165,7 +178,7 @@ private struct ControlSummary: View {
                       : "The control backend failed repeatedly. Only normal charging will be requested.",
                       systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.criticalText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -193,7 +206,7 @@ private struct NativeLimitSummary: View {
                 // Shared with the restore notification.
                 if let problem = NativeLimitWording.restoreProblem(status) {
                     Text(problem)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.criticalText)
                 } else if let owner = native?.ownerLimit {
                     Text("Set by CellKeeper. Your own limit, \(Format.chargeLimit(owner)), is restored when CellKeeper stops managing it, quits, or fails.")
                 } else {
@@ -201,23 +214,23 @@ private struct NativeLimitSummary: View {
                 }
                 if let adopted = status.adoptedChange, !status.settings.isManagementEnabled {
                     Text("The limit was changed outside CellKeeper to \(Format.chargeLimit(adopted.limit)), so CellKeeper kept it as your own and turned off Manage charging. Turn it on to let CellKeeper manage the limit again.")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.warningText)
                     if adopted.isNoLimit, adopted.previousOwnerLimit != adopted.limit {
                         Text("If that was a temporary full charge rather than your choice, your earlier limit was \(Format.chargeLimit(adopted.previousOwnerLimit)).")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.warningText)
                     }
                 }
                 if native?.needsNoLimitConfirmation == true {
                     Text("macOS reports no limit. If your own limit is 100%, confirm it in Settings › Control before CellKeeper changes anything.")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.warningText)
                 }
                 if let problem = native?.readProblem {
                     Text("Could not read the Charge Limit: \(problem)")
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.warningText)
                 }
                 if let owner = native?.ownerLimit, !status.capabilities.availability.acceptsRequests, !status.isOwnLimitRestorePending {
                     Text("CellKeeper cannot change the limit back right now. Set \(Format.chargeLimit(owner)) in System Settings › Battery › Charging.")
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.criticalText)
                 }
             }
             .font(.caption)
@@ -256,12 +269,16 @@ private struct NativeChargeLimitPicker: View {
                 Text(steps.contains(limit) ? Format.chargeLimit(limit) : "Not set")
                     .monospacedDigit()
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
             Picker("Charge limit", selection: Binding<Int?>(
                 get: { steps.contains(limit) ? limit : nil },
                 set: { if let value = $0 { model.setChargeLimit(value) } }
             )) {
                 ForEach(steps, id: \.self) { step in
-                    Text("\(step)").tag(Int?.some(step))
+                    Text("\(step)")
+                        .accessibilityLabel(AccessibilityWording.chargeLimit(step))
+                        .tag(Int?.some(step))
                 }
             }
             .pickerStyle(.segmented)
@@ -271,7 +288,7 @@ private struct NativeChargeLimitPicker: View {
             if !steps.contains(limit) {
                 Text("\(ChargeLimitChoices.notSettableWithMacOSLimit(limit)) Choose one of the values above; until then your own limit stays in effect.")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
                     .fixedSize(horizontal: false, vertical: true)
             }
             ManageChargingToggle(model: model)
@@ -279,15 +296,26 @@ private struct NativeChargeLimitPicker: View {
     }
 }
 
-/// Charge-limit slider. Changes are applied when the drag ends, so dragging
-/// never produces a burst of control requests.
+/// Charge-limit slider. ``ChargeLimitSliderEdit`` (Kit) decides what is
+/// applied and when; this view only feeds it events and carries out what it
+/// returns. A drag is applied when it ends, a change made without a drag
+/// (the arrow keys, VoiceOver's increment and decrement) once the value has
+/// stayed put for a moment, and only if no other settings change came first:
+/// a newer command, from anywhere, wins.
 private struct ChargeLimitSlider: View {
     let model: AppModel
-    @State private var draftLimit: Double?
+    /// Made when the slider appears, closed when it goes away.
+    @State private var edit: ChargeLimitSliderEdit?
+    /// The pause before a change made without a drag is applied.
+    @State private var timer: Task<Void, Never>?
+
+    /// How long a value changed without a drag stays put before it is
+    /// applied.
+    private static let applyDelay = Duration.milliseconds(600)
+    private static let range = ChargingSettings.chargeLimitRange
 
     var body: some View {
-        let committed = Double(model.settings.chargeLimit)
-        let shown = Int(draftLimit ?? committed)
+        let shown = edit?.draft ?? model.settings.chargeLimit
         VStack(alignment: .leading, spacing: 4) {
             HStack {
                 Text("Charge limit")
@@ -296,19 +324,29 @@ private struct ChargeLimitSlider: View {
                 Text(shown >= 100 ? "No limit" : "\(shown)%")
                     .monospacedDigit()
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
             Slider(
-                value: Binding(get: { draftLimit ?? committed }, set: { draftLimit = $0.rounded() }),
-                in: Double(ChargingSettings.chargeLimitRange.lowerBound)...Double(ChargingSettings.chargeLimitRange.upperBound)
+                value: Binding(get: { Double(shown) }, set: { send(.userChanged(Int($0.rounded()))) }),
+                in: Double(Self.range.lowerBound)...Double(Self.range.upperBound)
             ) {
                 Text("Charge limit")
             } onEditingChanged: { editing in
-                if !editing, let draftLimit {
-                    model.setChargeLimit(Int(draftLimit))
-                    self.draftLimit = nil
-                }
+                send(editing ? .dragBegan : .dragEnded(edit?.draft ?? model.settings.chargeLimit))
             }
             .labelsHidden()
             .disabled(!model.settings.isManagementEnabled)
+            .accessibilityValue(AccessibilityWording.chargeLimit(shown))
+            .accessibilityAdjustableAction { direction in
+                guard model.settings.isManagementEnabled else { return }
+                let step: Int
+                switch direction {
+                case .increment: step = 1
+                case .decrement: step = -1
+                @unknown default: return
+                }
+                send(.userChanged(min(max(shown + step, Self.range.lowerBound), Self.range.upperBound)))
+            }
             Text("Resumes charging at \(model.settings.resumeThreshold)%.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -316,15 +354,56 @@ private struct ChargeLimitSlider: View {
             if let status = model.status, let note = ControlStatement.limitNote(for: status, includesOwnRestriction: false) {
                 Text(note)
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if shown < 50 {
                 Text("Limits below 50% leave little charge for unplugged use.")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
             }
             ManageChargingToggle(model: model)
+        }
+        .onAppear {
+            edit = ChargeLimitSliderEdit(limit: model.settings.chargeLimit, revision: model.settingsRevision)
+        }
+        .onChange(of: model.settingsRevision) {
+            send(.settingsChanged(revision: model.settingsRevision, limit: model.settings.chargeLimit))
+        }
+        .onDisappear {
+            // Applies the current edit once, at once; the timer then does
+            // nothing.
+            send(.closed)
+            timer?.cancel()
+            timer = nil
+        }
+    }
+
+    private func send(_ event: ChargeLimitSliderEdit.Event) {
+        guard var current = edit else { return }
+        let output = current.handle(event)
+        edit = current
+        switch output {
+        case .nothing:
+            break
+        case .showModelValue:
+            // The draft is gone: the slider shows the model's limit.
+            timer?.cancel()
+            timer = nil
+        case .startTimer(let token):
+            timer?.cancel()
+            timer = Task {
+                try? await Task.sleep(for: Self.applyDelay)
+                guard !Task.isCancelled else { return }
+                send(.timerFired(token: token))
+            }
+        case .apply(let limit, let revision):
+            timer?.cancel()
+            timer = nil
+            model.setChargeLimit(limit, ifSettingsRevision: revision)
+            // What the model holds now, before any later event: an edit
+            // that starts next begins from it.
+            send(.settingsChanged(revision: model.settingsRevision, limit: model.settings.chargeLimit))
         }
     }
 }
@@ -342,7 +421,7 @@ private struct ManageChargingToggle: View {
         if let error = model.settingsError {
             Text(error)
                 .font(.caption)
-                .foregroundStyle(.orange)
+                .foregroundStyle(.warningText)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -364,11 +443,12 @@ private struct FullChargeControl: View {
                             .fixedSize(horizontal: false, vertical: true)
                     case .dischargeToLimit:
                         Label(dischargeText(override), systemImage: "minus.plus.batteryblock")
-                            .foregroundStyle(.orange)
+                            .foregroundStyle(.warningText)
                     }
                     Spacer()
                     Button("Cancel") { model.cancelOverride() }
                         .controlSize(.small)
+                        .accessibilityLabel(override.kind == .fullCharge ? "Cancel the temporary full charge" : "Cancel the discharge")
                 }
                 .font(.caption)
             } else {
@@ -441,11 +521,12 @@ private struct ScheduledFullChargeLines: View {
         if let schedule = status.fullChargeSchedule {
             HStack(alignment: .firstTextBaseline) {
                 Label(FullChargeScheduleWording.armedLine(schedule, wait: status.fullChargeScheduleWait, now: status.describedAt), systemImage: "calendar.badge.clock")
-                    .foregroundStyle(status.fullChargeScheduleWait == nil ? Color.primary : Color.orange)
+                    .foregroundStyle(status.fullChargeScheduleWait == nil ? Color.primary : Color.warningText)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()
                 Button("Cancel") { model.cancelFullChargeSchedule() }
                     .controlSize(.small)
+                    .accessibilityLabel("Cancel the scheduled full charge")
             }
             .font(.caption)
         }
@@ -457,6 +538,7 @@ private struct ScheduledFullChargeLines: View {
                 Spacer()
                 Button("OK") { model.dismissFullChargeScheduleOutcome() }
                     .controlSize(.small)
+                    .accessibilityLabel("OK, dismiss the scheduled full charge message")
             }
             .font(.caption)
         }
@@ -480,14 +562,14 @@ private struct WeeklyFullChargeLines: View {
             if let due = status.weeklyFullChargeDue {
                 Label(WeeklyFullChargeWording.dueLine(due, now: now), systemImage: "exclamationmark.triangle")
                     .font(.caption)
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.warningText)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
         if let problem = status.weeklyFullChargeStoreProblem {
             Label(WeeklyFullChargeWording.storeProblemLine(problem), systemImage: "exclamationmark.triangle")
                 .font(.caption)
-                .foregroundStyle(.orange)
+                .foregroundStyle(.warningText)
                 .fixedSize(horizontal: false, vertical: true)
         }
         if let outcome = status.weeklyFullChargeOutcome, let line = WeeklyFullChargeWording.outcomeLine(outcome, now: now) {
@@ -498,6 +580,7 @@ private struct WeeklyFullChargeLines: View {
                 Spacer()
                 Button("OK") { model.dismissWeeklyFullChargeOutcome() }
                     .controlSize(.small)
+                    .accessibilityLabel("OK, dismiss the weekly full charge message")
             }
             .font(.caption)
         }
@@ -514,21 +597,21 @@ private struct TelemetryDetails: View {
             if let snapshot {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 3) {
                     row("Cycle count", snapshot.health.cycleCount.map(String.init) ?? Format.unavailable)
-                    row("Capacity", Format.capacity(snapshot.health))
+                    row("Capacity", Format.capacity(snapshot.health), spoken: Format.Spoken.capacity(snapshot.health))
                     if let condition = snapshot.health.condition {
                         row("Condition", condition)
                     }
-                    row("Temperature", Format.celsius(snapshot.temperatureCelsius))
-                    row("Voltage", Format.volts(fromMillivolts: snapshot.voltageMillivolts))
-                    row("Current", Format.milliamps(snapshot.amperageMilliamps))
+                    row("Temperature", Format.celsius(snapshot.temperatureCelsius), spoken: Format.Spoken.celsius(snapshot.temperatureCelsius))
+                    row("Voltage", Format.volts(fromMillivolts: snapshot.voltageMillivolts), spoken: Format.Spoken.volts(fromMillivolts: snapshot.voltageMillivolts))
+                    row("Current", Format.milliamps(snapshot.amperageMilliamps), spoken: Format.Spoken.milliamps(snapshot.amperageMilliamps))
                     if let watts = snapshot.adapterWatts {
-                        row("Adapter", "\(watts) W")
+                        row("Adapter", "\(watts) W", spoken: AccessibilityWording.watts(watts))
                     }
                     if let toEmpty = Format.minutes(snapshot.timeToEmptyMinutes) {
-                        row("Time to empty", toEmpty)
+                        row("Time to empty", toEmpty, spoken: Format.Spoken.minutes(snapshot.timeToEmptyMinutes))
                     }
                     if let toFull = Format.minutes(snapshot.timeToFullMinutes) {
-                        row("Time to full", toFull)
+                        row("Time to full", toFull, spoken: Format.Spoken.minutes(snapshot.timeToFullMinutes))
                     }
                     row("Mac thermal state", thermalState.title)
                     row("Low Power Mode", isLowPowerModeEnabled ? "On" : "Off")
@@ -537,7 +620,7 @@ private struct TelemetryDetails: View {
                 .padding(.top, 4)
                 Text("Read at \(snapshot.timestamp.formatted(date: .omitted, time: .standard)). Capacity percentage is computed by CellKeeper from full-charge and design capacity, and may differ from the figure macOS shows. The thermal state is macOS's reading for the whole Mac, not the battery's temperature.")
                     .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 Text(Format.unavailable).font(.caption)
@@ -545,10 +628,15 @@ private struct TelemetryDetails: View {
         }
     }
 
-    private func row(_ label: String, _ value: String) -> some View {
+    /// One element for VoiceOver per row: the value, named by its label,
+    /// with its unit in words (`spoken`) where the screen abbreviates it.
+    private func row(_ label: String, _ value: String, spoken: String? = nil) -> some View {
         GridRow {
             Text(label).foregroundStyle(.secondary)
+                .accessibilityHidden(true)
             Text(value).monospacedDigit()
+                .accessibilityLabel(label)
+                .accessibilityValue(spoken ?? value)
         }
     }
 }
