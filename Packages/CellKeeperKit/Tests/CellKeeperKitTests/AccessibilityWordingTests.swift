@@ -44,6 +44,17 @@ struct AccessibilityWordingTests {
         #expect(AccessibilityWording.capacity(fullChargeMilliampHours: 6131, designMilliampHours: nil, percentOfDesign: nil, locale: english) == "6,131 milliamp-hours")
     }
 
+    @Test("The menu names units with the same words as Settings › Diagnostics, singular for one")
+    func sharedUnitWords() {
+        #expect(AccessibilityWording.milliamps(-845, locale: english) == QuantityUnit.milliamps.spoken(-845, locale: english))
+        #expect(AccessibilityWording.watts(1, locale: english) == "1 watt")
+        #expect(AccessibilityWording.watts(70, locale: english) == QuantityUnit.watts.spoken(70, locale: english))
+        #expect(AccessibilityWording.celsius(1, locale: english) == "1 degree Celsius")
+        #expect(AccessibilityWording.celsius(40, locale: english) == QuantityUnit.degreesCelsius.spoken(40, locale: english))
+        #expect(AccessibilityWording.volts(fromMillivolts: 1000, locale: english) == "1.00 volts")
+        #expect(AccessibilityWording.capacity(fullChargeMilliampHours: 1, designMilliampHours: nil, percentOfDesign: nil, locale: english) == "1 milliamp-hour")
+    }
+
     @Test("Hours are counted in words")
     func hours() {
         #expect(AccessibilityWording.hours(1, locale: english) == "1 hour")

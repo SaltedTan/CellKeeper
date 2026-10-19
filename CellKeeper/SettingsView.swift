@@ -778,15 +778,21 @@ private struct DiagnosticsTab: View {
     }
 
     /// Each row is one accessibility element made of its label and its
-    /// value; the value can be selected and copied. The trait keeps the
-    /// element a text: combined selectable text would otherwise have no
-    /// role (AXUnknown).
+    /// value; the value can be selected and copied. VoiceOver reads units
+    /// in words ("Voltage, 12,427 millivolts") where the value shows a
+    /// symbol ("12427 mV"). The trait keeps the element a text: combined
+    /// selectable text would otherwise have no role (AXUnknown).
     private func rows(of section: DiagnosticsSection) -> some View {
         ForEach(Array(section.rows.enumerated()), id: \.offset) { _, row in
+            let plain = row.value.plainText(formattingTime: Format.moment)
             LabeledContent(row.label) {
-                Text(row.value.plainText(formattingTime: Format.moment))
+                Text(plain)
                     .multilineTextAlignment(.trailing)
                     .textSelection(.enabled)
+                    // Combined into the row's element, the label takes the
+                    // text's place; set to the text itself, it changes
+                    // nothing (verified).
+                    .accessibilityLabel(row.value.spokenText(formattingTime: Format.moment) ?? plain)
             }
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isStaticText)

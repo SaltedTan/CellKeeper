@@ -4,7 +4,8 @@ import Foundation
 /// What VoiceOver reads for CellKeeper's controls and readings where the
 /// text on screen does not say it well: a value with its unit, units in
 /// words rather than abbreviations ("V", "mA" and "mAh" are read letter by
-/// letter), and the announcements CellKeeper asks for. Like the rest of the
+/// letter), and the announcements CellKeeper asks for. The units' words are
+/// ``QuantityUnit``'s, as in Settings › Diagnostics. Like the rest of the
 /// app's text, the words are English; numbers follow the user's format.
 public enum AccessibilityWording {
     /// A charge limit, as the menu's slider and Settings' stepper read it:
@@ -21,38 +22,38 @@ public enum AccessibilityWording {
     /// A temperature in degrees Celsius, as on screen: "40 degrees Celsius",
     /// "35.5 degrees Celsius".
     public static func celsius(_ value: Double, locale: Locale = .current) -> String {
-        "\(number(value, fractionDigits: 0...1, locale: locale)) degrees Celsius"
+        QuantityUnit.degreesCelsius.words(number(value, fractionDigits: 0...1, locale: locale))
     }
 
     /// A battery voltage from millivolts, with two decimals as on screen:
     /// "12.43 volts".
     public static func volts(fromMillivolts value: Int, locale: Locale = .current) -> String {
-        "\(number(Double(value) / 1000, fractionDigits: 2...2, locale: locale)) volts"
+        QuantityUnit.volts.words(number(Double(value) / 1000, fractionDigits: 2...2, locale: locale))
     }
 
     /// A battery current: "312 milliamps", negative while discharging.
     public static func milliamps(_ value: Int, locale: Locale = .current) -> String {
-        counted(value, "milliamp", "milliamps", locale: locale)
+        QuantityUnit.milliamps.words(number(Double(value), locale: locale))
     }
 
     /// The adapter's power: "70 watts".
     public static func watts(_ value: Int, locale: Locale = .current) -> String {
-        counted(value, "watt", "watts", locale: locale)
+        QuantityUnit.watts.words(number(Double(value), locale: locale))
     }
 
     /// The full-charge capacity, and the design capacity with the ratio
     /// when both are known: "6,131 of 6,249 milliamp-hours (98%)".
     public static func capacity(fullChargeMilliampHours full: Int, designMilliampHours design: Int?, percentOfDesign ratio: Double?, locale: Locale = .current) -> String {
         guard let design, let ratio else {
-            return counted(full, "milliamp-hour", "milliamp-hours", locale: locale)
+            return QuantityUnit.milliampHours.words(number(Double(full), locale: locale))
         }
         let percent = number(ratio, locale: locale)
-        return "\(number(Double(full), locale: locale)) of \(number(Double(design), locale: locale)) milliamp-hours (\(percent)%)"
+        return "\(number(Double(full), locale: locale)) of \(QuantityUnit.milliampHours.words(number(Double(design), locale: locale))) (\(percent)%)"
     }
 
     /// A duration in whole hours: "1 hour", "12 hours".
     public static func hours(_ value: Int, locale: Locale = .current) -> String {
-        counted(value, "hour", "hours", locale: locale)
+        "\(number(Double(value), locale: locale)) \(abs(value) == 1 ? "hour" : "hours")"
     }
 
     /// Announced when Copy Diagnostics has put the report on the clipboard.
@@ -60,10 +61,6 @@ public enum AccessibilityWording {
 
     private static func number(_ value: Double, fractionDigits: ClosedRange<Int> = 0...0, locale: Locale) -> String {
         value.formatted(.number.precision(.fractionLength(fractionDigits)).locale(locale))
-    }
-
-    private static func counted(_ value: Int, _ one: String, _ many: String, locale: Locale) -> String {
-        "\(number(Double(value), locale: locale)) \(abs(value) == 1 ? one : many)"
     }
 }
 

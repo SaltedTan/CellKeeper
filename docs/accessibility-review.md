@@ -55,12 +55,12 @@ render is possible; Zoom and Hover Text are the system's aids there.
 
 ## Results
 
-All must and should findings are fixed, and every nit but G10 (deferred
-below); M14 and G9 were fixed in a follow-up (below, D110). Verified in the accessibility tree after the fixes:
-the slider and steppers carry their value with its unit; the battery
-header, the menu's labelled values, the Battery details rows, the
-diagnostics rows and the activity events are one element each, and no
-element has an unknown role (33 before, 0 after); "Charging control" and
+All must and should findings are fixed, and so is every nit: M14 and G9
+in one follow-up (D110), G10 in another (D111), both below. Verified in
+the accessibility tree after the fixes: the slider and steppers carry
+their value with its unit; the battery header, the menu's labelled
+values, the Battery details rows, the diagnostics rows and the activity
+events are one element each, and no element has an unknown role (33 before, 0 after); "Charging control" and
 "Charge limit" are headings; the limit segments, Cancel and OK buttons and
 weekday buttons have their full names; the dialogs' default and cancel
 buttons are as before. The status item reads "CellKeeper, 80%, Not
@@ -106,23 +106,34 @@ once" keeps its help tag as AXHelp, and an enabled "Discharge Now…" has
 none, as before; the Settings button's title element is still "Discharge
 to the limit" (D110).
 
-### Deferred
+### Follow-up: units in Settings › Diagnostics (G10)
 
-- **G10** (nit): Settings › Diagnostics shows the report's values ("12427
-  mV"), whose units VoiceOver reads letter by letter. Spoken units there
-  need a spoken form in Core's section model, which the golden-tested
-  report shares.
+- **G10** (nit), Settings › Diagnostics' units (D111). The section model
+  keeps a number with a unit as a quantity, which the report and the tab
+  write as before ("12427 mV", "31 °C"; the golden tests are unchanged)
+  and VoiceOver reads in words, with the menu's words and the locale's
+  numbers: "Voltage, 12,427 millivolts", "Current, -845 milliamps",
+  "Full-charge capacity, 6,131 milliamp-hours", "Adapter, 70 watts",
+  "Temperature protection, on (pause 40 degrees Celsius, resume 35
+  degrees Celsius)", and one of a unit in the singular ("1 milliamp").
+  Temperatures in the policy's sentences are read so too ("Reason,
+  Battery at 41.5 degrees Celsius (pause at 40 degrees Celsius); charging
+  paused."). Verified in the accessibility tree of the harness, before and
+  after: the rows with a unit read their units in words, and every other
+  row and every element's role are as before. A test over every
+  diagnostics fixture requires words for each row whose value writes a
+  unit's symbol.
 
 ### For the owner's Mac
 
 With VoiceOver: the slider's value and its 1% steps (M1, M2), the
 announcements of a refused setting and of Copy Diagnostics (G2, G4), the
-weekly Start picker reading the time it shows (W6), and a disabled
-"Charge to 100% once" or "Discharge Now…" giving its reason as a hint
-(M14, G9). With Full Keyboard Access: Tab through the menu and Settings,
-and the slider with the arrow keys (M2). With Increase Contrast: the
-warning and error text (M6). These belong with the other owner-only
-checks in issue #89.
+weekly Start picker reading the time it shows (W6), a disabled "Charge to
+100% once" or "Discharge Now…" giving its reason as a hint (M14, G9), and
+the Diagnostics rows reading their units in words (G10). With Full
+Keyboard Access: Tab through the menu and Settings, and the slider with
+the arrow keys (M2). With Increase Contrast: the warning and error text
+(M6). These belong with the other owner-only checks in issue #89.
 
 ## Findings
 
@@ -165,7 +176,7 @@ checks in issue #89.
 | G7 | Activity rows, `SettingsView.swift:578-592` | Kind, time and message are three elements in one row | nit | Fixed: one element |
 | G8 | About title, `SettingsView.swift:691-692` | Not a heading | nit | Fixed |
 | G9 | "Discharge Now…" disabled, `SettingsView.swift:98-101` | Why it is disabled is not shown | nit | Fixed in the follow-up: the reason under the row's label and as the button's hint (D110) |
-| G10 | Diagnostics values with units, `DiagnosticsReport.swift` (Core) | "12427 mV", "6131 mAh": abbreviations, as in the report the tab mirrors | nit | Deferred |
+| G10 | Diagnostics values with units, `DiagnosticsReport.swift` (Core) | "12427 mV", "6131 mAh": abbreviations, as in the report the tab mirrors | nit | Fixed in a follow-up: units in words ("Voltage, 12,427 millivolts"), the report unchanged (D111) |
 | G11 | Form sections, toggles, pickers, buttons, date pickers | Section titles are headings; every control has its label as title element (verified) | pass | |
 | G12 | Confirmation dialogs, `SettingsView.swift:102-110, 326-330, 500-504, 514-518` | Verified: Escape is Cancel in each; Return is the action in "Start Discharge", "Use macOS Charge Limit" and "Yes, my limit is 100%"; "Discard Record" (`role: .destructive`) has no default button | pass | |
 | G13 | Diagnostics save failure alert, `SettingsView.swift:29-33`; quit warning `CellKeeperApp.swift:68-77`; save panel `AppModel.swift:605-644` | Standard alerts (announced by VoiceOver, OK or Quit as default) and the standard save panel | pass | |
