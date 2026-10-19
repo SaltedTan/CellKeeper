@@ -261,8 +261,10 @@ decision after that result.
   with every precondition in `safety.md`.
 
 There has been a test Mac since 2026-10-19 (the maintainer's, once no
-other battery tool is installed). A helper backend still needs an Apple
-Developer ID (phase 4b).
+other battery tool is installed). Distributing a helper backend to other
+Macs still needs an Apple Developer ID (phase 4b); a local build on the
+maintainer's Mac can use the free Personal Team signing (unverified with
+`SMAppService`; a manual `sudo` launch-daemon install is the fallback).
 
 ## Later
 

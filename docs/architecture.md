@@ -1508,8 +1508,11 @@ candidates, in the order we intend to evaluate them:
 2. **Privileged helper (`CellKeeperHelper`).** CellKeeper's own charge
    control, for limits at any level, is the current priority (owner decision,
    2026-10-09; roadmap milestone 4). Its foundations are developed against a
-   simulated control first (phase 4a). Installing the helper needs a
-   Developer ID (phase 4b), and hardware control needs a mechanism verified
+   simulated control first (phase 4a). Distributing the helper needs a
+   Developer ID (phase 4b); a local build on the maintainer's Mac can be
+   signed with a free Personal Team (owner decision, 2026-10-19; unverified
+   with `SMAppService`, with a manual `sudo` launch-daemon install as the
+   fallback). Hardware control needs a mechanism verified
    on a test Mac and every precondition in `safety.md` (phase 4c; the
    owner's `ChargeInhibit` probe of research note 09 is its first step).
    Design (see [04](research/04-privileged-helper.md)): `SMAppService` launch
