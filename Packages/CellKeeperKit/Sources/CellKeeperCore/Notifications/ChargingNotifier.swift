@@ -59,6 +59,11 @@ public protocol NotificationPosting: Sendable {
     /// the system's answer for a bounded time, or until cancelled
     /// (``NotificationPostResult/unconfirmed``).
     func add(_ notification: PlannedNotification, in generation: NotificationGeneration) async -> NotificationPostResult
+    /// Removes the notifications with these identifiers
+    /// (``PlannedNotification/identifier``) from Notification Center, and
+    /// any not shown yet, after every hand-over already queued. Asks the
+    /// user nothing and returns without waiting for the system.
+    func remove(identifiers: [String]) async
 }
 
 /// Turns the controller's statuses into notifications, if the user opted in.
@@ -112,6 +117,11 @@ public final class ChargingNotifier {
     /// is still the latest when it arrives.
     private var permissionOperation = 0
     private var isShutDown = false
+    /// How many times each identifier was withdrawn. A post captures the
+    /// count when it is queued and is dropped if the count has changed by
+    /// the time it would be handed over, so a request withdrawn while it
+    /// waited is never posted.
+    private var withdrawals: [String: Int] = [:]
 
     /// - Parameter uptime: monotonic seconds for the planner's minimum
     ///   intervals. Defaults to `ContinuousClock`, which keeps counting
@@ -190,7 +200,11 @@ public final class ChargingNotifier {
     /// Returns without waiting for anything.
     public func observe(_ status: ControllerStatus, trigger: EvaluationTrigger) {
         guard !isShutDown else { return }
-        let planned = planner.plan(status, trigger: trigger, uptime: uptime(), isDelivering: optIn.isDelivering)
+        let plan = planner.planAll(status, trigger: trigger, uptime: uptime(), isDelivering: optIn.isDelivering)
+        if !plan.withdrawals.isEmpty, optIn.isEnabled {
+            withdraw(plan.withdrawals)
+        }
+        let planned = plan.notifications
         guard !planned.isEmpty else { return }
         guard postTasks.count < Self.maximumPendingPosts else {
             let kinds = planned.map(\.kind.rawValue).joined(separator: ", ")
@@ -201,6 +215,7 @@ public final class ChargingNotifier {
         let previous = lastPost
         let number = nextPostTask
         nextPostTask += 1
+        let queuedWithdrawals = withdrawals
         // Runs on the main actor, so it cannot start before it is recorded.
         // It refers to the notifier only between suspensions, so a post
         // waiting for the system never keeps it alive.
@@ -218,7 +233,39 @@ public final class ChargingNotifier {
                     CellKeeperLog.app.notice("Notification not posted (\(notification.kind.rawValue, privacy: .public)): macOS does not show CellKeeper's notifications")
                     continue
                 }
+                if let self, self.withdrawals[notification.identifier] != queuedWithdrawals[notification.identifier] {
+                    CellKeeperLog.app.notice("Notification not posted (\(notification.kind.rawValue, privacy: .public)): it was withdrawn while it waited")
+                    continue
+                }
                 Self.log(await poster.add(notification, in: generation), for: notification.kind)
+            }
+            self?.postTasks[number] = nil
+        }
+        lastPost = task
+        postTasks[number] = task
+    }
+
+    /// Withdraws notifications that no longer hold: a post of one still
+    /// waiting is dropped, and the system is asked to remove them, after
+    /// every post queued before, so one being handed over is removed once
+    /// shown. Within the current generation only; never waits.
+    private func withdraw(_ identifiers: [String]) {
+        for identifier in identifiers {
+            withdrawals[identifier, default: 0] += 1
+        }
+        guard postTasks.count < Self.maximumPendingPosts else {
+            CellKeeperLog.app.error("Notifications not withdrawn: too many are waiting for the system")
+            return
+        }
+        let generation = generation
+        let previous = lastPost
+        let number = nextPostTask
+        nextPostTask += 1
+        let task = Task { [weak self, poster] in
+            await previous?.value
+            if generation.isCurrent, !Task.isCancelled {
+                await poster.remove(identifiers: identifiers)
+                CellKeeperLog.app.notice("Notifications withdrawn: \(identifiers.count, privacy: .public)")
             }
             self?.postTasks[number] = nil
         }

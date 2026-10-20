@@ -153,14 +153,27 @@ public enum NotificationWording {
         PlannedNotification(
             kind: NotificationKind.calibration(request),
             title: CalibrationWording.title(request),
-            body: CalibrationWording.text(request, atRequest: true, now: status.lastEvaluation ?? Date())
+            body: CalibrationWording.text(request, atRequest: true, now: status.lastEvaluation ?? Date()),
+            identifier: status.calibration.session.map { calibrationIdentifier(session: $0.id, request: request) }
         )
+    }
+
+    /// A calibration request's own identifier: its session and what it
+    /// asks, a rest asked again being a new one.
+    static func calibrationIdentifier(session: UUID, request: CalibrationRequest) -> String {
+        let what = switch request {
+        case .unplug: "unplug"
+        case .rest: "rest"
+        case .restAgain: "restAgain"
+        case .plugIn: "plugIn"
+        }
+        return "calibration.\(session.uuidString).\(what)"
     }
 
     /// A calibration that finished or ended by itself.
     static func calibrationEnded(_ report: CalibrationReport, status: ControllerStatus) -> PlannedNotification {
         let words = CalibrationWording.endNotification(report, status: status)
-        return PlannedNotification(kind: report.end.isCompleted ? .calibrationFinished : .calibrationEndedEarly, title: words.title, body: words.body)
+        return PlannedNotification(kind: report.end.isCompleted ? .calibrationFinished : .calibrationEndedEarly, title: words.title, body: words.body, identifier: "calibration.\(report.id.uuidString).end")
     }
 
     private static func titled(_ title: String, _ status: ControllerStatus) -> String {

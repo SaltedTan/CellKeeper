@@ -23,6 +23,10 @@ public struct SystemNotificationPoster: NotificationPosting {
     /// default, one the test fires in tests.
     typealias TimeoutScheduler = @Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void
 
+    /// Removes delivered and pending notifications by identifier; the
+    /// system's center by default, a recorder in tests.
+    typealias Removal = @Sendable ([String]) -> Void
+
     /// How long a post waits for the center's answer before its outcome
     /// counts as unknown (``NotificationPostResult/unconfirmed``).
     static let answerBound: TimeInterval = 30
@@ -33,6 +37,7 @@ public struct SystemNotificationPoster: NotificationPosting {
     static let maximumQueuedHandOvers = 8
 
     private let submission: Submission
+    private let removal: Removal
     private let answerBound: TimeInterval
     private let scheduleTimeout: TimeoutScheduler
     /// Every hand-over runs here, one at a time: a system call that blocks
@@ -43,11 +48,16 @@ public struct SystemNotificationPoster: NotificationPosting {
     public init() {
         self.init(submission: { request, completion in
             UNUserNotificationCenter.current().add(request, withCompletionHandler: completion)
+        }, removal: { identifiers in
+            let center = UNUserNotificationCenter.current()
+            center.removePendingNotificationRequests(withIdentifiers: identifiers)
+            center.removeDeliveredNotifications(withIdentifiers: identifiers)
         })
     }
 
     init(
         submission: @escaping Submission,
+        removal: @escaping Removal = { _ in },
         answerBound: TimeInterval = SystemNotificationPoster.answerBound,
         scheduleTimeout: @escaping TimeoutScheduler = { seconds, expire in
             // Not on the hand-over queue, which a blocked system call holds.
@@ -56,6 +66,7 @@ public struct SystemNotificationPoster: NotificationPosting {
         queueLimit: Int = SystemNotificationPoster.maximumQueuedHandOvers
     ) {
         self.submission = submission
+        self.removal = removal
         self.answerBound = answerBound
         self.scheduleTimeout = scheduleTimeout
         self.queuedHandOvers = QueuedHandOvers(limit: queueLimit)
@@ -124,11 +135,20 @@ public struct SystemNotificationPoster: NotificationPosting {
         }
     }
 
+    /// Runs on the hand-over queue, after every hand-over already queued,
+    /// so a notification being handed over is removed once it is shown.
+    public func remove(identifiers: [String]) async {
+        let removal = removal
+        handOverQueue.async {
+            removal(identifiers)
+        }
+    }
+
     static func request(for notification: PlannedNotification) -> UNNotificationRequest {
         let content = UNMutableNotificationContent()
         content.title = notification.title
         content.body = notification.body
-        return UNNotificationRequest(identifier: notification.kind.replacementKey, content: content, trigger: nil)
+        return UNNotificationRequest(identifier: notification.identifier, content: content, trigger: nil)
     }
 
     /// An error's numeric code, without its description, which may carry

@@ -67,8 +67,10 @@ public enum NotificationKind: String, Sendable, CaseIterable {
 
     /// Identifies the notification to the system, so a newer one of the
     /// same kind replaces an older one in Notification Center. A restore's
-    /// resolution replaces its warning, and a calibration's latest request
-    /// or end replaces the one before. Not shown to the user.
+    /// resolution replaces its warning. A calibration's notifications share
+    /// one key for grouping, but each is posted under its own identifier
+    /// (``PlannedNotification/identifier``) and withdrawn when it no longer
+    /// holds. Not shown to the user.
     public var replacementKey: String {
         switch self {
         case .restoreUnconfirmed, .restoreResolved: "restore"
@@ -95,11 +97,34 @@ public struct PlannedNotification: Sendable, Equatable {
     public var kind: NotificationKind
     public var title: String
     public var body: String
+    /// Identifies it to the system: a newer notification with the same
+    /// identifier replaces it in Notification Center, and a withdrawal
+    /// removes it. The kind's ``NotificationKind/replacementKey``, except for
+    /// a calibration's, each of which has its own (its session and what it
+    /// asks), so that one that no longer holds can be withdrawn alone.
+    public var identifier: String
 
-    public init(kind: NotificationKind, title: String, body: String) {
+    public init(kind: NotificationKind, title: String, body: String, identifier: String? = nil) {
         self.kind = kind
         self.title = title
         self.body = body
+        self.identifier = identifier ?? kind.replacementKey
+    }
+}
+
+/// What one status calls for: notifications to post, and earlier ones to
+/// withdraw.
+public struct NotificationPlan: Sendable, Equatable {
+    public var notifications: [PlannedNotification]
+    /// The identifiers of notifications planned earlier that no longer
+    /// hold: a calibration's request that was done, asked again or ended
+    /// with its session. To be removed from Notification Center, and not
+    /// posted if still waiting to be.
+    public var withdrawals: [String]
+
+    public init(notifications: [PlannedNotification] = [], withdrawals: [String] = []) {
+        self.notifications = notifications
+        self.withdrawals = withdrawals
     }
 }
 
@@ -138,8 +163,11 @@ public struct PlannedNotification: Sendable, Equatable {
 ///   session's request begins: a request is identified by the session and
 ///   what it asks (a rest asked again is a new one), and a session's end
 ///   by ``CalibrationStatus/endedCount``. They follow the same rules as an
-///   override's end: only from automatic evaluations, never replayed. The
-///   menu shows every request whether or not one is posted.
+///   override's end: only from automatic evaluations, never replayed, so a
+///   request that begins on the owner's own command appears only in the
+///   menu. The menu shows every request whether or not one is posted. A
+///   request that was planned is withdrawn (``NotificationPlan/withdrawals``)
+///   once it no longer holds: done, asked again, or ended with its session.
 /// - **No replay.** Nothing true in the first status is reported, except
 ///   the safety kinds (``NotificationKind/isSafety``). Statuses of the
 ///   user's own commands (settings, overrides, a schedule, backend switch,
@@ -193,6 +221,12 @@ public struct NotificationPlanner: Sendable {
     /// ``CalibrationStatus/endedCount`` when last seen; nil before the
     /// first status, which only sets it.
     private var calibrationsEndedSeen: Int?
+    /// The identifier of the calibration request last planned for posting,
+    /// while it still holds: withdrawn once it is done, asked again or ended
+    /// with its session. A request that was only seen, never planned (one
+    /// the owner's own command began, or one while notifications were not
+    /// delivered), has nothing to withdraw.
+    private var calibrationRequestPlanned: String?
 
     private struct CalibrationRequestSeen: Equatable {
         var session: UUID
@@ -213,6 +247,13 @@ public struct NotificationPlanner: Sendable {
     ///   - isDelivering: false while notifications are off or macOS does not
     ///     show them; the arming is updated and nothing is returned.
     public mutating func plan(_ status: ControllerStatus, trigger: EvaluationTrigger, uptime: TimeInterval, isDelivering: Bool) -> [PlannedNotification] {
+        planAll(status, trigger: trigger, uptime: uptime, isDelivering: isDelivering).notifications
+    }
+
+    /// The notifications `status` calls for, and the earlier ones it
+    /// withdraws (``NotificationPlan``), by the rules of
+    /// ``plan(_:trigger:uptime:isDelivering:)``.
+    public mutating func planAll(_ status: ControllerStatus, trigger: EvaluationTrigger, uptime: TimeInterval, isDelivering: Bool) -> NotificationPlan {
         defer { previous = status }
         let isBackendChanged = previous.map { $0.backend.identifier != status.backend.identifier } ?? false
         if isBackendChanged {
@@ -279,8 +320,17 @@ public struct NotificationPlanner: Sendable {
         if let session = status.calibration.session, let request {
             requestSeen = CalibrationRequestSeen(session: session.id, request: request)
         }
+        var withdrawals: [String] = []
+        let currentIdentifier = requestSeen.map { NotificationWording.calibrationIdentifier(session: $0.session, request: $0.request) }
+        if let planned = calibrationRequestPlanned, planned != currentIdentifier {
+            withdrawals.append(planned)
+            calibrationRequestPlanned = nil
+        }
         if previous != nil, let requestSeen, let request, requestSeen != calibrationRequestSeen {
-            _ = offer(NotificationKind.calibration(request), NotificationWording.calibrationRequest(request, status: status))
+            let notification = NotificationWording.calibrationRequest(request, status: status)
+            if offer(NotificationKind.calibration(request), notification) {
+                calibrationRequestPlanned = notification.identifier
+            }
         }
         calibrationRequestSeen = requestSeen
         if let seen = calibrationsEndedSeen, status.calibration.endedCount != seen, let report = status.calibration.outcome {
@@ -305,7 +355,7 @@ public struct NotificationPlanner: Sendable {
         } else {
             restoreEpisode = nil
         }
-        return planned
+        return NotificationPlan(notifications: planned, withdrawals: withdrawals)
     }
 
     private func isOutsideInterval(_ kind: NotificationKind, uptime: TimeInterval) -> Bool {
