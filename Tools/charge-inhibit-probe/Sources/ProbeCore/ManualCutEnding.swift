@@ -83,16 +83,27 @@ public final class EndingWatchdog: @unchecked Sendable {
 /// report and takes the bounded end (``BoundedEnd``): the save, once for the
 /// run (``OneShotSave``), then the console, then the exit. Each step is a
 /// part, so the tests drive the order and the waits.
+///
+/// The sleep queue is drained once for the run, within its bound, however
+/// many paths end (``BoundedOnce``). If that drain does not complete, the
+/// end never touches the sleep watch again (code review r3 of #101, must
+/// 2): its lock may be held by the teardown or an acknowledgement that has
+/// not finished. The report is then rendered from the lock-free sleep log
+/// alone, says that the sleep notices are unavailable, and no confirmation
+/// of recovery counts (``ManualCutFlow/reconcile(with:drained:)``).
 public final class ManualCutEnding: @unchecked Sendable {
     public struct Parts: Sendable {
-        /// Deregisters from sleep notifications and drains their queue,
-        /// within ``EndingWatchdog/sleepDrainBound``; returns whether it
-        /// did.
-        public var drainSleepQueue: @Sendable () -> Bool
-        /// The sleep notifications received.
+        /// Deregisters from sleep notifications and drains their queue. It
+        /// may block (the sleep watch's lock, a callback that runs), so it
+        /// runs once, on a thread of its own, waited for at most
+        /// ``EndingWatchdog/sleepDrainBound``.
+        public var stopSleepNotifications: @Sendable () -> Void
+        /// The sleep notifications received. It takes the sleep watch's
+        /// lock, so it is read only after the drain has completed.
         public var sleepNotices: @Sendable () -> [ProbeRun.SleepNotice]
-        /// The report: the flow is nil when the probe refused to start.
-        public var render: @Sendable (_ outcome: ManualCutOutcome, _ flow: ManualCutFlow?, _ sleepNotices: [ProbeRun.SleepNotice]) -> String
+        /// The report: the flow is nil when the probe refused to start; the
+        /// sleep notices are nil when the drain did not complete.
+        public var render: @Sendable (_ outcome: ManualCutOutcome, _ flow: ManualCutFlow?, _ sleepNotices: [ProbeRun.SleepNotice]?) -> String
         /// Saves the report (``ReportFile/persist(_:)``); returns whether it
         /// was saved.
         public var persist: @Sendable (_ report: String) -> Bool
@@ -101,13 +112,13 @@ public final class ManualCutEnding: @unchecked Sendable {
         public var savedLine: @Sendable (_ saved: Bool) -> String
 
         public init(
-            drainSleepQueue: @escaping @Sendable () -> Bool,
+            stopSleepNotifications: @escaping @Sendable () -> Void,
             sleepNotices: @escaping @Sendable () -> [ProbeRun.SleepNotice],
-            render: @escaping @Sendable (_ outcome: ManualCutOutcome, _ flow: ManualCutFlow?, _ sleepNotices: [ProbeRun.SleepNotice]) -> String,
+            render: @escaping @Sendable (_ outcome: ManualCutOutcome, _ flow: ManualCutFlow?, _ sleepNotices: [ProbeRun.SleepNotice]?) -> String,
             persist: @escaping @Sendable (_ report: String) -> Bool,
             savedLine: @escaping @Sendable (_ saved: Bool) -> String
         ) {
-            self.drainSleepQueue = drainSleepQueue
+            self.stopSleepNotifications = stopSleepNotifications
             self.sleepNotices = sleepNotices
             self.render = render
             self.persist = persist
@@ -119,12 +130,21 @@ public final class ManualCutEnding: @unchecked Sendable {
     private let session: ManualCutSession
     private let parts: Parts
     private let oneSave: OneShotSave
+    private let sleepDrain: BoundedOnce
 
-    public init(session: ManualCutSession, watchdog: EndingWatchdog = EndingWatchdog(), parts: Parts) {
+    /// `sleepDrainBound`: the most the end waits for the sleep queue's
+    /// drain; the tests shorten it.
+    public init(
+        session: ManualCutSession,
+        watchdog: EndingWatchdog = EndingWatchdog(),
+        sleepDrainBound: Double = EndingWatchdog.sleepDrainBound,
+        parts: Parts
+    ) {
         self.session = session
         self.watchdog = watchdog
         self.parts = parts
         oneSave = OneShotSave(watchdog: watchdog)
+        sleepDrain = BoundedOnce(within: sleepDrainBound, parts.stopSleepNotifications)
     }
 
     /// Whether the report's save has finished.
@@ -140,9 +160,8 @@ public final class ManualCutEnding: @unchecked Sendable {
     public func endMainPath(refusal: ManualCutOutcome? = nil, tearDown: () -> Void) -> (status: Int32, drained: Bool) {
         watchdog.arm()
         tearDown()
-        let flow = session.reconciledFlow(drainSleepQueue: parts.drainSleepQueue)
-        let notices = parts.sleepNotices()
-        let outcome = refusal ?? ManualCutOutcome.of(flow, sleepNotices: notices)
+        let (flow, notices) = reconciled()
+        let outcome = refusal ?? ManualCutOutcome.of(flow, sleepNotices: notices ?? [])
         let text = parts.render(outcome, refusal == nil ? flow : nil, notices)
         var result = (status: outcome.exitStatus, drained: false)
         finish(text, status: outcome.exitStatus) { result = ($0, $1) }
@@ -154,14 +173,22 @@ public final class ManualCutEnding: @unchecked Sendable {
     /// (``ManualCutFlow/secondSignal(_:)``); `exit` ends the process.
     public func endAtSecondSignal(_ number: Int32, exit: @escaping (Int32) -> Void) {
         watchdog.arm()
-        let flow = session.reconciledFlow(drainSleepQueue: parts.drainSleepQueue)
+        let (flow, notices) = reconciled()
         let second = flow.secondSignal(number)
         if let banner = second.banner {
             session.console.enqueue("\n\(ManualCutFlow.signalName(number)) again: quitting. " + ManualCut.text(banner))
         }
-        let notices = parts.sleepNotices()
-        let text = parts.render(ManualCutOutcome.of(flow, sleepNotices: notices), flow, notices)
+        let text = parts.render(ManualCutOutcome.of(flow, sleepNotices: notices ?? []), flow, notices)
         finish(text, status: second.exitStatus) { status, _ in exit(status) }
+    }
+
+    /// The flow after the sleep queue's drain and the sleep log's last
+    /// read; and the sleep notices, only if the drain completed: if not,
+    /// the sleep watch's lock is never taken again.
+    private func reconciled() -> (flow: ManualCutFlow, sleepNotices: [ProbeRun.SleepNotice]?) {
+        let drained = sleepDrain.run()
+        let flow = session.reconciledFlow { drained }
+        return (flow, drained ? parts.sleepNotices() : nil)
     }
 
     /// The bounded end: the save (or the wait for another path's), then the
@@ -178,5 +205,50 @@ public final class ManualCutEnding: @unchecked Sendable {
             drain: { console.drain(timeout: $0) },
             exit: exit
         ))
+    }
+}
+
+/// Work run once, on a thread of its own, and waited for against one
+/// deadline: the first call starts it, and every call, from any thread,
+/// waits until it has finished or until `seconds` after it started, then
+/// says whether it finished. A later call never starts it again, and never
+/// waits past that deadline. If the work never finishes, its thread is left
+/// to it.
+public final class BoundedOnce: @unchecked Sendable {
+    private let seconds: Double
+    private let work: @Sendable () -> Void
+    private let condition = NSCondition()
+    private var deadline: Date?
+    private var finished = false
+
+    public init(within seconds: Double, _ work: @escaping @Sendable () -> Void) {
+        self.seconds = seconds
+        self.work = work
+    }
+
+    /// Starts the work if no call has; waits for it, at most until its
+    /// deadline. Returns whether it finished.
+    public func run() -> Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        let deadline: Date
+        if let started = self.deadline {
+            deadline = started
+        } else {
+            deadline = Date(timeIntervalSinceNow: seconds)
+            self.deadline = deadline
+            let work = work
+            Thread { [self] in
+                work()
+                condition.withLock {
+                    finished = true
+                    condition.broadcast()
+                }
+            }.start()
+        }
+        while !finished {
+            guard condition.wait(until: deadline) else { return finished }
+        }
+        return true
     }
 }

@@ -61,28 +61,32 @@ extension ManualCutTests {
         }
 
         /// `watch`'s ending for `driver`'s session, saving to `file`. Each
-        /// part logs when it runs; each report is numbered by its render.
+        /// part logs when it runs; each report is numbered by its render,
+        /// unless `report` renders it.
         static func ending(
             _ driver: SessionDriver,
             file: ReportFile,
             events: EventLog,
             watchdog: EndingWatchdog,
-            drainSleepQueue: @escaping @Sendable () -> Bool = { true },
-            sleepNotices: @escaping @Sendable () -> [ProbeRun.SleepNotice] = { [] }
+            sleepDrainBound: Double = EndingWatchdog.sleepDrainBound,
+            stopSleepNotifications: @escaping @Sendable () -> Void = {},
+            sleepNotices: @escaping @Sendable () -> [ProbeRun.SleepNotice] = { [] },
+            report: (@Sendable (_ outcome: ManualCutOutcome, _ flow: ManualCutFlow?, _ sleepNotices: [ProbeRun.SleepNotice]?) -> String)? = nil
         ) -> ManualCutEnding {
             let renders = Counter()
-            return ManualCutEnding(session: driver.session, watchdog: watchdog, parts: ManualCutEnding.Parts(
-                drainSleepQueue: {
+            return ManualCutEnding(session: driver.session, watchdog: watchdog, sleepDrainBound: sleepDrainBound, parts: ManualCutEnding.Parts(
+                stopSleepNotifications: {
                     events.add("drain")
-                    return drainSleepQueue()
+                    stopSleepNotifications()
                 },
                 sleepNotices: {
                     events.add("notices")
                     return sleepNotices()
                 },
-                render: { outcome, _, _ in
+                render: { outcome, flow, notices in
                     renders.add()
                     events.add("render")
+                    if let report { return report(outcome, flow, notices) }
                     return "report \(renders.value): exit \(outcome.exitStatus)\n"
                         + String(repeating: "a line of the report\n", count: 40)
                 },
@@ -247,6 +251,121 @@ extension ManualCutTests {
             #expect(!events.values.contains("second save"))
             // The second path found the watchdog armed and did not arm it again.
             #expect(events.values.filter { $0.hasPrefix("arm") }.count == 1)
+        }
+
+        /// A run whose restore was confirmed and whose last reading charges,
+        /// stopped by a signal in the after readings: without a sleep, it
+        /// ends with 2.
+        static func stoppedAfterAConfirmedRestore() -> SessionDriver {
+            let driver = SessionDriver(console: ConsoleWriter { _ in true })
+            let mark = ManualCutTests.ManualCutSessionTests.atRestoreReadBack(driver)
+            driver.type("restored00", at: mark + 190)
+            driver.read(.charging, at: mark + 191)
+            #expect(driver.session.signal(SIGINT) == .handled)
+            #expect(ManualCutOutcome.of(driver.session.snapshot, sleepNotices: []).exitStatus == 2)
+            driver.session.stopReminder()
+            return driver
+        }
+
+        /// The report as `watch` renders it.
+        static func realReport(_ outcome: ManualCutOutcome, _ flow: ManualCutFlow?, _ notices: [ProbeRun.SleepNotice]?) -> String {
+            ManualCutReport(
+                startedAt: "2026-10-20 12:00:00 +11:00", machine: ManualCutTests.ManualCutSupportTests.machine, hold: 180,
+                preconditionChecks: [], flow: flow, sleepNotices: notices, outcome: outcome
+            ).render()
+        }
+
+        @Test(
+            "Review r3's case: the sleep watch's lock is held forever and the drain times out; each ending never reads the notices, saves the report from the sleep log and exits (must 2)",
+            arguments: ["main path", "second signal"]
+        )
+        func lockHeldAfterTheDrainTimesOut(path endingPath: String) throws {
+            let path = Self.temporaryPath()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+            let events = EventLog()
+            // The sleep watch's lock, held by a teardown or an acknowledgement
+            // that never finishes: the drain and the notices both need it.
+            let held = DispatchSemaphore(value: 0)
+            defer { held.signal() }
+            let ending = Self.ending(
+                Self.stoppedAfterAConfirmedRestore(), file: file, events: events, watchdog: Self.watchdog(events),
+                sleepDrainBound: 0.3,
+                stopSleepNotifications: {
+                    held.wait()
+                    held.signal()
+                },
+                sleepNotices: {
+                    held.wait()
+                    held.signal()
+                    return []
+                },
+                report: Self.realReport
+            )
+            let statuses = EventLog()
+            let ended = Counter()
+            let start = Date()
+            Thread {
+                if endingPath == "main path" {
+                    statuses.add("\(ending.endMainPath(tearDown: {}).status)")
+                } else {
+                    ending.endAtSecondSignal(SIGINT) { statuses.add("\($0)") }
+                }
+                ended.add()
+            }.start()
+            #expect(eventually(timeout: 3) { ended.value == 1 }, "the ending blocked on the sleep watch's lock")
+            #expect(Date().timeIntervalSince(start) < 3)
+            #expect(!events.values.contains("notices"))
+            #expect(statuses.values == ["3"])
+            let report = try String(contentsOfFile: path, encoding: .utf8)
+            #expect(report.contains("sleep notices unavailable: the drain timed out"))
+            #expect(report.contains("CHECK RECOVERY FIRST"))
+            #expect(report.contains("could not be drained"))
+        }
+
+        @Test("After a drain that completed, the notices are read and reported; the report says nothing is unavailable")
+        func noticesAfterACompletedDrain() throws {
+            let path = Self.temporaryPath()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+            let events = EventLog()
+            let notice = ProbeRun.SleepNotice(time: 400, message: "kIOMessageCanSystemSleep")
+            let end = Self.ending(
+                Self.stoppedAfterAConfirmedRestore(), file: file, events: events, watchdog: Self.watchdog(events),
+                sleepNotices: { [notice] }, report: Self.realReport
+            ).endMainPath(tearDown: {})
+            #expect(end.status == 2)
+            #expect(events.values.filter { $0 == "notices" }.count == 1)
+            let report = try String(contentsOfFile: path, encoding: .utf8)
+            #expect(report.contains("+400.0 s: the system sent kIOMessageCanSystemSleep"))
+            #expect(!report.contains("unavailable"))
+        }
+
+        @Test("The sleep queue's drain runs once: a later call waits only until the first call's deadline, then returns at once")
+        func drainRunsOnceWithOneDeadline() {
+            let runs = Counter()
+            let gate = DispatchSemaphore(value: 0)
+            let once = BoundedOnce(within: 0.6) {
+                runs.add()
+                gate.wait()
+            }
+            let start = Date()
+            let first = Counter()
+            Thread {
+                if !once.run() { first.add() }
+            }.start()
+            Thread.sleep(forTimeInterval: 0.3)
+            #expect(!once.run())
+            let second = Date().timeIntervalSince(start)
+            #expect(second >= 0.55 && second < 0.85, "waited until \(second) s, not the first call's deadline")
+            let later = Date()
+            #expect(!once.run())
+            #expect(Date().timeIntervalSince(later) < 0.1)
+            #expect(eventually { first.value == 1 })
+            #expect(runs.value == 1)
+            gate.signal()
+            #expect(eventually { once.run() })
+            #expect(runs.value == 1)
         }
     }
 }

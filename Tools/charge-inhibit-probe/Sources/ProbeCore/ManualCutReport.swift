@@ -12,7 +12,10 @@ public struct ManualCutReport: Sendable {
     /// Nil if the probe refused before the owner was asked anything.
     public var flow: ManualCutFlow?
     public var sleepGuard: Report.SleepGuard?
-    public var sleepNotices: [ProbeRun.SleepNotice]
+    /// Nil when the end's drain of the sleep queue timed out, and the sleep
+    /// watch was not read again (code review r3 of #101, must 2); the sleep
+    /// log's occurrences are in the flow's events either way.
+    public var sleepNotices: [ProbeRun.SleepNotice]?
     /// The GO line's restore time, as the console showed it ("10:18:02"),
     /// if the cut was marked.
     public var restoreBy: String?
@@ -29,7 +32,7 @@ public struct ManualCutReport: Sendable {
         preconditionChecks: [Check],
         flow: ManualCutFlow? = nil,
         sleepGuard: Report.SleepGuard? = nil,
-        sleepNotices: [ProbeRun.SleepNotice] = [],
+        sleepNotices: [ProbeRun.SleepNotice]? = [],
         restoreBy: String? = nil,
         outcome: ManualCutOutcome? = nil,
         consoleSampleLinesDropped: Int = 0,
@@ -113,8 +116,12 @@ public struct ManualCutReport: Sendable {
             if let restoreBy {
                 out.append("GO line: restore by \(restoreBy)")
             }
-            for notice in sleepNotices {
-                out.append("+\(seconds(notice.time)): the system sent \(notice.message)")
+            if let sleepNotices {
+                for notice in sleepNotices {
+                    out.append("+\(seconds(notice.time)): the system sent \(notice.message)")
+                }
+            } else {
+                out.append("sleep notices unavailable: the drain timed out")
             }
             let count = { (phase: Sample.Phase) in flow.samples.filter { $0.phase == phase }.count }
             out.append("""

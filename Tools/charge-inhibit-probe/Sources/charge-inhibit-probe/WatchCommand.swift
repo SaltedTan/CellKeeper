@@ -24,9 +24,11 @@ import ProbeCore
 /// 5. The end (`ManualCutEnding`): arm the ending's watchdog first
 ///    (`EndingWatchdog`: SIGALRM's default action ends the process if the
 ///    end outlasts its bound); release the idle-sleep assertion; deregister
-///    from sleep notifications and drain their queue (at most 2 s), then
-///    read the sleep log once more, so that a sleep that began before a
-///    confirmation still makes it not count (`ManualCutFlow.reconcile`);
+///    from sleep notifications and drain their queue (once, at most 2 s),
+///    then read the sleep log once more, so that a sleep that began before a
+///    confirmation still makes it not count (`ManualCutFlow.reconcile`); if
+///    that drain did not complete, never touch the sleep watch again (its
+///    lock may be held) and render the report from the sleep log alone;
 ///    save the report, then queue it for the console, give the console at
 ///    most 2 s, and exit (`BoundedEnd`). A second signal takes the same
 ///    bounded path at once. The report is saved once (`OneShotSave`):
@@ -100,8 +102,10 @@ enum WatchCommand {
         let ending = ManualCutEnding(session: session, parts: ManualCutEnding.Parts(
             // Deregisters from sleep notifications and drains their queue,
             // so that a notification in flight has finished writing the
-            // sleep log.
-            drainSleepQueue: { runBounded(within: EndingWatchdog.sleepDrainBound) { sleepWatch.stop() } },
+            // sleep log. Once per run, at most 2 s.
+            stopSleepNotifications: { sleepWatch.stop() },
+            // Takes the sleep watch's lock: read only after that drain
+            // completed (must 2).
             sleepNotices: { sleepWatch.notices },
             render: { outcome, flow, notices in
                 ManualCutReport(
