@@ -44,6 +44,9 @@ restart, or anything SMC-based.
   `DisableInflow`, any other private assertion, and any change to the
   clean-room rule on third-party write encodings. Each needs a separate
   owner decision after this result.
+  *On 2026-10-20 the owner authorized the SMC adapter cut and a narrow
+  clean-room exception; the test is now a manual one, which the probe
+  only observes ([note 11](11-smc-adapter-cut.md) §2).*
 - **AlDente Pro's helper** (installed through Setapp) is being removed by the
   owner before the test. The owner cannot restart the Mac during this work
   (an agent session runs on it), so its absence is established read-only

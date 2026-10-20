@@ -66,7 +66,12 @@ maintainer's Mac, ran on 2026-10-19 and observed no effect on charging
 ([research note 09](docs/research/09-charge-inhibit-probe.md)). The
 second, of the private `DisableInflow` assertion, ran on 2026-10-20 and
 also observed no effect
-([research note 10](docs/research/10-disable-inflow-probe.md)).
+([research note 10](docs/research/10-disable-inflow-probe.md)). The
+third, of the SMC adapter cut (`CHIE`), which the owner authorized on
+2026-10-20, is designed as a manual test: the owner writes the key by hand
+with an existing open-source tool, and CellKeeper's probe only observes.
+It has not run yet
+([research note 11](docs/research/11-smc-adapter-cut.md)).
 
 ## Using macOS's Charge Limit (experimental)
 

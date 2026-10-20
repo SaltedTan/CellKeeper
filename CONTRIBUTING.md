@@ -23,6 +23,26 @@ documentation, public SDK headers, Apple open source, hardware
 documentation, and your own read-only observations. When you rely on a
 third-party claim, cite it as a claim, not as fact.
 
+**Exception (owner decision, 2026-10-20):** for CellKeeper's own charge
+control on Apple silicon, contributors may use these facts from
+OSI-licensed open-source projects: the name, type and size of the SMC
+adapter-cut key `CHIE`, the values those projects write to it, and the
+AppleSMC user-client interface needed to read and write one key. Each fact
+is cited in `docs/research` with its source and licence and treated as a
+third-party claim until verified on a test Mac. No code, comments or other
+text is copied, and no project's implementation structure (its files,
+types, functions or control flow); the wire-level facts needed to call the
+interface (the parameter block's fields, sizes and offsets, and the
+selector and command values) are used as facts. The implementation is
+written independently. Not covered: AlDente or any other proprietary or
+source-available tool, anything obtained from binaries, and any other key
+or mechanism (each needs its own owner decision). The owner may also use
+an OSI-licensed tool as an external test instrument, built and run outside
+the repository; nothing from it enters the repository, and CellKeeper
+never invokes it. This is a project rule, not a legal opinion or a
+licence-compatibility review. See
+[docs/research/11-smc-adapter-cut.md](docs/research/11-smc-adapter-cut.md).
+
 ### 2. Safety
 
 Read [docs/safety.md](docs/safety.md). In particular:
