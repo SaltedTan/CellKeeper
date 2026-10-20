@@ -200,6 +200,18 @@ public final class ManualCutSession: @unchecked Sendable {
         return .handled
     }
 
+    /// The console wrote the prompt of question `generation`: on the
+    /// writer's thread, which holds no lock of its own here.
+    private func published(_ generation: UInt64) {
+        send(.published(generation: generation, at: clock.now()))
+    }
+
+    /// Whether the open question's prompt has been written and the owner's
+    /// lines may answer it.
+    public var inputEligible: Bool {
+        lock.withLock { flow.inputEligible }
+    }
+
     /// Stops the reminder's timer; never waits for a handler that runs.
     public func stopReminder() {
         lock.withLock {
@@ -232,8 +244,16 @@ public final class ManualCutSession: @unchecked Sendable {
             case .discardInput:
                 input.discard()
                 discarded = true
-            case let .ask(question, repeated):
-                console.enqueue(Self.text(question, repeated: repeated))
+            case let .publish(question, generation):
+                // Input stays ineligible until the writer has written this
+                // prompt; then the flow discards pending input and only
+                // then takes answers. Nobody waits for the writer: it calls
+                // back.
+                console.enqueue(Self.text(question, repeated: false)) { [weak self] in
+                    self?.published(generation)
+                }
+            case let .remind(question):
+                console.enqueue(Self.text(question, repeated: true))
             case let .say(text):
                 console.enqueue(text)
             case let .banner(banner):

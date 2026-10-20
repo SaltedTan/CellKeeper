@@ -45,25 +45,43 @@ final class FakeInput: AnswerInput, @unchecked Sendable {
 }
 
 /// A console sink that blocks until the test lets it go, as a terminal that
-/// is not reading does.
+/// is not reading does; `then` sees each message once written.
 final class BlockingSink: @unchecked Sendable {
-    private let gate = DispatchSemaphore(value: 0)
-    private let lock = NSLock()
+    private let condition = NSCondition()
+    private var blocked: Bool
     private var lines: [String] = []
+    private let then: @Sendable (String) -> Void
+
+    init(blocked: Bool = true, then: @escaping @Sendable (String) -> Void = { _ in }) {
+        self.blocked = blocked
+        self.then = then
+    }
 
     var written: [String] {
-        lock.withLock { lines }
+        condition.withLock { lines }
     }
 
     lazy var sink: @Sendable (String) -> Void = { [self] text in
-        gate.wait()
-        lock.withLock { lines.append(text) }
-        gate.signal()
+        condition.lock()
+        while blocked {
+            condition.wait()
+        }
+        lines.append(text)
+        condition.unlock()
+        then(text)
     }
 
     /// Lets the sink write from now on.
     func open() {
-        gate.signal()
+        condition.withLock {
+            blocked = false
+            condition.broadcast()
+        }
+    }
+
+    /// Makes the sink block from now on, as a terminal that stops reading.
+    func close() {
+        condition.withLock { blocked = true }
     }
 }
 
@@ -93,8 +111,11 @@ struct SessionDriver {
         clock.set(time)
     }
 
+    /// Waits until the open question's prompt has been written, then types
+    /// `line`.
     func type(_ line: String, at time: Double) {
         clock.set(time)
+        _ = eventually { session.inputEligible }
         input.type(line)
         session.poll()
     }
@@ -168,11 +189,13 @@ struct ManualCutSessionTests {
         #expect(written.firstIndex(of: "RESTORE CHIE NOW")! < written.firstIndex(of: "last prompt")!)
     }
 
-    @Test("With a console that never writes, the reminder still makes the restore request and repeats it")
+    @Test("With a console that stops writing, the reminder still makes the restore request and repeats it")
     func reminderFiresWhileConsoleBlocked() {
-        let blocked = BlockingSink()
+        let blocked = BlockingSink(blocked: false)
         let driver = SessionDriver(console: ConsoleWriter(sink: blocked.sink))
         driver.toHold()
+        blocked.close()
+        let before = blocked.written.count
         let flow = driver.session.snapshot
         #expect(flow.stage == .hold)
         #expect(driver.session.reminderIsArmed)
@@ -183,14 +206,20 @@ struct ManualCutSessionTests {
         let shown = driver.session.snapshot.lastShownAt ?? 0
         driver.at(shown + 20)
         #expect(eventually { driver.session.snapshot.lastShownAt == shown + 20 })
-        #expect(blocked.written.isEmpty)
+        // The terminal took nothing more, and the restore question is not
+        // answerable until it does.
+        #expect(blocked.written.count <= before + 1)
+        #expect(!driver.session.inputEligible)
+        driver.session.stopReminder()
     }
 
-    @Test("With a console that never writes, a signal and the teardown return at once")
+    @Test("With a console that stops writing, a signal and the teardown return at once")
     func signalAndTeardownWhileConsoleBlocked() {
-        let blocked = BlockingSink()
+        let blocked = BlockingSink(blocked: false)
         let driver = SessionDriver(console: ConsoleWriter(sink: blocked.sink))
         driver.toHold()
+        blocked.close()
+        driver.session.console.enqueue("a prompt the terminal does not take")
         let start = Date()
         #expect(driver.session.signal(SIGINT) == .handled)
         #expect(driver.session.isEnded)

@@ -35,10 +35,22 @@ struct FlowDriver {
 
     /// The sleep latch, as the flow reads it with every event.
     var latch = SleepLatch.Snapshot.none
+    /// Whether the console writes every prompt at once, so that each new
+    /// question is published within the same step.
+    var publishesAtOnce = true
 
     @discardableResult
     mutating func send(_ event: ManualCutFlow.Event) -> [ManualCutFlow.Action] {
-        let result = flow.handle(event, latch: latch)
+        var result = flow.handle(event, latch: latch)
+        if publishesAtOnce {
+            var index = 0
+            while index < result.count {
+                if case let .publish(_, generation) = result[index] {
+                    result += flow.handle(.published(generation: generation, at: now), latch: latch)
+                }
+                index += 1
+            }
+        }
         actions += result
         return result
     }
@@ -139,14 +151,21 @@ struct FlowDriver {
 
     var outcome: ManualCutOutcome { ManualCutOutcome.of(flow, sleepNotices: []) }
 
-    /// The questions asked anew, in order (not reminders).
+    /// The questions published, in order (not reminders).
     var questionsAsked: [ManualCutQuestion] {
-        actions.compactMap { if case let .ask(question, false) = $0 { question } else { nil } }
+        actions.compactMap { if case let .publish(question, _) = $0 { question } else { nil } }
     }
 
     var banners: [ManualCutFlow.Banner] {
         actions.compactMap { if case let .banner(banner) = $0 { banner } else { nil } }
     }
+}
+
+/// Whether `actions` end with `question` published and then, once its
+/// prompt was written, pending input discarded.
+func endsPublishing(_ question: ManualCutQuestion, _ actions: [ManualCutFlow.Action]) -> Bool {
+    guard actions.count >= 2, case let .publish(published, _) = actions[actions.count - 2] else { return false }
+    return published == question && actions.last == .discardInput
 }
 
 @Suite("The manual adapter cut's questions, marks and endings (research note 11 §4.4–§4.8)")
@@ -191,7 +210,7 @@ struct ManualCutFlowTests {
     func firstReadAndBaseline() {
         var driver = FlowDriver()
         driver.begin()
-        #expect(driver.actions == [.discardInput, .ask(.firstRead, repeated: false)])
+        #expect(driver.actions == [.publish(.firstRead, generation: 1), .discardInput])
         #expect(!driver.flow.wantsReadings)
         driver.advance(by: 5)
         driver.type("start00")
@@ -200,7 +219,7 @@ struct ManualCutFlowTests {
         #expect(driver.flow.stage == .cutPrompt)
         let prompt = driver.flow.cutPromptAt ?? 0
         #expect(prompt >= 24 && prompt <= 27)
-        #expect(Array(driver.actions.suffix(2)) == [.discardInput, .ask(.cut, repeated: false)])
+        #expect(endsPublishing(.cut, driver.actions))
         #expect(driver.flow.samples.allSatisfy { $0.phase == .baseline })
     }
 
@@ -265,8 +284,8 @@ struct ManualCutFlowTests {
         #expect(actions == [
             .armReminder,
             .go(restoreBy: mark.unixTime + 180),
+            .publish(.cutReadBack, generation: driver.flow.questionGeneration),
             .discardInput,
-            .ask(.cutReadBack, repeated: false),
         ])
         #expect(driver.flow.reminderArmed)
         #expect(driver.flow.stage == .cutReadBack)
@@ -378,7 +397,7 @@ struct ManualCutFlowTests {
             driver.advance(by: 10)
             let actions = driver.type(typed)
             #expect(driver.flow.stage == .readFirst, "\(typed)")
-            #expect(actions.suffix(2) == [.discardInput, .ask(.readFirst, repeated: false)], "\(typed)")
+            #expect(endsPublishing(.readFirst, actions), "\(typed)")
             #expect(!driver.flow.cutConfirmed)
             #expect(driver.flow.readFirstReason != nil)
         }
@@ -436,12 +455,12 @@ struct ManualCutFlowTests {
         let mark = try #require(driver.flow.cutMark)
         let restoreAsked = try #require(driver.flow.lastShownAt)
         #expect(restoreAsked >= mark.time + 180 && restoreAsked < mark.time + 181)
-        #expect(driver.actions.suffix(2) == [.discardInput, .ask(.restore, repeated: false)])
+        #expect(endsPublishing(.restore, driver.actions))
         driver.advance(by: 3)
         let typedAt = driver.now
         let actions = driver.type("restorenow")
         #expect(driver.flow.restoreMark?.time == typedAt)
-        #expect(actions == [.discardInput, .ask(.restoreReadBack, repeated: false)])
+        #expect(actions == [.publish(.restoreReadBack, generation: driver.flow.questionGeneration), .discardInput])
         #expect(driver.flow.restoreCommandsRun == 1)
     }
 
@@ -510,7 +529,7 @@ struct ManualCutFlowTests {
         driver.type("cutfail")
         driver.advance(by: 5)
         let actions = driver.type("08")
-        #expect(actions == [.discardInput, .ask(.recheck, repeated: false)])
+        #expect(actions == [.publish(.recheck, generation: driver.flow.questionGeneration), .discardInput])
         #expect(driver.flow.restoreMark != nil)
         driver.advance(by: 10)
         driver.type("recheck00")
@@ -533,7 +552,7 @@ struct ManualCutFlowTests {
             driver.advance(by: 5)
             let actions = driver.type(typed)
             #expect(driver.flow.stage == .readFirst, "\(typed)")
-            #expect(actions.suffix(2) == [.discardInput, .ask(.readFirst, repeated: false)], "\(typed)")
+            #expect(endsPublishing(.readFirst, actions), "\(typed)")
             #expect(!driver.flow.restoreConfirmed)
         }
     }
@@ -623,7 +642,7 @@ struct ManualCutFlowTests {
             #expect(driver.flow.stage == stage)
             let actions = driver.sleep()
             #expect(actions.first == .banner(.restoreChieFirst), "\(stage)")
-            #expect(actions.suffix(2) == [.discardInput, .ask(.readFirst, repeated: false)], "\(stage)")
+            #expect(endsPublishing(.readFirst, actions), "\(stage)")
             #expect(driver.flow.stage == .readFirst)
             #expect(driver.flow.sleptAfterCutPrompt)
             driver.type("00")
@@ -639,7 +658,7 @@ struct ManualCutFlowTests {
         driver.advance(by: 1)
         let actions = driver.sleep()
         #expect(!actions.contains(.discardInput))
-        #expect(!actions.contains { if case .ask = $0 { true } else { false } })
+        #expect(!actions.contains { if case .publish = $0 { true } else { false } })
         #expect(driver.flow.stage == .after)
         driver.run(until: .ended, limit: 400)
         let notices = [ProbeRun.SleepNotice(time: driver.flow.sleeps[0], message: "kIOMessageSystemWillSleep")]
@@ -695,9 +714,9 @@ struct ManualCutFlowTests {
         driver.now = shown + 20
         driver.latch = SleepLatch.Snapshot(sequence: driver.latch.sequence + 1, time: shown + 19)
         let actions = driver.reminderTick()
-        #expect(!actions.contains(.ask(.restoreReadBack, repeated: true)))
+        #expect(!actions.contains(.remind(.restoreReadBack)))
         #expect(actions.first == .banner(.restoreChieFirst))
-        #expect(actions.suffix(2) == [.discardInput, .ask(.readFirst, repeated: false)])
+        #expect(endsPublishing(.readFirst, actions))
         #expect(driver.flow.questionLatch == driver.latch.sequence)
     }
 
@@ -820,7 +839,7 @@ struct ManualCutFlowTests {
         #expect(driver.reminderTick().isEmpty)
         driver.now = mark.time + 180
         let actions = driver.reminderTick()
-        #expect(actions == [.discardInput, .ask(.restore, repeated: false)])
+        #expect(endsPublishing(.restore, actions) && actions.count == 2)
     }
 
     @Test("With the main loop stuck since GO, the reminder makes the read-first request at the hold's end, never the RESTORE prompt")
@@ -831,7 +850,7 @@ struct ManualCutFlowTests {
         driver.mainLoopTicks = false
         driver.now = mark.time + 180
         let actions = driver.reminderTick()
-        #expect(actions.suffix(2) == [.discardInput, .ask(.readFirst, repeated: false)])
+        #expect(endsPublishing(.readFirst, actions))
         #expect(driver.flow.stage == .readFirst)
         #expect(!driver.questionsAsked.contains(.restore))
         #expect(driver.flow.answers.last?.outcome == "superseded at the hold's end")
@@ -849,14 +868,17 @@ struct ManualCutFlowTests {
         driver.now = shown + 19
         #expect(driver.reminderTick().isEmpty)
         driver.now = shown + 20
-        #expect(driver.reminderTick() == [.ask(.restoreReadBack, repeated: true)])
+        let generation = driver.flow.questionGeneration
+        #expect(driver.reminderTick() == [.remind(.restoreReadBack)])
+        #expect(driver.flow.questionGeneration == generation)
+        #expect(driver.flow.inputEligible)
         #expect(driver.flow.restoreMark == mark)
         #expect(driver.flow.stage == stage)
         #expect(driver.flow.answers == answers)
         driver.now = shown + 30
         #expect(driver.reminderTick().isEmpty)
         driver.now = shown + 40
-        #expect(driver.reminderTick() == [.ask(.restoreReadBack, repeated: true)])
+        #expect(driver.reminderTick() == [.remind(.restoreReadBack)])
         // An answer typed before the reminder still counts: a repeat discards nothing.
         driver.type("restored00")
         #expect(driver.flow.restoreConfirmed)
@@ -871,7 +893,7 @@ struct ManualCutFlowTests {
         let actions = driver.sleep()
         #expect(actions.contains(.armReminder))
         driver.now += 20
-        #expect(driver.reminderTick() == [.ask(.readFirst, repeated: true)])
+        #expect(driver.reminderTick() == [.remind(.readFirst)])
     }
 
     @Test("The reminder is not armed before the cut mark, and never repeats the CUT or read-back questions")
@@ -888,19 +910,51 @@ struct ManualCutFlowTests {
 
     // MARK: Discards and phases
 
-    @Test("Every new question is preceded by a discard; repeats never are")
-    func discardBeforeEveryQuestion() {
+    @Test("Every published question makes input eligible only after its prompt is written, with a discard first; reminders never discard")
+    func discardAfterEveryPublication() {
         var driver = FlowDriver()
         driver.toAfter()
         driver.now += 0
         for (index, action) in driver.actions.enumerated() {
-            guard case let .ask(_, repeated) = action else { continue }
-            if repeated {
-                #expect(index == 0 || driver.actions[index - 1] != .discardInput)
-            } else {
-                #expect(index > 0 && driver.actions[index - 1] == .discardInput)
+            switch action {
+            case .publish:
+                #expect(index + 1 < driver.actions.count && driver.actions[index + 1] == .discardInput)
+            case .remind:
+                #expect(index + 1 == driver.actions.count || driver.actions[index + 1] != .discardInput)
+            default:
+                break
             }
         }
+    }
+
+    @Test("Until its prompt is written, a question takes no answer; then pending input is discarded first")
+    func publicationGatesAnswers() throws {
+        var driver = FlowDriver()
+        driver.toGo()
+        driver.type("cutfail")
+        driver.type("08")
+        #expect(driver.flow.stage == .recheck)
+        // The console is not writing: recheckfail opens read-first, whose
+        // prompt is not written yet.
+        driver.publishesAtOnce = false
+        let opened = driver.type("recheckfail")
+        guard case let .publish(.readFirst, generation)? = opened.last else {
+            Issue.record("read-first not published: \(opened)")
+            return
+        }
+        #expect(!driver.flow.inputEligible)
+        // 00 typed before the question appeared is not accepted.
+        #expect(driver.type("00").isEmpty)
+        #expect(!driver.flow.restoreConfirmed)
+        // A stale publication does nothing.
+        #expect(driver.send(.published(generation: generation - 1, at: driver.now)).isEmpty)
+        #expect(!driver.flow.inputEligible)
+        // The prompt is written: pending input is discarded, then answers count.
+        #expect(driver.send(.published(generation: generation, at: driver.now)) == [.discardInput])
+        #expect(driver.flow.inputEligible)
+        #expect(driver.send(.published(generation: generation, at: driver.now)).isEmpty)
+        driver.type("00")
+        #expect(driver.flow.restoreConfirmed)
     }
 
     @Test("Readings take their phase from the marks: baseline, pre-cut, held, after")

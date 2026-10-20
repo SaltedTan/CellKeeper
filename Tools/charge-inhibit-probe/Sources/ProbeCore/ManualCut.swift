@@ -264,6 +264,9 @@ public struct ManualCutFlow: Sendable {
         case tick(at: Double, unixTime: Double)
         /// A reading; the flow sets its phase from the marks.
         case reading(Sample)
+        /// The console has written the prompt of question `generation`
+        /// (``Action/publish(_:generation:)``).
+        case published(generation: UInt64, at: Double)
         /// The first SIGINT, SIGTERM or SIGHUP.
         case signal(Int32, at: Double)
         /// The reminder's own timer.
@@ -287,11 +290,17 @@ public struct ManualCutFlow: Sendable {
     public enum Action: Sendable, Equatable {
         /// Discard pending terminal input: the terminal's unread input,
         /// including an unfinished line, the probe's own buffer, and any
-        /// line read but not yet handled. Comes before every new question.
+        /// line read but not yet handled. Comes once a new question's
+        /// prompt has been written, just before input becomes eligible.
         case discardInput
-        /// Show a question; `repeated`: a reminder (with the bell), which is
-        /// not a new question and discards nothing.
-        case ask(ManualCutQuestion, repeated: Bool)
+        /// Publish a new question (code review r1 of #101, must 3): queue its
+        /// prompt; input is not eligible until the console has written it
+        /// and says so (``Event/published(generation:at:)``), and then
+        /// pending input is discarded first.
+        case publish(ManualCutQuestion, generation: UInt64)
+        /// A reminder: the open question again, with the bell. Not a new
+        /// question: it changes no generation and discards nothing.
+        case remind(ManualCutQuestion)
         case say(String)
         case banner(Banner)
         /// Arm the reminder's own timer (``Event/reminderTick(at:)``).
@@ -376,6 +385,11 @@ public struct ManualCutFlow: Sendable {
     public private(set) var ending: Ending?
     /// The sleep latch's sequence the flow has seen.
     public private(set) var seenLatch: UInt64 = 0
+    /// The number of the latest question published.
+    public private(set) var questionGeneration: UInt64 = 0
+    /// Whether the owner's lines may answer the open question: only once
+    /// its prompt has been written and pending input discarded.
+    public private(set) var inputEligible = false
     /// The latch's sequence when the open question was published: an
     /// answer counts only if no sleep came since.
     public private(set) var questionLatch: UInt64 = 0
@@ -452,7 +466,8 @@ public struct ManualCutFlow: Sendable {
     /// When `event` happened, on the run's clock.
     static func time(of event: Event) -> Double {
         switch event {
-        case let .begin(time), let .line(_, time, _), let .tick(time, _), let .signal(_, time), let .reminderTick(time): time
+        case let .begin(time), let .line(_, time, _), let .tick(time, _), let .published(_, time), let .signal(_, time),
+             let .reminderTick(time): time
         case let .reading(sample): sample.time
         }
     }
@@ -469,6 +484,12 @@ public struct ManualCutFlow: Sendable {
             return tick(at: time, unixTime: unixTime)
         case let .reading(sample):
             return reading(sample)
+        case let .published(generation, _):
+            // Only the prompt of the open question makes input eligible;
+            // pending input is discarded first, in the same critical section.
+            guard generation == questionGeneration, openQuestion != nil, !inputEligible else { return [] }
+            inputEligible = true
+            return [.discardInput]
         case let .signal(number, time):
             return signal(number, at: time)
         case let .reminderTick(time):
@@ -477,16 +498,15 @@ public struct ManualCutFlow: Sendable {
     }
 
     /// Hands the flow the owner's lines read in one batch, in order. A line
-    /// after one whose actions discard input was typed before that discard,
-    /// and is dropped with it: an answer typed ahead, or meant for an
-    /// earlier question, never carries over.
+    /// read after one that opened a new question meets that question before
+    /// its prompt is written, while input is not eligible, and is dropped:
+    /// an answer typed ahead, or meant for an earlier question, never
+    /// carries over.
     public mutating func handleLines(_ lines: [String], at time: Double, unixTime: Double, latch: SleepLatch.Snapshot) -> [Action] {
         var all: [Action] = []
         for line in lines {
             guard stage != .ended else { break }
-            let actions = handle(.line(line, at: time, unixTime: unixTime), latch: latch)
-            all += actions
-            if actions.contains(.discardInput) { break }
+            all += handle(.line(line, at: time, unixTime: unixTime), latch: latch)
         }
         return all
     }
@@ -498,7 +518,9 @@ public struct ManualCutFlow: Sendable {
         askedAt = time
         lastShownAt = time
         questionLatch = seenLatch
-        return [.discardInput, .ask(question, repeated: false)]
+        questionGeneration += 1
+        inputEligible = false
+        return [.publish(question, generation: questionGeneration)]
     }
 
     static func stage(for question: ManualCutQuestion) -> Stage {
@@ -515,6 +537,9 @@ public struct ManualCutFlow: Sendable {
 
     private mutating func answer(_ text: String, at time: Double, unixTime: Double) -> [Action] {
         guard let question = openQuestion else { return [] }
+        // A line read before the question's prompt was written, and pending
+        // input discarded, answers nothing.
+        guard inputEligible else { return [] }
         // An answer counts only for a question published since the latest
         // sleep (``handle(_:latch:)`` delivers a sleep first).
         guard questionLatch == seenLatch else { return [] }
@@ -872,7 +897,7 @@ public struct ManualCutFlow: Sendable {
               let shown = lastShownAt, time - shown >= ManualCut.reminderInterval
         else { return [] }
         lastShownAt = time
-        return [.ask(question, repeated: true)]
+        return [.remind(question)]
     }
 
     // MARK: The end
@@ -880,6 +905,7 @@ public struct ManualCutFlow: Sendable {
     private mutating func end(_ ending: Ending, at time: Double) -> [Action] {
         self.ending = ending
         stage = .ended
+        inputEligible = false
         note(time, "the run ended")
         return [.end]
     }
