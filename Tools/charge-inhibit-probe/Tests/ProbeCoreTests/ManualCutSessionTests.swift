@@ -324,9 +324,12 @@ extension ManualCutTests {
             })
             sleepQueue.queue.async { handler {} }
             #expect(sampled.wait(timeout: .now() + 2) == .success)
-            // The log is still empty: restored00 is accepted.
+            // The log is still empty: restored00 is accepted, and the Mac
+            // charges again, so without the sleep the run would end with 2.
             driver.type("restored00", at: mark + 190)
             #expect(driver.session.snapshot.restoreConfirmed)
+            driver.read(.charging, at: mark + 191)
+            #expect(ManualCutOutcome.of(driver.session.snapshot, sleepNotices: []).exitStatus != 3)
             #expect(driver.session.signal(SIGINT) == .handled)
             #expect(driver.session.isEnded)
             // The notification resumes while the end drains the sleep queue.
@@ -340,7 +343,7 @@ extension ManualCutTests {
             #expect(flow.sleeps == [mark + 189])
             let outcome = ManualCutOutcome.of(flow, sleepNotices: [])
             #expect(outcome.exitStatus == 3)
-            #expect(outcome.recoveryReason != nil)
+            #expect(outcome.recoveryReason?.contains("+\(seconds(mark + 189))") == true)
             #expect(flow.secondSignal(SIGINT) == (.restoreChieNow, 3))
             driver.session.stopReminder()
         }
@@ -522,6 +525,27 @@ extension ManualCutTests {
             if let first, let readFirst { #expect(first.lowerBound < readFirst.lowerBound) }
             #expect(driver.session.console.supersededMessages >= 1)
             #expect(eventually { driver.session.inputEligible })
+            driver.session.stopReminder()
+        }
+
+        @Test("The end supersedes a prompt still queued behind a blocked terminal: only the end's text appears")
+        func endSupersedesQueuedPrompt() {
+            let blocked = BlockingSink(blocked: false)
+            let driver = SessionDriver(console: ConsoleWriter(sink: blocked.sink))
+            driver.toHold()
+            let mark = driver.session.snapshot.cutMark?.time ?? 0
+            blocked.close()
+            driver.read(.cut, at: mark + 100)
+            driver.at(mark + 180)
+            driver.session.poll()
+            #expect(driver.session.snapshot.stage == .restorePrompt)
+            // A signal ends the run while the RESTORE prompt waits.
+            #expect(driver.session.signal(SIGINT) == .handled)
+            blocked.open()
+            #expect(driver.session.console.drain(timeout: 3))
+            let written = blocked.written.joined(separator: "\n")
+            #expect(!written.contains(ManualCutQuestion.restore.prompt))
+            #expect(written.contains("RESTORE CHIE NOW — if you ran the cut"))
             driver.session.stopReminder()
         }
 

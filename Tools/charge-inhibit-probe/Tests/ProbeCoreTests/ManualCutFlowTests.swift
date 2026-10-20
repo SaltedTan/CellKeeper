@@ -795,10 +795,12 @@ extension ManualCutTests {
                 let finished = Counter()
                 let problems = Counter()
                 let readers = Counter()
+                // A slow writer, so that the readers, which never stop, read
+                // across every append.
                 let writer = Thread {
                     for index in 0..<(SleepLog.capacity + 10) {
                         log.record(at: Double(index) * 1.5)
-                        if index % 8 == 0 { usleep(20) }
+                        usleep(100)
                     }
                     finished.add()
                 }
