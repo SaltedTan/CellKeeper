@@ -142,17 +142,25 @@ final class AssertionHolder: @unchecked Sendable {
 /// (`kIOPMAssertionTypePreventUserIdleSystemSleep`, `IOPMLib.h`): if the Mac
 /// runs from its battery, idle sleep becomes likelier during a run of
 /// several minutes. It stops idle sleep only, not a closed lid or the Apple
-/// menu (research note 10 §4, §7). Created only by `run`, only as root,
-/// with a timeout that covers the longest run plus 120 s; released after
-/// the private assertion, in a `defer`, and by powerd when the probe exits.
+/// menu (research note 10 §4, §7). Created by `run`, only as root, with a
+/// timeout that covers the longest run plus 120 s; and by `watch` (research
+/// note 11), which never runs as root, with a timeout that covers its
+/// bounded parts plus 30 minutes for the owner's restore. Released after
+/// the private assertion, if any, in a `defer`, and by powerd when the
+/// probe exits.
 final class IdleSleepAssertion: @unchecked Sendable {
     private let lock = NSLock()
     private let clock: Clock
+    private let requiresRoot: Bool
     private var assertionID: IOPMAssertionID?
     private var lastRelease: (time: Double, result: Int32)?
 
-    init(clock: Clock) {
+    /// `requiresRoot`: `run` creates it only as root; `watch` creates it as
+    /// the owner (`IOPMLib.h`: any process may create an assertion with
+    /// `IOPMAssertionCreateWithName`).
+    init(clock: Clock, requiresRoot: Bool = true) {
         self.clock = clock
+        self.requiresRoot = requiresRoot
     }
 
     /// When the probe released it, and the IOReturn of the last attempt;
@@ -163,25 +171,31 @@ final class IdleSleepAssertion: @unchecked Sendable {
         return lastRelease
     }
 
-    static func properties(hold: Int) -> [String: Any] {
+    static func properties(timeout: Int) -> [String: Any] {
         [
             kIOPMAssertionTypeKey: kIOPMAssertionTypePreventUserIdleSystemSleep,
             kIOPMAssertionNameKey: ProbeAssertion.idleSleepName,
             kIOPMAssertionLevelKey: NSNumber(value: kIOPMAssertionLevelOn),
-            kIOPMAssertionTimeoutKey: NSNumber(value: ProbeAssertion.idleSleepTimeout(hold: hold)),
+            kIOPMAssertionTimeoutKey: NSNumber(value: timeout),
             kIOPMAssertionTimeoutActionKey: kIOPMAssertionTimeoutActionRelease,
         ]
     }
 
-    /// Creates the assertion unless the process is not root or it exists;
-    /// returns the IOReturn.
+    /// For `run`: creates the assertion with a timeout of the longest run
+    /// plus 120 s.
     func create(hold: Int) -> Int32 {
+        create(timeout: ProbeAssertion.idleSleepTimeout(hold: hold))
+    }
+
+    /// Creates the assertion unless the process must be root and is not,
+    /// or it exists; returns the IOReturn.
+    func create(timeout: Int) -> Int32 {
         lock.lock()
         defer { lock.unlock() }
-        guard geteuid() == 0 else { return Int32(bitPattern: 0xE000_02C1) }
+        guard !requiresRoot || geteuid() == 0 else { return Int32(bitPattern: 0xE000_02C1) }
         guard assertionID == nil else { return kIOReturnSuccess }
         var newID = IOPMAssertionID(0)
-        let result = IOPMAssertionCreateWithProperties(Self.properties(hold: hold) as CFDictionary, &newID)
+        let result = IOPMAssertionCreateWithProperties(Self.properties(timeout: timeout) as CFDictionary, &newID)
         if result == kIOReturnSuccess {
             assertionID = newID
         }

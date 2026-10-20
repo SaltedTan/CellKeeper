@@ -108,6 +108,35 @@ public enum Preconditions {
     public static let minimumStartCharge = 40
 
     public static func evaluate(_ state: SystemState, assertion: AssertionKind, criteria: Criteria = .standard) -> [Check] {
+        evaluate(state, test: .assertion(assertion), criteria: criteria)
+    }
+
+    /// The rules for research note 11's manual adapter cut (§5): note 10's
+    /// for `disable-inflow`, except that an adapter not reported attached
+    /// fails rather than warns, plus a warning that the probe reads no SMC
+    /// key, so `watch` asks the owner to read `CHIE`. `watch` itself refuses
+    /// as root, or without a terminal (``ManualCut/refusal(effectiveUserIsRoot:inputIsTerminal:outputIsTerminal:)``).
+    public static func evaluateManualCut(_ state: SystemState, criteria: Criteria = .standard) -> [Check] {
+        evaluate(state, test: .manualAdapterCut, criteria: criteria)
+    }
+
+    /// What the rules are for.
+    enum Test {
+        case assertion(AssertionKind)
+        case manualAdapterCut
+
+        /// The checks that guard a possible adapter cut: a charge of at
+        /// least 40%, the adapter reported attached, and Optimized Battery
+        /// Charging off.
+        var guardsAdapterCut: Bool {
+            switch self {
+            case let .assertion(kind): kind == .disableInflow
+            case .manualAdapterCut: true
+            }
+        }
+    }
+
+    static func evaluate(_ state: SystemState, test: Test, criteria: Criteria) -> [Check] {
         let reading = state.reading
         var checks: [Check] = []
 
@@ -137,7 +166,7 @@ public enum Preconditions {
             checks.append(Check(.fail, "Charge below 95%", "the charge could not be read"))
         }
 
-        if assertion == .disableInflow {
+        if test.guardsAdapterCut {
             let title = "Charge at least \(minimumStartCharge)%"
             if let percent = reading.percent {
                 if percent >= minimumStartCharge {
@@ -198,12 +227,18 @@ public enum Preconditions {
                 """))
         }
 
-        if assertion == .disableInflow {
+        if test.guardsAdapterCut {
             let raw = reading.rawExternalConnected.map { $0 ? "yes" : "no" } ?? "unknown"
             let details = reading.adapterAttached.map { $0 ? "an adapter" : "no adapter" } ?? "nothing"
             let detail = "AppleRawExternalConnected: \(raw); IOPSCopyExternalPowerAdapterDetails: \(details)"
             if reading.reportsAdapter {
                 checks.append(Check(.pass, "Adapter reported attached", detail))
+            } else if case .manualAdapterCut = test {
+                checks.append(Check(.fail, "Adapter reported attached", """
+                    \(detail). Without either, a cut can only end inconclusive, and every \
+                    write carries risk, so the manual adapter cut needs one (research \
+                    note 11 §5)
+                    """))
             } else {
                 checks.append(Check(.warn, "Adapter reported attached", """
                     \(detail). Without either, an adapter cut cannot be told from an \
@@ -313,14 +348,35 @@ public enum Preconditions {
             }
         }
 
-        if assertion == .disableInflow {
+        if test.guardsAdapterCut {
             checks.append(Check(.warn, "Optimized Battery Charging off", """
                 the probe cannot read this setting: turn it off for the whole test \
                 (\(chargeLimitAdvice)), so that macOS does not pause charging by itself
                 """))
         }
 
+        if case .manualAdapterCut = test {
+            checks.append(Check(.warn, "CHIE reads 00 (the owner's read)", """
+                the probe reads no SMC key, so it cannot see CHIE. `watch` asks you to \
+                read it with the tool (\(ManualCut.ToolCommand.read), in \
+                \(ManualCut.ToolCommand.directory)) before the baseline, and refuses \
+                unless it printed [hex_] and (bytes 00)
+                """))
+        }
+
         return checks
+    }
+
+    /// "READY …" or "NOT READY …", for the end of `check --mechanism
+    /// manual-adapter-cut`.
+    public static func manualCutSummary(_ checks: [Check]) -> String {
+        let failures = checks.filter { $0.status == .fail }.count
+        let warnings = checks.filter { $0.status == .warn }.count
+        let warned = warnings == 0 ? "" : " Read the \(warnings == 1 ? "warning" : "\(warnings) warnings") above."
+        if failures == 0 {
+            return "READY: every precondition holds; `charge-inhibit-probe watch --mechanism manual-adapter-cut` may be started, without sudo.\(warned)"
+        }
+        return "NOT READY: \(failures) \(failures == 1 ? "precondition fails" : "preconditions fail"); `watch` would refuse.\(warned)"
     }
 
     /// "READY …" or "NOT READY …", for the end of `check`.
