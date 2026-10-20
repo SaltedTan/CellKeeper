@@ -428,6 +428,51 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         }
     }
 
+    /// Keeps `percent`, which macOS reports, as the user's own limit after a
+    /// change made while CellKeeper was not running (research note 12 §7.6):
+    /// CellKeeper holds no record, so nothing of its own is in effect, but a
+    /// guided calibration had recorded the limit CellKeeper left
+    /// (`previousOwnerLimit`, the user's own, which quitting restored), and
+    /// this is not it. Handled as an adoption: nothing is written to macOS,
+    /// an adoption marker is stored so that Manage charging stays off at the
+    /// next launch too, and the change is reported once by
+    /// ``takeAdoptedLimitChange()``. Says whether the marker was stored and
+    /// read back; one that could not be is retried at every read. Does
+    /// nothing if a record exists (its own reconciliation decides then) or
+    /// the values are not ones a marker holds.
+    public func keepOutsideLimit(_ percent: Int, previousOwnerLimit: Int) -> KeptOutsideLimit {
+        guard case .none = record, (1...100).contains(percent), Self.supportedLimits.contains(previousOwnerLimit) else { return .notApplicable }
+        let marker = AdoptionMarker(
+            adoptedLimit: percent,
+            isNoLimit: percent == 100 && lastReading == .noLimit,
+            previousOwnerLimit: previousOwnerLimit,
+            expectedLimit: previousOwnerLimit,
+            adoptedAt: now()
+        )
+        adoptedChange = marker.change(fromEarlierSession: false)
+        isLastReportedStateOwn = false
+        unsavedMarker = marker
+        saveUnsavedMarker()
+        CellKeeperLog.backend.notice("Kept \(percent)%, set while CellKeeper was not running, as the user's own limit (CellKeeper had left \(previousOwnerLimit)%)")
+        return isAdoptionRecorded() ? .recorded : .notRecorded
+    }
+
+    /// What ``keepOutsideLimit(_:previousOwnerLimit:)`` did.
+    public enum KeptOutsideLimit: Sendable, Equatable {
+        /// Kept, its marker stored and read back.
+        case recorded
+        /// Kept in memory; its marker could not be stored yet.
+        case notRecorded
+        /// Nothing done: a record exists, or the values are not a marker's.
+        case notApplicable
+    }
+
+    /// True if an adoption marker is stored, as a read of the store shows,
+    /// and none waits to be stored.
+    public func isAdoptionRecorded() -> Bool {
+        unsavedMarker == nil && Self.loadAdoptionMarker(from: store) != nil
+    }
+
     /// Discards a record that cannot be read, after the user has set their
     /// own limit by hand. Does nothing if the record is readable or absent.
     public func discardUnreadableRecord() throws {

@@ -269,8 +269,8 @@ public enum DiagnosticsReport {
 
     /// Everything the report says apart from when it was generated and the
     /// activity log: the app, macOS and the model, then Control, Settings,
-    /// Battery, Decision and, with a native-limit backend, macOS Charge
-    /// Limit.
+    /// Battery, Decision, with a native-limit backend macOS Charge Limit,
+    /// and, once there has been one, Calibration.
     public static func sections(status: ControllerStatus, environment: DiagnosticsEnvironment) -> [DiagnosticsSection] {
         var sections: [DiagnosticsSection] = []
         var title: String?
@@ -399,8 +399,91 @@ public enum DiagnosticsReport {
                 field("Kept outside change", "\(adopted.limit)%\(adopted.isNoLimit ? " (no limit)" : "") at \(time: adopted.date); CellKeeper had set \(adopted.expectedLimit)%, own limit was \(adopted.previousOwnerLimit)%\(adopted.isFromEarlierSession ? ", earlier session" : "")")
             }
         }
+        let calibration = calibrationRows(status.calibration)
+        if !calibration.isEmpty {
+            section("Calibration")
+            rows.append(contentsOf: calibration)
+        }
         sections.append(DiagnosticsSection(title: title, rows: rows))
         return sections
+    }
+
+    /// The guided calibration's rows (research note 12 §7.9): the session
+    /// in progress, then the report of the latest one that ended. Only
+    /// times, steps, charges, capacities and cycle counts; never an
+    /// identifier.
+    private static func calibrationRows(_ calibration: CalibrationStatus) -> [DiagnosticsRow] {
+        var rows: [DiagnosticsRow] = []
+        func field(_ name: String, _ value: DiagnosticsValue) {
+            rows.append(DiagnosticsRow(label: name, value: value))
+        }
+        if let session = calibration.session {
+            var state: [String] = []
+            if calibration.isPaused { state.append("paused, waiting for you to continue or cancel") }
+            if session.isReturning { state.append("returning to CellKeeper's limit, not confirmed yet") }
+            if calibration.needsRestAnswer { state.append("asking whether the Mac stayed shut down and unplugged") }
+            field("Session", "step \(session.step.rawValue) of \(CalibrationStep.allCases.count), \(session.step)\(state.isEmpty ? "" : "; " + state.joined(separator: "; "))")
+            field("Session started", "\(time: session.startedAt.wall)")
+            field("Step started", "\(time: session.stepStartedAt.wall)")
+            if let end = calibration.stepEndsAt {
+                field(session.step == .restAtBottom ? "Plug in again after" : "Step ends at the latest", "\(time: end)")
+            }
+            if let cap = calibration.capEndsAt {
+                field("Session ends at the latest", "\(time: cap)")
+            }
+            if session.step == .restAtBottom {
+                field("Rest", "\(session.isRestAgainRequested ? "asked once to rest again" : "requested")\(session.restSleep.map { "; sleep announced at \($0.percent.map { "\($0)%" } ?? "an unknown charge")" } ?? "")")
+            }
+            field("Limits", "your own \(session.ownerLimit)%, CellKeeper's \(session.cellKeeperLimit)% when it started; 100% asked for only in steps 1, 2 and 7")
+            field("Temperature", "\(temperatureText(session.temperatureCheck))")
+        }
+        if calibration.isEndUnsaved {
+            field("Calibration store", "\("the end of the calibration is not saved yet; it may come back, paused, at the next launch", identifier: "endUnsaved")")
+        }
+        guard let report = calibration.last else { return rows }
+        field("Last calibration", "\(time: report.startedAt) to \(time: report.endedAt); \(report.end.isCompleted ? "finished" : "ended early: \(report.end)")")
+        field("Steps", report.steps.map { entry -> DiagnosticsValue in "\(entry.step.rawValue) \(time: entry.enteredAt)" }.joined(separator: ", "))
+        if !report.resumedAt.isEmpty {
+            field("Continued after a relaunch", report.resumedAt.map { date -> DiagnosticsValue in "\(time: date)" }.joined(separator: ", "))
+        }
+        field("Steps done", "\(CalibrationWording.stepsDone(report))")
+        field("Before", capacities(report.before))
+        field("After", report.after.map(capacities) ?? "no reading when it ended")
+        field("Rest at the bottom", report.restResult.map(restText) ?? "not reached")
+        field("Recorded as short", "\(report.shortRests.isEmpty ? "none" : report.shortRests.map(\.description).joined(separator: ", "))")
+        field("Temperature at start", "\(temperatureText(report.temperatureCheck))")
+        field("Optimized Battery Charging", "\(report.optimizedCharging == .off ? "confirmed off" : "the owner accepted step 1's limit")")
+        field("Gauge", "\(CalibrationWording.gaugeNote)")
+        return rows
+    }
+
+    private static func capacities(_ capacities: CalibrationCapacities) -> DiagnosticsValue {
+        var parts: [DiagnosticsValue] = []
+        if let full = capacities.fullChargeMilliampHours { parts.append("full-charge \(full, unit: .milliampHours)") }
+        if let nominal = capacities.nominalMilliampHours { parts.append("nominal \(nominal, unit: .milliampHours)") }
+        if let design = capacities.designMilliampHours { parts.append("design \(design, unit: .milliampHours)") }
+        if let cycles = capacities.cycleCount { parts.append("\(cycles) cycles") }
+        return parts.isEmpty ? "not available" : parts.joined(separator: ", ")
+    }
+
+    private static func restText(_ result: CalibrationRestResult) -> DiagnosticsValue {
+        switch result {
+        case .counted(let slept, let from, let to):
+            return "counted: slept \(Int(slept / 60)) minutes on battery power, \(from)% to \(to)%"
+        case .ownersAccount(let bootTime, let last):
+            let boot: DiagnosticsValue = bootTime.map { "; started again at \(time: $0)" } ?? ""
+            let reading: DiagnosticsValue = last.map { "; last reading before: \($0.percent)% on \($0.powerSource) at \(time: $0.at)" } ?? ""
+            return "by your account\(boot)\(reading)"
+        case .notConfirmed(let reason):
+            return "\("not confirmed: \(reason)", identifier: reason.rawValue)"
+        }
+    }
+
+    private static func temperatureText(_ check: CalibrationTemperatureCheck) -> String {
+        switch check {
+        case .measured: "read, 10–40 °C required"
+        case .ownerConfirmedCoolRoom: "not readable; the owner confirmed a room at 10–35 °C"
+        }
     }
 
     /// Replaces the account name in paths such as
@@ -553,6 +636,8 @@ public enum DiagnosticsReport {
             "window passed before it could start (\(window(occurrence)))\(lastWait.map { "; last checked: \($0)" } ?? "")"
         case .discarded(let reason):
             "a saved weekly full charge could not be used and is removed: \(reason)"
+        case .skippedForCalibration(let occurrence):
+            "skipped: a calibration was in progress (window \(window(occurrence)))"
         }
     }
 }

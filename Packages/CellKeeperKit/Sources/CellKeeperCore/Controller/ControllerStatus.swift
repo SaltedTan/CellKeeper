@@ -84,6 +84,8 @@ public struct ControlEvent: Sendable, Equatable, Identifiable {
         case safety
         case settings
         case override
+        /// A guided calibration's steps, requests and end.
+        case calibration
 
         var logger: Logger {
             switch self {
@@ -91,7 +93,7 @@ public struct ControlEvent: Sendable, Equatable, Identifiable {
             case .decision: CellKeeperLog.policy
             case .request, .result, .failure: CellKeeperLog.backend
             case .safety: CellKeeperLog.safety
-            case .settings, .override: CellKeeperLog.settings
+            case .settings, .override, .calibration: CellKeeperLog.settings
             }
         }
     }
@@ -196,6 +198,9 @@ public struct ControllerStatus: Sendable, Equatable {
     /// (``lastEndedOverride``), counting ones that began and ended between
     /// two statuses. Only grows.
     public var overridesEnded: Int = 0
+    /// The guided calibration: the session in progress, if any, and the
+    /// latest one that ended.
+    public var calibration: CalibrationStatus = CalibrationStatus()
 }
 
 /// An override that ended by itself, and how.

@@ -59,6 +59,15 @@ public protocol NotificationPosting: Sendable {
     /// the system's answer for a bounded time, or until cancelled
     /// (``NotificationPostResult/unconfirmed``).
     func add(_ notification: PlannedNotification, in generation: NotificationGeneration) async -> NotificationPostResult
+    /// Removes the notifications with these identifiers
+    /// (``PlannedNotification/identifier``) from Notification Center, and
+    /// any not shown yet, after every hand-over already queued. Asks the
+    /// user nothing and returns without waiting for the system.
+    func remove(identifiers: [String]) async
+    /// The identifiers of CellKeeper's own notifications in Notification
+    /// Center and of those not shown yet, as the system reports them; none
+    /// if it does not answer within a bound. Asks the user nothing.
+    func notificationIdentifiers() async -> [String]
 }
 
 /// Turns the controller's statuses into notifications, if the user opted in.
@@ -78,6 +87,13 @@ public protocol NotificationPosting: Sendable {
 /// user's choice or ``shutdown()`` supersedes, so an older answer never
 /// overwrites a newer one. Posting tasks hold no reference to the notifier
 /// while they wait, and at most ``maximumPendingPosts`` wait at once.
+///
+/// The one exception is withdrawing a calibration's request that no longer
+/// holds (``NotificationPlan/withdrawals``): it removes only a request this
+/// notifier queued, or kept from an earlier run, under an opt-in, belongs to
+/// no generation, and runs also after notifications were turned off, which
+/// withdraws every outstanding request at once. Removing CellKeeper's own notifications asks for no
+/// permission and posts nothing.
 @MainActor
 public final class ChargingNotifier {
     public private(set) var optIn: NotificationOptIn {
@@ -112,6 +128,36 @@ public final class ChargingNotifier {
     /// is still the latest when it arrives.
     private var permissionOperation = 0
     private var isShutDown = false
+    /// How many times each identifier was withdrawn. A post captures the
+    /// count when it is queued and is dropped if the count has changed by
+    /// the time it would be handed over, so a request withdrawn while it
+    /// waited is never posted.
+    private var withdrawals: [String: Int] = [:]
+    /// A calibration's requests queued or handed to the system and not
+    /// withdrawn yet. Kept across generations and opt-in changes, so a
+    /// request that no longer holds is always removed: by the planner's
+    /// withdrawal, or at once when notifications are turned off.
+    private var outstanding: Set<String> = []
+    /// Requests an earlier run posted that reconciliation kept because they
+    /// still held, also in ``outstanding``. The planner never planned them,
+    /// so each is withdrawn here once it no longer holds.
+    private var inherited: Set<String> = []
+    /// Removal tasks that have not finished. Not part of a generation:
+    /// turning notifications off or on never cancels one.
+    private var removalTasks: [Int: Task<Void, Never>] = [:]
+    private var nextRemovalTask = 0
+    /// Notification Center keeps what an earlier run posted, which neither
+    /// the planner nor ``outstanding`` remembers after a relaunch. So the
+    /// calibration requests it holds are reconciled with the one that holds
+    /// now: after launch, once the owner has opted in (never before); after
+    /// opting in again; whenever the request that holds changes; and when
+    /// a session ends.
+    private var isReconciliationDue = true
+    /// The calibration request that holds as of the latest status, also a
+    /// paused session's (``NotificationWording/standingCalibrationRequest(_:)``).
+    private var standingRequest: String?
+    /// ``CalibrationStatus/endedCount`` as last seen.
+    private var endedSeen: Int?
 
     /// - Parameter uptime: monotonic seconds for the planner's minimum
     ///   intervals. Defaults to `ContinuousClock`, which keeps counting
@@ -151,7 +197,16 @@ public final class ChargingNotifier {
         asking.isEnabled = enabled
         asking.isRequesting = enabled
         optIn = asking
-        guard enabled else { return }
+        isReconciliationDue = isReconciliationDue || enabled
+        guard enabled else {
+            // Requests posted under the opt-in are not left behind: removing
+            // CellKeeper's own notifications asks for no permission and
+            // posts nothing.
+            if !outstanding.isEmpty {
+                withdraw(outstanding.sorted())
+            }
+            return
+        }
         let permission = await poster.requestPermission()
         guard isLatest(operation) else { return }
         var answered = optIn
@@ -190,7 +245,29 @@ public final class ChargingNotifier {
     /// Returns without waiting for anything.
     public func observe(_ status: ControllerStatus, trigger: EvaluationTrigger) {
         guard !isShutDown else { return }
-        let planned = planner.plan(status, trigger: trigger, uptime: uptime(), isDelivering: optIn.isDelivering)
+        let plan = planner.planAll(status, trigger: trigger, uptime: uptime(), isDelivering: optIn.isDelivering)
+        // Only what this notifier queued, which needed the opt-in, so the
+        // system's center is still untouched before it; also while opted
+        // out now.
+        let obsolete = plan.withdrawals.filter(outstanding.contains)
+        if !obsolete.isEmpty {
+            withdraw(obsolete)
+        }
+        let standing = NotificationWording.standingCalibrationRequest(status)
+        if standing != standingRequest || (endedSeen.map { $0 != status.calibration.endedCount } ?? false) {
+            isReconciliationDue = true
+        }
+        standingRequest = standing
+        endedSeen = status.calibration.endedCount
+        let lapsed = inherited.filter { $0 != standing }
+        if !lapsed.isEmpty {
+            withdraw(lapsed.sorted())
+        }
+        if isReconciliationDue, optIn.isEnabled {
+            isReconciliationDue = false
+            reconcile()
+        }
+        let planned = plan.notifications
         guard !planned.isEmpty else { return }
         guard postTasks.count < Self.maximumPendingPosts else {
             let kinds = planned.map(\.kind.rawValue).joined(separator: ", ")
@@ -201,6 +278,10 @@ public final class ChargingNotifier {
         let previous = lastPost
         let number = nextPostTask
         nextPostTask += 1
+        let queuedWithdrawals = withdrawals
+        for notification in planned where notification.kind.isCalibrationRequest {
+            outstanding.insert(notification.identifier)
+        }
         // Runs on the main actor, so it cannot start before it is recorded.
         // It refers to the notifier only between suspensions, so a post
         // waiting for the system never keeps it alive.
@@ -218,7 +299,19 @@ public final class ChargingNotifier {
                     CellKeeperLog.app.notice("Notification not posted (\(notification.kind.rawValue, privacy: .public)): macOS does not show CellKeeper's notifications")
                     continue
                 }
+                if let self, self.withdrawals[notification.identifier] != queuedWithdrawals[notification.identifier] {
+                    CellKeeperLog.app.notice("Notification not posted (\(notification.kind.rawValue, privacy: .public)): it was withdrawn while it waited")
+                    continue
+                }
                 Self.log(await poster.add(notification, in: generation), for: notification.kind)
+                // A withdrawal made while the post was on its way to the
+                // center may have reached the center first: the post, now
+                // shown or still being handed over after a timeout, is
+                // removed again (the poster removes once more one it
+                // answers later).
+                if let self, self.withdrawals[notification.identifier] != queuedWithdrawals[notification.identifier] {
+                    await poster.remove(identifiers: [notification.identifier])
+                }
             }
             self?.postTasks[number] = nil
         }
@@ -226,11 +319,74 @@ public final class ChargingNotifier {
         postTasks[number] = task
     }
 
-    /// Waits until every posting task has finished, whether it handed its
-    /// notifications to the system or stopped because its generation ended,
-    /// including tasks started while waiting.
+    /// Withdraws notifications that no longer hold: a post of one still
+    /// waiting is dropped, and the system is asked to remove them at once.
+    /// The poster removes again one whose hand-over it answers later. Not
+    /// tied to a generation, the post queue or the opt-in, so neither
+    /// turning notifications off or on nor a post that waits can drop it;
+    /// never waits.
+    private func withdraw(_ identifiers: [String]) {
+        for identifier in identifiers {
+            withdrawals[identifier, default: 0] += 1
+        }
+        outstanding.subtract(identifiers)
+        inherited.subtract(identifiers)
+        let number = nextRemovalTask
+        nextRemovalTask += 1
+        let task = Task { [weak self, poster] in
+            await poster.remove(identifiers: identifiers)
+            CellKeeperLog.app.notice("Notifications withdrawn: \(identifiers.count, privacy: .public)")
+            self?.removalTasks[number] = nil
+        }
+        removalTasks[number] = task
+    }
+
+    /// Lists CellKeeper's own notifications and removes every calibration
+    /// request (``NotificationWording/calibrationRequestPrefix``) other than
+    /// the one that holds, judged when the list arrives: not one queued in
+    /// this run and not withdrawn (``outstanding``), and not one this run
+    /// withdrew already, which its withdrawal handles. The one that holds is
+    /// kept and from then on withdrawn like one this run posted
+    /// (``inherited``), or removed with the rest if notifications were
+    /// turned off meanwhile. A session's end report has another prefix and
+    /// stays.
+    private func reconcile() {
+        let number = nextRemovalTask
+        nextRemovalTask += 1
+        let task = Task { [weak self, poster] in
+            let listed = await poster.notificationIdentifiers()
+            guard let self else { return }
+            let earlier = listed.filter { identifier in
+                identifier.hasPrefix(NotificationWording.calibrationRequestPrefix)
+                    && !self.outstanding.contains(identifier)
+                    && self.withdrawals[identifier] == nil
+            }
+            var obsolete: [String] = []
+            for identifier in earlier {
+                if identifier == self.standingRequest, self.optIn.isEnabled {
+                    self.outstanding.insert(identifier)
+                    self.inherited.insert(identifier)
+                } else {
+                    obsolete.append(identifier)
+                }
+            }
+            if !obsolete.isEmpty {
+                for identifier in obsolete {
+                    self.withdrawals[identifier, default: 0] += 1
+                }
+                await poster.remove(identifiers: obsolete)
+                CellKeeperLog.app.notice("Calibration requests left from earlier withdrawn: \(obsolete.count, privacy: .public)")
+            }
+            self.removalTasks[number] = nil
+        }
+        removalTasks[number] = task
+    }
+
+    /// Waits until every posting and removal task has finished, whether it
+    /// handed its notifications to the system or stopped because its
+    /// generation ended, including tasks started while waiting.
     func waitForPosts() async {
-        while let task = postTasks.values.first {
+        while let task = postTasks.values.first ?? removalTasks.values.first {
             await task.value
         }
     }

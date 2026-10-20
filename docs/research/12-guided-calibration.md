@@ -1,8 +1,9 @@
 # 12 — Guided battery calibration, without SMC writes
 
 - **Date:** 2026-10-21
-- **Status:** Design approved by the owner on 2026-10-21, for
-  implementation; nothing is built yet. The owner asked on 2026-10-20 for a
+- **Status:** Design approved by the owner on 2026-10-21; implemented
+  (`architecture.md`, "Guided calibration", D112), not yet tried on a
+  Mac. The owner asked on 2026-10-20 for a
   calibration feature like the one other battery tools offer, and chose,
   from the options in §6, "write up, then build A": a calibration that
   CellKeeper guides and the owner carries out, with no SMC write, no
@@ -284,8 +285,8 @@ Settings › Battery (the owner's own limit), as `safety.md` precondition
 
 A calibration is one **session**, stored under its own versioned key and
 read back after every write, as the weekly full charge's store does.
-Each step records its entry time, by the wall clock and by a monotonic
-clock that counts sleep.
+Each step records its entry time by the wall clock; the current step also
+records it by a monotonic clock that counts sleep, which its bounds use.
 
 | # | Step | Limit | CellKeeper does | The owner does | Ends when |
 |---|---|---|---|---|---|
@@ -352,8 +353,9 @@ and, if the owner has turned notifications on, as a notification. Both are
 new: today's notifications report what happened and ask for nothing. Each
 request says what to do and why ("Unplug your Mac now; CellKeeper will
 watch the battery drain to 20%"), and stays until it is done or the
-session ends. The menu and Settings show the step, the time left in it,
-and a Cancel button throughout.
+session ends. The menu and Settings show the step, when it is expected
+to end, where it has a time (an end time, clearer than a countdown in a
+menu that does not refresh live), and a Cancel button throughout.
 
 The rest's request carries everything the owner needs without CellKeeper:
 "Shut down your Mac now and leave it unplugged. Plug it in again after
@@ -364,7 +366,8 @@ has no launch at login yet); the request says that too.
 ### 7.6 Early ends, resuming, low battery, and the rest
 
 **Cancel**, at any step: CellKeeper's normal policy applies again at once,
-and the session is marked ended and removed from storage. The store, like
+and the session is replaced in storage by its report, in one write: that
+report is its "ended" mark, kept as the last calibration. The store, like
 the weekly full charge's, reads back every write but cannot promise that
 the last write survives a crash or a power loss; so durability does not
 rest on the mark (next paragraph). The report says which steps were done.

@@ -16,7 +16,7 @@ public enum NotificationWording {
     static let simulatedNote = "CellKeeper's control is simulated: your Mac's charging is not changed."
 
     /// What Settings says notifications are about.
-    public static let settingsSummary = "CellKeeper notifies you when it holds charging at your limit or pauses it because the battery is warm, when a temporary full charge or a discharge ends without you stopping it, when its control backend faults, and when it cannot confirm that its own restriction ended or that your own Charge Limit is back, and once that is resolved. With macOS's Charge Limit, it notifies you when macOS reports the battery at or above the limit CellKeeper chose and not charging. Notifications say only what CellKeeper observed, and say so when its control is simulated."
+    public static let settingsSummary = "CellKeeper notifies you when it holds charging at your limit or pauses it because the battery is warm, when a temporary full charge or a discharge ends without you stopping it, when its control backend faults, and when it cannot confirm that its own restriction ended or that your own Charge Limit is back, and once that is resolved. With macOS's Charge Limit, it notifies you when macOS reports the battery at or above the limit CellKeeper chose and not charging, and during a calibration when it asks you to unplug, rest or plug in your Mac, and when the calibration finishes or ends early. Notifications say only what CellKeeper observed, and say so when its control is simulated."
 
     /// `percent`: the charge usable telemetry showed with the hold.
     static func limitReached(_ status: ControllerStatus, limit: Int, percent: Int) -> PlannedNotification {
@@ -145,6 +145,52 @@ public enum NotificationWording {
                 body: "At your request, CellKeeper discarded its unreadable record of your own Charge Limit, so it will not restore a limit from it."
             )
         }
+    }
+
+    /// A calibration's request, worded as the menu words it but "from now",
+    /// since it is posted when the request begins (note 12 §7.5).
+    static func calibrationRequest(_ request: CalibrationRequest, status: ControllerStatus) -> PlannedNotification {
+        PlannedNotification(
+            kind: NotificationKind.calibration(request),
+            title: CalibrationWording.title(request),
+            body: CalibrationWording.text(request, atRequest: true, now: status.lastEvaluation ?? Date()),
+            identifier: status.calibration.session.map { calibrationIdentifier(session: $0.id, request: request) }
+        )
+    }
+
+    /// What every calibration request's identifier begins with, and only
+    /// theirs: after a relaunch, a request an earlier run posted is found in
+    /// Notification Center by it. A session's end report has another.
+    public static let calibrationRequestPrefix = "calibration.request."
+
+    /// What a session's end report's identifier begins with.
+    public static let calibrationReportPrefix = "calibration.report."
+
+    /// The identifier of the calibration request that holds for `status`,
+    /// also a paused session's, if any: what reconciliation keeps.
+    static func standingCalibrationRequest(_ status: ControllerStatus) -> String? {
+        guard let session = status.calibration.session,
+              let request = CalibrationWording.request(status.calibration, reading: NotificationPlanner.usableSnapshot(status), includingPaused: true)
+        else { return nil }
+        return calibrationIdentifier(session: session.id, request: request)
+    }
+
+    /// A calibration request's own identifier: its session and what it
+    /// asks, a rest asked again being a new one.
+    static func calibrationIdentifier(session: UUID, request: CalibrationRequest) -> String {
+        let what = switch request {
+        case .unplug: "unplug"
+        case .rest: "rest"
+        case .restAgain: "restAgain"
+        case .plugIn: "plugIn"
+        }
+        return "\(calibrationRequestPrefix)\(session.uuidString).\(what)"
+    }
+
+    /// A calibration that finished or ended by itself.
+    static func calibrationEnded(_ report: CalibrationReport, status: ControllerStatus) -> PlannedNotification {
+        let words = CalibrationWording.endNotification(report, status: status)
+        return PlannedNotification(kind: report.end.isCompleted ? .calibrationFinished : .calibrationEndedEarly, title: words.title, body: words.body, identifier: "\(calibrationReportPrefix)\(report.id.uuidString)")
     }
 
     private static func titled(_ title: String, _ status: ControllerStatus) -> String {

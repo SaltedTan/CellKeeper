@@ -435,6 +435,7 @@ private struct FullChargeControl: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            CalibrationLines(model: model, status: status)
             if let override = status.activeOverride {
                 HStack {
                     switch override.kind {
@@ -514,6 +515,80 @@ private struct FullChargeControl: View {
             return .notInEffect(why: status.lastExecution.map { " (\($0.result.title))" } ?? "")
         }
         return .running(simulated: status.capabilities.availability == .simulated)
+    }
+}
+
+/// The menu's lines for a guided calibration (research note 12 §7.5): the
+/// step and what to do next, with Continue for a session found at launch
+/// (with the owner's answer after a restart in the rest) and Cancel; the
+/// temperature note; a store that could not save the end; and what became
+/// of the latest session, with OK. The wording is `CalibrationWording`'s.
+private struct CalibrationLines: View {
+    let model: AppModel
+    let status: ControllerStatus
+
+    var body: some View {
+        let calibration = status.calibration
+        if let session = calibration.session, let line = CalibrationWording.statusLine(for: status) {
+            let isRequest = CalibrationWording.request(for: status) != nil || calibration.isPaused
+            VStack(alignment: .leading, spacing: 4) {
+                Label(line, systemImage: "gauge.with.needle")
+                    .fontWeight(isRequest ? .semibold : .regular)
+                    .fixedSize(horizontal: false, vertical: true)
+                if session.temperatureCheck == .ownerConfirmedCoolRoom {
+                    Text(CalibrationWording.temperatureUnknown)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                HStack {
+                    Spacer()
+                    if calibration.isPaused {
+                        if calibration.needsRestAnswer {
+                            Button("Yes, Continue") { model.continueCalibration(restAnswer: true) }
+                                .accessibilityLabel("Yes, it stayed shut down and unplugged; continue the calibration")
+                            Button("No, Continue") { model.continueCalibration(restAnswer: false) }
+                                .accessibilityLabel("No, it did not; continue the calibration")
+                        } else {
+                            Button("Continue") { model.continueCalibration() }
+                                .accessibilityLabel("Continue the calibration")
+                        }
+                    }
+                    Button("Cancel") { model.cancelCalibration() }
+                        .accessibilityLabel("Cancel the calibration")
+                }
+                .controlSize(.small)
+                if let refusal = calibration.refusal {
+                    Text(refusal)
+                        .foregroundStyle(.warningText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .font(.caption)
+        }
+        if calibration.isEvidenceRetained {
+            Label(CalibrationWording.evidenceRetained, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.warningText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if calibration.isEndUnsaved {
+            Label(CalibrationWording.endUnsaved, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.warningText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        if calibration.session == nil, let outcome = calibration.outcome {
+            HStack(alignment: .firstTextBaseline) {
+                Label(CalibrationWording.outcomeLine(outcome, status: status), systemImage: outcome.end.asksToPlugIn ? "exclamationmark.triangle" : "gauge.with.needle")
+                    .foregroundStyle(outcome.end.asksToPlugIn ? Color.warningText : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("OK") { model.dismissCalibrationOutcome() }
+                    .controlSize(.small)
+                    .accessibilityLabel("OK, dismiss the calibration message")
+            }
+            .font(.caption)
+        }
     }
 }
 

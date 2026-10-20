@@ -144,6 +144,10 @@ final class AppModel {
         case recheckBackend
         case confirmNoLimit
         case discardUnreadableRecord
+        case startCalibration(CalibrationConfirmations, isNotifying: Bool)
+        case cancelCalibration
+        case continueCalibration(restAnswer: Bool?)
+        case dismissCalibrationOutcome
 
         /// The evaluation this command runs, for the notification planner:
         /// the user's own commands never post a hold, a pause or an
@@ -153,6 +157,7 @@ final class AppModel {
             case .evaluate(let trigger): trigger
             case .apply: .settingsChanged
             case .startFullCharge, .startDischarge, .cancelOverride: .overrideChanged
+            case .startCalibration, .cancelCalibration, .continueCalibration, .dismissCalibrationOutcome: .overrideChanged
             case .setSchedule, .cancelSchedule, .dismissScheduleOutcome, .setWeekly, .removeWeekly, .dismissWeeklyOutcome: .scheduleChanged
             case .switchBackend: .backendChanged
             case .resetFault, .recheckBackend, .confirmNoLimit, .discardUnreadableRecord: .manual
@@ -212,6 +217,7 @@ final class AppModel {
         telemetry: any TelemetryProvider = SystemTelemetryProvider(),
         scheduleStore: any FullChargeScheduleStoring = FullChargeScheduleStore(),
         weeklyStore: any WeeklyFullChargeStoring = WeeklyFullChargeStore(),
+        calibrationStore: any CalibrationStoring = CalibrationStore(),
         notificationPoster: any NotificationPosting = SystemNotificationPoster()
     ) {
         var loaded = store.loadChargingSettings()
@@ -244,6 +250,7 @@ final class AppModel {
             adoptionMarkerStore: FileOwnershipRecordStore.default,
             scheduleStore: scheduleStore,
             weeklyStore: weeklyStore,
+            calibrationStore: calibrationStore,
             // Read fresh at every evaluation. Foundation caches the system
             // time zone until it is reset, and documents no reset of its own
             // when it changes; resetting here does not depend on the
@@ -251,7 +258,8 @@ final class AppModel {
             timeZone: {
                 NSTimeZone.resetSystemTimeZone()
                 return TimeZone.current
-            }
+            },
+            calibrationClock: .system()
         )
         let notifier = ChargingNotifier(poster: notificationPoster, store: store)
         self.notifier = notifier
@@ -536,9 +544,14 @@ final class AppModel {
     }
 
     /// Arms a scheduled full charge from `start` to `end`, replacing any
-    /// armed one. A schedule that is not valid now is not sent, and
-    /// ``scheduleError`` says why.
+    /// armed one. A schedule that is not valid now, or one asked for while a
+    /// calibration is in progress, is not sent, and ``scheduleError`` says
+    /// why.
     func setFullChargeSchedule(start: Date, end: Date) {
+        if status?.calibration.isInProgress == true {
+            refuseSchedule(CalibrationWording.inProgress)
+            return
+        }
         let schedule = FullChargeSchedule(startsAt: start, endsAt: end)
         let issues = schedule.issues(settingAt: Date())
         guard issues.isEmpty else {
@@ -562,6 +575,10 @@ final class AppModel {
     /// pattern that is not valid is not sent, and ``weeklyError`` says why.
     /// The controller counts from when it runs the command.
     func setWeeklyFullCharge(_ pattern: WeeklyFullChargePattern) {
+        if status?.calibration.isInProgress == true {
+            refuseWeekly(CalibrationWording.inProgress)
+            return
+        }
         let issues = pattern.issues
         guard issues.isEmpty else {
             refuseWeekly(issues.map(\.description).joined(separator: " "))
@@ -594,6 +611,42 @@ final class AppModel {
 
     func dismissWeeklyFullChargeOutcome() {
         send(.dismissWeeklyOutcome)
+    }
+
+    // MARK: Guided calibration
+
+    /// Whether the owner's notifications reach them: on, and shown by macOS.
+    /// Otherwise a calibration's requests appear only in the menu.
+    var isNotifying: Bool {
+        notificationOptIn.isToggleOn
+    }
+
+    /// Why a calibration cannot start now with `confirmations`, or nil
+    /// (``CalibrationAdmission``); the Settings button shows it.
+    func calibrationRefusal(_ confirmations: CalibrationConfirmations) -> String? {
+        guard let status else { return "CellKeeper has not finished its first check yet." }
+        return CalibrationAdmission.refusal(status: status, settings: settings, confirmations: confirmations, isNotifying: isNotifying, now: Date())
+    }
+
+    /// Does nothing unless Settings' button would be enabled; the controller
+    /// checks everything again after a fresh evaluation.
+    func startCalibration(_ confirmations: CalibrationConfirmations) {
+        guard calibrationRefusal(confirmations) == nil else { return }
+        send(.startCalibration(confirmations, isNotifying: isNotifying))
+    }
+
+    func cancelCalibration() {
+        send(.cancelCalibration)
+    }
+
+    /// The owner's "continue" for a paused session; `restAnswer` answers
+    /// whether the Mac stayed shut down and unplugged, when that is asked.
+    func continueCalibration(restAnswer: Bool? = nil) {
+        send(.continueCalibration(restAnswer: restAnswer))
+    }
+
+    func dismissCalibrationOutcome() {
+        send(.dismissCalibrationOutcome)
     }
 
     /// Saves the choice at once: if the switch cannot complete in this
@@ -853,6 +906,18 @@ final class AppModel {
             status = await controller.confirmNoLimitIsOwnerLimit()
         case .discardUnreadableRecord:
             status = await controller.discardUnreadableOwnershipRecord()
+        case .startCalibration(let confirmations, let isNotifying):
+            let newStatus = await controller.startCalibration(confirmations, isNotifying: isNotifying)
+            status = newStatus
+            announceCalibrationRefusal(newStatus)
+        case .cancelCalibration:
+            status = await controller.cancelCalibration()
+        case .continueCalibration(let restAnswer):
+            let newStatus = await controller.continueCalibration(restAnswer: restAnswer)
+            status = newStatus
+            announceCalibrationRefusal(newStatus)
+        case .dismissCalibrationOutcome:
+            status = await controller.dismissCalibrationOutcome()
         }
         // Plans at once and posts later; never waits.
         if let status {
@@ -860,6 +925,13 @@ final class AppModel {
             firstStatus.provide(true)
         }
         noteAdoptedChanges()
+    }
+
+    /// Announces why the controller refused the owner's start or continue,
+    /// which Settings and the menu then show.
+    private func announceCalibrationRefusal(_ status: ControllerStatus) {
+        guard let refusal = status.calibration.refusal else { return }
+        Announcement.post(refusal, priority: .high)
     }
 
     /// When the controller kept a Charge Limit set outside CellKeeper, it
@@ -882,7 +954,7 @@ final class AppModel {
         case .failSafe: return "exclamationmark.triangle"
         case .temperaturePause: return "thermometer.high"
         case .discharging: return "minus.plus.batteryblock"
-        case .holding, .onBattery, .charging, .fullChargeOverride, .safetyFloor, .osEnforcedLimit, .deferringToMacOS:
+        case .holding, .onBattery, .charging, .fullChargeOverride, .safetyFloor, .osEnforcedLimit, .deferringToMacOS, .calibrating:
             // A state that allows charging does not mean the battery is
             // charging (unplugged at the safety floor, full at a 100% limit).
             return status.snapshot?.isCharging == true ? "bolt.batteryblock" : "batteryblock"
@@ -903,6 +975,9 @@ final class AppModel {
             parts.append("Control backend faulted")
         } else if let decision = status.decision {
             parts.append(decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS))
+        }
+        if let session = status.calibration.session {
+            parts.append(status.calibration.isPaused ? "Calibration paused" : "Calibration \(CalibrationWording.stepNumber(session.step).lowercased())")
         }
         return parts.joined(separator: ", ")
     }

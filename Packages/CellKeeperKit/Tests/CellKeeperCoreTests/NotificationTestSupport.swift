@@ -457,6 +457,11 @@ final class FakeNotificationPoster: NotificationPosting, @unchecked Sendable {
     private var _answer: NotificationPermission
     private var _failureCode: Int?
     private var _posted: [PlannedNotification] = []
+    private var _removed: [[String]] = []
+    private var _events: [String] = []
+    /// What the center holds, delivered or pending.
+    private var _center: Set<String> = []
+    private var _listings = 0
     private var _permissionReads = 0
     private var _finishedReads = 0
     private var _requests = 0
@@ -477,6 +482,24 @@ final class FakeNotificationPoster: NotificationPosting, @unchecked Sendable {
     }
 
     var posted: [PlannedNotification] { lock.withLock { _posted } }
+    /// Every removal asked for, in order.
+    var removed: [[String]] { lock.withLock { _removed } }
+    /// Posts that reached the center ("add <identifier>") and removals
+    /// ("remove <identifiers>"), in the order the center saw them.
+    var events: [String] { lock.withLock { _events } }
+    /// The identifiers the center holds now.
+    var identifiers: Set<String> { lock.withLock { _center } }
+    /// How many times the center was asked what it holds.
+    var listings: Int { lock.withLock { _listings } }
+
+    /// Listings wait here, after counting, before the center answers.
+    let listing = TestGate()
+
+    func notificationIdentifiers() async -> [String] {
+        lock.withLock { _listings += 1 }
+        await listing.pass()
+        return lock.withLock { _center.sorted() }
+    }
     var permissionReads: Int { lock.withLock { _permissionReads } }
     /// Reads that returned, after any hold.
     var finishedReads: Int { lock.withLock { _finishedReads } }
@@ -504,6 +527,14 @@ final class FakeNotificationPoster: NotificationPosting, @unchecked Sendable {
         return permission
     }
 
+    func remove(identifiers: [String]) async {
+        lock.withLock {
+            _removed.append(identifiers)
+            _events.append("remove \(identifiers.joined(separator: ","))")
+            _center.subtract(identifiers)
+        }
+    }
+
     func requestPermission() async -> NotificationPermission {
         lock.withLock {
             _requests += 1
@@ -521,6 +552,8 @@ final class FakeNotificationPoster: NotificationPosting, @unchecked Sendable {
             }
             if let code = _failureCode { return .failed(code: code) }
             _posted.append(notification)
+            _events.append("add \(notification.identifier)")
+            _center.insert(notification.identifier)
             return .posted
         }
     }

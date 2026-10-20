@@ -15,6 +15,9 @@ public struct WeeklyFullChargeRecord: Sendable, Equatable {
         case passed
         /// It began before the schedule was saved, so it was never due.
         case beforeSave
+        /// It fell due while a guided calibration was in progress, and was
+        /// skipped (note 12 §7.4).
+        case skippedForCalibration
     }
 
     /// The occurrence's nominal day, which identifies it.
@@ -145,6 +148,9 @@ public enum WeeklyFullChargeOutcome: Sendable, Equatable {
     case windowPassed(WeeklyFullChargeOccurrence, lastWait: FullChargeScheduleWait?)
     /// A stored weekly schedule could not be used, and is not.
     case discarded(reason: String)
+    /// It fell due while a guided calibration was in progress, and was
+    /// skipped.
+    case skippedForCalibration(WeeklyFullChargeOccurrence)
 
     /// This outcome once the full charge it started, extended or kept
     /// turned out complete in the same evaluation; other outcomes are
@@ -153,7 +159,7 @@ public enum WeeklyFullChargeOutcome: Sendable, Equatable {
         switch self {
         case .started(let occurrence), .extendedRunning(let occurrence), .keptRunning(let occurrence, _):
             .alreadyFull(occurrence)
-        case .alreadyFull, .windowPassed, .discarded:
+        case .alreadyFull, .windowPassed, .discarded, .skippedForCalibration:
             self
         }
     }
@@ -174,11 +180,14 @@ public enum WeeklyFullChargeError: Error, Sendable, Equatable, CustomStringConve
     case invalid([WeeklyFullChargeIssue])
     /// No store was given to the controller.
     case notAvailable
+    /// A guided calibration is in progress (note 12 §7.4).
+    case calibrationInProgress
 
     public var description: String {
         switch self {
         case .invalid(let issues): issues.map(\.description).joined(separator: " ")
         case .notAvailable: "Weekly full charges are not available."
+        case .calibrationInProgress: CalibrationWording.inProgress
         }
     }
 }

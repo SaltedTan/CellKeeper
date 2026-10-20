@@ -569,6 +569,129 @@ like any write. Every stored number is checked against its range before
 anything is computed with it, so no stored value can make loading trap
 (an offset of the most negative integer once did, through `abs`).
 
+### Guided calibration
+
+A guided calibration (research note 12 §7, owner approval 2026-10-21,
+D112) gives the battery's gauge the conditions it needs to relearn its
+capacity, with no SMC write, no helper and no root: the only control
+output is macOS's Charge Limit through the native backend, and the owner
+unplugs, rests and plugs in the Mac when asked. Only with macOS's Charge
+Limit; user-initiated only; not yet tried on a Mac.
+
+**The session** (`CalibrationSession`, Core) is a pure value with every
+clock and reading given by the caller. Its steps:
+
+| # | Step | Asks for | Ends when |
+|---|---|---|---|
+| 1 | Charge to full | 100% | a "charged" reading (`FullyCharged`, or 100% and not charging) taken under a 100% already confirmed; at most 6 h |
+| 2 | Rest at the top | 100% | 2 h by the monotonic clock (restarted by a "continue"); then the normal limit, confirmed |
+| 3 | Unplug | normal | on battery power; at most 4 h |
+| 4 | Drain | normal | the charge at 20% or below (at 15% or below the session ends, asking for a plug-in now) |
+| 5 | Rest at the bottom | normal | a plug-in (step 7), the time shown reached awake on battery power, or the first usable reading after a wake (step 6 or 7) |
+| 6 | Plug in | normal | on external power |
+| 7 | Final charge to full | 100% | a "charged" reading under 100%, at most 6 h; then the normal limit, confirmed, and the session is complete |
+
+Every session ends after 72 hours. Bounds use a monotonic clock that counts
+sleep and restarts at boot (`CalibrationClock`: in the app `CLOCK_MONOTONIC`
+with `kern.bootsessionuuid`) within the same boot, and the wall clock
+across a restart; without a boot identifier only the current run counts as
+the same boot. Step 5's time to plug in again is rounded up to a whole
+minute at least 5 h ahead and never moved later; it counts as reached by
+the wall clock or, within the boot, by the monotonic clock, so a clock set
+back never lengthens the time at a low charge. An unplug during step 1, or
+during step 7 before full, and a plug-in during the drain end the session
+(R23); the owner's two decisions accept an unplug during step 2 (on to the
+drain, the top rest recorded short unless its 2 hours had already
+passed, the return requested at once) and a
+plug-in during step 5 before the time shown (on to step 7, the bottom rest
+short). Where the temperature is read, 10–40 °C applies and a reading that
+disappears ends the session; where it is not, the owner confirmed a cool
+room at the start.
+
+**The rest check** gives one of three results: counted (one sleep seen
+announced and ended in the same run, on battery at 15–20%, at least 5 h on
+the monotonic clock with the wall clock within 10 minutes, the first usable
+reading after the wake on battery and no higher and at most 3 points
+lower); the owner's account, asked after a restart once the time shown has
+come, with the boot time and the last reading before; or not confirmed,
+with the reason. An early wake on battery above 15% asks once to rest
+again until the same time; a second one moves on, the rest short. No rest
+is asked for at 15% or below. The session continues to step 6 or 7 in
+every case, so a failed check never lengthens the time at a low charge.
+
+**In the controller** (`CalibrationRunner`, owned by `ChargeController`):
+
+- The native policy gains one rule (row N4 below): while the session's
+  step asks for 100% (not paused, not returning), it wants
+  `nativeLimit(100)`, and unlike a temporary full charge that does not end
+  at full. The request is rate-limited like any change.
+- Leaving a 100% step is confirmed: the session waits, "returning to your
+  limit", until a read-back shows the normal policy's mode, and only then
+  enters step 3 or completes. A return the rate limit defers is retried as
+  it allows; one that fails or that the read-back does not confirm goes
+  through the existing failure handling (the owner's own limit, three
+  failures fault the backend) and ends the session.
+- It is checked inside each evaluation after the backend's mode was read
+  and before the schedules. While a session exists, running or paused, a
+  temporary full charge, a one-shot schedule and saving a weekly one are
+  refused with "a calibration is in progress" (the menu, Settings and the
+  Shortcuts action alike); the controller also refuses a discharge command,
+  with a log line (none of the app's controls offers one with macOS's
+  Charge Limit); the one-shot is not applied;
+  a weekly occurrence that falls due is recorded as handled with the
+  result `skippedForCalibration`, so the schedule continues afterwards.
+  Changing CellKeeper's own limit is allowed. Management off, an outside
+  change kept, a switch away from macOS's Charge Limit (or one pending),
+  an unavailable or faulted backend end the session.
+- **Startup** (§7.6): a stored session is loaded paused. Before anything
+  is written, the first evaluation notes whether the backend holds a
+  record of the owner's limit (from what it loaded, no new I/O); the
+  backend's own recovery then runs as always. With a record, an adoption
+  ends the session; without one, the limit read must equal the owner's
+  limit recorded in the session. Anything else is the owner's change, kept
+  as an outside change before the policy runs: the backend stores an
+  adoption marker and reads it back (`keepOutsideLimit`), nothing is
+  written, and Manage charging is off until the owner turns it on again,
+  as after any adoption. Only once the marker is recorded is the session
+  replaced in storage by its report; until then its record stays there as
+  the evidence a next launch needs (`CalibrationStatus.isEvidenceRetained`,
+  shown in the menu and Settings), and every evaluation checks again. A
+  limit that could not be read turns Manage charging off too and keeps the
+  record until it reads: as the owner's own, the record is replaced; as
+  another value, that value is kept the same way first.
+  Passed bounds, an unplug in step 1, or a one-shot schedule found end it
+  too. Otherwise it stays paused with the normal policy, asking for
+  nothing, until the owner chooses "continue" (`continueCalibration`),
+  which runs an evaluation first and restarts step 2's timer.
+- **Admission** (`CalibrationAdmission`): the Settings button and the
+  controller, after a fresh evaluation, use the same check: macOS's Charge
+  Limit in control and settled, Manage charging on, CellKeeper's limit one
+  of its steps, a fresh reading on power, no override running and no
+  one-shot scheduled, 10–40 °C where read; then the owner's confirmations
+  (Optimized Battery Charging off or step 1's bound accepted, a cool room
+  where the temperature cannot be read, the recovery seen, and with
+  notifications off that requests appear only in the menu).
+- **Storage** (`CalibrationStore`, `calibration.v1`): every change is
+  written and read back; a failure stops the session in memory at once.
+  An ended session is replaced, in one write, by its report (the "ended"
+  mark); a failure to save that is retried at every evaluation and shown.
+
+**What the owner sees**: Settings › Charging › Calibration (what it does,
+the confirmations, the recovery with the owner's own limit, Start with the
+first reason it is disabled; during a session the step, when it ends, the
+recovery, Continue for one found at launch, Cancel; the last calibration
+and its report); the menu's status line with the next action (§7.5's
+requests, "returning to your limit", the paused prompt), Continue and
+Cancel, and what became of a session that ended, worded from what a
+read-back now shows about macOS's Charge Limit (`CalibrationWording.limitAfter`:
+CellKeeper's limit confirmed, the owner's own confirmed, or not confirmed
+yet, with the owner's limit to set in System Settings › Battery), never
+from what CellKeeper intends (R30). A confirmation needs the latest read of
+the limit to have succeeded and shown the value: holding no record only
+means nothing of CellKeeper's is owed; opt-in notifications for each request
+and the end (see "Notifications"); and the report (§7.9) in
+the activity log and the diagnostics report's Calibration section.
+
 ### Precedence (highest first)
 
 | # | Condition | State | Desired mode |
@@ -611,7 +734,8 @@ row 4 never applies. The rest are replaced by:
 | N1 | Telemetry reports no battery | `failSafe` | normal (the user's own limit) |
 | N2 | Limit is not one of the backend's steps (80/85/90/95/100) | `failSafe` | normal |
 | N3 | Temporary full charge active (ends when full, on unplug, or on expiry) | `fullChargeOverride` | nativeLimit(100) |
-| N4 | Otherwise | `osEnforcedLimit` | nativeLimit(limit) |
+| N4 | A guided calibration's step asks for 100% (steps 1, 2, 7; not paused, not returning); does not end when full | `calibrating` | nativeLimit(100) |
+| N5 | Otherwise | `osEnforcedLimit` | nativeLimit(limit) |
 
 What the native-limit policy does with features and inputs it cannot use:
 - **Discharge:** a session is interrupted with a note.
@@ -2323,7 +2447,41 @@ channel: they report what statuses establish and never affect charging.
   release (`OwnRestrictionState`), or the user's own Charge Limit not
   confirmed back (`isOwnLimitRestorePending`, an unreadable record); and,
   after such a warning, what resolved it, which replaces the warning in
-  Notification Center. Nothing else has an "ended" counterpart.
+  Notification Center. Nothing else has an "ended" counterpart. During a
+  guided calibration, also its requests (unplug, rest unplugged with the
+  time to plug in again, plug in) and its end (finished, or ended early),
+  each posted once as it begins, only from automatic evaluations, so a
+  request that begins on the owner's own command appears only in the menu.
+  Each has its own identifier (its session and what it asks), and one that
+  was posted is withdrawn once it no longer holds (done, asked again, or
+  ended with its session): removed from Notification Center through
+  `NotificationPosting.remove`, and not posted if it is still waiting
+  (`NotificationPlan.withdrawals`). The notifier keeps the requests it
+  queued and has not withdrawn across generations and opt-in changes;
+  removals belong to no generation and run also after notifications were
+  turned off, which withdraws every outstanding request at once (removing
+  CellKeeper's own notifications asks for no permission and posts nothing,
+  and only requests queued under an opt-in are ever removed). The system
+  poster tracks each hand-over until the center answers it and removes
+  again one answered after its withdrawal, and a post withdrawn on its way
+  to the poster is removed again once its add returns. A session's end
+  notification is a report and stays, and quitting withdraws nothing.
+  After a relaunch the notifier remembers nothing it posted, so it
+  reconciles Notification Center with the request that holds now: request
+  identifiers begin with `calibration.request.` and end reports with
+  `calibration.report.`; the notifier lists CellKeeper's own delivered and
+  pending notifications (`NotificationPosting.notificationIdentifiers`)
+  and removes every request but the one that holds (a paused session's
+  step request still holds) and those this run queued or withdrew. It does
+  so after launch once the owner has opted in, never before; after opting
+  in again; whenever the request that holds changes; and when a session
+  ends. The request it keeps is from then on withdrawn like one this run
+  queued: once it no longer holds, and at once if notifications are turned
+  off. If they are turned off while the list is on its way, the request is
+  removed with the others when the list arrives, not kept. No new
+  persistence: the center itself is the record. While a session exists the limit hold is
+  not armed, since the calibration's 100% and returns are its own doing
+  (see "Guided calibration", D112).
 - **Evidence.** A notification that says something happened needs positive
   evidence of that very thing. Holds and pauses need a read-back. A
   restore warning is resolved only by a read-back since the warning: of
@@ -2550,6 +2708,16 @@ tested.
     the app passes the status's evaluation time, and tests pin the
     calendar, so the wording is tested without the wall clock or the
     system's calendar).
+- **Guided calibration.** Settings › Charging › Calibration and the menu's
+  calibration lines (see "Guided calibration" for what they show).
+  `CalibrationWording` (Core) words both, and the notifications: the menu
+  says a request "5 hours after the battery reached 20%", the notification,
+  posted as the request begins, "at least 5 hours from now". Start is
+  enabled by `CalibrationAdmission`, with its first reason shown under the
+  button and as its hint, as for the full charge (D110); Cancel in Settings
+  asks for confirmation, the menu's does not, like the full charge's. The
+  disabled "Charge to 100% once" and schedule editors say "A calibration is
+  in progress." The status item's label names the calibration step.
 - **Weekly full charge.**
   - **Settings › Charging** has a "Weekly full charge" section after
     "Scheduled full charge": day toggles in the calendar's order, a start
@@ -2865,6 +3033,12 @@ The weekly full charge and its record are stored on their own, under
 the one in memory decides the run, and the store is brought in line with it
 and retried while that fails (see "Weekly full charge").
 
+A guided calibration's session, and the report of the latest one that
+ended, are stored on their own, under `calibration.v1` (`CalibrationStore`).
+Each write is read back, and a failure stops the session at once; a session
+found at launch is never resumed without the owner's "continue", because
+the last write may be missing after a crash (see "Guided calibration").
+
 The helper daemon keeps one file, its activation history, under
 `/Library/Application Support/CellKeeper/Helper/` (see "Helper daemon").
 
@@ -3029,4 +3203,5 @@ The helper daemon logs under its own subsystem,
 | D108 | Discharge starts follow D91: `ChargeController.startDischargeToLimit` while an override is live (a full charge or a discharge, from the user or a schedule) changes nothing and logs that ("Discharge not started: a temporary full charge is running." or "…: a discharge to the limit is already running."); the override keeps its identity, source, deadline and the ending counters. One whose deadline has passed is replaced. Manage charging and the limit's range are checked first, with their message unchanged. As for an ignored full charge, the app shows nothing more: the menu keeps showing the override that runs. Schedule starts keep D82, so a scheduled full charge still replaces a discharge (lead's decision, 2026-10-19) | Discharge starts queued behind one another (a double-click) reset the deadline, and a discharge confirmed in Settings after a full charge started meanwhile, for example a schedule's while the confirmation was open, silently replaced it: Settings checks for a running override only when it asks for confirmation. A schedule's start differs on purpose: it is unattended at a time the user chose (D82), and `forceDischarge → normal` relaxes, while a discharge replacing a full charge would undo a relaxation the user or a schedule asked for |
 | D109 | Accessibility review (owner approval 2026-10-19): warning and error text uses fixed tones (`TextTone`, Kit) instead of the system's orange and red, darker in light mode and with high-contrast variants chosen through the appearance, tested for 4.5:1 (7:1 with Increase Contrast) against the backgrounds CellKeeper's text sits on; the status badge keeps its text in the label colour. The menu's slider is a state machine in Kit (`ChargeLimitSliderEdit`): a change made without a drag (arrow keys, VoiceOver's increment of 1%) is applied once the value has stayed put for 0.6 s, a drag when it ends, and either only at the settings revision the edit began from; `AppModel.settingsRevision` counts every settings change accepted from any source (also one that leaves the settings as they were, and keeping Manage charging off after applying one), and the model checks the revision again when it applies. A superseded edit is dropped (at once, or at the end of a drag) and the slider shows the model's limit; closing the menu applies the current edit once, never later. An action of the user's that ends refused or failed (a settings change in the UI, Schedule Full Charge, saving the weekly full charge) announces its problem where it ends, every time, even with the same text, and Copy Diagnostics announces the copy; nothing else is announced: not steps that keep or clear a problem line, Shortcuts actions, CellKeeper's own changes or status updates | System orange and red reach 2.3:1 and 3.6:1 against white, below WCAG's 4.5:1 for small text, and they carry the app's most important lines (faults, restores, the low-limit warning). `onEditingChanged` reports a drag; if AppKit reports no end for a keyboard or VoiceOver change, the menu would show a limit it never applied, and a short pause keeps a held key from sending a change per step, as the drag rule does. A revision, not a value, decides which change is newer: a Shortcuts action that sets the limit the edit began from is still the later command (#93 review). Announcing from the action rather than from changes of the problem line makes a repeated refusal heard again (#93 review); announcing every status update would talk over VoiceOver once a minute |
 | D110 | A disabled "Charge to 100% once" (menu) or "Discharge Now…" (Settings › Charging) says why: one short plain-words reason, the first condition that fails in a fixed order, shown in secondary text (under the button in the menu, under the row's label in Settings) and given as the button's accessibility hint; an enabled button shows nothing extra and keeps its help tag, which is also its hint as before. One function in Kit enables each button and gives the reason, so they cannot disagree: `FullChargeStart.refusal` (D97), shared with Start CellKeeper Full Charge, with its wording and order unchanged (an override running, Manage charging, a limit of 100%, a reading that shows a battery and external power; the menu hides the button while an override runs); and `DischargeStart.refusal`, which enables "Discharge Now…" under exactly the conditions of the view's former predicate (tested over a grid of settings, backends, readings and overrides), in the order Manage charging, a limit of 20–95%, a backend that can discharge, a reading of the charge (none before the first status), external power, a charge above the limit, no override running. The texts: "Manage charging is off. Turn it on to discharge to the limit.", "Discharging needs a limit of 20–95%.", "Discharging while plugged in is not available with the current backend.", "CellKeeper has no reading of the battery's charge.", "The Mac is on battery. Connect power first." (or, with an unknown power source, "CellKeeper has no battery reading that shows the Mac plugged in."), "The battery is already at or below the limit.", "A temporary full charge is running." or "A discharge to the limit is already running." (accessibility review M14, G9; lead's decision, 2026-10-19) | A help tag appears only on hover, so keyboard users never see it, and VoiceOver reads it only as a hint; "Discharge Now…" said nothing. Secondary text, not a warning tone: a disabled button is not a fault. The line stays a text element for VoiceOver users who turn hints off. On macOS a hint and a help tag are both the element's AXHelp and the outer modifier wins, so the hint follows `.help(_:)` and falls back to the help text when enabled (verified in the accessibility tree). Keeping `FullChargeStart`'s wording and order keeps the Shortcuts action's refusals as they were |
+| D112 | A guided battery calibration (research note 12 §7, owner approval 2026-10-21) on macOS's Charge Limit only: a pure session (`CalibrationSession`) with steps 1–7, 100% asked for only in steps 1, 2 and 7 (policy row N4, not ending at full), each 100% step left only once a read-back confirms the normal limit, per-step bounds and a 72-hour cap on a boot-wide monotonic clock (`CalibrationClock`) with the wall clock across a restart; exclusion of full charges and their schedules while a session exists (weekly occurrences recorded as `skippedForCalibration`); §7.6's startup order (backend recovery first, then the record or the owner's recorded limit decides whether the limit is accounted for, then paused until "continue"); a store read back on every write whose failure stops the session; the owner's two decisions (a cool room confirmed where the temperature cannot be read; an unplug in step 2 and a plug-in in step 5 before the time shown continue the session, the rest recorded short, the top rest only if its 2 hours had not passed on the monotonic clock). At launch, a limit not accounted for when the backend held no record is kept as the owner's change, an adoption with nothing written and Manage charging off, and the session's record is replaced by its report only once the adoption marker reads back as stored, so a failed marker write or a crash between the writes leaves the next launch its evidence (#105 review). The end's message says what a read-back confirmed about the limit, not what CellKeeper intends (R30), and only a successful read showing the value confirms one. Each calibration notification has its own identity and is withdrawn once it no longer holds, also after an opt-out or a new generation, and again if its add is answered after the withdrawal or was withdrawn on its way to the poster; a request an earlier run left in Notification Center is removed by reconciling the center's list with the request that holds, after launch once opted in and whenever that request changes or a session ends; the request it keeps is then withdrawn like one this run posted. An unplug during step 7 before full ends the session, the safest reading of R23 where §7.6 names only steps 1 and 4. CellKeeper's limit must be one of macOS's steps to start, since otherwise the native policy's fail-safe would keep step 1 from ever reaching 100%. While a session exists the limit-held notification is not armed | The owner chose a guided calibration over the CHIE adapter cut (note 12 §6): the drain and the rest need the owner anyway, and public APIs suffice. A temporary full charge ends at full, which would end step 2 at once. A return assumed rather than confirmed could leave 100% in effect through the drain and the rest. A session that resumed by itself after a crash could act on a stale record or a limit the owner changed meanwhile. The limit notice would otherwise report "above the Charge Limit" after every return the calibration made on purpose |
 | D111 | Settings › Diagnostics reads units in words (accessibility review G10; lead's decision, 2026-10-19). A number the section model writes with a unit is a typed part (`DiagnosticsValue`'s `.quantity`, with a `QuantityUnit`: volts, millivolts, milliamps, milliamp-hours, watts, degrees Celsius) that the report and the tab write exactly as before, the number and then the symbol ("12427 mV", "-12 mA", "31 °C", temperatures in the current locale's format), so the report's text is unchanged (golden tests); a whole number stays an `Int` throughout, a decimal is read with the six decimals at most that the report writes. `DiagnosticsValue.spokenText` is the plain text with the units in words and the numbers in the locale's format ("12,427 millivolts", "-12 milliamps", "31 degrees Celsius"), the minus sign kept as the menu reads it. A unit is singular when its number, rounded to the decimals shown as the formatter rounds (half to even), is 1 or -1 ("1 milliamp", "1.00 volt", "1 degree Celsius" for 1.04 shown with at most one decimal), decided from the value, never from the formatted text, so other digits and directional marks do not matter ("١ milliamp"); the menu decides the same way. A temperature written after a number in the policy's reasons and the settings check's messages ("Battery at 41.5°C") is read in words too, the whole number read with the locale's grouping and decimal separators (a space-like grouping separator in any of its forms) and singular when its whole part's digits are exactly 1 and any decimals 0 ("1,000°C" is plural); nil when the value names no unit. The tab sets it as the accessibility label of the row's value, which the row's combined element reads in place of the text ("Voltage, 12,427 millivolts"); rows without a unit are unchanged. `AccessibilityWording` (the menu) takes its units' words from `QuantityUnit`. A test over every diagnostics fixture requires a spoken form without a symbol for each row whose value writes one | Speech reads "mV", "mA" and "mAh" letter by letter. A typed quantity keeps the report byte for byte and gives VoiceOver the number the tab shows, in the menu's words (M10), from one vocabulary; a whole number through `Double` would lose digits above 2^53, and a formatted "1" can be "١" or carry a directional mark, so neither decides anything (#95 review); saying the value's own unit (millivolts, not volts) keeps what VoiceOver says and what the tab shows the same. The policy's sentences are shared with the menu, notifications and the activity log and keep their text; their temperatures are read as the tab's own are. The test makes a new row written with a symbol fail until it has words |

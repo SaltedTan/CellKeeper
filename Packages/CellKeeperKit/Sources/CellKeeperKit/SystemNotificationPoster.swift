@@ -23,6 +23,14 @@ public struct SystemNotificationPoster: NotificationPosting {
     /// default, one the test fires in tests.
     typealias TimeoutScheduler = @Sendable (TimeInterval, @escaping @Sendable () -> Void) -> Void
 
+    /// Removes delivered and pending notifications by identifier; the
+    /// system's center by default, a recorder in tests.
+    typealias Removal = @Sendable ([String]) -> Void
+
+    /// Lists the identifiers of delivered and pending notifications and
+    /// hands them to the completion; the system's center by default.
+    typealias Listing = @Sendable (@escaping @Sendable ([String]) -> Void) -> Void
+
     /// How long a post waits for the center's answer before its outcome
     /// counts as unknown (``NotificationPostResult/unconfirmed``).
     static let answerBound: TimeInterval = 30
@@ -33,21 +41,40 @@ public struct SystemNotificationPoster: NotificationPosting {
     static let maximumQueuedHandOvers = 8
 
     private let submission: Submission
+    private let removal: Removal
+    private let listing: Listing
     private let answerBound: TimeInterval
     private let scheduleTimeout: TimeoutScheduler
     /// Every hand-over runs here, one at a time: a system call that blocks
     /// holds this queue, never Swift's cooperative pool or the main thread.
     private let handOverQueue = DispatchQueue(label: "io.github.saltedtan.CellKeeper.notification-hand-over")
     private let queuedHandOvers: QueuedHandOvers
+    /// Identifiers handed to the center whose add has not been answered,
+    /// and those withdrawn meanwhile.
+    private let inFlight = InFlightAdds()
 
     public init() {
         self.init(submission: { request, completion in
             UNUserNotificationCenter.current().add(request, withCompletionHandler: completion)
+        }, removal: { identifiers in
+            let center = UNUserNotificationCenter.current()
+            center.removePendingNotificationRequests(withIdentifiers: identifiers)
+            center.removeDeliveredNotifications(withIdentifiers: identifiers)
+        }, listing: { completion in
+            // Identifiers only leave the system's callbacks.
+            UNUserNotificationCenter.current().getDeliveredNotifications { delivered in
+                let shown = delivered.map(\.request.identifier)
+                UNUserNotificationCenter.current().getPendingNotificationRequests { pending in
+                    completion(shown + pending.map(\.identifier))
+                }
+            }
         })
     }
 
     init(
         submission: @escaping Submission,
+        removal: @escaping Removal = { _ in },
+        listing: @escaping Listing = { completion in completion([]) },
         answerBound: TimeInterval = SystemNotificationPoster.answerBound,
         scheduleTimeout: @escaping TimeoutScheduler = { seconds, expire in
             // Not on the hand-over queue, which a blocked system call holds.
@@ -56,6 +83,8 @@ public struct SystemNotificationPoster: NotificationPosting {
         queueLimit: Int = SystemNotificationPoster.maximumQueuedHandOvers
     ) {
         self.submission = submission
+        self.removal = removal
+        self.listing = listing
         self.answerBound = answerBound
         self.scheduleTimeout = scheduleTimeout
         self.queuedHandOvers = QueuedHandOvers(limit: queueLimit)
@@ -103,6 +132,10 @@ public struct SystemNotificationPoster: NotificationPosting {
         let outcome = PostOutcome()
         let submission = submission
         let queuedHandOvers = queuedHandOvers
+        let inFlight = inFlight
+        let removal = removal
+        let handOverQueue = handOverQueue
+        let identifier = notification.identifier
         handOverQueue.async {
             defer { queuedHandOvers.release() }
             guard generation.isCurrent else {
@@ -110,8 +143,14 @@ public struct SystemNotificationPoster: NotificationPosting {
                 return
             }
             guard !outcome.isSettled else { return }
+            inFlight.begin(identifier)
             submission(Self.request(for: notification)) { error in
                 outcome.settle(error.map { .failed(code: Self.errorCode($0)) } ?? .posted)
+                // An answer after a withdrawal, also one after the wait
+                // timed out: what it showed is removed again.
+                if inFlight.end(identifier) {
+                    handOverQueue.async { removal([identifier]) }
+                }
             }
         }
         scheduleTimeout(answerBound) {
@@ -124,11 +163,37 @@ public struct SystemNotificationPoster: NotificationPosting {
         }
     }
 
+    /// Runs on the hand-over queue, after every hand-over already queued.
+    /// An add of one of them that the center has not answered yet, also
+    /// one whose wait timed out, is removed again when its answer comes,
+    /// so a withdrawn notification never stays shown.
+    public func remove(identifiers: [String]) async {
+        let removal = removal
+        let inFlight = inFlight
+        handOverQueue.async {
+            inFlight.withdraw(identifiers)
+            removal(identifiers)
+        }
+    }
+
+    /// Waits for the center's answer at most the answer bound, or until
+    /// cancelled; none then.
+    public func notificationIdentifiers() async -> [String] {
+        let answer = ListedIdentifiers()
+        listing { answer.settle($0) }
+        scheduleTimeout(answerBound) { answer.settle([]) }
+        return await withTaskCancellationHandler {
+            await answer.value()
+        } onCancel: {
+            answer.settle([])
+        }
+    }
+
     static func request(for notification: PlannedNotification) -> UNNotificationRequest {
         let content = UNMutableNotificationContent()
         content.title = notification.title
         content.body = notification.body
-        return UNNotificationRequest(identifier: notification.kind.replacementKey, content: content, trigger: nil)
+        return UNNotificationRequest(identifier: notification.identifier, content: content, trigger: nil)
     }
 
     /// An error's numeric code, without its description, which may carry
@@ -204,7 +269,76 @@ final class PostOutcome: @unchecked Sendable {
     }
 }
 
+/// The center's list of identifiers, settled once: answered, expired or
+/// cancelled.
+final class ListedIdentifiers: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: [String]?
+    private var waiter: CheckedContinuation<[String], Never>?
+
+    func settle(_ value: [String]) {
+        let waiting = lock.withLock { () -> CheckedContinuation<[String], Never>? in
+            guard result == nil else { return nil }
+            result = value
+            defer { waiter = nil }
+            return waiter
+        }
+        waiting?.resume(returning: value)
+    }
+
+    func value() async -> [String] {
+        await withCheckedContinuation { (continuation: CheckedContinuation<[String], Never>) in
+            let settled = lock.withLock { () -> [String]? in
+                if let result { return result }
+                waiter = continuation
+                return nil
+            }
+            if let settled {
+                continuation.resume(returning: settled)
+            }
+        }
+    }
+}
+
 /// Hand-overs queued or under way, up to a limit.
+/// The identifiers whose add the center has not answered, and those
+/// withdrawn while it had not. Thread-safe; the center's answers arrive on
+/// its own queue.
+final class InFlightAdds: @unchecked Sendable {
+    private let lock = NSLock()
+    private var counts: [String: Int] = [:]
+    private var withdrawn: Set<String> = []
+
+    func begin(_ identifier: String) {
+        lock.withLock { counts[identifier, default: 0] += 1 }
+    }
+
+    /// The add of `identifier` was answered (shown or failed): true if it
+    /// was withdrawn while unanswered, so it is to be removed again.
+    func end(_ identifier: String) -> Bool {
+        lock.withLock {
+            let left = (counts[identifier] ?? 1) - 1
+            let wasWithdrawn = withdrawn.contains(identifier)
+            if left <= 0 {
+                counts[identifier] = nil
+                withdrawn.remove(identifier)
+            } else {
+                counts[identifier] = left
+            }
+            return wasWithdrawn
+        }
+    }
+
+    /// Notes the identifiers among `identifiers` with an add unanswered.
+    func withdraw(_ identifiers: [String]) {
+        lock.withLock {
+            for identifier in identifiers where counts[identifier] != nil {
+                withdrawn.insert(identifier)
+            }
+        }
+    }
+}
+
 final class QueuedHandOvers: @unchecked Sendable {
     private let lock = NSLock()
     private let limit: Int
