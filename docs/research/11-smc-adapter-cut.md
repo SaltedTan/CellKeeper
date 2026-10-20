@@ -1,16 +1,19 @@
 # 11 — The SMC adapter cut (`CHIE`): a manual, owner-run test on the maintainer's Mac
 
 - **Date:** 2026-10-20
-- **Status:** Phase 1 — design and policy, revised on 2026-10-20 for a
-  manual test. No SMC key has been read or written yet. Phase 2 as first
-  planned, in which the probe itself would open the AppleSMC user client
-  and write `CHIE`, was replaced by the owner's decision of 2026-10-20: an
-  automated safety check stopped an agent's response as it began writing
-  the SMC client code, and the lead decided not to route around it (§2.2).
-  The owner now reads and writes `CHIE` by hand with an existing
-  open-source tool (§4.1), and the probe only observes (§4). The probe's
-  observer mode is built next; §9 will hold the pre-run state, and §10 the
-  results.
+- **Status:** Run by the owner on 2026-10-20 (§10). Writing `CHIE` `08`
+  cut the adapter's power on this Mac: it ran from its battery with the
+  adapter plugged in, and macOS stopped reporting the adapter at all.
+  Writing `00` brought both back. The probe's verdict is `inconclusive`
+  by its own rule, because no reading during the cut reported the adapter
+  attached, so the readings alone look like an unplug; the owner's account
+  that the adapter stayed plugged in decides it (§4.8, §10). Phase 2 as
+  first planned, in which the probe itself would open the AppleSMC user
+  client and write `CHIE`, was replaced by the owner's decision of
+  2026-10-20: an automated safety check stopped an agent's response as it
+  began writing the SMC client code, and the lead decided not to route
+  around it (§2.2). The owner read and wrote `CHIE` by hand with an
+  existing open-source tool (§4.1), and the probe only observed (§4).
 - **Machine:** Mac16,1 (MacBook Pro, Apple M4), macOS 27.0.1 (26A434),
   system firmware mBoot-20457.1.29. This is the maintainer's own Mac, the
   test Mac since 2026-10-19 (note 09 §2).
@@ -829,11 +832,12 @@ words.
    2. **Baseline.** Wait: 20 s to 2½ minutes. Type nothing in B.
    3. **CUT.** Type `cutnow` in A and wait for the GO line. **No GO line,
       no cut.** Write down the restore time the GO line shows, or set a
-      phone timer for it. Only then type and run the cut command in B
-      (`sudo` may ask for your password), then run the read in B. Type
-      `cut08` in A only if the read shows `(bytes 08)`; if it shows
-      anything else, type `cutfail`: A then shows the read-first steps
-      (step 7.5).
+      phone timer for it. Then, at once, type and run the cut command in
+      B (`sudo` may ask for your password), then run the read in B: GO
+      means run the cut now, and the read-back is expected within 90 s
+      (the first attempt in §10 missed this). Type `cut08` in A only if
+      the read shows `(bytes 08)`; if it shows anything else, type
+      `cutfail`: A then shows the read-first steps (step 7.5).
    4. **Hold.** 3 minutes by default. The Mac is expected to run from its
       battery with the adapter plugged in. Leave everything as it is.
    5. **RESTORE or read-first.** When A rings:
@@ -976,26 +980,30 @@ which has the same steps.
 1. Does writing `CHIE 0x08` make this M4, on macOS 27.0.1 with firmware
    20457.1.29, run from its battery with the adapter attached, and does
    `CHIE 0x00` bring adapter power and charging back? The owner's test,
-   observed by `watch`, answers this.
+   observed by `watch`, answers this. *Answered on 2026-10-20 (§10), for
+   one run: yes, by the owner's account that the adapter stayed plugged
+   in. The cut also hid the adapter from every reading the probe makes.*
 2. Does `CHIE` read as `[hex_]`, one byte, `00` on this Mac, as the
    reports say (§3.1)? The owner's first read answers this, before any
-   write.
+   write. *Answered on 2026-10-20 (§9, §10): yes, in both attempts.*
 3. **Does a written `CHIE` outlive its writer?** Specifically, does
    unplug/replug, sleep, or a restart clear it, or does it stay `0x08`?
    Not tested here (lead's decision, 2026-10-20). A persistence run
    (unplug/replug, sleep, restart; note 02 §7, Phase D) is **an owner
    decision** for before any helper work: it decides whether CellKeeper's
    own control needs a startup reconciliation and an uninstaller restore
-   (note 02 §6).
+   (note 02 §6). *Still open: in the run of §10, the owner restored `CHIE`
+   by hand while the Mac was awake and plugged in.*
 4. Is `CHIE` ignored while the native Charge Limit is on, as reported
    (§3.3)? The test is done with the limit off, so this is not measured
    here; it matters because CellKeeper's own control must turn the native
-   limit off.
+   limit off. *Still open: the limit was off for the run of §10.*
 5. On Apple silicon the matched service is an RTKit SMC endpoint, not the
    Intel AppleSMC device (§9). Does a client written for the Intel device
    read and write `CHIE` through it? The owner's reads and writes answer
    this for that tool only; they say nothing about any client CellKeeper
-   might have.
+   might have. *Answered for that tool only (§10): its reads showed the
+   values its writes had just made, and the effect followed each write.*
 6. Reading the sibling adapter keys (`CH0I`/`CH0J`) or the inhibit keys
    (`CHTE`) read-only would characterise this firmware's generation, but
    each is a key outside the allowlist and is **deliberately not read**;
@@ -1007,7 +1015,15 @@ which has the same steps.
    (§2.2). This is **the next owner decision** after the result: a layer
    the owner writes; an existing external tool that the helper uses, which
    raises licence, signing and safety questions of its own; or stopping at
-   macOS's native 80–100% limit. Nothing is decided here.
+   macOS's native 80–100% limit. Nothing is decided here. *The result of
+   §10 makes this the owner's next decision.*
+8. **Can anything tell a `CHIE` cut from an unplugged adapter?** During
+   the cut in §10, no reading the probe makes reported the adapter
+   (IOPowerSources, `ExternalConnected`, `AppleRawExternalConnected`,
+   `IOPSCopyExternalPowerAdapterDetails`). Whether any other read-only
+   signal still does, so that CellKeeper's own control could notice a
+   real unplug during a cut, is not investigated; any new read would need
+   its own review. *Added on 2026-10-20, after §10.*
 
 ## 9. Pre-run state
 
@@ -1027,17 +1043,278 @@ errors, and a trivial file built with the Makefile's
 `-mmacosx-version-min=10.4` linked on arm64. No agent built or ran the
 tool, and no key was read.
 
-The owner's first read of `CHIE` (§4.4 step 4), and the read-only
-`check --mechanism manual-adapter-cut` once the observer is built, will be
-recorded here, as note 10 §9 recorded its `check`.
+The read-only `check --mechanism manual-adapter-cut`, run by the lead as an
+ordinary user on 2026-10-20 at 21:29 local, just before the owner's runs,
+follows. Nothing was created. It ran in the owner's checkout, which the
+lead had first fast-forwarded to `befeec1` (#101) and rebuilt: the owner's
+first `check` had printed the usage text of the probe before #101, which
+has no `--mechanism` option.
+
+```text
+CellKeeper manual adapter-cut probe: check (read-only; creates nothing)
+machine: Mac16,1, macOS 27.0.1 (26A434), system firmware mBoot-20457.1.29
+This probe reads no SMC key and runs no tool: the owner reads and writes CHIE by hand,
+with the external tool, in another terminal (docs/research/11-smc-adapter-cut.md).
+
+Current reading
+clock          time phase     AC   charging   charged     %  mA instant/avg   reg.charging  reg.ext  raw.ext  adapter  NotChargingReason  SysPowerIn mW  upd.age  state
+21:29:18    +0.0 baseline  yes  yes        -          81   2582/2582        yes           yes      yes      68 W     0x0                58021          9 s      charging
+
+Preconditions
+PASS  On AC power: IOPowerSources reports AC power (AppleSmartBattery ExternalConnected: yes)
+PASS  Battery present: the internal battery is present
+PASS  Charge below 95%: 81%
+PASS  Charge at least 40%: 81%
+PASS  macOS is charging now: IOPowerSources reports charging; battery current 2582 mA
+PASS  Battery current readable: InstantAmperage 2582 mA, Amperage 2582 mA
+PASS  Battery update time readable: AppleSmartBattery UpdateTime, 9 s old
+PASS  System power input readable: PowerTelemetryData.SystemPowerIn 58021 mW
+PASS  Adapter reported attached: AppleRawExternalConnected: yes; IOPSCopyExternalPowerAdapterDetails: an adapter
+PASS  macOS's Charge Limit is 100%: pmset -g battlimit: no battery level limits set
+PASS  No AlDente helper files: neither of its helper files exists
+PASS  AlDente helper not loaded: launchctl print system/com.apphousekitchen.aldente-pro-setapp.helper: could not find service
+PASS  No AlDente process running: no executable path or name in the process table matches AlDente
+PASS  No other battery-control daemon: no file name in /Library/LaunchDaemons or /Library/PrivilegedHelperTools suggests one
+PASS  No ChargeInhibit or DisableInflow assertion held: pmset -g assertions lists neither
+WARN  Charge in the recommended 50–74%: 81%: if Optimized Battery Charging is on, macOS may pause charging near 80% by itself and confuse the result. Turn it off for the test (System Settings › Battery › ⓘ next to Charging), or start below 75%
+WARN  Optimized Battery Charging off: the probe cannot read this setting: turn it off for the whole test (System Settings › Battery › ⓘ next to Charging), so that macOS does not pause charging by itself
+WARN  CHIE reads 00 (the owner's read): the probe reads no SMC key, so it cannot see CHIE. `watch` asks you to read it with the tool (./smc -k CHIE -r, in ~/smc-test/smc-command) before the baseline, and refuses unless it printed [hex_] and (bytes 00)
+
+The owner's tool commands (run them yourself, in ~/smc-test/smc-command; the probe never does)
+read:    ./smc -k CHIE -r
+cut:     sudo ./smc -k CHIE -w 08
+restore: sudo ./smc -k CHIE -w 00
+
+READY: every precondition holds; `charge-inhibit-probe watch --mechanism manual-adapter-cut` may be started, without sudo. Read the 3 warnings above.
+```
+
+`[VERIFIED-EXPERIMENTALLY]` (read-only): the Charge Limit was 100% and the
+Mac was charging at 2.6 A, with the adapter reported attached by both
+reads, at 68 W. The charge was 81%, above the recommended 50–74%, so
+`check` warned (§5); Optimized Battery Charging was to be off for the
+whole test (§6).
+
+The owner's first read of `CHIE` (§4.4 step 4) showed `[hex_]` and
+`(bytes 00)` in both attempts (§10): the owner typed `start00` each time.
+The probe records the owner's answer words, not what the tool printed.
 
 ## 10. Results
 
-Not run yet. The owner's manual test — one cut and one restore, each read
-back (§2.2) — is the one experiment this note covers. Its outcome, the
-verdict, what each read printed and the full report (with no serial
-numbers, user names or home paths) will be recorded here, as in notes 09
-§10 and 10 §10.
+The owner ran `watch` twice on 2026-10-20, following §6, with the probe
+built from `befeec1` and the tool at its pinned commit. The first attempt
+wrote nothing and does not count. The second made the one cut and the one
+restore that §2.2 allows, each read back. No sleep notification arrived in
+either.
+
+**The first attempt (21:30:49, wrote nothing).** The owner read `CHIE` as
+`00` (`start00`, +53.2 s) and typed `cutnow` (+110.1 s); the probe printed
+its GO line. The owner had not understood that GO meant running the cut at
+once, and ran no write. With no `cut08` within 90 s, the probe showed the
+read-first steps (+200.1 s); the owner read `CHIE` again, typed `00`
+(nothing to restore, nothing written; +247.3 s), and the run ended after
+its after readings (+427.4 s). Verdict: `inconclusive` ("the restore went
+through the read-first steps: no cut08 within 90 s of the cut mark").
+Every one of its 188 readings showed charging, from 82 to 87%. §6 step
+7.3 now says that GO means running the cut at once. Between the two runs
+the owner unplugged the adapter (the owner's account): at 21:39 and 21:40
+the lead's read-only `pmset -g batt` and `ioreg` showed the Mac on battery
+power with no adapter reported, and the shell history shows no `CHIE`
+write. It was plugged in again, and reported attached, when the second
+run's preconditions were checked.
+
+**The second run (21:42:11): the result.**
+
+| Field | Value |
+|---|---|
+| Date and time | 2026-10-20 21:42:11 +11:00 |
+| macOS build, firmware | Mac16,1, macOS 27.0.1 (26A434), mBoot-20457.1.29 |
+| Hold | 180 s from the cut mark (the default), after a 42 s baseline of 22 readings (+11.0 to +53.0 s) and 7 readings before the cut mark; readings continued for 180 s after the restore mark |
+| Sleep notifications registered; idle-sleep assertion IOReturn (creation / release) | yes; `0x0` at +0.0 s / `0x0` at +447.5 s; no sleep notification arrived |
+| What each read showed (the owner's answer words) | Before the cut: `[hex_]`, `(bytes 00)` (`start00`, +11.0 s). After the cut: `(bytes 08)` (`cut08`, +96.5 s). After the restore: `(bytes 00)` (`restored00`, +288.2 s) |
+| Cut mark, and the cut | `cutnow` at +68.7 s (about 21:43:20). The owner's shell history (zsh's start time of each command, to the second) shows the cut entered at 21:43:25 and the read at 21:43:37 |
+| Restore mark, and the restore | `restorenow` at +267.4 s (about 21:46:38), 18.7 s after the RESTORE prompt. The shell history shows the restore entered at 21:46:49 and the read at 21:46:52 |
+| Battery updates in the baseline / held / after the restore mark | 2 / 4 (21:43:35, 21:44:35, 21:45:35, 21:46:35) / 4 (21:46:48, 21:47:48, 21:48:48, 21:49:34) |
+| Adapter reported during the cut | Not attached, in every reading from 21:43:36 (+85.0 s) to 21:46:48 (+277.0 s): IOPowerSources reported battery power, `ExternalConnected` and `AppleRawExternalConnected` were no, and `IOPSCopyExternalPowerAdapterDetails` returned no adapter. The reading at 21:43:34 still reported the 68 W adapter |
+| Effect, and when it began | Discharging. The first battery update after the cut, at 21:43:35, showed 997 mA into the battery with the charging flag off (`mixed`); the next three showed −1094, −1075 and −1099 mA. By the probe's count the discharge began 76.4 s after the cut mark and lasted until the restore. The charge stayed at 88% |
+| System power input | 48 348 mW at the last update before the cut; 32 222 mW at 21:43:35; then 526, 528 and 529 mW |
+| Adapter power back, and charging resumed, after the restore | The 68 W adapter was reported again from 21:46:50; the reading at 21:46:48 did not report it. The update at 21:46:48 still showed −1086 mA; the next, at 21:47:48, showed charging at 2569 mA and 49 128 mW of input, from the reading at 21:47:50, 71.6 s after the restore mark. Then 2590 and 2614 mA, 88 to 89% |
+| Verdict | `inconclusive`: 62 of the 62 readings while it discharged did not report the adapter attached (§4.8) |
+| Adapter stayed plugged in (the owner's account) | Yes, the whole time (the owner's message, 2026-10-20) |
+| Notes | The charge was 88% at the start (`check` warned, §5); Optimized Battery Charging was to be off for the whole test (§6). `NotChargingReason` read `0x1000` (undocumented, not decoded) during the cut and until the first charging update after the restore. Recovery, after the run: the owner's last read showed `(bytes 00)` (`restored00`), and at 21:50 the lead's read-only `pmset -g batt` and `ioreg` showed the Mac on AC power and charging, at 89% |
+
+The second run's report follows, with runs of sample rows whose values
+only differ in the update's age shortened, the warnings' text, the column
+legend and the criteria (§4.8) left out, and the title and section
+underlines removed; bracketed text is not in the report. It contains no
+serial numbers, user names or home paths.
+
+```text
+started:   2026-10-20 21:42:11 +11:00
+machine:   Mac16,1, macOS 27.0.1 (26A434), system firmware mBoot-20457.1.29
+test:      research note 11's manual adapter cut. The owner reads and writes the SMC key
+           CHIE by hand, with an external tool; this probe reads no SMC key, runs no tool,
+           and only observes. Hold 180 s from the owner's cut mark.
+           The cut time, the restore time and every read-back are owner-confirmed, not
+           observed by the probe.
+
+Preconditions
+PASS  On AC power: IOPowerSources reports AC power (AppleSmartBattery ExternalConnected: yes)
+PASS  Battery present: the internal battery is present
+PASS  Charge below 95%: 88%
+PASS  Charge at least 40%: 88%
+PASS  macOS is charging now: IOPowerSources reports charging; battery current 410 mA
+PASS  Battery current readable: InstantAmperage 410 mA, Amperage 410 mA
+PASS  Battery update time readable: AppleSmartBattery UpdateTime, 8 s old
+PASS  System power input readable: PowerTelemetryData.SystemPowerIn 17358 mW
+PASS  Adapter reported attached: AppleRawExternalConnected: yes; IOPSCopyExternalPowerAdapterDetails: an adapter
+PASS  macOS's Charge Limit is 100%: pmset -g battlimit: no battery level limits set
+PASS  No AlDente helper files: neither of its helper files exists
+PASS  AlDente helper not loaded: launchctl print system/com.apphousekitchen.aldente-pro-setapp.helper: could not find service
+PASS  No AlDente process running: no executable path or name in the process table matches AlDente
+PASS  No other battery-control daemon: no file name in /Library/LaunchDaemons or /Library/PrivilegedHelperTools suggests one
+PASS  No ChargeInhibit or DisableInflow assertion held: pmset -g assertions lists neither
+WARN  Charge in the recommended 50–74%: 88%: [warning about Optimized Battery Charging]
+WARN  Optimized Battery Charging off: the probe cannot read this setting: [reminder to turn it off]
+WARN  CHIE reads 00 (the owner's read): the probe reads no SMC key, so it cannot see CHIE. [how watch asks for the read]
+
+READY: every precondition holds; `charge-inhibit-probe watch --mechanism manual-adapter-cut` may be started, without sudo. Read the 3 warnings above.
+
+The owner's answers (owner-confirmed; the probe observed no read and no write)
++11.0 s: first read: typed start00: CHIE read 00 at the start, by the owner's read
++68.7 s: CUT: typed cutnow: the cut mark
++96.5 s: cut read-back: typed cut08: the cut read back 08, by the owner's read
++267.4 s: RESTORE: typed restorenow: the restore mark
++288.2 s: restore read-back: typed restored00: the restore read back 00, by the owner's read
+restore written: By the owner's answers, the restore command was run once
+(restorenow, or read-first 08). The probe observed no write.
+
+Events
+sleep notifications: registered (IORegisterForSystemPower)
++0.0 s: IOPMAssertionCreateWithProperties (PreventUserIdleSystemSleep) returned 0x0 (kIOReturnSuccess)
++447.5 s: IOPMAssertionRelease (PreventUserIdleSystemSleep) returned 0x0 (kIOReturnSuccess)
++0.0 s: watch started; the first read was asked for
++11.0 s: the owner confirmed CHIE read [hex_] and (bytes 00) (start00); the
+baseline began
++53.0 s: the CUT prompt was shown
++68.7 s: the cut mark (cutnow); the reminder armed, then GO
++96.5 s: the owner confirmed the cut read back (bytes 08) (cut08)
++248.7 s: the hold ended; the RESTORE prompt
++267.4 s: the restore mark (restorenow); the owner runs the restore now
++288.2 s: the owner confirmed recovery (restored00); the after readings
++447.4 s: the after readings ended
++447.4 s: the run ended
+GO line: restore by 21:46:20
+readings: 22 baseline, 7 pre-cut (between the CUT prompt and the cut mark), 100 held, 90 after
+
+Samples (every 2 s)
+clock          time phase     AC   charging   charged     %  mA instant/avg   reg.charging  reg.ext  raw.ext  adapter  NotChargingReason  SysPowerIn mW  upd.age  state
+21:42:22   +11.0 baseline  yes  yes        -          88   410/410          yes           yes      yes      68 W     0x0                17358          19 s     charging
+  [… 19 rows with the same values, the update age rising …]
+21:43:02   +51.0 baseline  yes  yes        -          88   410/410          yes           yes      yes      68 W     0x0                17358          59 s     charging
+21:43:04   +53.0 baseline  yes  yes        -          88   2591/2591        yes           yes      yes      68 W     0x0                48348          1 s      charging
+21:43:06   +55.0 pre-cut   yes  yes        -          88   2591/2591        yes           yes      yes      68 W     0x0                48348          3 s      charging
+  [… 5 rows with the same values, the update age rising …]
+21:43:18   +67.1 pre-cut   yes  yes        -          88   2591/2591        yes           yes      yes      68 W     0x0                48348          15 s     charging
+21:43:20   +69.0 held      yes  yes        -          88   2591/2591        yes           yes      yes      68 W     0x0                48348          17 s     charging
+  [… 6 rows with the same values, the update age rising …]
+21:43:34   +83.0 held      yes  yes        -          88   2591/2591        yes           yes      yes      68 W     0x0                48348          31 s     charging
+21:43:36   +85.0 held      no   no         -          88   997/997          no            no       no       no       0x1000             32222          1 s      mixed
+  [… 28 rows with the same values, the update age rising …]
+21:44:34  +143.0 held      no   no         -          88   997/997          no            no       no       no       0x1000             32222          59 s     mixed
+21:44:36  +145.0 held      no   no         -          88   -1094/-1094      no            no       no       no       0x1000             526            1 s      discharging, battery power
+  [… 28 rows with the same values, the update age rising …]
+21:45:34  +203.0 held      no   no         -          88   -1094/-1094      no            no       no       no       0x1000             526            59 s     discharging, battery power
+21:45:36  +205.0 held      no   no         -          88   -1075/-1075      no            no       no       no       0x1000             528            1 s      discharging, battery power
+  [… 28 rows with the same values, the update age rising …]
+21:46:34  +263.0 held      no   no         -          88   -1075/-1075      no            no       no       no       0x1000             528            59 s     discharging, battery power
+21:46:36  +265.0 held      no   no         -          88   -1099/-1099      no            no       no       no       0x1000             529            1 s      discharging, battery power
+21:46:38  +267.1 held      no   no         -          88   -1099/-1099      no            no       no       no       0x1000             529            3 s      discharging, battery power
+21:46:40  +269.0 after     no   no         -          88   -1099/-1099      no            no       no       no       0x1000             529            5 s      discharging, battery power
+  [… 3 rows with the same values, the update age rising …]
+21:46:48  +277.0 after     no   no         -          88   -1099/-1099      no            no       no       no       0x1000             529            13 s     discharging, battery power
+21:46:50  +279.1 after     yes  no         no         88   -1086/-1086      no            yes      yes      68 W     0x1000             526            2 s      discharging
+  [… 28 rows with the same values, the update age rising …]
+21:47:48  +337.1 after     yes  no         no         88   -1086/-1086      no            yes      yes      68 W     0x1000             526            60 s     discharging
+21:47:50  +339.0 after     yes  yes        -          88   2569/2569        yes           yes      yes      68 W     0x0                49128          2 s      charging
+  [… 28 rows with the same values, the update age rising …]
+21:48:48  +397.0 after     yes  yes        -          88   2569/2569        yes           yes      yes      68 W     0x0                49128          60 s     charging
+21:48:50  +399.0 after     yes  yes        -          88   2590/2590        yes           yes      yes      68 W     0x0                49501          2 s      charging
+  [… 21 rows with the same values, the update age rising …]
+21:49:34  +443.0 after     yes  yes        -          88   2590/2590        yes           yes      yes      68 W     0x0                49501          46 s     charging
+21:49:36  +445.1 after     yes  yes        -          89   2614/2614        yes           yes      yes      68 W     0x0                49869          2 s      charging
+21:49:38  +447.0 after     yes  yes        -          89   2614/2614        yes           yes      yes      68 W     0x0                49869          4 s      charging
+
+Verdict: inconclusive
+The run cannot decide: the battery discharged 76.4 s after the owner's cut
+mark and until the restore, and charging resumed 71.6 s after the restore, but
+62 of the 62 readings while it discharged did not report the adapter attached
+(AppleRawExternalConnected or the adapter details). An adapter unplugged at
+those moments would look the same. If the adapter stayed plugged in the whole
+time, the adapter's power was cut. Nothing about the adapter cut is concluded
+from it.
+```
+
+### Interpretation
+
+- `[VERIFIED-EXPERIMENTALLY]` By the owner's account that the adapter
+  stayed plugged in, writing `CHIE` `08` with the tool cut the adapter's
+  power on this Mac, macOS build and firmware, with the native Charge
+  Limit off: the Mac ran from its battery for the 3-minute hold, at about
+  1.1 A, with about 0.5 W of system power input. Writing `00` brought the
+  adapter back at once, and charging at the next battery update. This
+  answers §8 questions 1 and 2. It is one run, on one Mac.
+- `[VERIFIED-EXPERIMENTALLY]` The cut hid the adapter from every reading
+  the probe makes, not only from `ExternalConnected` as reported (S4): it
+  also turned `AppleRawExternalConnected` false and left
+  `IOPSCopyExternalPowerAdapterDetails` with no adapter, the two signals
+  note 10 relies on to tell a cut from an unplug. §4.8 allowed for this.
+  On this firmware, then, the readings alone cannot tell a `CHIE` cut from
+  an unplugged adapter, and the probe's verdict is `inconclusive` by
+  design; it never claims a definite unplug.
+- Two things make it a cut, not an unplug. The owner's account, which
+  §4.8 makes the deciding evidence. And the timing, from the owner's shell
+  history against the probe's readings `[VERIFIED-EXPERIMENTALLY]`: the
+  adapter disappeared between the readings at 21:43:34 and 21:43:36, after
+  the cut was entered at 21:43:25 (`sudo` may have asked for a password
+  first) and before the read at 21:43:37 that showed `08`; it came back
+  between the readings at 21:46:48 and 21:46:50, within about a second of
+  the restore entered at 21:46:49.
+- `[VERIFIED-EXPERIMENTALLY]` The adapter's state changed in the readings
+  at once, but the battery current and the system power input changed only
+  with the battery's updates, so the first update after the cut caught the
+  change part way (`mixed`), and the first after the restore still showed
+  discharging. The battery also updated early at each change (21:43:35,
+  32 s after the previous update; 21:46:48, 13 s after); otherwise it
+  updated once a minute.
+- **Not tested:** whether `CHIE` stays `08` across unplug/replug, sleep or
+  a restart (§8 question 3), or whether the native limit makes it ignored
+  (question 4); longer cuts, repeated cuts, other charge levels, and other
+  Macs, macOS builds or firmware.
+
+### What it means for phase 4c
+
+- `CHIE` is the first mechanism with an observed effect on this Mac;
+  neither private assertion had one (notes 09 and 10). It is not added to
+  the helper's allowlist: no CellKeeper code can write it (§2.2), and one
+  manual run does not meet `safety.md`'s preconditions for a verified
+  mechanism (behavioural verification in independent telemetry, a tested
+  independent recovery).
+- It is an adapter cut, not a charge inhibit: nothing observed here holds
+  the charge on adapter power the way macOS's own limit does. A limit
+  built on it would let the battery discharge with the adapter plugged
+  in, then re-enable charging: the small cycles S13 objects to (§3.3),
+  with note 02 §7's floor of about 25%.
+- `[INFERRED/UNVERIFIED]` While it is cut, macOS reports battery power,
+  so its battery-power behaviour presumably applies (the battery settings,
+  low-battery warnings), and anything that reads IOPowerSources,
+  CellKeeper included, sees an unplugged Mac. CellKeeper's own control
+  would have to account for its own cut, and could not tell a real unplug
+  during one from the readings the probe uses (§8 question 8).
+- The next decision is the owner's (§8 question 7): a layer the owner
+  writes, an external tool, or stopping at macOS's native 80–100% limit.
+  A persistence run (question 3) is a separate owner decision, needed
+  before any helper work. Until then, macOS's own Charge Limit stays
+  CellKeeper's only real control, and limits below 80% stay simulated.
 
 ## 11. Sources
 

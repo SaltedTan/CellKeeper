@@ -48,7 +48,8 @@ effect, the owner decided on 2026-10-20 to test the SMC adapter cut
 ([research note 11](research/11-smc-adapter-cut.md)) by hand: the owner
 writes one SMC key, `CHIE`, with an existing open-source command-line tool
 (smcFanControl's `smc`), built and run outside the repository, and
-restores it the same way. The probe only observes: run without `sudo`, it
+restores it the same way; the owner ran it on 2026-10-20, and the cut
+worked (note 11 §10). The probe only observes: run without `sudo`, it
 opens no SMC connection, never runs the tool, and tells the owner what to
 type and when, with a reminder until the restore is confirmed. Unlike an
 assertion, a written key is not released when anything exits, and a
