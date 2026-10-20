@@ -544,7 +544,7 @@ public struct CalibrationSession: Sendable, Equatable, Codable {
         case .restAtTop:
             guard !isPaused else { break }
             if isOnBattery {
-                session.leaveTopRestEarly(at: now, changes: &changes)
+                session.leaveTopRestEarly(at: now, isRestComplete: isReturning || now.elapsed(since: stepStartedAt) >= Self.topRest, changes: &changes)
             } else if !isReturning, now.elapsed(since: stepStartedAt) >= Self.topRest {
                 session.isReturning = true
                 changes.append(.returning(from: .restAtTop))
@@ -697,7 +697,10 @@ public struct CalibrationSession: Sendable, Equatable, Codable {
         switch step {
         case .restAtTop:
             if isOnBattery {
-                session.leaveTopRestEarly(at: now, changes: &changes)
+                // Only a rest already complete before the relaunch counts:
+                // CellKeeper cannot know whether the Mac stayed plugged in
+                // while it was not running.
+                session.leaveTopRestEarly(at: now, isRestComplete: isReturning, changes: &changes)
             } else {
                 session.stepStartedAt = now
                 session.isReturning = false
@@ -802,10 +805,12 @@ public struct CalibrationSession: Sendable, Equatable, Codable {
     }
 
     /// An unplug in step 2, accepted (owner, 2026-10-21): on to the drain,
-    /// the rest short unless it had already lasted its 2 hours, and the
-    /// return to the normal limit requested at once if it was not already.
-    private mutating func leaveTopRestEarly(at now: CalibrationStamp, changes: inout [CalibrationChange]) {
-        let isShort = !isReturning
+    /// the rest short unless it had already lasted its 2 hours
+    /// (`isRestComplete`, judged by the caller on the monotonic clock), and
+    /// the return to the normal limit requested at once if it was not
+    /// already.
+    private mutating func leaveTopRestEarly(at now: CalibrationStamp, isRestComplete: Bool, changes: inout [CalibrationChange]) {
+        let isShort = !isRestComplete
         if isShort, !shortRests.contains(.restAtTop) {
             shortRests.append(.restAtTop)
         }

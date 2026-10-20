@@ -183,6 +183,18 @@ struct CalibrationSessionTests {
         #expect(returned.end == nil)
     }
 
+    @Test("An unplug first seen after the rest's 2 hours, before any check asked for the return, is not short")
+    func unplugAfterRestDeadline() {
+        let s = session(in: .restAtTop)
+        let late = observe(s, at(3.05), reading(99, .battery))
+        #expect(late.session.step == .drain)
+        #expect(late.session.isReturning, "the return is asked for at once")
+        #expect(late.session.shortRests.isEmpty)
+        #expect(late.changes == [.earlyUnplug(restShort: false), .returning(from: .restAtTop), .entered(.drain)])
+        // A clock set forward within the boot does not make it count.
+        #expect(observe(s, at(2.5, wallShift: hour), reading(99, .battery)).session.shortRests == [.restAtTop])
+    }
+
     // MARK: - Unplug and drain
 
     @Test("Step 3 ends when the Mac is on battery power, or ends the session after 4 hours")
