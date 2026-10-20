@@ -91,6 +91,17 @@ public enum CalibrationWording {
 
     // MARK: - The menu and Settings
 
+    /// The request for `status`, judged on the reading of its latest
+    /// evaluation if the policy accepted it.
+    public static func request(for status: ControllerStatus) -> CalibrationRequest? {
+        request(status.calibration, reading: NotificationPlanner.usableSnapshot(status))
+    }
+
+    /// The menu's line for `status`, as of its latest evaluation.
+    public static func statusLine(for status: ControllerStatus, timeZone: TimeZone = .current, locale: Locale = .current) -> String? {
+        statusLine(status.calibration, cellKeeperLimit: status.settings.chargeLimit, reading: NotificationPlanner.usableSnapshot(status), now: status.lastEvaluation ?? Date(), timeZone: timeZone, locale: locale)
+    }
+
     /// "Step 4 of 7".
     public static func stepNumber(_ step: CalibrationStep) -> String {
         "Step \(step.rawValue) of \(CalibrationStep.allCases.count)"
@@ -115,7 +126,8 @@ public enum CalibrationWording {
             return "Calibration, \(step.lowercased()): returning to your limit. CellKeeper asks macOS for its \(NativeLimitWording.limit(cellKeeperLimit)) limit again and waits for macOS to confirm it."
         }
         if let request = request(status, reading: reading) {
-            var line = "Calibration, \(step.lowercased()): \(text(request, atRequest: false, now: now, timeZone: timeZone, locale: locale))"
+            let words = text(request, atRequest: false, now: now, timeZone: timeZone, locale: locale)
+            var line = "Calibration, \(step.lowercased()): \(words.prefix(1).lowercased())\(words.dropFirst())"
             if session.step == .unplug, let end = time(status.stepEndsAt) {
                 line += " If your Mac is still plugged in at \(end), the calibration ends."
             }

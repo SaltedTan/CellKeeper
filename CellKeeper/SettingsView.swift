@@ -133,6 +133,10 @@ private struct ChargingSettingsTab: View {
                 WeeklyFullChargeSection(model: model)
             }
 
+            Section("Calibration") {
+                CalibrationSection(model: model)
+            }
+
             if !isNative {
                 Section("Temperature protection") {
                     TemperatureProtectionControls(model: model)
@@ -191,6 +195,7 @@ private struct ScheduledFullChargeSection: View {
         let status = model.status
         let now = status?.describedAt ?? Date()
         let isManaged = model.settings.isManagementEnabled
+        let isCalibrating = status?.calibration.isInProgress == true
         if let schedule = status?.fullChargeSchedule {
             LabeledContent("Scheduled", value: FullChargeScheduleWording.window(schedule, now: now))
             if let wait = status?.fullChargeScheduleWait {
@@ -204,8 +209,12 @@ private struct ScheduledFullChargeSection: View {
                 DatePicker("Start", selection: $start, displayedComponents: [.date, .hourAndMinute])
                 DatePicker("End", selection: $end, in: start.addingTimeInterval(FullChargeSchedule.minimumWindow)...start.addingTimeInterval(FullChargeSchedule.maximumWindow), displayedComponents: [.date, .hourAndMinute])
                 Button("Schedule Full Charge") { model.setFullChargeSchedule(start: start, end: end) }
+                    .disabledReasonHint(isCalibrating ? CalibrationWording.inProgress : nil)
+                if isCalibrating {
+                    DisabledReason(text: CalibrationWording.inProgress)
+                }
             }
-            .disabled(!isManaged)
+            .disabled(!isManaged || isCalibrating)
             .onChange(of: start) { _, newStart in
                 let earliest = newStart.addingTimeInterval(FullChargeSchedule.minimumWindow)
                 let latest = newStart.addingTimeInterval(FullChargeSchedule.maximumWindow)
@@ -311,8 +320,12 @@ private struct WeeklyFullChargeSection: View {
                 }
                 .accessibilityValue(AccessibilityWording.hours(draft.durationHours))
                 Button(weekly == nil ? "Save Weekly Full Charge" : "Save Changes") { model.setWeeklyFullCharge(draft.pattern) }
-                    .disabled(!draft.pattern.issues.isEmpty || draft.pattern == weekly?.pattern)
+                    .disabled(!draft.pattern.issues.isEmpty || draft.pattern == weekly?.pattern || status?.calibration.isInProgress == true)
                     .help(WeeklyFullChargeWording.saveHelp)
+                    .disabledReasonHint(status?.calibration.isInProgress == true ? CalibrationWording.inProgress : nil, help: WeeklyFullChargeWording.saveHelp)
+                if status?.calibration.isInProgress == true {
+                    DisabledReason(text: "\(CalibrationWording.inProgress) A weekly full charge that falls due meanwhile is skipped; the schedule continues afterwards.")
+                }
             }
             .disabled(!model.settings.isManagementEnabled)
             if weekly != nil {
@@ -342,6 +355,179 @@ private struct WeeklyFullChargeSection: View {
             guard let pattern else { return }
             draft = WeeklyFullChargeDraft(pattern)
         }
+    }
+}
+
+/// Settings › Charging's guided calibration (research note 12 §7): what it
+/// does and when 100% applies, the owner's confirmations and the recovery,
+/// and Start, enabled by ``CalibrationAdmission`` with the reason shown when
+/// it is not; while a session exists, the step, when it ends at the latest,
+/// the recovery, Continue for one found at launch, and Cancel; and the last
+/// calibration's report. The wording is `CalibrationWording`'s.
+private struct CalibrationSection: View {
+    let model: AppModel
+    @State private var optimizedCharging: OptimizedChargingConfirmation?
+    @State private var isCoolRoomConfirmed = false
+    @State private var isRecoverySeen = false
+    @State private var isMenuOnlyAcknowledged = false
+    @State private var isConfirmingStart = false
+    @State private var isConfirmingCancel = false
+    @State private var isReportExpanded = false
+
+    private var confirmations: CalibrationConfirmations {
+        CalibrationConfirmations(optimizedCharging: optimizedCharging, isCoolRoomConfirmed: isCoolRoomConfirmed, isRecoverySeen: isRecoverySeen, isMenuOnlyAcknowledged: isMenuOnlyAcknowledged)
+    }
+
+    var body: some View {
+        let status = model.status
+        let calibration = status?.calibration ?? CalibrationStatus()
+        let now = status?.describedAt ?? Date()
+        Group {
+            if let status, let session = calibration.session {
+                running(session, status: status, calibration: calibration, now: now)
+            } else {
+                start(status: status)
+            }
+            if let refusal = calibration.refusal {
+                Label(refusal, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.criticalText)
+            }
+            if calibration.isEndUnsaved {
+                Label(CalibrationWording.endUnsaved, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.warningText)
+            }
+            if let last = calibration.last {
+                LabeledContent("Last calibration", value: "\(CalibrationWording.clockTime(last.endedAt, now: now, alwaysWithDay: true)), \(last.end.isCompleted ? "finished" : "ended early")")
+                    .accessibilityElement(children: .combine)
+                DisclosureGroup("Report", isExpanded: $isReportExpanded) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(CalibrationWording.reportLines(last, now: now).enumerated()), id: \.offset) { _, line in
+                            LabeledContent(line.label) {
+                                Text(line.value)
+                                    .multilineTextAlignment(.trailing)
+                                    .textSelection(.enabled)
+                            }
+                            .accessibilityElement(children: .combine)
+                            .accessibilityAddTraits(.isStaticText)
+                        }
+                        Text(CalibrationWording.gaugeNote)
+                            .foregroundStyle(.secondary)
+                    }
+                    .font(.caption)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func running(_ session: CalibrationSession, status: ControllerStatus, calibration: CalibrationStatus, now: Date) -> some View {
+        if let line = CalibrationWording.statusLine(for: status) {
+            Text(line)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        LabeledContent("Step", value: "\(session.step.rawValue) of \(CalibrationStep.allCases.count), \(session.step)")
+            .accessibilityElement(children: .combine)
+        if let end = calibration.stepEndsAt {
+            LabeledContent(session.step == .restAtBottom ? "Plug in again after" : "This step ends at the latest", value: CalibrationWording.clockTime(end, now: now))
+                .accessibilityElement(children: .combine)
+        }
+        if let cap = calibration.capEndsAt {
+            LabeledContent("The calibration ends at the latest", value: CalibrationWording.clockTime(cap, now: now, alwaysWithDay: true))
+                .accessibilityElement(children: .combine)
+        }
+        if session.temperatureCheck == .ownerConfirmedCoolRoom {
+            Label(CalibrationWording.temperatureUnknown, systemImage: "thermometer.medium")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        Text(CalibrationWording.recovery(ownerLimit: session.ownerLimit))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        HStack {
+            if calibration.isPaused {
+                if calibration.needsRestAnswer {
+                    Button("Yes, It Stayed Off and Unplugged") { model.continueCalibration(restAnswer: true) }
+                        .help("Continues the calibration and records your answer in its report.")
+                    Button("No, Continue Anyway") { model.continueCalibration(restAnswer: false) }
+                        .help("Continues the calibration; its report records the rest as not confirmed.")
+                } else {
+                    Button("Continue Calibration") { model.continueCalibration() }
+                        .help("Continues the calibration from its current step. In the rest at 100%, its 2 hours start again.")
+                }
+            }
+            Button("Cancel Calibration…") { isConfirmingCancel = true }
+        }
+        .confirmationDialog("Cancel the calibration?", isPresented: $isConfirmingCancel) {
+            Button("Cancel Calibration", role: .destructive) { model.cancelCalibration() }
+        } message: {
+            Text("CellKeeper's own limit applies again at once. The report keeps the steps done so far.")
+        }
+    }
+
+    @ViewBuilder
+    private func start(status: ControllerStatus?) -> some View {
+        let refusal = model.calibrationRefusal(confirmations)
+        let ownerLimit = status?.nativeLimit?.ownerLimit ?? status?.nativeLimit?.reportedLimit
+        let isTemperatureReadable = status.map { CalibrationAdmission.isTemperatureReadable(status: $0, now: Date()) } ?? false
+        Text(CalibrationWording.explanation)
+            .font(.caption)
+            .fixedSize(horizontal: false, vertical: true)
+        Text(CalibrationWording.fullLimitDisclosure)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        Picker("Optimized Battery Charging", selection: $optimizedCharging) {
+            Text("Not confirmed yet").tag(OptimizedChargingConfirmation?.none)
+            Text("It is off").tag(OptimizedChargingConfirmation?.some(.off))
+            Text("It may be on; step 1 may stop at its 6-hour limit").tag(OptimizedChargingConfirmation?.some(.boundAccepted))
+        }
+        Text("CellKeeper cannot read this setting (System Settings › Battery › ⓘ next to Charging). With it on, macOS may hold the charge at 80%, and step 1 ends the calibration after 6 hours.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+        if !isTemperatureReadable {
+            Toggle("The room is between 10 and 35 °C, and my Mac is out of a bag and off soft surfaces", isOn: $isCoolRoomConfirmed)
+            Text("CellKeeper cannot read the battery's temperature on this Mac, so it cannot stop the calibration if the battery gets too warm or too cold; the battery's own protections still apply.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        Text(CalibrationWording.recovery(ownerLimit: ownerLimit))
+            .font(.caption)
+            .fixedSize(horizontal: false, vertical: true)
+        Toggle("I have read how to get my own Charge Limit back", isOn: $isRecoverySeen)
+        if !model.isNotifying {
+            Toggle("Notifications are off: I will check the menu for CellKeeper's requests", isOn: $isMenuOnlyAcknowledged)
+        }
+        LabeledContent {
+            Button("Start Calibration…") { isConfirmingStart = true }
+                .disabled(refusal != nil)
+                .disabledReasonHint(refusal)
+        } label: {
+            Text("Guided calibration")
+            if let refusal {
+                DisabledReason(text: refusal)
+            }
+        }
+        .confirmationDialog("Start a guided calibration?", isPresented: $isConfirmingStart) {
+            Button("Start Calibration") {
+                model.startCalibration(confirmations)
+                optimizedCharging = nil
+                isCoolRoomConfirmed = false
+                isRecoverySeen = false
+                isMenuOnlyAcknowledged = false
+            }
+        } message: {
+            Text("CellKeeper will set macOS's Charge Limit to 100% now, and over the next one to two days ask you to unplug, rest and plug in your Mac. You can cancel it at any time.")
+        }
+        Text(CalibrationWording.frequency)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

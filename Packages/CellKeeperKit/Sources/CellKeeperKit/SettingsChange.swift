@@ -163,11 +163,15 @@ public enum SettingsReconciliation {
 
 /// Whether "Charge to 100% once" can start a temporary full charge now. The
 /// menu's button and Start CellKeeper Full Charge share it; nil means it
-/// can. It needs a reading that shows a battery and external power.
-/// Otherwise it gives one reason, the first that applies: the menu shows it
-/// under the disabled button, and the action refuses with it (D97, D110).
+/// can. It needs a reading that shows a battery and external power, and no
+/// guided calibration in progress (research note 12 §7.4). Otherwise it
+/// gives one reason, the first that applies: the menu shows it under the
+/// disabled button, and the action refuses with it (D97, D110).
 public enum FullChargeStart {
     public static func refusal(settings: ChargingSettings, status: ControllerStatus) -> String? {
+        if status.calibration.isInProgress {
+            return CalibrationWording.inProgress
+        }
         if let running = status.activeOverride {
             return running.kind == .fullCharge
                 ? "A temporary full charge is already running."
