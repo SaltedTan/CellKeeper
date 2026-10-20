@@ -28,10 +28,11 @@ extension ManualCutTests {
                 .appendingPathComponent("charge-inhibit-probe-manual-adapter-cut-\(UUID().uuidString).txt").path
         }
 
-        /// Removes the report file at `path` and its partial file.
+        /// Removes the report file at `path` and its partial files.
         static func remove(_ path: String) {
-            try? FileManager.default.removeItem(atPath: path)
-            try? FileManager.default.removeItem(atPath: ReportFile.partialPath(for: path))
+            for entry in [path] + ReportFile.partialPaths(for: path) {
+                try? FileManager.default.removeItem(atPath: entry)
+            }
         }
 
         static func contents(_ path: String) -> String? {
@@ -52,7 +53,7 @@ extension ManualCutTests {
                 gate.wait()
                 return written
             })
-            return ReportFile(path: path, placeholder: "placeholder\n", hooks: hooks)
+            return try? ReportFile(path: path, placeholder: "placeholder\n", hooks: hooks)
         }
 
         /// A watchdog that logs each arm instead of arming an alarm; with
@@ -131,7 +132,7 @@ extension ManualCutTests {
         func watchdogArmedFirst() throws {
             let path = Self.temporaryPath()
             defer { Self.remove(path) }
-            let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+            let file = try ReportFile(path: path, placeholder: "placeholder\n")
             let main = EventLog()
             let mainEnd = Self.ending(Self.stoppedInTheHold(), file: file, events: main, watchdog: Self.watchdog(main))
                 .endMainPath(tearDown: { main.add("tearDown") })
@@ -183,7 +184,7 @@ extension ManualCutTests {
             // The placeholder is whole; the save's 8 bytes are in the
             // partial file beside it.
             #expect(Self.contents(path) == "placeholder\n")
-            #expect(Self.contents(ReportFile.partialPath(for: path)) == "report 1")
+            #expect(Self.contents(ReportFile.partialPaths(for: path)[0]) == "report 1")
             released.add()
             gate.signal()
             #expect(eventually { exited.value == 1 && mainEnded.value == 1 })
@@ -225,7 +226,7 @@ extension ManualCutTests {
             let path = Self.temporaryPath()
             defer { Self.remove(path) }
             let events = EventLog()
-            let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+            let file = try ReportFile(path: path, placeholder: "placeholder\n")
             let pausedInArm = DispatchSemaphore(value: 0)
             let resumeArm = DispatchSemaphore(value: 0)
             let ending = Self.ending(
@@ -294,7 +295,7 @@ extension ManualCutTests {
         func lockHeldAfterTheDrainTimesOut(path endingPath: String) throws {
             let path = Self.temporaryPath()
             defer { Self.remove(path) }
-            let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+            let file = try ReportFile(path: path, placeholder: "placeholder\n")
             let events = EventLog()
             // The sleep watch's lock, held by a teardown or an acknowledgement
             // that never finishes: the drain and the notices both need it.
@@ -339,7 +340,7 @@ extension ManualCutTests {
         func noticesAfterACompletedDrain() throws {
             let path = Self.temporaryPath()
             defer { Self.remove(path) }
-            let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+            let file = try ReportFile(path: path, placeholder: "placeholder\n")
             let events = EventLog()
             let notice = ProbeRun.SleepNotice(time: 400, message: "kIOMessageCanSystemSleep")
             let end = Self.ending(
@@ -448,7 +449,7 @@ extension ManualCutTests {
         func failedEndBanner() throws {
             let path = Self.temporaryPath()
             defer { Self.remove(path) }
-            let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+            let file = try ReportFile(path: path, placeholder: "placeholder\n")
             let events = EventLog()
             let driver = Self.stoppedAfterAConfirmedRestore(console: Self.failing(ManualCut.text(.afterReadingsEndedEarly), after: 0.5))
             let end = Self.ending(driver, file: file, events: events, watchdog: Self.watchdog(events), report: Self.realReport)
@@ -463,7 +464,7 @@ extension ManualCutTests {
         func failedSecondSignalBanner() throws {
             let path = Self.temporaryPath()
             defer { Self.remove(path) }
-            let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+            let file = try ReportFile(path: path, placeholder: "placeholder\n")
             let events = EventLog()
             let driver = Self.stoppedAfterAConfirmedRestore(console: Self.failing("again: quitting", after: 0.3))
             let statuses = EventLog()
@@ -479,7 +480,7 @@ extension ManualCutTests {
         func terminalNotTakingTheEnd() throws {
             let path = Self.temporaryPath()
             defer { Self.remove(path) }
-            let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+            let file = try ReportFile(path: path, placeholder: "placeholder\n")
             let events = EventLog()
             let blocked = BlockingSink(blocked: false)
             defer { blocked.open() }
@@ -601,7 +602,7 @@ extension ManualCutTests {
         func boundaryBeforeTheDrain() throws {
             let path = Self.temporaryPath()
             defer { Self.remove(path) }
-            let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+            let file = try ReportFile(path: path, placeholder: "placeholder\n")
             let events = EventLog()
             let handed = EventLog()
             let slow = DispatchSemaphore(value: 0)
@@ -645,7 +646,7 @@ extension ManualCutTests {
             for _ in 0..<20 {
                 let path = Self.temporaryPath()
                 defer { Self.remove(path) }
-                let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+                let file = try ReportFile(path: path, placeholder: "placeholder\n")
                 let events = EventLog()
                 let handed = EventLog()
                 let driver = Self.stoppedAfterAConfirmedRestore(console: Self.recordingConsole(handed, failing: Self.secondBanner))
@@ -751,7 +752,7 @@ extension ManualCutTests {
             let path = Self.temporaryPath()
             defer { Self.remove(path) }
             let events = EventLog()
-            let file = try #require(ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
+            let file = try ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
                 write: { descriptor, bytes, offset in
                     events.add("write")
                     return ReportFile.Hooks.pwrite(descriptor, bytes, offset)
@@ -761,20 +762,26 @@ extension ManualCutTests {
                     return ReportFile.Hooks.fsync(descriptor)
                 },
                 rename: { from, to in
-                    events.add("rename \(from == ReportFile.partialPath(for: path) && to == path)")
+                    events.add("rename \(from == ReportFile.partialPaths(for: path)[0] && to == path)")
                     return ReportFile.Hooks.rename(from, to)
                 }
-            )))
+            ))
             #expect(Self.contents(path) == Self.placeholder)
             #expect(events.values.isEmpty)
-            #expect(file.partialPath.hasSuffix(".partial.txt"))
-            #expect((file.partialPath as NSString).deletingLastPathComponent == (path as NSString).deletingLastPathComponent)
+            let directory = (path as NSString).deletingLastPathComponent
+            #expect(file.partialPaths.count == ReportFile.partialNames)
+            #expect(file.partialPaths.allSatisfy { ($0 as NSString).deletingLastPathComponent == directory })
             #expect(file.persist(Self.report))
             #expect(events.values == ["write", "sync", "rename true"])
             #expect(Self.contents(path) == Self.report)
-            #expect(!FileManager.default.fileExists(atPath: file.partialPath))
-            #expect(ReportFile.partialPath(for: "charge-inhibit-probe-manual-adapter-cut-20261020-101500.txt")
-                == "charge-inhibit-probe-manual-adapter-cut-20261020-101500.partial.txt")
+            #expect(!file.partialPaths.contains { FileManager.default.fileExists(atPath: $0) })
+            // Every name is matched by .gitignore's charge-inhibit-probe-*.txt.
+            let names = ReportFile.partialPaths(for: "charge-inhibit-probe-manual-adapter-cut-20261020-101500.txt")
+            #expect(names.first == "charge-inhibit-probe-manual-adapter-cut-20261020-101500.partial.txt")
+            #expect(names.dropFirst().first == "charge-inhibit-probe-manual-adapter-cut-20261020-101500.partial-2.txt")
+            #expect(names.last == "charge-inhibit-probe-manual-adapter-cut-20261020-101500.partial-10.txt")
+            #expect(names.allSatisfy { $0.hasPrefix("charge-inhibit-probe-") && $0.hasSuffix(".txt") })
+            #expect(Set(names).count == ReportFile.partialNames)
         }
 
         @Test(
@@ -784,7 +791,7 @@ extension ManualCutTests {
         func failedSaveKeepsThePlaceholder(failing step: String) throws {
             let path = Self.temporaryPath()
             defer { Self.remove(path) }
-            let file = try #require(ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
+            let file = try ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
                 write: { descriptor, bytes, offset in
                     guard step == "write fails" else { return ReportFile.Hooks.pwrite(descriptor, bytes, offset) }
                     // Some of it, then an error.
@@ -802,7 +809,7 @@ extension ManualCutTests {
                     errno = EXDEV
                     return -1
                 }
-            )))
+            ))
             #expect(!file.persist(Self.report))
             #expect(Self.contents(path) == Self.placeholder)
         }
@@ -814,7 +821,7 @@ extension ManualCutTests {
             let paused = DispatchSemaphore(value: 0)
             let gate = DispatchSemaphore(value: 0)
             let first = Counter()
-            let file = try #require(ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
+            let file = try ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
                 write: { descriptor, bytes, offset in
                     first.add()
                     guard first.value == 1 else { return ReportFile.Hooks.pwrite(descriptor, bytes, offset) }
@@ -823,14 +830,14 @@ extension ManualCutTests {
                     gate.wait()
                     return written
                 }
-            )))
+            ))
             let saved = Counter()
             Thread {
                 if file.persist(Self.report) { saved.add() }
             }.start()
             #expect(paused.wait(timeout: .now() + 2) == .success)
             #expect(Self.contents(path) == Self.placeholder)
-            #expect(Self.contents(file.partialPath) == "a line o")
+            #expect(Self.contents(file.partialPaths[0]) == "a line o")
             gate.signal()
             #expect(eventually { saved.value == 1 })
             #expect(Self.contents(path) == Self.report)
@@ -856,7 +863,7 @@ extension ManualCutTests {
             driver.sleepLog.record(at: confirmed - 1)
             let hang = DispatchSemaphore(value: 0)
             defer { hang.signal() }
-            let file = try #require(ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
+            let file = try ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
                 write: { _, _, _ in
                     // The save has started: what had been queued by now?
                     _ = console.drain(timeout: 2)
@@ -866,7 +873,7 @@ extension ManualCutTests {
                     errno = EIO
                     return -1
                 }
-            )))
+            ))
             let ending = ManualCutEnding(session: driver.session, watchdog: Self.watchdog(events), parts: ManualCutEnding.Parts(
                 stopSleepNotifications: {}, sleepNotices: { [] }, render: Self.realReport,
                 persist: { file.persist($0) }, savedLine: { "saved: \($0)" }
@@ -914,6 +921,128 @@ extension ManualCutTests {
             #expect(refused == "\nThe run is over (refused: no read); exit status 1. Saving the report.")
             #expect(ManualCut.settledBanner(ManualCutOutcome(verdict: nil, exitStatus: 2, recoveryReason: nil), status: 130)
                 == "\nThe run is over (no verdict); exit status 130. Saving the report.")
+        }
+
+        // MARK: Exclusive creation of the report and its partial file (code review r6 of #101)
+
+        static func isSymbolicLink(_ path: String) -> Bool {
+            (try? FileManager.default.attributesOfItem(atPath: path)[.type] as? FileAttributeType) == .typeSymbolicLink
+        }
+
+        static func isRegularFile(_ path: String) -> Bool {
+            (try? FileManager.default.attributesOfItem(atPath: path)[.type] as? FileAttributeType) == .typeRegular
+        }
+
+        @Test(
+            "A report name that is taken (a leftover report, a link to another file, a dangling link) is never opened, truncated or followed: watch refuses, and nothing is created",
+            arguments: ["regular file", "symbolic link", "dangling symbolic link"]
+        )
+        func takenReportNameRefuses(entry: String) throws {
+            let path = Self.temporaryPath()
+            let other = path + ".other"
+            defer {
+                Self.remove(path)
+                try? FileManager.default.removeItem(atPath: other)
+            }
+            switch entry {
+            case "regular file":
+                try "someone else's report\n".write(toFile: path, atomically: false, encoding: .utf8)
+            case "symbolic link":
+                try "someone else's report\n".write(toFile: other, atomically: false, encoding: .utf8)
+                try FileManager.default.createSymbolicLink(atPath: path, withDestinationPath: other)
+            default:
+                try FileManager.default.createSymbolicLink(atPath: path, withDestinationPath: other)
+            }
+            #expect(throws: ReportFile.CreateError.exists) {
+                try ReportFile(path: path, placeholder: Self.placeholder)
+            }
+            switch entry {
+            case "regular file":
+                #expect(Self.contents(path) == "someone else's report\n")
+            case "symbolic link":
+                #expect(Self.isSymbolicLink(path))
+                #expect(Self.contents(other) == "someone else's report\n")
+            default:
+                #expect(Self.isSymbolicLink(path))
+                #expect(!FileManager.default.fileExists(atPath: other))
+            }
+            #expect(!ReportFile.partialPaths(for: path).contains { FileManager.default.fileExists(atPath: $0) })
+            let refusal = ManualCut.reportFileRefusal(.exists, fileName: "charge-inhibit-probe-manual-adapter-cut-20261020-101500.txt")
+            #expect(refusal.hasPrefix("Refusing to run: ./charge-inhibit-probe-manual-adapter-cut-20261020-101500.txt already exists"))
+            #expect(refusal.hasSuffix("Nothing was created."))
+        }
+
+        @Test("Two report files with the same name: the second refuses, and the first keeps its placeholder and still saves")
+        func sameNameTwice() throws {
+            let path = Self.temporaryPath()
+            defer { Self.remove(path) }
+            let first = try ReportFile(path: path, placeholder: Self.placeholder)
+            #expect(throws: ReportFile.CreateError.exists) {
+                try ReportFile(path: path, placeholder: "another run's placeholder\n")
+            }
+            #expect(Self.contents(path) == Self.placeholder)
+            #expect(first.persist(Self.report))
+            #expect(Self.contents(path) == Self.report)
+        }
+
+        @Test(
+            "A leftover partial file (a symbolic link or a hard link to the placeholder, or a regular file) is never opened: the save uses the next name, and the leftover is untouched",
+            arguments: ["symbolic link", "hard link", "regular file"], [false, true]
+        )
+        func leftoverPartialFile(leftover: String, writeFails: Bool) throws {
+            let path = Self.temporaryPath()
+            defer { Self.remove(path) }
+            let file = try ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
+                write: { descriptor, bytes, offset in
+                    guard writeFails else { return ReportFile.Hooks.pwrite(descriptor, bytes, offset) }
+                    if offset == 0 { return ReportFile.Hooks.pwrite(descriptor, UnsafeRawBufferPointer(rebasing: bytes.prefix(8)), offset) }
+                    errno = EIO
+                    return -1
+                }
+            ))
+            let partial = file.partialPaths[0]
+            switch leftover {
+            case "symbolic link":
+                try FileManager.default.createSymbolicLink(atPath: partial, withDestinationPath: path)
+            case "hard link":
+                #expect(link(path, partial) == 0)
+            default:
+                try "a leftover\n".write(toFile: partial, atomically: false, encoding: .utf8)
+            }
+            #expect(file.persist(Self.report) == !writeFails)
+            // The report file is a regular file: the report, or else the
+            // whole placeholder.
+            #expect(Self.isRegularFile(path))
+            #expect(Self.contents(path) == (writeFails ? Self.placeholder : Self.report))
+            // The next name was used; it is gone once renamed into place.
+            #expect(FileManager.default.fileExists(atPath: file.partialPaths[1]) == writeFails)
+            // The leftover is untouched.
+            switch leftover {
+            case "symbolic link":
+                #expect(Self.isSymbolicLink(partial))
+                #expect(try FileManager.default.destinationOfSymbolicLink(atPath: partial) == path)
+            case "hard link":
+                #expect(Self.isRegularFile(partial))
+                #expect(Self.contents(partial) == Self.placeholder)
+            default:
+                #expect(Self.contents(partial) == "a leftover\n")
+            }
+        }
+
+        @Test("Every partial name taken: the save fails without opening any of them, and the placeholder is whole")
+        func everyPartialNameTaken() throws {
+            let path = Self.temporaryPath()
+            defer { Self.remove(path) }
+            let file = try ReportFile(path: path, placeholder: Self.placeholder)
+            for partial in file.partialPaths {
+                try "taken\n".write(toFile: partial, atomically: false, encoding: .utf8)
+            }
+            #expect(!file.persist(Self.report))
+            #expect(Self.contents(path) == Self.placeholder)
+            #expect(file.partialPaths.allSatisfy { Self.contents($0) == "taken\n" })
+            // One more name than the bound would have been free.
+            let stem = String(path.dropLast(".txt".count))
+            #expect(!FileManager.default.fileExists(atPath: "\(stem).partial-\(ReportFile.partialNames + 1).txt"))
         }
     }
 }

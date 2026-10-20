@@ -77,17 +77,23 @@ enum WatchCommand {
         // crash), only this placeholder is left, so it asks for the
         // recovery check: the probe cannot know whether CHIE was restored.
         // The save replaces it atomically (`ReportFile`), so a save that
-        // hangs, stops part way or fails leaves it whole.
+        // hangs, stops part way or fails leaves it whole. The name is
+        // reserved exclusively: if anything already has it (a leftover, a
+        // link, another run started in the same second), the probe
+        // refuses, and never opens, truncates or follows it.
         let fileName = ManualCut.reportFileName(stamp: Clock.fileStamp())
-        guard let reportFile = ReportFile(
-            path: fileName,
-            placeholder: """
-                CHECK RECOVERY FIRST: this run stopped before it finished its report, so whether CHIE was restored is unknown. Read CHIE first and follow the recovery steps (docs/research/11-smc-adapter-cut.md §7.1).
-                CellKeeper manual adapter-cut probe report: run started \(startedAt), still in progress or stopped before it finished.
+        let reportFile: ReportFile
+        do {
+            reportFile = try ReportFile(
+                path: fileName,
+                placeholder: """
+                    CHECK RECOVERY FIRST: this run stopped before it finished its report, so whether CHIE was restored is unknown. Read CHIE first and follow the recovery steps (docs/research/11-smc-adapter-cut.md §7.1).
+                    CellKeeper manual adapter-cut probe report: run started \(startedAt), still in progress or stopped before it finished.
 
-                """
-        ) else {
-            Console.error("Refusing to run: cannot write \(fileName) in the current directory. Nothing was created.")
+                    """
+            )
+        } catch {
+            Console.error(ManualCut.reportFileRefusal(error, fileName: fileName))
             return 1
         }
         // From here on, only the writer's thread writes to the terminal.

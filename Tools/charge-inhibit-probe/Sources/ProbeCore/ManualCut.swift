@@ -49,6 +49,23 @@ public enum ManualCut {
         "charge-inhibit-probe-manual-adapter-cut-\(stamp).txt"
     }
 
+    /// Why `watch` refuses when it cannot reserve its report file
+    /// (``ReportFile``, code review r6 of #101). Nothing was created: the
+    /// probe never opens, truncates or follows an existing entry, and
+    /// removes a file it created but could not finish.
+    public static func reportFileRefusal(_ error: ReportFile.CreateError, fileName: String) -> String {
+        switch error {
+        case .exists:
+            return """
+                Refusing to run: ./\(fileName) already exists (a leftover report, a link, or \
+                another run started in the same second), and the probe never overwrites it. \
+                Move it away, or wait a second, then run again. Nothing was created.
+                """
+        case let .failed(code):
+            return "Refusing to run: cannot write ./\(fileName) in the current directory (\(String(cString: strerror(code)))). Nothing was created."
+        }
+    }
+
     /// Why `watch` refuses to start, or nil (note 11 §4.3, §4.4 step 1):
     /// nothing in it needs privileges, so it refuses root; and it refuses
     /// unless its input and its output are a terminal, so that no script
