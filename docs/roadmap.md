@@ -60,9 +60,10 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
   then decided not to use it, because a cut runs the Mac from its battery
   instead of stopping charging, and an owner-run read showed the older
   charge-inhibit keys empty on this firmware. On this Mac, macOS's own
-  Charge Limit (80–100%) is the only control that stops charging on
-  adapter power; phase 4c has nothing more to try until a macOS or
-  firmware update changes that.
+  Charge Limit (80–100%) is the only verified, usable control found so
+  far that stops charging on adapter power. Any further experiment (for
+  example the firmware-limit keys, which were not read) needs new
+  evidence and new owner decisions.
 - While both were blocked, the owner approved three smaller features on
   2026-10-18, all done: Save Diagnostics… (milestone 3), opt-in
   notifications (milestone 3) and a one-shot scheduled full charge

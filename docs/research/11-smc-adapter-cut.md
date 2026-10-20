@@ -204,9 +204,10 @@ SMC client, does.** These facts come from Apple's own open source and the
 public SDK, and are corroborated by two open-source SMC clients: SMCKit
 (MIT), which describes itself as a client for Intel-based Macs, and gosmc
 (GPL-2.0, strong copyleft). They describe how a client reaches **one**
-named key, not how to enumerate keys. They are kept as background, for the
-owner's later decision about a write layer (§8, question 7). This note
-gives no layout and no call sequence.
+named key, not how to enumerate keys. They were kept as background for
+the owner's decision about a write layer (§8, question 7), which §2.3 has
+since settled: none is needed. This note gives no layout and no call
+sequence.
 
 | Item | What the sources state | Source | Licence | Tags / grade |
 |---|---|---|---|---|
@@ -229,8 +230,9 @@ decisions for CellKeeper's own single-key client: a parameter-block layout
 derived from the sources, an open type, a confirming read in the writer's
 own process just before the cut, and no fallback to another layout. With
 the owner's decision of §2.2 that client will not be built, and those
-decisions are withdrawn. Whether CellKeeper ever needs an SMC write layer,
-and who would write it, is an open owner decision (§8, question 7).
+decisions are withdrawn. Whether CellKeeper needed an SMC write layer,
+and who would write it, was left to the owner (§8, question 7); after the
+result, the owner decided not to use `CHIE`, so none is needed (§2.3).
 
 ### 3.3 Reported behaviour (third-party claims — unverified)
 
@@ -1041,13 +1043,13 @@ which has the same steps.
    keys (§2.3, §10): the owner's read-only reads of `CHTE`, `CH0B` and
    `CH0C` each printed `no data`. `CH0I` and `CH0J` stay unread.*
 7. **If `CHIE` works, how would CellKeeper write it?** CellKeeper's own
-   helper would need an SMC write layer, and agents will not write one
-   (§2.2). This is **the next owner decision** after the result: a layer
-   the owner writes; an existing external tool that the helper uses, which
-   raises licence, signing and safety questions of its own; or stopping at
-   macOS's native 80–100% limit. Nothing is decided here. *Decided on
-   2026-10-20 (§2.3): none. The owner rejected `CHIE` as CellKeeper's
-   control mechanism, so CellKeeper stays on macOS's native limit.*
+   helper would have needed an SMC write layer, and agents will not write
+   one (§2.2). The choices were a layer the owner writes; an existing
+   external tool that the helper uses, which raises licence, signing and
+   safety questions of its own; or stopping at macOS's native 80–100%
+   limit. *Decided on 2026-10-20 (§2.3): none of the first two. The owner
+   rejected `CHIE` as CellKeeper's control mechanism, so CellKeeper stays
+   on macOS's native limit.*
 8. **Can anything tell a `CHIE` cut from an unplugged adapter?** During
    the cut in §10, no reading the probe makes reported the adapter
    (IOPowerSources, `ExternalConnected`, `AppleRawExternalConnected`,
@@ -1375,8 +1377,11 @@ old charge-inhibit keys once. Each printed the same thing:
 
 In the tool's source (S14), `no data` means the read call succeeded but
 reported a data size of zero, and the blank brackets are an empty type;
-the tool does not tell an absent key from a zero-size placeholder. Either
-way, none of the three holds a value that could be written. This matches
+the tool does not tell an absent key from a zero-size placeholder. So the
+reads exposed no value for any of the three keys; nothing was tried that
+would show whether a write is accepted. `[INFERRED/UNVERIFIED]` A key
+that reports no size offers nothing a charge limit could write to, so
+these keys are not a usable inhibit on this firmware. This matches
 the reports for 20457.x firmware (§3.3; note 02 §3.3, which says these
 keys are zero-size or "no data"). Nothing was written, and no other key
 was read.
