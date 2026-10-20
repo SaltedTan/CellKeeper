@@ -158,6 +158,23 @@ public enum NotificationWording {
         )
     }
 
+    /// What every calibration request's identifier begins with, and only
+    /// theirs: after a relaunch, a request an earlier run posted is found in
+    /// Notification Center by it. A session's end report has another.
+    public static let calibrationRequestPrefix = "calibration.request."
+
+    /// What a session's end report's identifier begins with.
+    public static let calibrationReportPrefix = "calibration.report."
+
+    /// The identifier of the calibration request that holds for `status`,
+    /// also a paused session's, if any: what reconciliation keeps.
+    static func standingCalibrationRequest(_ status: ControllerStatus) -> String? {
+        guard let session = status.calibration.session,
+              let request = CalibrationWording.request(status.calibration, reading: NotificationPlanner.usableSnapshot(status), includingPaused: true)
+        else { return nil }
+        return calibrationIdentifier(session: session.id, request: request)
+    }
+
     /// A calibration request's own identifier: its session and what it
     /// asks, a rest asked again being a new one.
     static func calibrationIdentifier(session: UUID, request: CalibrationRequest) -> String {
@@ -167,13 +184,13 @@ public enum NotificationWording {
         case .restAgain: "restAgain"
         case .plugIn: "plugIn"
         }
-        return "calibration.\(session.uuidString).\(what)"
+        return "\(calibrationRequestPrefix)\(session.uuidString).\(what)"
     }
 
     /// A calibration that finished or ended by itself.
     static func calibrationEnded(_ report: CalibrationReport, status: ControllerStatus) -> PlannedNotification {
         let words = CalibrationWording.endNotification(report, status: status)
-        return PlannedNotification(kind: report.end.isCompleted ? .calibrationFinished : .calibrationEndedEarly, title: words.title, body: words.body, identifier: "calibration.\(report.id.uuidString).end")
+        return PlannedNotification(kind: report.end.isCompleted ? .calibrationFinished : .calibrationEndedEarly, title: words.title, body: words.body, identifier: "\(calibrationReportPrefix)\(report.id.uuidString)")
     }
 
     private static func titled(_ title: String, _ status: ControllerStatus) -> String {

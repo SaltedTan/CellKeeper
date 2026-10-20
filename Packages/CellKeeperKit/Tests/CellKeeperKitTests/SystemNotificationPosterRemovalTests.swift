@@ -76,6 +76,21 @@ struct SystemNotificationPosterRemovalTests {
         #expect(SystemNotificationPoster.request(for: PlannedNotification(kind: .backendFault, title: "", body: "")).identifier == NotificationKind.backendFault.replacementKey)
     }
 
+    @Test("The center's list of CellKeeper's delivered and pending notifications is passed on; one that never answers gives none")
+    func listing() async {
+        let answering = SystemNotificationPoster(
+            submission: { _, completion in completion(nil) },
+            listing: { completion in completion(["calibration.request.s.rest", "calibration.report.s"]) }
+        )
+        #expect(await answering.notificationIdentifiers() == ["calibration.request.s.rest", "calibration.report.s"])
+        let silent = SystemNotificationPoster(
+            submission: { _, completion in completion(nil) },
+            listing: { _ in },
+            scheduleTimeout: { _, expire in expire() }
+        )
+        #expect(await silent.notificationIdentifiers() == [])
+    }
+
     @Test("An add the center answers only after its withdrawal is removed again when it completes")
     func lateCompletionRemovedAgain() async throws {
         let center = DelayedCenter()

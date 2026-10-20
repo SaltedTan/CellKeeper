@@ -459,6 +459,9 @@ final class FakeNotificationPoster: NotificationPosting, @unchecked Sendable {
     private var _posted: [PlannedNotification] = []
     private var _removed: [[String]] = []
     private var _events: [String] = []
+    /// What the center holds, delivered or pending.
+    private var _center: Set<String> = []
+    private var _listings = 0
     private var _permissionReads = 0
     private var _finishedReads = 0
     private var _requests = 0
@@ -484,6 +487,17 @@ final class FakeNotificationPoster: NotificationPosting, @unchecked Sendable {
     /// Posts that reached the center ("add <identifier>") and removals
     /// ("remove <identifiers>"), in the order the center saw them.
     var events: [String] { lock.withLock { _events } }
+    /// The identifiers the center holds now.
+    var identifiers: Set<String> { lock.withLock { _center } }
+    /// How many times the center was asked what it holds.
+    var listings: Int { lock.withLock { _listings } }
+
+    func notificationIdentifiers() async -> [String] {
+        lock.withLock {
+            _listings += 1
+            return _center.sorted()
+        }
+    }
     var permissionReads: Int { lock.withLock { _permissionReads } }
     /// Reads that returned, after any hold.
     var finishedReads: Int { lock.withLock { _finishedReads } }
@@ -515,6 +529,7 @@ final class FakeNotificationPoster: NotificationPosting, @unchecked Sendable {
         lock.withLock {
             _removed.append(identifiers)
             _events.append("remove \(identifiers.joined(separator: ","))")
+            _center.subtract(identifiers)
         }
     }
 
@@ -536,6 +551,7 @@ final class FakeNotificationPoster: NotificationPosting, @unchecked Sendable {
             if let code = _failureCode { return .failed(code: code) }
             _posted.append(notification)
             _events.append("add \(notification.identifier)")
+            _center.insert(notification.identifier)
             return .posted
         }
     }

@@ -64,6 +64,10 @@ public protocol NotificationPosting: Sendable {
     /// any not shown yet, after every hand-over already queued. Asks the
     /// user nothing and returns without waiting for the system.
     func remove(identifiers: [String]) async
+    /// The identifiers of CellKeeper's own notifications in Notification
+    /// Center and of those not shown yet, as the system reports them; none
+    /// if it does not answer within a bound. Asks the user nothing.
+    func notificationIdentifiers() async -> [String]
 }
 
 /// Turns the controller's statuses into notifications, if the user opted in.
@@ -138,6 +142,18 @@ public final class ChargingNotifier {
     /// turning notifications off or on never cancels one.
     private var removalTasks: [Int: Task<Void, Never>] = [:]
     private var nextRemovalTask = 0
+    /// Notification Center keeps what an earlier run posted, which neither
+    /// the planner nor ``outstanding`` remembers after a relaunch. So the
+    /// calibration requests it holds are reconciled with the one that holds
+    /// now: after launch, once the owner has opted in (never before); after
+    /// opting in again; whenever the request that holds changes; and when
+    /// a session ends.
+    private var isReconciliationDue = true
+    /// The calibration request that holds as of the latest status, also a
+    /// paused session's (``NotificationWording/standingCalibrationRequest(_:)``).
+    private var standingRequest: String?
+    /// ``CalibrationStatus/endedCount`` as last seen.
+    private var endedSeen: Int?
 
     /// - Parameter uptime: monotonic seconds for the planner's minimum
     ///   intervals. Defaults to `ContinuousClock`, which keeps counting
@@ -177,6 +193,7 @@ public final class ChargingNotifier {
         asking.isEnabled = enabled
         asking.isRequesting = enabled
         optIn = asking
+        isReconciliationDue = isReconciliationDue || enabled
         guard enabled else {
             // Requests posted under the opt-in are not left behind: removing
             // CellKeeper's own notifications asks for no permission and
@@ -231,6 +248,16 @@ public final class ChargingNotifier {
         let obsolete = plan.withdrawals.filter(outstanding.contains)
         if !obsolete.isEmpty {
             withdraw(obsolete)
+        }
+        let standing = NotificationWording.standingCalibrationRequest(status)
+        if standing != standingRequest || (endedSeen.map { $0 != status.calibration.endedCount } ?? false) {
+            isReconciliationDue = true
+        }
+        standingRequest = standing
+        endedSeen = status.calibration.endedCount
+        if isReconciliationDue, optIn.isEnabled {
+            isReconciliationDue = false
+            reconcile()
         }
         let planned = plan.notifications
         guard !planned.isEmpty else { return }
@@ -301,6 +328,36 @@ public final class ChargingNotifier {
             await poster.remove(identifiers: identifiers)
             CellKeeperLog.app.notice("Notifications withdrawn: \(identifiers.count, privacy: .public)")
             self?.removalTasks[number] = nil
+        }
+        removalTasks[number] = task
+    }
+
+    /// Lists CellKeeper's own notifications and removes every calibration
+    /// request (``NotificationWording/calibrationRequestPrefix``) other than
+    /// the one that holds, judged when the list arrives: not one queued in
+    /// this run and not withdrawn (``outstanding``), and not one this run
+    /// withdrew already, which its withdrawal handles. A session's end
+    /// report has another prefix and stays.
+    private func reconcile() {
+        let number = nextRemovalTask
+        nextRemovalTask += 1
+        let task = Task { [weak self, poster] in
+            let listed = await poster.notificationIdentifiers()
+            guard let self else { return }
+            let obsolete = listed.filter { identifier in
+                identifier.hasPrefix(NotificationWording.calibrationRequestPrefix)
+                    && identifier != self.standingRequest
+                    && !self.outstanding.contains(identifier)
+                    && self.withdrawals[identifier] == nil
+            }
+            if !obsolete.isEmpty {
+                for identifier in obsolete {
+                    self.withdrawals[identifier, default: 0] += 1
+                }
+                await poster.remove(identifiers: obsolete)
+                CellKeeperLog.app.notice("Calibration requests left from earlier withdrawn: \(obsolete.count, privacy: .public)")
+            }
+            self.removalTasks[number] = nil
         }
         removalTasks[number] = task
     }

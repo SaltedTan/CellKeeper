@@ -27,6 +27,10 @@ public struct SystemNotificationPoster: NotificationPosting {
     /// system's center by default, a recorder in tests.
     typealias Removal = @Sendable ([String]) -> Void
 
+    /// Lists the identifiers of delivered and pending notifications and
+    /// hands them to the completion; the system's center by default.
+    typealias Listing = @Sendable (@escaping @Sendable ([String]) -> Void) -> Void
+
     /// How long a post waits for the center's answer before its outcome
     /// counts as unknown (``NotificationPostResult/unconfirmed``).
     static let answerBound: TimeInterval = 30
@@ -38,6 +42,7 @@ public struct SystemNotificationPoster: NotificationPosting {
 
     private let submission: Submission
     private let removal: Removal
+    private let listing: Listing
     private let answerBound: TimeInterval
     private let scheduleTimeout: TimeoutScheduler
     /// Every hand-over runs here, one at a time: a system call that blocks
@@ -55,12 +60,21 @@ public struct SystemNotificationPoster: NotificationPosting {
             let center = UNUserNotificationCenter.current()
             center.removePendingNotificationRequests(withIdentifiers: identifiers)
             center.removeDeliveredNotifications(withIdentifiers: identifiers)
+        }, listing: { completion in
+            // Identifiers only leave the system's callbacks.
+            UNUserNotificationCenter.current().getDeliveredNotifications { delivered in
+                let shown = delivered.map(\.request.identifier)
+                UNUserNotificationCenter.current().getPendingNotificationRequests { pending in
+                    completion(shown + pending.map(\.identifier))
+                }
+            }
         })
     }
 
     init(
         submission: @escaping Submission,
         removal: @escaping Removal = { _ in },
+        listing: @escaping Listing = { completion in completion([]) },
         answerBound: TimeInterval = SystemNotificationPoster.answerBound,
         scheduleTimeout: @escaping TimeoutScheduler = { seconds, expire in
             // Not on the hand-over queue, which a blocked system call holds.
@@ -70,6 +84,7 @@ public struct SystemNotificationPoster: NotificationPosting {
     ) {
         self.submission = submission
         self.removal = removal
+        self.listing = listing
         self.answerBound = answerBound
         self.scheduleTimeout = scheduleTimeout
         self.queuedHandOvers = QueuedHandOvers(limit: queueLimit)
@@ -161,6 +176,19 @@ public struct SystemNotificationPoster: NotificationPosting {
         }
     }
 
+    /// Waits for the center's answer at most the answer bound, or until
+    /// cancelled; none then.
+    public func notificationIdentifiers() async -> [String] {
+        let answer = ListedIdentifiers()
+        listing { answer.settle($0) }
+        scheduleTimeout(answerBound) { answer.settle([]) }
+        return await withTaskCancellationHandler {
+            await answer.value()
+        } onCancel: {
+            answer.settle([])
+        }
+    }
+
     static func request(for notification: PlannedNotification) -> UNNotificationRequest {
         let content = UNMutableNotificationContent()
         content.title = notification.title
@@ -230,6 +258,37 @@ final class PostOutcome: @unchecked Sendable {
     func value() async -> NotificationPostResult {
         await withCheckedContinuation { (continuation: CheckedContinuation<NotificationPostResult, Never>) in
             let settled = lock.withLock { () -> NotificationPostResult? in
+                if let result { return result }
+                waiter = continuation
+                return nil
+            }
+            if let settled {
+                continuation.resume(returning: settled)
+            }
+        }
+    }
+}
+
+/// The center's list of identifiers, settled once: answered, expired or
+/// cancelled.
+final class ListedIdentifiers: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: [String]?
+    private var waiter: CheckedContinuation<[String], Never>?
+
+    func settle(_ value: [String]) {
+        let waiting = lock.withLock { () -> CheckedContinuation<[String], Never>? in
+            guard result == nil else { return nil }
+            result = value
+            defer { waiter = nil }
+            return waiter
+        }
+        waiting?.resume(returning: value)
+    }
+
+    func value() async -> [String] {
+        await withCheckedContinuation { (continuation: CheckedContinuation<[String], Never>) in
+            let settled = lock.withLock { () -> [String]? in
                 if let result { return result }
                 waiter = continuation
                 return nil

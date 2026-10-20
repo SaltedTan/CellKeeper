@@ -59,7 +59,15 @@ public enum CalibrationWording {
     /// What CellKeeper asks the owner to do now, if anything: none while
     /// paused or returning, and no rest at 15% or below (§7.6).
     public static func request(_ status: CalibrationStatus, reading: BatterySnapshot?) -> CalibrationRequest? {
-        guard let session = status.session, !status.isPaused, !session.isReturning else { return nil }
+        request(status, reading: reading, includingPaused: false)
+    }
+
+    /// As ``request(_:reading:)``, and with `includingPaused`, also the
+    /// request of a paused session's step: what still holds for the owner
+    /// after a relaunch, such as the rest's time to plug in again, though
+    /// the menu asks to continue first.
+    public static func request(_ status: CalibrationStatus, reading: BatterySnapshot?, includingPaused: Bool) -> CalibrationRequest? {
+        guard let session = status.session, includingPaused || !status.isPaused, !session.isReturning else { return nil }
         switch session.step {
         case .unplug:
             return .unplug

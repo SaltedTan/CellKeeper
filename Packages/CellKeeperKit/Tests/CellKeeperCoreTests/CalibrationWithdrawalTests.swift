@@ -71,6 +71,9 @@ struct CalibrationWithdrawalTests {
         let poster = FakeNotificationPoster(permission: .shown)
         let notifier = await makeNotifier(poster, clock: rig.clock)
         _ = await resting(rig, notifier)
+        // The rest's post finishes first; one still on its way when it is
+        // withdrawn is removed once more after it is shown.
+        await settle(notifier)
         notifier.observe(await rig.read(calibrationReading(19, .battery), .willSleep), trigger: .willSleep)
         rig.clock.advance(by: hour)
         notifier.observe(await rig.read(calibrationReading(19, .battery), .didWake), trigger: .didWake)
@@ -236,7 +239,7 @@ struct CalibrationWithdrawalTests {
         let unplug = planner.planAll(await rig.read(calibrationReading(100, charging: false, full: true)), trigger: .periodic, uptime: 2, isDelivering: true)
         let posted = try #require(unplug.notifications.first)
         let session = try #require(await rig.controller.evaluate(.manual).calibration.session)
-        #expect(posted.identifier == "calibration.\(session.id.uuidString).unplug")
+        #expect(posted.identifier == "calibration.request.\(session.id.uuidString).unplug")
         #expect(unplug.withdrawals.isEmpty)
         let drained = planner.planAll(await rig.read(calibrationReading(99, .battery), .powerSourceChanged), trigger: .powerSourceChanged, uptime: 3, isDelivering: true)
         #expect(drained.withdrawals == [posted.identifier])
