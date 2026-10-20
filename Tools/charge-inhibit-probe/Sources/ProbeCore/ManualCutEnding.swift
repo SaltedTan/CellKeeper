@@ -154,19 +154,18 @@ public final class ManualCutEnding: @unchecked Sendable {
         /// The report: the flow is nil when the probe refused to start; the
         /// sleep notices are nil when the drain did not complete.
         public var render: @Sendable (_ outcome: ManualCutOutcome, _ flow: ManualCutFlow?, _ sleepNotices: [ProbeRun.SleepNotice]?) -> String
-        /// Saves the report (``ReportFile/persist(_:)``); returns whether it
-        /// was saved.
-        public var persist: @Sendable (_ report: String) -> Bool
+        /// Saves the report (``ReportFile/persist(_:)``).
+        public var persist: @Sendable (_ report: String) -> ReportFile.SaveOutcome
         /// The console's last line: where the report is, or that it could
-        /// not be saved.
-        public var savedLine: @Sendable (_ saved: Bool) -> String
+        /// not be saved (``ManualCut/savedLine(_:fileName:)``).
+        public var savedLine: @Sendable (_ saved: ReportFile.SaveOutcome) -> String
 
         public init(
             stopSleepNotifications: @escaping @Sendable () -> Void,
             sleepNotices: @escaping @Sendable () -> [ProbeRun.SleepNotice],
             render: @escaping @Sendable (_ outcome: ManualCutOutcome, _ flow: ManualCutFlow?, _ sleepNotices: [ProbeRun.SleepNotice]?) -> String,
-            persist: @escaping @Sendable (_ report: String) -> Bool,
-            savedLine: @escaping @Sendable (_ saved: Bool) -> String
+            persist: @escaping @Sendable (_ report: String) -> ReportFile.SaveOutcome,
+            savedLine: @escaping @Sendable (_ saved: ReportFile.SaveOutcome) -> String
         ) {
             self.stopSleepNotifications = stopSleepNotifications
             self.sleepNotices = sleepNotices
@@ -333,11 +332,15 @@ public final class ManualCutEnding: @unchecked Sendable {
         // does not hold it back; and it has no result callback, so a failed
         // write of it cannot change the outcome already settled.
         console.enqueue(settled.banner)
+        var saveOutcome = ReportFile.SaveOutcome.unconfirmed
         BoundedEnd.perform(status: status, bound: consoleDrainBound, steps: BoundedEnd.Steps(
-            persist: { [parts] in parts.persist(text) },
-            print: { [parts] saved in
+            persist: { [parts] in
+                saveOutcome = parts.persist(text)
+                return saveOutcome == .saved
+            },
+            print: { [parts] _ in
                 console.enqueue("\n" + text)
-                console.enqueue(parts.savedLine(saved))
+                console.enqueue(parts.savedLine(saveOutcome))
                 self.publish(status)
             },
             drain: { console.drain(timeout: $0) },

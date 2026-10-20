@@ -140,14 +140,7 @@ enum WatchCommand {
                 ).render()
             },
             persist: { reportFile.persist($0) },
-            savedLine: { saved in
-                saved
-                    ? "Report written to ./\(fileName). Please send it to the lead."
-                    : """
-                        Could not save the report: ./\(fileName) still says CHECK RECOVERY FIRST. \
-                        Copy the report above instead, and send it to the lead.
-                        """
-            }
+            savedLine: { ManualCut.savedLine($0, fileName: fileName) }
         ))
 
         let signalSources = installSignalHandlers { number in

@@ -906,6 +906,10 @@ words.
   as small as it can: one key; two values that two independent projects
   use (§3.1); a read before each write that must show the expected type,
   size and value; the tool's own length check; and no enumeration.
+- **The report's directory.** The probe guards against its own failures
+  and against files left by earlier runs, but does not defend against
+  another process renaming or replacing files in the directory it writes
+  its report to during a run.
 - **What the probe never does:** run as root; open a user client of the
   SMC or the battery manager; read or write any SMC key; run the tool,
   start any process for it, or read what it prints; run without a terminal

@@ -50,9 +50,10 @@ public enum ManualCut {
     }
 
     /// Why `watch` refuses when it cannot reserve its report file
-    /// (``ReportFile``, code review r6 of #101). Nothing was created: the
-    /// probe never opens, truncates or follows an existing entry, and
-    /// removes a file it created but could not finish.
+    /// (``ReportFile``, code reviews r6 and r7 of #101). It says only what
+    /// it knows: the probe never opens, truncates or follows an existing
+    /// entry, and never removes anything, so a file it created but could not
+    /// finish is left, and named.
     public static func reportFileRefusal(_ error: ReportFile.CreateError, fileName: String) -> String {
         switch error {
         case .exists:
@@ -61,8 +62,39 @@ public enum ManualCut {
                 another run started in the same second), and the probe never overwrites it. \
                 Move it away, or wait a second, then run again. Nothing was created.
                 """
-        case let .failed(code):
-            return "Refusing to run: cannot write ./\(fileName) in the current directory (\(String(cString: strerror(code)))). Nothing was created."
+        case let .notCreated(code):
+            return """
+                Refusing to run: cannot create ./\(fileName) in the current directory \
+                (\(String(cString: strerror(code)))). Nothing was created.
+                """
+        case let .placeholderNotWritten(code):
+            return """
+                Refusing to run: ./\(fileName) was created, but its placeholder could not be \
+                written (\(String(cString: strerror(code)))). The probe left that file as it \
+                is; remove it before you run again. Nothing else was created.
+                """
+        }
+    }
+
+    /// The console's last line, once the save is over (code reviews r5 and
+    /// r7 of #101). It claims only what the save checked: the placeholder
+    /// is said to be in place only if the report's name was still the
+    /// placeholder the probe created.
+    public static func savedLine(_ outcome: ReportFile.SaveOutcome, fileName: String) -> String {
+        switch outcome {
+        case .saved:
+            return "Report written to ./\(fileName). Please send it to the lead."
+        case .placeholderKept:
+            return """
+                Could not save the report: ./\(fileName) still says CHECK RECOVERY FIRST. \
+                Copy the report above instead, and send it to the lead.
+                """
+        case .unconfirmed:
+            return """
+                Could not save or confirm the report: ./\(fileName) is not the file the probe \
+                created or wrote, so what it holds is unknown. Copy the report above instead, \
+                and send it to the lead.
+                """
         }
     }
 

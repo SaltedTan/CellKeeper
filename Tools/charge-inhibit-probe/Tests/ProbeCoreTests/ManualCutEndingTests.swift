@@ -771,7 +771,7 @@ extension ManualCutTests {
             let directory = (path as NSString).deletingLastPathComponent
             #expect(file.partialPaths.count == ReportFile.partialNames)
             #expect(file.partialPaths.allSatisfy { ($0 as NSString).deletingLastPathComponent == directory })
-            #expect(file.persist(Self.report))
+            #expect(file.persist(Self.report) == .saved)
             #expect(events.values == ["write", "sync", "rename true"])
             #expect(Self.contents(path) == Self.report)
             #expect(!file.partialPaths.contains { FileManager.default.fileExists(atPath: $0) })
@@ -810,7 +810,7 @@ extension ManualCutTests {
                     return -1
                 }
             ))
-            #expect(!file.persist(Self.report))
+            #expect(file.persist(Self.report) == .placeholderKept)
             #expect(Self.contents(path) == Self.placeholder)
         }
 
@@ -833,7 +833,7 @@ extension ManualCutTests {
             ))
             let saved = Counter()
             Thread {
-                if file.persist(Self.report) { saved.add() }
+                if file.persist(Self.report) == .saved { saved.add() }
             }.start()
             #expect(paused.wait(timeout: .now() + 2) == .success)
             #expect(Self.contents(path) == Self.placeholder)
@@ -981,7 +981,7 @@ extension ManualCutTests {
                 try ReportFile(path: path, placeholder: "another run's placeholder\n")
             }
             #expect(Self.contents(path) == Self.placeholder)
-            #expect(first.persist(Self.report))
+            #expect(first.persist(Self.report) == .saved)
             #expect(Self.contents(path) == Self.report)
         }
 
@@ -1009,7 +1009,7 @@ extension ManualCutTests {
             default:
                 try "a leftover\n".write(toFile: partial, atomically: false, encoding: .utf8)
             }
-            #expect(file.persist(Self.report) == !writeFails)
+            #expect(file.persist(Self.report) == (writeFails ? .placeholderKept : .saved))
             // The report file is a regular file: the report, or else the
             // whole placeholder.
             #expect(Self.isRegularFile(path))
@@ -1037,12 +1037,153 @@ extension ManualCutTests {
             for partial in file.partialPaths {
                 try "taken\n".write(toFile: partial, atomically: false, encoding: .utf8)
             }
-            #expect(!file.persist(Self.report))
+            #expect(file.persist(Self.report) == .placeholderKept)
             #expect(Self.contents(path) == Self.placeholder)
             #expect(file.partialPaths.allSatisfy { Self.contents($0) == "taken\n" })
             // One more name than the bound would have been free.
             let stem = String(path.dropLast(".txt".count))
             #expect(!FileManager.default.fileExists(atPath: "\(stem).partial-\(ReportFile.partialNames + 1).txt"))
+        }
+
+        // MARK: Identity checks around the rename, and no cleanup (code review r7 of #101)
+
+        /// Replaces the entry at `path` with a regular file holding `text`,
+        /// as another process might.
+        static func replace(_ path: String, with text: String) {
+            let other = path + ".replacement"
+            try? text.write(toFile: other, atomically: false, encoding: .utf8)
+            _ = rename(other, path)
+        }
+
+        @Test("Review r7's first swap: the written partial is replaced by a link to an obsolete report before the rename; nothing is renamed, and the placeholder, still the probe's, is kept")
+        func partialSwappedBeforeTheRename() throws {
+            let path = Self.temporaryPath()
+            let obsolete = path + ".obsolete"
+            defer {
+                Self.remove(path)
+                try? FileManager.default.removeItem(atPath: obsolete)
+            }
+            try "an obsolete report\n".write(toFile: obsolete, atomically: false, encoding: .utf8)
+            let renames = Counter()
+            let file = try ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
+                sync: { descriptor in
+                    let partial = ReportFile.partialPaths(for: path)[0]
+                    _ = unlink(partial)
+                    _ = symlink(obsolete, partial)
+                    return ReportFile.Hooks.fsync(descriptor)
+                },
+                rename: { from, to in
+                    renames.add()
+                    return ReportFile.Hooks.rename(from, to)
+                }
+            ))
+            let outcome = file.persist(Self.report)
+            #expect(outcome == .placeholderKept)
+            #expect(renames.value == 0)
+            #expect(Self.isRegularFile(path))
+            #expect(Self.contents(path) == Self.placeholder)
+            #expect(Self.contents(obsolete) == "an obsolete report\n")
+            #expect(ManualCut.savedLine(outcome, fileName: "r.txt").contains("still says CHECK RECOVERY FIRST"))
+        }
+
+        @Test(
+            "Review r7's second swap: the reservation is moved aside and another file put at the report's name; nothing is renamed, the other file is untouched, and the console claims nothing about it",
+            arguments: [false, true]
+        )
+        func reservationMovedAside(syncFails: Bool) throws {
+            let path = Self.temporaryPath()
+            let aside = path + ".aside"
+            defer {
+                Self.remove(path)
+                try? FileManager.default.removeItem(atPath: aside)
+            }
+            let renames = Counter()
+            let file = try ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
+                sync: { descriptor in
+                    _ = rename(path, aside)
+                    try? "another run's placeholder\n".write(toFile: path, atomically: false, encoding: .utf8)
+                    guard !syncFails else {
+                        errno = EIO
+                        return -1
+                    }
+                    return ReportFile.Hooks.fsync(descriptor)
+                },
+                rename: { from, to in
+                    renames.add()
+                    return ReportFile.Hooks.rename(from, to)
+                }
+            ))
+            let outcome = file.persist(Self.report)
+            #expect(outcome == .unconfirmed)
+            #expect(renames.value == 0)
+            #expect(Self.contents(path) == "another run's placeholder\n")
+            #expect(Self.contents(aside) == Self.placeholder)
+            let line = ManualCut.savedLine(outcome, fileName: "r.txt")
+            #expect(!line.contains("CHECK RECOVERY FIRST"))
+            #expect(line.hasPrefix("Could not save or confirm the report: ./r.txt"))
+            #expect(line.contains("Copy the report above instead"))
+        }
+
+        @Test("After the rename, the report's name is not the file the probe wrote: the save is reported as not confirmed")
+        func mismatchAfterTheRename() throws {
+            let path = Self.temporaryPath()
+            defer { Self.remove(path) }
+            let file = try ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
+                rename: { from, to in
+                    let result = ReportFile.Hooks.rename(from, to)
+                    Self.replace(path, with: "someone else's file\n")
+                    return result
+                }
+            ))
+            #expect(file.persist(Self.report) == .unconfirmed)
+            #expect(Self.contents(path) == "someone else's file\n")
+        }
+
+        @Test("A create of the partial file that fails with anything but EEXIST (EMFILE, say) ends the save at once, though a later create would succeed; the placeholder is kept")
+        func transientCreateFailureEndsTheSave() throws {
+            let path = Self.temporaryPath()
+            defer { Self.remove(path) }
+            let creates = Counter()
+            let file = try ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
+                create: { partial in
+                    creates.add()
+                    guard creates.value > 1 else {
+                        errno = EMFILE
+                        return -1
+                    }
+                    return ReportFile.Hooks.create(partial)
+                }
+            ))
+            #expect(file.persist(Self.report) == .placeholderKept)
+            #expect(creates.value == 1)
+            #expect(Self.contents(path) == Self.placeholder)
+            #expect(!file.partialPaths.contains { FileManager.default.fileExists(atPath: $0) })
+        }
+
+        @Test("A placeholder that cannot be written: the probe refuses, names the file it created and left, and removes nothing")
+        func placeholderNotWrittenIsLeftAndNamed() throws {
+            let path = Self.temporaryPath()
+            defer { Self.remove(path) }
+            #expect(throws: ReportFile.CreateError.placeholderNotWritten(ENOSPC)) {
+                try ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
+                    writePlaceholder: { descriptor, bytes, offset in
+                        guard offset == 0 else {
+                            errno = ENOSPC
+                            return -1
+                        }
+                        return ReportFile.Hooks.pwrite(descriptor, UnsafeRawBufferPointer(rebasing: bytes.prefix(8)), offset)
+                    }
+                ))
+            }
+            // The file the probe created is left as it is.
+            #expect(Self.isRegularFile(path))
+            #expect(Self.contents(path) == String(Self.placeholder.prefix(8)))
+            #expect(!ReportFile.partialPaths(for: path).contains { FileManager.default.fileExists(atPath: $0) })
+            let refusal = ManualCut.reportFileRefusal(.placeholderNotWritten(ENOSPC), fileName: "r.txt")
+            #expect(refusal.hasPrefix("Refusing to run: ./r.txt was created, but its placeholder could not be written"))
+            #expect(refusal.contains("The probe left that file as it is"))
+            #expect(!refusal.contains("Nothing was created"))
+            #expect(ManualCut.reportFileRefusal(.notCreated(EACCES), fileName: "r.txt").hasSuffix("Nothing was created."))
         }
     }
 }
