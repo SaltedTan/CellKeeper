@@ -1,12 +1,13 @@
 # 12 — Guided battery calibration, without SMC writes
 
 - **Date:** 2026-10-21
-- **Status:** Research and design, for the owner's approval. Nothing is
-  built. The owner asked on 2026-10-20 for a calibration feature like the
-  one other battery tools offer, and chose, from the options in §6, "write
-  up, then build A": a calibration that CellKeeper guides and the owner
-  carries out, with no SMC write, no privileged helper and no root. It is
-  built only after the owner approves this design (§7).
+- **Status:** Design approved by the owner on 2026-10-21, for
+  implementation; nothing is built yet. The owner asked on 2026-10-20 for a
+  calibration feature like the one other battery tools offer, and chose,
+  from the options in §6, "write up, then build A": a calibration that
+  CellKeeper guides and the owner carries out, with no SMC write, no
+  privileged helper and no root. On 2026-10-21 the owner approved this
+  design (§7) and decided its two open points (§7.6, §7.7).
 - **Machine:** Mac16,1 (MacBook Pro, Apple M4), macOS 27.0.1 (26A434),
   system firmware mBoot-20457.1.29, as in notes 09–11.
 - **Labels:** as in [note 06](06-safety-analysis.md): **[S]** a sourced
@@ -61,9 +62,10 @@
   plugged in and CellKeeper running (sleep, a crash or a failed return can
   keep it there longer, §7.2). It
   takes one to two days, mostly unattended, and is user-initiated only
-  (§7.8). Besides approving the design, two parts need the owner's
-  decision: it cannot check the battery's temperature on macOS 27 (§7.7),
-  and it accepts the owner's requested actions arriving early (§7.6).
+  (§7.8). The owner approved it on 2026-10-21, deciding its two
+  departures from note 06 R23: where the battery's temperature cannot be
+  read, as on macOS 27, the owner confirms a cool room (§7.7); and the
+  owner's requested actions arriving early continue the session (§7.6).
 
 ---
 
@@ -402,8 +404,9 @@ during step 4 (the drain has not reached its target). Two requested
 actions arriving early are accepted instead, and recorded: unplugging
 during step 2 moves to step 4 with the top rest short; plugging in during
 step 5, before the time shown, moves to step 7 with the bottom rest short.
-**These two acceptances read R23's "unexpected" as "not the requested
-action"; that reading needs the owner's decision.** An early unplug
+These two acceptances read R23's "unexpected" as "not the requested
+action". **Decided by the owner on 2026-10-21: continue, and record the
+rest as short.** An early unplug
 during step 2 requests the return to the normal limit at once, with the
 same confirmation as §7.2: the menu shows "returning to your limit" until
 it is confirmed, and if it cannot be, the session ends as there.
@@ -460,9 +463,11 @@ the owner confirms a room at 10–35 °C, with the Mac out of a bag and off
 soft surfaces; the menu shows "temperature unknown" throughout, and the
 report says it was not checked. A room's temperature does not establish
 the battery's; the battery's own protections apply either way (note 06).
-The alternative is to offer no managed calibration where the temperature
-cannot be read, only a written checklist the owner follows alone. **This
-is a departure from R23, and needs the owner's decision.**
+The alternative was to offer no managed calibration where the
+temperature cannot be read, only a written checklist the owner follows
+alone. **Decided by the owner on 2026-10-21: the proposal above** (the
+owner confirms a cool room), a departure from R23 where the temperature
+cannot be read.
 
 ### 7.8 How often
 
@@ -503,8 +508,8 @@ macOS 27 (§3). It goes into the activity log and the Diagnostics report.
 - **Time at 100%:** the charge, about 2 h of rest, up to 4 h waiting for
   the owner to unplug, and the final charge: the main wear cost besides
   the cycle itself (§3).
-- **Departures from R23** needing the owner's decision: the temperature
-  rule (§7.7), and the two early actions accepted (§7.6).
+- **Departures from R23,** decided by the owner on 2026-10-21: the
+  temperature rule (§7.7), and the two early actions accepted (§7.6).
 
 ### 7.11 What has to be built
 
@@ -541,8 +546,9 @@ From the code as it stands (2026-10-21):
    of a limit [S5]; with no limit set it should charge fully [I, O].
 4. Can `pmset -g log` show reliably that the Mac stayed unplugged and
    asleep or off during the rest (§7.6)? Its format is not documented [O].
-5. **For the owner:** the temperature rule (§7.7); the two early actions
-   accepted (§7.6); and whether to approve the design.
+5. *Decided by the owner on 2026-10-21:* the design is approved; the
+   temperature rule as proposed (§7.7); the two early actions continue the
+   session (§7.6).
 
 ## 9. Sources
 
