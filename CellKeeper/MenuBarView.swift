@@ -565,6 +565,12 @@ private struct CalibrationLines: View {
             }
             .font(.caption)
         }
+        if calibration.isEvidenceRetained {
+            Label(CalibrationWording.evidenceRetained, systemImage: "exclamationmark.triangle")
+                .font(.caption)
+                .foregroundStyle(.warningText)
+                .fixedSize(horizontal: false, vertical: true)
+        }
         if calibration.isEndUnsaved {
             Label(CalibrationWording.endUnsaved, systemImage: "exclamationmark.triangle")
                 .font(.caption)

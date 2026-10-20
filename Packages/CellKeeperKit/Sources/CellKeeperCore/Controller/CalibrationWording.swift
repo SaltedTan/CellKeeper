@@ -244,6 +244,10 @@ public enum CalibrationWording {
         }
     }
 
+    /// A session's record kept as evidence of a limit changed while
+    /// CellKeeper was not running (``CalibrationStatus/isEvidenceRetained``).
+    public static let evidenceRetained = "CellKeeper could not yet store its record that your Charge Limit was changed while it was not running. It writes nothing, keeps Manage charging off, and keeps the calibration's record until it can, so that it changes nothing when it opens again either; it tries again at its next check."
+
     /// A store that could not save a session's end.
     public static let endUnsaved = "CellKeeper could not save that the calibration ended. It tries again at its next check; until then, the calibration may come back, paused, if CellKeeper opens again."
 

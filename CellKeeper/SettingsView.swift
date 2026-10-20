@@ -393,6 +393,11 @@ private struct CalibrationSection: View {
                     .font(.caption)
                     .foregroundStyle(.criticalText)
             }
+            if calibration.isEvidenceRetained {
+                Label(CalibrationWording.evidenceRetained, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.warningText)
+            }
             if calibration.isEndUnsaved {
                 Label(CalibrationWording.endUnsaved, systemImage: "exclamationmark.triangle")
                     .font(.caption)

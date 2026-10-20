@@ -1054,14 +1054,60 @@ public actor ChargeController {
     /// launch. A limit that could not be read cannot be shown to be the
     /// owner's, nor ruled out: nothing is written and Manage charging is
     /// turned off too, without a marker.
-    private func keepUnaccountedLimit(found: Int?, ownerLimit: Int) async {
-        guard settings.isManagementEnabled else { return }
-        if let found, let native = backend as? NativeChargeLimitBackend, await native.keepOutsideLimit(found, previousOwnerLimit: ownerLimit) {
-            nativeLimit = await native.nativeLimitStatus()
-            adopt(await native.takeAdoptedLimitChange())
-            return
+    ///
+    /// Returns whether the change is recorded where it keeps a next launch
+    /// from writing (the marker, stored and read back); until it is, the
+    /// session's record stays in storage as evidence.
+    private func keepUnaccountedLimit(found: Int?, ownerLimit: Int) async -> Bool {
+        // Management already off: nothing is written, and turning it on is
+        // the owner's own choice.
+        guard settings.isManagementEnabled else { return true }
+        if let found, let native = backend as? NativeChargeLimitBackend {
+            let kept = await native.keepOutsideLimit(found, previousOwnerLimit: ownerLimit)
+            if kept != .notApplicable {
+                nativeLimit = await native.nativeLimitStatus()
+                adopt(await native.takeAdoptedLimitChange())
+                if kept == .notRecorded {
+                    record(.safety, "CellKeeper could not store its record of the Charge Limit it kept. It writes nothing, keeps Manage charging off, and keeps the calibration's record as evidence for its next launch; it tries again at its next check.", level: .error)
+                }
+                return kept == .recorded
+            }
         }
         adopt(nil, unknownValue: "CellKeeper could not read macOS's Charge Limit when it started again, so it cannot tell whether it was changed while CellKeeper was not running (your own limit was \(ownerLimit)%). It changed nothing")
+        return false
+    }
+
+    /// While a session's record is kept as evidence of an unaccounted limit
+    /// (``CalibrationRunner/retainedEvidence``): it is replaced by its
+    /// report once the change is recorded (the backend's marker stored and
+    /// read back), once a limit that could not be read at launch reads as
+    /// the owner's own, or as soon as the owner turns Manage charging on
+    /// again, their choice. A limit unreadable at launch that reads as
+    /// another value later is kept then, as at launch.
+    private func resolveRetainedEvidence(_ retained: CalibrationRunner.RetainedEvidence) async {
+        guard !settings.isManagementEnabled, let native = backend as? NativeChargeLimitBackend else {
+            calibration.releaseEvidence()
+            return
+        }
+        if retained.found != nil {
+            if await native.isAdoptionRecorded() {
+                calibration.releaseEvidence()
+            }
+            return
+        }
+        guard let reported = nativeLimit?.reportedLimit else { return }
+        if reported == retained.ownerLimit {
+            calibration.releaseEvidence()
+            return
+        }
+        let kept = await native.keepOutsideLimit(reported, previousOwnerLimit: retained.ownerLimit)
+        // Manage charging is already off; the change is only recorded.
+        _ = await native.takeAdoptedLimitChange()
+        nativeLimit = await native.nativeLimitStatus()
+        if kept == .recorded {
+            record(.safety, "macOS's Charge Limit, which CellKeeper could not read when it started again, is \(reported)%, not your own \(retained.ownerLimit)% that it had left. CellKeeper kept it as your own limit and changed nothing; Manage charging stays off.")
+            calibration.releaseEvidence()
+        }
     }
 
     /// Records what the calibration did since this was last called.
@@ -1396,10 +1442,17 @@ public actor ChargeController {
         recordCalibrationLog()
         if let unaccounted = calibration.takeUnaccountedLimit() {
             // Before the policy, so that it writes nothing over the owner's
-            // change.
-            await keepUnaccountedLimit(found: unaccounted.found, ownerLimit: unaccounted.ownerLimit)
+            // change, and before the session's record is replaced, so that
+            // the evidence is kept until the change is recorded.
+            let isRecorded = await keepUnaccountedLimit(found: unaccounted.found, ownerLimit: unaccounted.ownerLimit)
+            calibration.endUnaccounted(found: unaccounted.found, ownerLimit: unaccounted.ownerLimit, isRecorded: isRecorded, at: calibrationStamp, reading: ChargingPolicy.usableSnapshot(snapshot, now: evaluationNow))
+            recordCalibrationLog()
             input.settings = settings
             input.currentMode = currentMode
+        } else if let retained = calibration.retainedEvidence {
+            await resolveRetainedEvidence(retained)
+            recordCalibrationLog()
+            input.settings = settings
         }
         input.calibrationWantsFullLimit = calibration.wantsFullLimit
         let isCalibrating = calibration.isInProgress

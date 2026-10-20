@@ -52,6 +52,12 @@ public struct CalibrationStatus: Sendable, Equatable {
     public var isEndUnsaved: Bool
     /// Why the latest start or "continue" was refused.
     public var refusal: String?
+    /// A session ended at launch because macOS's Charge Limit was not the
+    /// one CellKeeper left, but what keeps that change from being
+    /// overwritten (the backend's adoption marker) is not stored yet: the
+    /// session's record is kept in storage as evidence until it is, and
+    /// CellKeeper writes nothing meanwhile.
+    public var isEvidenceRetained: Bool
 
     public init(
         isAvailable: Bool = false,
@@ -65,7 +71,8 @@ public struct CalibrationStatus: Sendable, Equatable {
         outcome: CalibrationReport? = nil,
         endedCount: Int = 0,
         isEndUnsaved: Bool = false,
-        refusal: String? = nil
+        refusal: String? = nil,
+        isEvidenceRetained: Bool = false
     ) {
         self.isAvailable = isAvailable
         self.session = session
@@ -79,6 +86,7 @@ public struct CalibrationStatus: Sendable, Equatable {
         self.endedCount = endedCount
         self.isEndUnsaved = isEndUnsaved
         self.refusal = refusal
+        self.isEvidenceRetained = isEvidenceRetained
     }
 
     /// True while a session exists, running or paused: full charges and
@@ -157,8 +165,20 @@ struct CalibrationRunner {
     /// log.
     private(set) var log: [String] = []
     /// At launch the limit was not accounted for (§7.6 step 3): the
-    /// controller keeps it as the owner's change.
+    /// controller keeps it as the owner's change, then ends the session
+    /// (``endUnaccounted(isRecorded:at:reading:)``).
     private var unaccountedLimit: (found: Int?, ownerLimit: Int)?
+    /// A session ended for an unaccounted limit whose record stays in
+    /// storage, as evidence for the next launch, until the change is
+    /// recorded where it keeps CellKeeper from writing.
+    private(set) var retainedEvidence: RetainedEvidence?
+
+    struct RetainedEvidence {
+        /// The limit read at launch; nil if it could not be read.
+        var found: Int?
+        var ownerLimit: Int
+        var report: CalibrationReport
+    }
 
     init(store: (any CalibrationStoring)?, clock: CalibrationClock, run: UUID = UUID()) {
         self.store = store
@@ -179,7 +199,8 @@ struct CalibrationRunner {
             outcome: outcome,
             endedCount: endedCount,
             isEndUnsaved: isEndUnsaved,
-            refusal: refusal
+            refusal: refusal,
+            isEvidenceRetained: retainedEvidence != nil
         )
     }
 
@@ -199,12 +220,42 @@ struct CalibrationRunner {
     }
 
     /// The limit found at launch that is not the one CellKeeper left, with
-    /// the owner's own limit recorded in the session, once: the session has
-    /// ended, and the controller keeps the limit as the owner's change,
-    /// writing nothing (§7.6).
+    /// the owner's own limit recorded in the session, once. The controller
+    /// keeps it as the owner's change, writing nothing (§7.6), then ends the
+    /// session with ``endUnaccounted(isRecorded:at:reading:)``.
     mutating func takeUnaccountedLimit() -> (found: Int?, ownerLimit: Int)? {
         defer { unaccountedLimit = nil }
         return unaccountedLimit
+    }
+
+    /// Ends the session for the unaccounted limit taken last. Only once the
+    /// change is recorded where it keeps CellKeeper from writing at the next
+    /// launch (`isRecorded`: the backend's marker, stored and read back) is
+    /// the session replaced in storage by its report; until then the
+    /// session's record stays there as the evidence a next launch needs,
+    /// and only memory says the session ended.
+    mutating func endUnaccounted(found: Int?, ownerLimit: Int, isRecorded: Bool, at stamp: CalibrationStamp, reading: BatterySnapshot?) {
+        let end = CalibrationEnd.unaccountedLimit(found: found, expected: ownerLimit)
+        guard isRecorded else {
+            guard let report = endInMemory(end, at: stamp, reading: reading) else { return }
+            retainedEvidence = RetainedEvidence(found: found, ownerLimit: ownerLimit, report: report)
+            log.append("CellKeeper keeps the calibration's record in storage, as evidence that the limit was changed while it was not running, until it can record that change; it writes nothing meanwhile.")
+            return
+        }
+        finish(end, at: stamp, reading: reading)
+    }
+
+    /// The change behind ``retainedEvidence`` is recorded, or nothing is
+    /// left to protect: the session's record is replaced by its report.
+    mutating func releaseEvidence() {
+        guard let retained = retainedEvidence else { return }
+        retainedEvidence = nil
+        if write(CalibrationStored(last: retained.report)) {
+            log.append("CellKeeper replaced the calibration's record with its report.")
+        } else {
+            isEndUnsaved = true
+            log.append("CellKeeper could not save the end of the calibration; it tries again at its next check. Until then, the calibration may come back, paused, if CellKeeper opens again.")
+        }
     }
 
     /// A stamp for `wall`, read together with the monotonic clock. Without a
@@ -332,7 +383,7 @@ struct CalibrationRunner {
     /// the conditions that hold throughout (§7.4), then the session's own
     /// observation.
     mutating func check(event: CalibrationObservation.Event, observedMode: ChargeControlMode?, context: CalibrationContext, startup: CalibrationStartupEvidence?, at stamp: CalibrationStamp) {
-        if isEndUnsaved, session == nil {
+        if isEndUnsaved, session == nil, retainedEvidence == nil {
             write(CalibrationStored(last: last))
         }
         guard let current = session else { return }
@@ -340,7 +391,10 @@ struct CalibrationRunner {
             needsStartupCheck = false
             if let end = startupEnd(current, startup: startup, context: context) {
                 if case .unaccountedLimit(let found, let expected) = end {
+                    // Ended by the controller once it has kept the change,
+                    // so the evidence is not consumed first.
                     unaccountedLimit = (found, expected)
+                    return
                 }
                 finish(end, at: stamp, reading: context.reading)
                 return
@@ -447,7 +501,16 @@ struct CalibrationRunner {
     /// Ends the session: its report replaces it in the store (the ended
     /// mark), and CellKeeper's normal policy applies from this evaluation.
     private mutating func finish(_ end: CalibrationEnd, at stamp: CalibrationStamp, reading: BatterySnapshot?) {
-        guard let ended = session else { return }
+        guard let report = endInMemory(end, at: stamp, reading: reading) else { return }
+        if !write(CalibrationStored(last: report)) {
+            isEndUnsaved = true
+            log.append("CellKeeper could not save the end of the calibration; it tries again at its next check. Until then, the calibration may come back, paused, if CellKeeper opens again.")
+        }
+    }
+
+    /// Ends the session in memory and returns its report, writing nothing.
+    private mutating func endInMemory(_ end: CalibrationEnd, at stamp: CalibrationStamp, reading: BatterySnapshot?) -> CalibrationReport? {
+        guard let ended = session else { return nil }
         let report = CalibrationReport(ended, end: end, at: stamp.wall, after: reading.map { CalibrationCapacities($0.health) })
         session = nil
         isPaused = false
@@ -462,10 +525,7 @@ struct CalibrationRunner {
         } else {
             log.append("Calibration ended in step \(ended.step.rawValue) (\(ended.step)): \(end). CellKeeper asks for its normal limit again; the lines that follow say what macOS confirmed. \(CalibrationWording.reportSummary(report))")
         }
-        if !write(CalibrationStored(last: report)) {
-            isEndUnsaved = true
-            log.append("CellKeeper could not save the end of the calibration; it tries again at its next check. Until then, the calibration may come back, paused, if CellKeeper opens again.")
-        }
+        return report
     }
 
     private mutating func note(_ changes: [CalibrationChange]) {

@@ -571,6 +571,79 @@ struct CalibrationControllerTests {
         #expect(status.nativeLimit?.ownerLimit == 95)
     }
 
+    @Test("If the marker cannot be stored, the session's record is kept as evidence and nothing is written, also at the next launch")
+    func markerStoreFails() async throws {
+        let rig = CalibrationRig()
+        _ = await rig.started()
+        await rig.controller.shutdown(reason: "quit")
+        rig.system.changeExternally(to: 95)
+        rig.records.saveFails = true
+        let inputs = rig.system.runInputs
+        let second = rig.relaunched(reading: calibrationReading(85))
+        var status = await second.controller.evaluate(.launch)
+        #expect(rig.system.runInputs == inputs)
+        #expect(!status.settings.isManagementEnabled, "off in memory")
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: rig.records) == nil)
+        guard case .stored(let kept) = rig.stored else {
+            Issue.record("nothing stored")
+            return
+        }
+        #expect(kept.session != nil, "the evidence is kept: the session is not replaced by its report before the marker is stored")
+        #expect(status.calibration.isEvidenceRetained)
+        #expect(status.calibration.session == nil, "ended in memory")
+        #expect(status.events.contains { $0.message.hasPrefix("CellKeeper could not store its record of the Charge Limit it kept.") })
+        // Management off did not reach the disk either: the next launch
+        // starts with it on, and still writes nothing.
+        let third = rig.relaunched(reading: calibrationReading(85))
+        status = await third.controller.evaluate(.launch)
+        #expect(rig.system.runInputs == inputs)
+        #expect(!status.settings.isManagementEnabled)
+        // Once the marker can be stored, the report replaces the session.
+        rig.records.saveFails = false
+        rig.clock.advance(by: 61)
+        status = await third.controller.evaluate(.periodic)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: rig.records)?.limit == 95)
+        guard case .stored(let ended) = rig.stored else {
+            Issue.record("nothing stored")
+            return
+        }
+        #expect(ended.session == nil)
+        #expect(ended.last?.end == .unaccountedLimit(found: 95, expected: 90))
+        #expect(!status.calibration.isEvidenceRetained)
+        #expect(rig.system.runInputs == inputs)
+        let fourth = rig.relaunched(reading: calibrationReading(85))
+        status = await fourth.controller.evaluate(.launch)
+        #expect(rig.system.runInputs == inputs, "the marker keeps the next launch from writing")
+        #expect(!status.settings.isManagementEnabled)
+    }
+
+    @Test("A crash after the marker is stored and before the report replaces the session leaves the next launch writing nothing")
+    func crashBetweenWrites() async {
+        let flaky = FlakyStorage()
+        let rig = CalibrationRig(storage: flaky)
+        _ = await rig.started()
+        await rig.controller.shutdown(reason: "quit")
+        rig.system.changeExternally(to: 95)
+        let inputs = rig.system.runInputs
+        // The report's write does not reach storage, as after a crash right
+        // after the marker was stored.
+        flaky.set(mode: .droppingWrites)
+        let second = rig.relaunched(reading: calibrationReading(85))
+        _ = await second.controller.evaluate(.launch)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: rig.records)?.limit == 95)
+        guard case .stored(let kept) = rig.stored else {
+            Issue.record("nothing stored")
+            return
+        }
+        #expect(kept.session != nil)
+        flaky.set(mode: .working)
+        let third = rig.relaunched(reading: calibrationReading(85))
+        let status = await third.controller.evaluate(.launch)
+        #expect(rig.system.runInputs == inputs)
+        #expect(!status.settings.isManagementEnabled)
+        #expect(status.calibration.session == nil)
+    }
+
     @Test("After a quit, a limit that cannot be read at launch is not accounted for either: nothing written, Manage charging off")
     func quitThenUnreadable() async {
         let rig = CalibrationRig()
