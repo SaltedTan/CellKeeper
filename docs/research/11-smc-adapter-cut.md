@@ -1264,7 +1264,7 @@ from it.
   power on this Mac, macOS build and firmware, with the native Charge
   Limit off. The adapter stopped being reported between the cut command
   and the owner's read-back of it (21:43:25 and 21:43:37); from the
-  battery update 76.4 s after the cut mark until the
+  first discharging reading, 76.4 s after the cut mark, until the
   restore, about two minutes, every update showed the battery discharging
   at about 1.1 A with about 0.5 W of system power input. Writing `00`
   brought the adapter back at once, and charging at the next full battery
