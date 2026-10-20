@@ -9,7 +9,8 @@
   the SMC client code, and the lead decided not to route around it (§2.2).
   The owner now reads and writes `CHIE` by hand with an existing
   open-source tool (§4.1), and the probe only observes (§4). The probe's
-  observer mode is built next; the results land in §9 and §10.
+  observer mode is built next; §9 will hold the pre-run state, and §10 the
+  results.
 - **Machine:** Mac16,1 (MacBook Pro, Apple M4), macOS 27.0.1 (26A434),
   system firmware mBoot-20457.1.29. This is the maintainer's own Mac, the
   test Mac since 2026-10-19 (note 09 §2).
@@ -303,8 +304,8 @@ type in brackets, and its bytes in hex.
   length differs from the key's size. It does **not** check the key's
   type, so the owner's read before the cut must show `[hex_]` and one byte
   (§4.4).
-- It writes only with `-w`. `-l` lists every key, which is enumeration;
-  `-f` and `-t` read other keys.
+- It writes only with `-w`. `-l` and `-t` both walk the whole key table,
+  which is enumeration; `-f` reads other keys.
 - Nothing in it restores `CHIE`: no daemon, no exit handler, no timeout.
 
 **Rules for its use.** Only the owner runs it, and only the three commands
@@ -351,8 +352,9 @@ Subcommands for this test:
 - `watch --mechanism manual-adapter-cut [--hold SECONDS]` — **the owner
   only, without `sudo`.** It refuses to run as root: nothing in it needs
   privileges, and the two steps that do are the owner's writes, made with
-  the tool in another terminal. It also refuses unless its input is a
-  terminal, so that no script can answer its questions for the owner. Like
+  the tool in another terminal. It also refuses unless its input and its
+  output are a terminal, so that no script can answer its questions for
+  the owner and every prompt is shown where the owner looks. Like
   note 10's `run`, it creates one public `PreventUserIdleSystemSleep`
   assertion and registers for sleep notifications. `IOPMLib.h` says any
   process may create an assertion with `IOPMAssertionCreateWithName`, and
@@ -382,11 +384,37 @@ restore are owner-confirmed, and the report never mentions
 
 Readings stay every 2 s, never catching up, on `CLOCK_MONOTONIC`, as in
 note 10, also while the probe waits for the owner: it reads the owner's
-input without holding up the schedule. A line typed when no question is
-open is ignored.
+input without holding up the schedule, and it records every reading.
+
+**Questions and answer words.** The probe asks the owner one question at a
+time. Each question has its own answer words, listed below; no word
+answers more than one question, and each is typed in full, then Return.
+These rules hold throughout:
+
+- Whenever the probe shows a new question, or a question is superseded (by
+  a sleep, an early stop, a timeout or an answer that is not one of its
+  words), it first **discards any terminal input typed before then**, so
+  an answer typed ahead, or meant for an earlier question, never carries
+  over. A line typed when no question is open is discarded too.
+- Recovery counts as confirmed only by an answer to a question shown
+  after the latest supersession.
+- The standard RESTORE prompt (step 9) is used **only** when the cut was
+  confirmed (`cut08`) and no sleep has come since. Every other restore
+  request uses the read-first steps (step 10).
+
+| Question | When | Type | Meaning | Anything else |
+|---|---|---|---|---|
+| First read | before the baseline (step 4) | `start00` | The read printed `[hex_]` and `(bytes 00)`. | The probe refuses (exit 1); nothing has been written. |
+| CUT | after the baseline (step 6) | `cutnow` | Marks the cut time. The probe then prints GO or NO GO (step 7). | Not an answer; the prompt stays until its 120 s run out. |
+| Cut read-back | after GO (step 7) | `cut08` or `cutfail` | `cut08`: the read after the cut printed `(bytes 08)`. `cutfail`: it printed anything else. | Taken as `cutfail`, as is no answer within 90 s: the cut is unconfirmed, and the probe goes to read-first (step 10). |
+| RESTORE | at the end of the hold, or an early stop, after a confirmed cut and no sleep (step 9) | `restorenow` | Marks the restore time; the owner then runs the restore. | Not an answer; the reminder goes on. |
+| Restore read-back | after `restorenow` (step 9) | `restored00` or `restorefail` | `restored00`: the read after the restore printed `(bytes 00)`. `restorefail`: it printed anything else. | Taken as `restorefail`: read-first (step 10). |
+| Read-first | every other restore request (step 10) | `08`, `00` or `other` | What the read printed: `(bytes 08)`; `(bytes 00)`; or anything else, including no output, an error, a hang, or output the owner does not trust. | Not an answer; the question stays. |
+| Re-check | after `08` and the restore (step 10) | `recheck00` or `recheckfail` | `recheck00`: the read after that restore printed `(bytes 00)`. `recheckfail`: it printed anything else. | Taken as `recheckfail`: read-first again. |
 
 1. **Not as root, from a terminal.** Refuse if the effective user is root,
-   or if the input is not a terminal. Nothing else happens first.
+   or if the input or the output is not a terminal. Nothing else happens
+   first.
 2. **Preconditions** (§5). Refuse on any failure.
 3. **Report, signals, sleep.** As note 10 §4: create the report file in
    the current directory, install the signal handlers, register for sleep
@@ -395,7 +423,7 @@ open is ignored.
    owner's restore. Refuse if either fails. These are the only things the
    probe creates.
 4. **The owner's first read.** The probe shows the read command and asks
-   the owner to type `yes` only if the tool printed `[hex_]` and
+   for `start00`, to be typed only if the tool printed `[hex_]` and
    `(bytes 00)`. It waits up to 120 s. On anything else, or no answer, it
    refuses (exit 1): nothing has been written, and the report says why.
    `CHIE` must read `0x00` at the start (lead's decision, 2026-10-20). The
@@ -403,77 +431,95 @@ open is ignored.
    part of this answer.
 5. **Baseline**, exactly as note 10 §4 step 4: readings for at least 20 s
    and until they show 2 battery updates, all steady charging on AC power,
-   at most 150 s. If the baseline fails, there is no CUT prompt: the run
-   ends inconclusive, with nothing written.
-6. **CUT prompt.** Only if the baseline passed and is still fresh by note
-   10's rule (the last reading at most 4 s old, the latest battery update
-   at most 70 s old, the clock rules holding). The probe shows the cut and
-   read commands and says: type the cut command in the other terminal, but
-   do not run it yet; press Return here; then run it at once. It also says
-   that it will ask for the restore when the hold (180 s by default) has
-   passed after that Return. It waits up to 120 s for the Return, reading
-   every 2 s. If a reading stops showing steady charging on AC power, or
-   the freshness rule breaks, before the Return, it **withdraws** the
-   prompt ("do not run the cut") and ends the run (below). If no Return
-   comes within 120 s, it ends the same way.
-7. **The cut mark.** The owner's Return is the cut time: the verdict's
-   "creation". At once — before the owner runs the cut — the probe prints
-   the clock time by which to restore (the mark plus the hold) and says to
-   restore by then even if the probe says nothing more, and arms its
-   restore reminder (§4.6). Then it asks the owner to run the cut, run the
-   read, and type `yes` only if the read shows `(bytes 08)`. It waits up to
-   60 s. On `yes`, the cut is confirmed. On anything else, or no answer,
-   the state of `CHIE` is unknown, and the run is inconclusive. The probe
-   does **not** show the RESTORE prompt (which says to write `00`); it
-   shows the read-first steps of §7.1 at once, and from then on its
-   reminder repeats those, with the bell, until the owner answers:
-   - read `CHIE`;
-   - `(bytes 08)`: run the restore, read again, and type `yes` only if
-     that read shows `(bytes 00)`;
-   - `(bytes 00)`: nothing to restore; type `yes`. The report then says
-     that no restore was written;
-   - anything else: write nothing, follow the recovery steps (§7.1), and
-     type `no`.
-
-   A `yes` here counts as a confirmed restore, at the time of the answer
-   (there is no restore mark); the probe then reads for the after period
-   (step 10), and the report keeps the run inconclusive. Anything else ends
-   the run as in step 9.
+   at most 150 s. The probe validates it with check (a) of §4.5. The
+   baseline ends when the CUT prompt is shown. If it fails, there is no
+   CUT prompt: the run ends inconclusive, with nothing written.
+6. **CUT prompt.** Only if the baseline passed check (a) and, at that
+   moment, freshness check (b) of §4.5 holds (with no pre-cut readings
+   yet). The probe shows the cut and read commands and says: **do not type
+   the cut command yet**; type `cutnow` here; wait for the GO line; only
+   then run the cut in the other terminal. It waits up to 120 s for
+   `cutnow`, reading every 2 s. It applies check (b) to every reading it
+   takes meanwhile; if one fails, it **withdraws** the prompt ("do not run
+   the cut") and ends the run (below). If no `cutnow` comes within 120 s,
+   it ends the same way.
+7. **The cut mark, then GO.** `cutnow` is the cut time: the verdict's
+   "creation". The probe applies check (b) at that moment. If it fails,
+   the probe prints **NO GO — do not run the cut** and ends the run
+   (below). If it holds, the probe first arms its restore reminder (§4.6),
+   and only then prints one GO line with the clock time by which to
+   restore (the mark plus the hold), for example
+   `GO — run the cut now in terminal B. Restore by 10:18:02.`
+   **No GO line, no cut.** The owner writes that time down or sets a phone
+   timer for it, outside the terminal; then runs the cut, then the read;
+   then types `cut08` if the read shows `(bytes 08)`, or `cutfail` if it
+   shows anything else. The probe waits up to 90 s from the mark. On
+   `cut08`, the cut is confirmed. On `cutfail`, anything else, or no
+   answer, the cut is unconfirmed, the state of `CHIE` is unknown, and the
+   probe goes to read-first (step 10).
 8. **Hold:** 180 s by default, 165–300 s with `--hold`, measured from the
-   cut mark. The probe asks for the restore early — the RESTORE prompt at
-   once — when a reading is unreadable, shows 100% or charged, shows a
-   charge below 25%, or shows a battery update more than 150 s old.
-   Battery power is **not** a reason to stop early: it is the expected
-   effect of a cut.
-9. **RESTORE prompt.** At the end of the hold, or early as above. The
-   probe shows the restore and read commands and says: type the restore
-   command in the other terminal; press Return here; then run it at once;
-   then run the read, and type `yes` only if it shows `(bytes 00)`. Until
-   the owner answers, it shows the reminder again, with a terminal bell,
-   every 20 s. The owner's Return is the restore time: the verdict's
-   "release". On `yes`, the restore is confirmed. On anything else, it
-   prints the recovery steps (§7.1) at once, ends the readings, writes the
-   report, opening with **CHECK RECOVERY FIRST**, and exits 3.
-10. **After, and the end.** After a confirmed restore, readings for 180 s
-    after the restore mark, up to 120 s more until charging has resumed,
+   cut mark. The probe stops the hold early when a reading is unreadable,
+   shows 100% or charged, shows a charge below 25%, or shows a battery
+   update more than 150 s old. Then, if the cut was confirmed and no sleep
+   has come, it shows the RESTORE prompt at once (step 9); if the cut
+   read-back is still pending, that question is superseded and the probe
+   goes to read-first (step 10). Battery power is **not** a reason to stop
+   early: it is the expected effect of a cut.
+9. **RESTORE prompt** — only after a confirmed cut with no sleep since. At
+   the end of the hold, or early as above. The probe shows the restore and
+   read commands and says: type `restorenow` here; then run the restore in
+   the other terminal at once; then run the read, and type `restored00` if
+   it shows `(bytes 00)`, or `restorefail` if it shows anything else.
+   Until the owner answers, its reminder shows the prompt again, with a
+   terminal bell, every 20 s. `restorenow` is the restore time: the
+   verdict's "release". On `restored00`, the restore is confirmed. On
+   `restorefail`, or anything else, the state of `CHIE` is unknown, and the
+   probe goes to read-first (step 10).
+10. **Read-first** — every other restore request: a cut read-back that is
+    unconfirmed or still pending, an early stop before confirmation, a
+    restore read-back that is not `restored00`, a sleep after the CUT
+    prompt (§4.7), or an error the probe can carry on from. The probe
+    supersedes any open question, prints the read-first steps of §7.1, and
+    asks what the read showed; its reminder repeats them, with the bell,
+    every 20 s until the owner answers:
+    - `08`: the probe asks the owner to run the restore now and read again,
+      and shows the re-check question: `recheck00` if that read shows
+      `(bytes 00)`, `recheckfail` if not; `recheckfail`, or anything else,
+      brings read-first back.
+    - `00`: nothing to restore, and nothing is written; the report says so.
+    - `other`: write nothing. The probe prints the recovery steps (§7.1),
+      ends the readings, writes the report, opening with **CHECK RECOVERY
+      FIRST**, and exits 3.
+
+    The answer `08` is the restore time (the owner runs the restore after
+    it), and so is `00` (with nothing written). Recovery is confirmed by
+    `00`, or by `08` and then `recheck00`. A run that goes through
+    read-first is always inconclusive; the report records each answer and
+    whether, by those answers, a restore was written.
+11. **After, and the end.** After a confirmed restore, readings for 180 s
+    after the restore time, up to 120 s more until charging has resumed,
     as in note 10. Then the probe releases the idle-sleep assertion,
     deregisters from sleep notifications and writes the report.
 
 **Any end after the CUT prompt without a confirmed restore** — a withdrawn
-prompt, a timeout, a `no` to the RESTORE prompt or to the read-first steps
-(step 7), Ctrl-C, `SIGTERM`, `SIGHUP`, an error — prints **RESTORE CHIE
-NOW** with the read-first recovery steps (§7.1), opens the report with
-**CHECK RECOVERY FIRST**, and exits 3. The probe cannot know whether the
-owner ran the cut or the restore. The report also opens that way when the
-restore was confirmed but the last reading does not show charging on
-adapter power (note 10 §4 step 8).
+prompt, NO GO, no `cutnow` in time, `other` in read-first, Ctrl-C,
+`SIGTERM`, `SIGHUP`, an error the probe cannot carry on from — prints
+**RESTORE CHIE NOW** with the read-first recovery steps (§7.1), opens the
+report with **CHECK RECOVERY FIRST**, and exits 3. The probe cannot know
+whether the owner ran the cut or the restore. The report also opens that
+way when the restore was confirmed but the last reading does not show
+charging on adapter power (note 10 §4 step 8).
 
-With the default hold and a prompt owner, the run takes about 7 minutes
-(a baseline of 20–60 s, a few seconds to the cut, the 180 s hold, a few
-seconds to the restore, 180 s after); up to about 11 if the baseline waits
-for a battery update or charging is slow to resume. The bounded parts are
-at most 150 + 120 + 300 + 300 s; the wait for the owner's restore is not
-bounded, and the probe keeps reminding until it ends.
+With the default hold and a prompt owner, the run takes about 7½ minutes:
+about 20 s for the first read, a baseline of 20–60 s, a few seconds to
+`cutnow`, the 180 s hold (the GO line, the cut and its read-back fall
+inside it), about 20 s for the restore and its read-back, and 180 s after.
+It takes up to about 12 minutes if the baseline waits for a battery update
+or charging is slow to resume. The bounded waits are at most 120 s for the
+first read, 150 s of baseline, 120 s at the CUT prompt, 300 s of hold (the
+90 s for `cut08` is inside it) and 300 s after the restore: 990 s, about
+16½ minutes. The wait for the owner's restore is not bounded, and the
+probe keeps reminding until it ends.
 
 Exit status, with note 10's meanings: 0 a verdict; 1 refused before the
 CUT prompt; 2 inconclusive, but only for a run whose restore was confirmed
@@ -482,43 +528,75 @@ recovery steps the report prints" — a run after which charging did not
 resume, and **any end after the CUT prompt without a confirmed restore**;
 64 a usage error.
 
-### 4.5 Why the owner presses Return before each write
+### 4.5 The marks, and the two checks at the cut
 
-Note 10 attributes an effect to the creation only if the battery update
-that first shows it was made after the creation, and it requires the
-effect to last until the release. If the owner pressed Return *after*
-running a command, a battery update made between the write and the Return
-could show the cut before the cut time, or charging back before the
-restore time. Either would make a good run inconclusive. With the Return
-first, every update made after a write is also made after its mark, and
-note 10's rules apply unchanged.
+**Why the owner marks each write before running it.** Note 10 attributes
+an effect to the creation only if the battery update that first shows it
+was made after the creation, and it requires the effect to last until the
+release. If the owner marked a write *after* running it, a battery update
+made between the write and the mark could show the cut before the cut
+time, or charging back before the restore time. Either would make a good
+run inconclusive. With the mark first (`cutnow`; `restorenow`, or the
+read-first answer `08`), every update made after a write is also made
+after its mark, and note 10's rules apply unchanged.
 
-The owner's delay between the Return and the write (switching windows,
-`sudo`'s password) falls inside the 90 s effect window. A long delay makes
-a run inconclusive, never misjudged.
+The owner's delay between `cutnow` and the write (the GO line, noting the
+restore time, switching windows, `sudo`'s password) falls inside the 90 s
+effect window. A long delay makes a run inconclusive, never misjudged.
+
+**The two checks at the cut, kept apart.** The evaluator applies them
+separately:
+
+- **(a) Baseline validation**: note 10's baseline rules, unchanged, over
+  the baseline readings only — those taken before the CUT prompt was
+  shown. At least 5 readings spanning 18–152 s, no gap over 4 s, every
+  reading usable and steady charging on AC power, readings of at least 2
+  distinct battery updates, and the clock rules.
+- **(b) Freshness at the cut**, judged at the cut mark on the **pre-cut
+  segment**: the readings taken after the CUT prompt was shown and before
+  the mark, with note 10's thresholds:
+  - every pre-cut reading usable and steady charging on AC power;
+  - no gap over 4 s between consecutive readings, from the last baseline
+    reading through the pre-cut readings to the mark;
+  - the latest reading before the mark (the last pre-cut reading, or the
+    last baseline reading if the segment is empty) at most 4 s old;
+  - the latest battery update among the readings before the mark at most
+    70 s old;
+  - the clock rules over the baseline and pre-cut readings, with the mark
+    as an event.
+
+The pre-cut segment never counts toward the baseline, so check (a)'s
+152 s limit is unaffected by a wait at the CUT prompt, and a good baseline
+is not judged stale because the owner took 30 s to type `cutnow`. The
+segment has no length rule of its own; the CUT prompt's 120 s bounds it.
+For the assertion mechanisms of notes 09–10 the pre-cut segment is empty,
+and check (b) is exactly today's freshness check on the baseline (the last
+baseline reading at most 4 s old, its latest update at most 70 s old, the
+clock rules up to the creation): notes 09–10 are unchanged. The probe
+applies (b) on every pre-cut reading and at the mark, before GO; the
+verdict applies (a) and (b) again. The observer's implementation therefore
+gives the pre-cut readings a phase of their own, and gives the evaluator a
+freshness check over the baseline, the pre-cut segment and the mark.
 
 **How the readings around the marks are judged:**
 
-- **Between the CUT prompt and the cut mark.** Recorded, with a phase of
-  their own; not part of the baseline (whose rules are unchanged) or the
-  hold, and not judged for an effect. They are used only for note 10's
-  freshness rule at the cut (the last of them at most 4 s old, its battery
-  update at most 70 s old, showing steady charging on AC power — so a Mac
-  that stopped charging while the owner got ready is not cut: the probe
-  withdraws the prompt) and for the gap and clock rules. If the owner ran
-  the cut before pressing Return, the first update that shows the effect
-  may be older than the mark, and note 10's rule then makes the run
+- **Before the CUT prompt.** Baseline readings: check (a).
+- **Between the CUT prompt and the cut mark.** The pre-cut segment: check
+  (b), and the run's gap and clock rules; not judged for an effect. If the
+  owner ran the cut before `cutnow`, the first update that shows the
+  effect may be older than the mark, and note 10's rule then makes the run
   inconclusive.
-- **Between the cut mark and the restore mark.** Held readings, judged as
-  in note 10, including those taken while the owner confirms the cut and
+- **Between the cut mark and the restore time.** Held readings, judged as
+  in note 10, including those taken while the cut read-back is pending and
   while the RESTORE prompt waits: the cut is still in place, and the effect
-  must last until the restore mark. If the owner restored before pressing
-  Return, charging may come back "while held", and the run is
+  must last until the restore time. If the owner restored before
+  `restorenow`, charging may come back "while held", and the run is
   inconclusive.
-- **After the restore mark.** After readings, judged as in note 10.
+- **After the restore time.** After readings, judged as in note 10.
 
-The owner's `yes` answers come after the marks and do not move them. The
-report gives the time of each mark and each answer.
+The confirming answers (`cut08`, `restored00`, `recheck00` and their
+`fail` words) come after the marks and do not move them. The report gives the time of each mark and
+each answer.
 
 ### 4.6 The restore: held by the owner, reminded by the probe
 
@@ -527,34 +605,46 @@ owner's, made with the tool in the owner's own terminal, and it needs
 nothing from the probe. There is no powerd timeout for an SMC write, so
 the reminders below are what stands in for one:
 
-- **A restore time, printed before the cut.** At the cut mark, before the
-  owner runs the cut, the probe prints the clock time by which to restore.
-  It is the owner's deadline, and it holds whatever happens to the probe.
-  A phone timer for it is a good idea.
-- **A reminder on its own timer**, also armed at the cut mark. At the end
-  of the hold it shows the RESTORE prompt, and it rings and shows it again
+- **A restore time, printed before the cut.** The GO line carries the
+  clock time by which to restore. The owner writes it down or sets a phone
+  timer before running the cut, so it holds whatever happens to the probe
+  or its terminal.
+- **A reminder on its own timer**, armed at the cut mark **before** the GO
+  line is printed: no GO line means no reminder, and then no cut. At the
+  end of the hold it shows the current restore request — the RESTORE
+  prompt, or the read-first steps (§4.4) — and it rings and shows it again
   every 20 s until the owner answers. It runs apart from the sampling loop
   and the report, so a reading that hangs does not hold it up. An early
-  stop (§4.4 step 8) shows the same prompt sooner.
+  stop (§4.4 step 8) shows the request sooner.
 - **No lock, no write.** The probe holds no lock that anything outside it
   waits on, and makes no write to any key or setting. Nothing it does can
   stand in the way of the owner's restore.
-- **If the probe crashes, hangs or is killed** (even with `SIGKILL`), it
-  reminds no one. Restore by the printed time anyway: the cut is the
-  owner's, not the probe's, and a dead probe does not stop the owner
-  restoring.
-- **If the tool hangs** on a write, press Ctrl-C in its terminal and read
-  `CHIE` again; if it still does not answer, follow §7.1 from step 3.
+- **If the probe crashes, hangs or is killed** (even with `SIGKILL`), or
+  terminal A closes, it reminds no one. Restore by the noted time anyway,
+  reading first (§7.1): the cut is the owner's, not the probe's, and a dead
+  probe does not stop the owner restoring.
+- **If a tool command hangs.** If any read or write has not returned
+  within about 10 s, press Ctrl-C in terminal B. A read that hangs, errors
+  or prints something unexpected is not trustworthy: the state of `CHIE` is
+  unknown; answer `other` if the probe asks, and follow §7.1.
+- **No staged commands.** Never leave a cut command typed but not run. If
+  the probe withdraws the CUT prompt, prints NO GO, or shows any restore or
+  recovery request, first clear anything typed but not run in terminal B
+  (Ctrl-C at the prompt). Recovery is never established while a cut
+  command might still run.
 - **Ctrl-C, `SIGTERM` or `SIGHUP` after the CUT prompt** print RESTORE
   CHIE NOW with the read-first recovery steps, write the report opening
   with CHECK RECOVERY FIRST, and end the run with exit status 3. A second
   Ctrl-C quits at once, also with exit status 3, after printing RESTORE
   CHIE NOW once more. Before the CUT prompt, a signal ends the run as in
-  note 10, with nothing to restore.
+  note 10, with nothing to restore. A closed terminal cannot show the
+  `SIGHUP` warning, which is why the owner never closes terminal A during a
+  run (§6).
 - **What the probe cannot know:** whether the owner ran the cut or the
-  restore, and what the tool printed. It records what the owner answered,
-  and when. Every report calls the cut time, the restore time and both
-  read-backs **owner-confirmed**, not observed by the probe.
+  restore, and what the tool printed. It records what the owner typed, and
+  when. Every report calls the cut time, the restore time and every
+  read-back **owner-confirmed**, not observed by the probe; whether a
+  restore was written is unknown unless the answers show it.
 
 ### 4.7 Sleep
 
@@ -570,31 +660,37 @@ which keeps the Mac awake for the restore after the wake.
 **A sleep can therefore happen with `CHIE` still at `0x08`.** Whether a
 cut survives sleep is not known (§8); one tool restores before sleep
 (S12). After the wake, the main thread finds the notice. Before the CUT
-prompt, the run ends inconclusive, with nothing to restore. After it, the
-state of `CHIE` is unknown — the sleep may or may not have cleared the cut —
-so the probe prints **RESTORE CHIE FIRST** and shows the §7.1 read-first
-steps in place of the RESTORE prompt, answered as in §4.4 step 7, and
-carries on to the after readings once the owner answers. Any sleep
-notification makes the run inconclusive. What the owner's read showed after
-the wake is worth sending with the report (§6): one observation, not a
-persistence test (§8).
+prompt, the run ends inconclusive, with nothing to restore. After it, and
+until a restore has been confirmed, the state of `CHIE` is unknown — the
+sleep may or may not have cleared the cut — so the probe supersedes any
+open question (discarding pending input), prints **RESTORE CHIE FIRST**,
+and goes to read-first (§4.4 step 10), even if the RESTORE prompt was
+showing. It carries on to the after readings once recovery is confirmed.
+A sleep after a confirmed restore asks nothing new. Any sleep notification
+makes the run inconclusive. What the owner's read showed after the wake is
+worth sending with the report (§6): one observation, not a persistence
+test (§8).
 
 ### 4.8 The verdict (reuses note 10)
 
 The manual cut is judged by note 10's verdict rules, unchanged. A reading
 is *charging*, *stopped*, *discharging* or *mixed* by the same thresholds;
 a *sustained run* needs 5 counted readings over ≥ 8 s and ≥ 2 battery
-updates; the effect must begin within 90 s of the **cut mark**, be
-discharging with the adapter reported attached and system power input ≤
-1000 mW in **every** held reading, and last until the **restore mark**;
-charging must resume within 120 s of a **confirmed restore**.
+updates; the effect must begin within 90 s of the **cut mark**, and
+**every reading from the first effect until the restore time** must be
+discharging, with the adapter reported attached and system power input ≤
+1000 mW. Charging must resume within 120 s of the **restore time**,
+measured from it once its read-back is confirmed; the probe keeps sampling
+and recording while the confirmation is pending.
 
-The test maps onto note 10's `ProbeRun`. The cut mark is the "creation",
-which counts as accepted only if the owner confirmed the read-back of
-`08`; without it, the run is inconclusive (not `refused`: there is no
-IOReturn, and the probe cannot tell a refused write from one not made).
-The restore mark is the "release", confirmed only if the owner confirmed
-the read-back of `00` — the analogue of `pmset -g assertions` no longer
+The test maps onto note 10's `ProbeRun`. The cut mark (`cutnow`) is the
+"creation", which counts as accepted only if the owner then typed `cut08`;
+without it, the run is inconclusive (not `refused`: there is no IOReturn,
+and the probe cannot tell a refused write from one not made). The restore
+time (`restorenow`, or the read-first answer `08` or `00`) is the
+"release", confirmed only by `restored00`, by `recheck00` after `08`, or by
+`00` — each an answer to a question shown after the latest supersession.
+That confirmation is the analogue of `pmset -g assertions` no longer
 listing an assertion. An unconfirmed restore opens the report with the
 recovery steps, whatever the verdict.
 
@@ -649,9 +745,9 @@ With these changes:
 | Check | Fails / warns when | Why |
 |---|---|---|
 | Not run as root | `watch` **refuses** when the effective user is root | Nothing in `watch` needs privileges. The owner's two writes use `sudo`, in the tool's own terminal (§4.3). |
-| Input is a terminal | `watch` **refuses** otherwise | Only the owner answers its questions (§4.3). |
+| Input and output are a terminal | `watch` **refuses** otherwise | Only the owner answers its questions, and every prompt is shown to the owner (§4.3). |
 | Adapter reported attached | **fails** unless `AppleRawExternalConnected` is yes **or** `IOPSCopyExternalPowerAdapterDetails` returns an adapter (§4.8) | Without either, a cut can only end inconclusive, and every write carries risk. Note 10 keeps this check a warning for the two assertions; for `--mechanism manual-adapter-cut` only, it fails. |
-| `CHIE` reads `00` (the owner's read) | `check` **always warns**: the probe reads no SMC key. `watch` asks the owner before the baseline and **refuses** unless the owner types `yes`: the tool printed `[hex_]`, one byte, `00` (§4.4 step 4). | `0x08` would mean something else already holds a cut, and any other value is an unknown state: either way, the restore value `0x00` would not return the key to where it started (lead's decision, 2026-10-20). The tool checks a write's length but not the key's type (§4.1), so the type and size are part of the owner's answer (note 02 §6, "writing unknown keys or wrong widths"). |
+| `CHIE` reads `00` (the owner's read) | `check` **always warns**: the probe reads no SMC key. `watch` asks the owner before the baseline and **refuses** unless the owner types `start00`: the tool printed `[hex_]`, one byte, `00` (§4.4 step 4). | `0x08` would mean something else already holds a cut, and any other value is an unknown state: either way, the restore value `0x00` would not return the key to where it started (lead's decision, 2026-10-20). The tool checks a write's length but not the key's type (§4.1), so the type and size are part of the owner's answer (note 02 §6, "writing unknown keys or wrong widths"). |
 | macOS's Charge Limit is 100% | **fails** below 100% (note 10 already checks this) | `CHIE` is reported ignored while the native limit is active (§3.3); the limit must be off for a meaningful result. |
 
 ## 6. Owner steps
@@ -659,7 +755,8 @@ With these changes:
 Use two terminals: **A** for the probe, in `Tools/charge-inhibit-probe` of
 the CellKeeper checkout, and **B** for the tool, in
 `~/smc-test/smc-command`. Each prompt of the probe shows the exact command
-to type; §4.1 has them all.
+and the exact answer word to type; §4.1 has the commands and §4.4 the
+words.
 
 1. As in note 10 §6: AlDente fully removed, and the probe built, in
    terminal A —
@@ -677,15 +774,26 @@ to type; §4.1 has them all.
 4. Connect the Apple power adapter and wait until the battery menu shows it
    charging. Keep the lid open and the Mac on a hard surface, and stay with
    it. Quit anything heavy (builds, games, video exports) and leave it idle
-   during the run. If the Mac gets unusually hot, restore `CHIE` at once
-   in terminal B (the restore command, then a read), then press Ctrl-C in
-   terminal A.
-5. **During the run, do not touch the adapter or its cable**, and do not
-   close the lid or let the Mac sleep. The run is expected to leave the Mac
-   running from its battery while the adapter is plugged in, for the hold
-   (3 minutes by default): that is the effect. The probe cannot tell a cut
-   from an unplugged adapter, so it relies on you not touching it (§4.8).
-   If the Mac does sleep, restore first when it wakes (step 8).
+   during the run. If the Mac gets unusually hot, press Ctrl-C in terminal
+   A and follow the read-first steps it prints (§7.1) at once.
+5. **Rules for the whole run:**
+   - Do not touch the adapter or its cable, and do not close the lid or let
+     the Mac sleep. The run is expected to leave the Mac running from its
+     battery while the adapter is plugged in, for the hold (3 minutes by
+     default): that is the effect. The probe cannot tell a cut from an
+     unplugged adapter, so it relies on you not touching it (§4.8). If the
+     Mac does sleep, follow the read-first steps when it wakes (step 8).
+   - **Never close terminal A during a run.** A closed terminal cannot show
+     the probe's warnings. If it closes, follow §7.1 at once.
+   - **No GO line, no cut.** Type the cut command in B only after A has
+     printed its GO line, and never leave it typed but not run. If A
+     withdraws the CUT prompt, prints NO GO, or shows any restore or
+     recovery request, first clear anything typed but not run in B
+     (Ctrl-C at the prompt).
+   - If any tool command, read or write, has not returned within about
+     10 s, press Ctrl-C in B. A read that hangs, errors or prints something
+     unexpected is not trustworthy: answer `other` if A asks, and follow
+     §7.1.
 6. Check, in terminal A, without privileges:
 
    ```sh
@@ -701,27 +809,35 @@ to type; §4.1 has them all.
    ```
 
    Then do what it asks, in this order:
-   1. **First read.** Run the read in B. Type `yes` in A only if it
+   1. **First read.** Run the read in B. Type `start00` in A only if it
       printed `[hex_]` and `(bytes 00)`.
-   2. **Baseline.** Wait: 20 s to 2½ minutes.
-   3. **CUT.** Type the cut command in B, without pressing Return. Press
-      Return in A, then at once press Return in B (`sudo` may ask for your
-      password). Then run the read in B, and type `yes` in A only if it
-      shows `(bytes 08)`. Note the restore time A prints. If it shows
-      anything else, type `no`: A then shows the read-first steps of §7.1
-      instead of the RESTORE prompt; follow them.
+   2. **Baseline.** Wait: 20 s to 2½ minutes. Type nothing in B.
+   3. **CUT.** Type `cutnow` in A and wait for the GO line. **No GO line,
+      no cut.** Write down the restore time the GO line shows, or set a
+      phone timer for it. Only then type and run the cut command in B
+      (`sudo` may ask for your password), then run the read in B. Type
+      `cut08` in A only if the read shows `(bytes 08)`; if it shows
+      anything else, type `cutfail`: A then shows the read-first steps
+      (step 7.5).
    4. **Hold.** 3 minutes by default. The Mac is expected to run from its
       battery with the adapter plugged in. Leave everything as it is.
-   5. **RESTORE.** When A rings and shows the RESTORE prompt: type the
-      restore command in B, press Return in A, then at once press Return
-      in B. Then run the read in B, and type `yes` in A only if it shows
-      `(bytes 00)`. **If the restore time has passed and A shows nothing —
-      it stopped, crashed or hangs — restore anyway.**
+   5. **RESTORE or read-first.** When A rings:
+      - If it shows the **RESTORE** prompt: type `restorenow` in A, then at
+        once run the restore in B, then the read. Type `restored00` in A
+        only if the read shows `(bytes 00)`; otherwise type `restorefail`,
+        and A shows the read-first steps.
+      - If it shows the **read-first** steps: run the read in B and type
+        what it showed: `08`, `00` or `other`. After `08`, run the restore
+        and read again; type `recheck00` only if that read shows
+        `(bytes 00)`, otherwise `recheckfail`.
+
+      **If the restore time has passed and A shows nothing — it stopped,
+      crashed, hangs or its window closed — follow §7.1 anyway.**
    6. **After.** 3 to 5 minutes of readings; then the report.
 
-   The whole run takes about 7 minutes with the default hold, up to about
-   11. Ctrl-C ends it at any time; after the CUT prompt it prints RESTORE
-   CHIE NOW, and you restore with the tool (§7.1).
+   The whole run takes about 7½ minutes with the default hold, up to about
+   12. Ctrl-C ends it at any time; after the CUT prompt it prints RESTORE
+   CHIE NOW, and you follow the read-first steps (§7.1).
 8. **After the run, check recovery first** — and if the Mac slept during
    the run, as soon as it wakes. Recovery counts only when **both** hold: a
    read in B shows `(bytes 00)`, **and** the battery menu shows the power
@@ -748,24 +864,26 @@ to type; §4.1 has them all.
   battery while plugged in. At the 10–16 W it draws while not charging,
   300 s is about 1 Wh, a percent or two `[INFERRED/UNVERIFIED]`; a heavy
   workload draws more and warms the battery, so the owner leaves the Mac
-  idle and restores at once on unusual heat (§6). The probe asks for the
-  restore at once if the charge falls below 25% (note 02 §7 puts the floor
-  for an adapter cut at about 25–30%), and refuses to start below 40% (§5).
+  idle and, on unusual heat, stops the run and restores at once (§6). The
+  probe asks for the restore at once if the charge falls below 25% (note 02
+  §7 puts the floor for an adapter cut at about 25–30%), and refuses to
+  start below 40% (§5).
 - **No self-release.** A written SMC key is **not** freed when anything
   exits. The restore is the owner's, with the tool, and it needs nothing
-  from the probe. The probe arms two reminders at the cut mark, before the
-  cut: the printed restore time and its own timer (§4.6). If the probe
-  crashes, hangs or is killed, it reminds no one; the owner restores by the
-  printed time anyway. **Unknown: whether unplug/replug, sleep or a restart
-  clears `CHIE`** — the published Apple source does not say, and this test
-  does not measure persistence (§8).
+  from the probe. The probe arms its reminder at the cut mark and only then
+  prints the GO line with the restore time, which the owner notes outside
+  the terminal before running the cut (§4.6). No GO line, no cut. If the
+  probe crashes, hangs or is killed after GO, it reminds no one; the owner
+  restores by the noted time anyway. **Unknown: whether unplug/replug,
+  sleep or a restart clears `CHIE`** — the published Apple source does not
+  say, and this test does not measure persistence (§8).
 - **Sleep.** A closed lid, the Apple menu or a low battery still sleeps the
   Mac; the idle-sleep assertion stops only idle sleep. A process cannot
   cancel a sleep: withholding the acknowledgement would delay it by at most
   the 30-second timeout (`IOPMLib.h`), and the probe has nothing to do in
   that time, so it acknowledges at once. A sleep can therefore happen with
-  `CHIE` still at `0x08`; the owner restores first after the wake (§4.7,
-  §6 step 8). A sleep makes the run inconclusive.
+  `CHIE` still at `0x08`; after the wake the owner follows the read-first
+  steps (§4.7, §6 step 8). A sleep makes the run inconclusive.
 - **The tool.** It is unmaintained, and its README warns that writing SMC
   values could irreversibly damage the computer. The test keeps that risk
   as small as it can: one key; two values that two independent projects
@@ -773,28 +891,37 @@ to type; §4.1 has them all.
   size and value; the tool's own length check; and no enumeration.
 - **What the probe never does:** run as root; open a user client of the
   SMC or the battery manager; read or write any SMC key; run the tool,
-  start any process for it, or read what it prints; take answers from
-  anything but a terminal; create any assertion but the public idle-sleep
-  one; change `pmset` settings; read the AlDente helper's files; keep
-  anything of the adapter details but presence and wattage.
+  start any process for it, or read what it prints; run without a terminal
+  for its input and its output; take an answer typed before its question
+  was shown; create any assertion but the public idle-sleep one; change
+  `pmset` settings; read the AlDente helper's files; keep anything of the
+  adapter details but presence and wattage.
 - **What agents never do:** run `sudo`; run the tool; read or write any
   SMC key; run `watch`; change System Settings.
 
 ### 7.1 Recovery steps
 
 Follow these steps if adapter power did not come back after the run, if
-you did not answer `yes` to the restore, if the report or the console says
-CHECK RECOVERY FIRST or RESTORE CHIE NOW, or if the probe stopped after
-its CUT prompt. The probe also shows step 1 itself when the cut's
-read-back was not confirmed (§4.4 step 7), and asks for an answer:
+the probe did not confirm the restore, if the report or the console says
+CHECK RECOVERY FIRST or RESTORE CHIE NOW, if the probe stopped or terminal
+A closed after the CUT prompt, or after a sleep. The probe shows step 1
+itself as its read-first steps (§4.4 step 10), and asks for an answer.
 
-1. **Read `CHIE`** with the tool (§4.1). Never write before this read.
-   - `(bytes 08)`: run the restore, then read again. If the probe asks,
-     type `yes` only if that read shows `(bytes 00)`.
+First, clear anything typed but not run in terminal B (Ctrl-C at the
+prompt). Recovery is never established while a cut command might still
+run.
+
+1. **Read `CHIE`** with the tool (§4.1). Never write before this read. If
+   the read has not returned within about 10 s, press Ctrl-C and treat it
+   as "anything else".
+   - `(bytes 08)`: if the probe asks, type `08`. Run the restore, then read
+     again; if the probe asks, type `recheck00` only if that read shows
+     `(bytes 00)`, otherwise `recheckfail`, and start again at step 1.
    - `(bytes 00)`: nothing to restore; write nothing. If the probe asks,
-     type `yes`. Go to step 2 if the Mac still runs from its battery.
-   - Anything else: **write nothing**. If the probe asks, type `no`. Go to
-     step 3.
+     type `00`. Go to step 2 if the Mac still runs from its battery.
+   - Anything else — another value, an error, a hang, or output you do not
+     trust: the state is unknown. **Write nothing.** If the probe asks, type
+     `other`. Go to step 3.
 
    Recovery counts only when a read shows `(bytes 00)` **and** the battery
    menu shows the power adapter again.
