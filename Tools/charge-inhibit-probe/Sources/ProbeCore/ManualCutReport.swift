@@ -17,6 +17,9 @@ public struct ManualCutReport: Sendable {
     /// if the cut was marked.
     public var restoreBy: String?
     public var outcome: ManualCutOutcome?
+    /// Sample lines the console writer dropped because the terminal was not
+    /// keeping up (``ConsoleWriter``); every reading is still in the report.
+    public var consoleSampleLinesDropped: Int
     public var notes: [String]
 
     public init(
@@ -29,6 +32,7 @@ public struct ManualCutReport: Sendable {
         sleepNotices: [ProbeRun.SleepNotice] = [],
         restoreBy: String? = nil,
         outcome: ManualCutOutcome? = nil,
+        consoleSampleLinesDropped: Int = 0,
         notes: [String] = []
     ) {
         self.startedAt = startedAt
@@ -40,6 +44,7 @@ public struct ManualCutReport: Sendable {
         self.sleepNotices = sleepNotices
         self.restoreBy = restoreBy
         self.outcome = outcome
+        self.consoleSampleLinesDropped = consoleSampleLinesDropped
         self.notes = notes
     }
 
@@ -129,6 +134,13 @@ public struct ManualCutReport: Sendable {
             out.append("SysPowerIn and upd.age (seconds since the battery's UpdateTime) from AppleSmartBattery.")
             out.append("Phases: held from the owner's cut mark (cutnow), after from the owner's restore")
             out.append("time (restorenow, or read-first 08 or 00).")
+            if consoleSampleLinesDropped > 0 {
+                out.append(Report.wrap("""
+                    The console did not keep up: \(consoleSampleLinesDropped) sample \
+                    \(consoleSampleLinesDropped == 1 ? "line was" : "lines were") not shown there. \
+                    Every reading is in this report; no prompt or recovery text was dropped.
+                    """))
+            }
             out.append("")
         }
 
