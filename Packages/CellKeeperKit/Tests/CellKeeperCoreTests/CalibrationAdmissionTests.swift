@@ -205,7 +205,8 @@ struct CalibrationPolicyTests {
 
     @Test("The request is rate-limited like any change of the limit")
     func rateLimited() {
-        var policyInput = input(snapshot(percent: 60), settings: ChargingSettings.default.withChargeLimit(80), capabilities: nativeCapabilities, currentMode: .nativeLimit(percent: 80), recentRestrictingRequests: [10_000 - 30])
+        let recent: [TimeInterval] = [10_000 - 30]
+        var policyInput = input(snapshot(percent: 60), settings: ChargingSettings.default.withChargeLimit(80), capabilities: nativeCapabilities, currentMode: .nativeLimit(percent: 80), recentRestrictingRequests: recent)
         policyInput.calibrationWantsFullLimit = true
         guard case .refuse(.rateLimited) = ChargingPolicy.evaluate(policyInput).action else {
             Issue.record("not rate-limited")

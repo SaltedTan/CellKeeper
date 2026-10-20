@@ -274,7 +274,8 @@ struct CalibrationSessionTests {
         }
         let entry: TimeInterval = 10 * hour + 30
         var s = step(session(in: .drain), seconds(entry), reading(20, .battery), event: .willSleep)
-        #expect(try #require(s.plugInAfter) == start.addingTimeInterval(15 * hour + minute))
+        let plugInAfter = try #require(s.plugInAfter)
+        #expect(plugInAfter == start.addingTimeInterval(15 * hour + minute))
         s = step(s, seconds(entry + 5 * hour), nil, event: .didWake)
         #expect(!s.isRestTimeReached(at: seconds(entry + 5 * hour)))
         let woke = observe(s, seconds(entry + 5 * hour), reading(20, .battery))

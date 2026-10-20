@@ -44,8 +44,9 @@ struct CalibrationNotificationTests {
         #expect(planned.kinds == [.calibrationUnplug, .calibrationRest])
         let rest = try #require(planned.posted.last)
         let shown = try #require(resting.calibration.session?.plugInAfter)
+        let now = try #require(resting.lastEvaluation)
         #expect(rest.title == "Calibration: rest your Mac unplugged")
-        #expect(rest.body == CalibrationWording.text(.rest(plugInAfter: shown), atRequest: true, now: try #require(resting.lastEvaluation)))
+        #expect(rest.body == CalibrationWording.text(.rest(plugInAfter: shown), atRequest: true, now: now))
         #expect(rest.body.contains("(at least 5 hours from now), even before you open CellKeeper"))
 
         planned.observe(await rig.read(calibrationReading(18, .battery), .willSleep), .willSleep)
