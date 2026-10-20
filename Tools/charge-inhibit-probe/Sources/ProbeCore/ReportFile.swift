@@ -1,38 +1,23 @@
 import Foundation
 
 /// `watch`'s report file, opened when the run starts and kept open. A save
-/// replaces its contents under a deadline that needs no lock, queue or
-/// output: in `watch`, SIGALRM's default action, as in ``EmergencyExit``.
-/// The deadline and the write are hooks, so the tests can pause a save.
+/// replaces its contents. It has no deadline of its own: the ending's
+/// watchdog, armed before any save is claimed, bounds it
+/// (``EndingWatchdog``, code review r3 of #101, must 1). The write is a
+/// hook, so the tests can pause a save.
 public final class ReportFile: @unchecked Sendable {
     public struct Hooks: Sendable {
-        /// Arms the save's deadline, in seconds.
-        public var arm: @Sendable (UInt32) -> Void
-        /// Disarms it once the save is done.
-        public var disarm: @Sendable () -> Void
         /// One positioned write; returns what `pwrite(2)` returns.
         public var write: @Sendable (_ descriptor: Int32, _ bytes: UnsafeRawBufferPointer, _ offset: off_t) -> Int
 
-        public init(
-            arm: @escaping @Sendable (UInt32) -> Void,
-            disarm: @escaping @Sendable () -> Void,
-            write: @escaping @Sendable (_ descriptor: Int32, _ bytes: UnsafeRawBufferPointer, _ offset: off_t) -> Int
-        ) {
-            self.arm = arm
-            self.disarm = disarm
+        public init(write: @escaping @Sendable (_ descriptor: Int32, _ bytes: UnsafeRawBufferPointer, _ offset: off_t) -> Int) {
             self.write = write
         }
 
-        /// `watch`'s: SIGALRM back to its default action, which ends the
-        /// process, then `alarm(2)`; and `pwrite(2)`.
-        public static let real = Hooks(
-            arm: { seconds in
-                signal(SIGALRM, SIG_DFL)
-                alarm(seconds)
-            },
-            disarm: { _ = alarm(0) },
-            write: { descriptor, bytes, offset in pwrite(descriptor, bytes.baseAddress, bytes.count, offset) }
-        )
+        /// `watch`'s: `pwrite(2)`.
+        public static let real = Hooks { descriptor, bytes, offset in
+            pwrite(descriptor, bytes.baseAddress, bytes.count, offset)
+        }
     }
 
     public let path: String
@@ -54,12 +39,10 @@ public final class ReportFile: @unchecked Sendable {
         close(descriptor)
     }
 
-    /// Saves `text` as the whole report, under the deadline
-    /// (``EmergencyExit/deadline`` seconds); returns whether it was saved.
-    /// Called once per run, through ``OneShotSave``.
+    /// Saves `text` as the whole report; returns whether it was saved.
+    /// Called once per run, through ``OneShotSave``, after the ending's
+    /// watchdog is armed.
     public func persist(_ text: String) -> Bool {
-        hooks.arm(EmergencyExit.deadline)
-        defer { hooks.disarm() }
         guard ftruncate(descriptor, 0) == 0 else { return false }
         return Self.write(text, to: descriptor, with: hooks.write)
     }
@@ -85,34 +68,35 @@ public final class ReportFile: @unchecked Sendable {
     }
 }
 
-/// The run's one save of its report (code review r2 of #101, must A). The
-/// first ending path to get here claims the save and runs it, under the
-/// report file's own deadline. Every other path, a second signal's
-/// included, never saves: it waits for that save to finish, at most until
-/// the save's deadline (and a short margin for the alarm to act), and only
-/// then goes on to drain the console and exit. If the save hangs, the
-/// deadline's alarm ends the process, as #98's emergency exit does.
+/// The run's one save of its report (code review r2 of #101, must A; r3,
+/// must 1). The first ending path to get here claims the save and runs it.
+/// Every other path, a second signal's included, never saves: it waits
+/// until that save has finished, with no timeout of its own, and only then
+/// goes on to the console and the exit.
+///
+/// No save is claimed before the ending's watchdog is armed: every ending
+/// path arms it first, and ``save(_:)`` arms it if none has. So a path
+/// never waits on a save the watchdog does not bound: if the save hangs,
+/// the watchdog ends the process.
 public final class OneShotSave: @unchecked Sendable {
-    /// The save's deadline, in seconds.
-    public let deadline: Double
-    /// How long a waiter waits past the deadline, for the alarm to act.
-    public let margin: Double
+    private let watchdog: EndingWatchdog
     private let condition = NSCondition()
-    private var claimedAt: Date?
+    private var claimed = false
     private var finished = false
     private var saved = false
 
-    public init(deadline: Double = Double(EmergencyExit.deadline), margin: Double = 0.5) {
-        self.deadline = deadline
-        self.margin = margin
+    public init(watchdog: EndingWatchdog) {
+        self.watchdog = watchdog
     }
 
-    /// Runs `save` if no path has claimed the save yet; otherwise waits for
-    /// the claimed one. Returns whether the report was saved.
+    /// Runs `save` if no path has claimed the save yet; otherwise waits
+    /// until the claimed one has finished. Returns whether the report was
+    /// saved.
     public func save(_ save: () -> Bool) -> Bool {
+        watchdog.armIfNeeded()
         condition.lock()
-        guard let claimedAt else {
-            self.claimedAt = Date()
+        guard claimed else {
+            claimed = true
             condition.unlock()
             let result = save()
             condition.withLock {
@@ -122,9 +106,10 @@ public final class OneShotSave: @unchecked Sendable {
             }
             return result
         }
-        let limit = claimedAt.addingTimeInterval(deadline + margin)
-        while !finished, condition.wait(until: limit) {}
-        let result = finished && saved
+        while !finished {
+            condition.wait()
+        }
+        let result = saved
         condition.unlock()
         return result
     }

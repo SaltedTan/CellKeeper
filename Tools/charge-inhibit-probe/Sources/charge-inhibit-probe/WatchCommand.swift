@@ -21,14 +21,17 @@ import ProbeCore
 ///    lines, the clock and the readings; the reminder's own timer and the
 ///    signal handlers hand it events too; every event reads the sleep log
 ///    first. None of them waits on the terminal.
-/// 5. Release the idle-sleep assertion; deregister from sleep
-///    notifications and drain their queue (at most 2 s), then read the sleep
-///    log once more, so that a sleep that began before a confirmation still
-///    makes it not count (`ManualCutFlow.reconcile`); save the report, then
-///    queue it for the console, give the console at most 2 s, and exit
-///    (`BoundedEnd`). A second signal takes the same bounded path at once.
-///    The report is saved once (`OneShotSave`): whichever ending path comes
-///    first saves it, and the other waits for that save before it exits.
+/// 5. The end (`ManualCutEnding`): arm the ending's watchdog first
+///    (`EndingWatchdog`: SIGALRM's default action ends the process if the
+///    end outlasts its bound); release the idle-sleep assertion; deregister
+///    from sleep notifications and drain their queue (at most 2 s), then
+///    read the sleep log once more, so that a sleep that began before a
+///    confirmation still makes it not count (`ManualCutFlow.reconcile`);
+///    save the report, then queue it for the console, give the console at
+///    most 2 s, and exit (`BoundedEnd`). A second signal takes the same
+///    bounded path at once. The report is saved once (`OneShotSave`):
+///    whichever ending path comes first saves it, and the other waits for
+///    that save, bounded only by the watchdog, before it exits.
 enum WatchCommand {
     static func main(hold: Int) -> Int32 {
         // 1. Not as root, from a terminal.
@@ -91,48 +94,36 @@ enum WatchCommand {
         let sleepWatch = SleepWatch(clock: clock)
         let guardState = SleepGuardState()
 
-        /// The report as it stands; safe to call from any thread.
-        @Sendable func render(outcome: ManualCutOutcome, flow: ManualCutFlow?) -> String {
-            ManualCutReport(
-                startedAt: startedAt,
-                machine: machine,
-                hold: hold,
-                preconditionChecks: checks,
-                flow: flow,
-                sleepGuard: guardState.value,
-                sleepNotices: sleepWatch.notices,
-                restoreBy: session.restoreByText,
-                outcome: outcome,
-                consoleSampleLinesDropped: console.droppedSampleLines
-            ).render()
-        }
-
-        // The report is saved once: the first ending path saves it; any
-        // other waits for that save (code review r2 of #101, must A).
-        let oneSave = OneShotSave()
-
-        /// The bounded end: save the report first, then queue it, then give
-        /// the console at most 2 s.
-        @Sendable func finish(_ text: String, status: Int32, exit: @escaping (Int32, Bool) -> Void) {
-            BoundedEnd.perform(status: status, steps: BoundedEnd.Steps(
-                persist: { oneSave.save { reportFile.persist(text) } },
-                print: { persisted in
-                    console.enqueue("\n" + text)
-                    console.enqueue(persisted
-                        ? "Report written to ./\(fileName). Please send it to the lead."
-                        : "Could not write ./\(fileName). Copy the report above instead.")
-                },
-                drain: { console.drain(timeout: $0) },
-                exit: exit
-            ))
-        }
-
-        /// Deregisters from sleep notifications and drains their queue, so
-        /// that a notification in flight has finished writing the sleep log;
-        /// at most 2 s. Returns whether it did.
-        @Sendable func drainSleepQueue() -> Bool {
-            runBounded(within: 2) { sleepWatch.stop() }
-        }
+        // Every ending path (the main path's and a second signal's) goes
+        // through `ending`, which arms its watchdog first (code review r3 of
+        // #101, must 1) and saves the report once.
+        let ending = ManualCutEnding(session: session, parts: ManualCutEnding.Parts(
+            // Deregisters from sleep notifications and drains their queue,
+            // so that a notification in flight has finished writing the
+            // sleep log.
+            drainSleepQueue: { runBounded(within: EndingWatchdog.sleepDrainBound) { sleepWatch.stop() } },
+            sleepNotices: { sleepWatch.notices },
+            render: { outcome, flow, notices in
+                ManualCutReport(
+                    startedAt: startedAt,
+                    machine: machine,
+                    hold: hold,
+                    preconditionChecks: checks,
+                    flow: flow,
+                    sleepGuard: guardState.value,
+                    sleepNotices: notices,
+                    restoreBy: session.restoreByText,
+                    outcome: outcome,
+                    consoleSampleLinesDropped: console.droppedSampleLines
+                ).render()
+            },
+            persist: { reportFile.persist($0) },
+            savedLine: { saved in
+                saved
+                    ? "Report written to ./\(fileName). Please send it to the lead."
+                    : "Could not write ./\(fileName). Copy the report above instead."
+            }
+        ))
 
         let signalSources = installSignalHandlers { number in
             guard case .quit = session.signal(number) else { return }
@@ -141,13 +132,7 @@ enum WatchCommand {
             // console's 2 s) never hold a thread of the shared dispatch pool
             // that the reminder and the sleep queue run on.
             Thread {
-                let flow = session.reconciledFlow(drainSleepQueue: drainSleepQueue)
-                let second = flow.secondSignal(number)
-                if let banner = second.banner {
-                    console.enqueue("\n\(signalName(number)) again: quitting. " + ManualCut.text(banner))
-                }
-                let text = render(outcome: ManualCutOutcome.of(flow, sleepNotices: sleepWatch.notices), flow: flow)
-                finish(text, status: second.exitStatus) { status, _ in
+                ending.endAtSecondSignal(number) { status in
                     _exit(status)
                 }
             }.start()
@@ -162,9 +147,9 @@ enum WatchCommand {
                 guardState.update { $0.released = released }
             }
         }
+        // Every path from here on ends through `ending`, which tears down
+        // and drains the sleep queue.
         defer {
-            tearDown()
-            _ = drainSleepQueue()
             signalSources.forEach { $0.cancel() }
         }
 
@@ -187,11 +172,10 @@ enum WatchCommand {
             }
         }
         if let refusal {
-            tearDown()
-            _ = drainSleepQueue()
+            // Queuing never waits for the terminal.
             console.enqueue("Refusing to run: \(refusal). Nothing was written, and you were asked nothing.")
             let outcome = ManualCutOutcome(verdict: nil, exitStatus: 1, recoveryReason: nil, refusal: refusal)
-            return endMainPath(render(outcome: outcome, flow: nil), status: 1, finish: finish)
+            return endMainPath(ending.endMainPath(refusal: outcome, tearDown: tearDown))
         }
 
         // 4. The flow: the main loop.
@@ -214,21 +198,16 @@ enum WatchCommand {
             TerminalInput.waitForInput(STDIN_FILENO, milliseconds: 50)
         }
 
-        // 5. Cleanup; the last look at the sleep log, after its queue is
-        // drained; then the bounded end.
-        tearDown()
-        let flow = session.reconciledFlow(drainSleepQueue: drainSleepQueue)
-        let outcome = ManualCutOutcome.of(flow, sleepNotices: sleepWatch.notices)
-        return endMainPath(render(outcome: outcome, flow: flow), status: outcome.exitStatus, finish: finish)
+        // 5. The end: the watchdog first, then the cleanup, the last look at
+        // the sleep log after its queue is drained, and the bounded end.
+        return endMainPath(ending.endMainPath(tearDown: tearDown))
     }
 
     /// The main path's bounded end: if the console took everything, the
     /// status goes back to `main`; if not, the probe exits at once.
-    static func endMainPath(_ text: String, status: Int32, finish: (String, Int32, @escaping (Int32, Bool) -> Void) -> Void) -> Int32 {
-        finish(text, status) { status, drained in
-            if !drained { _exit(status) }
-        }
-        return status
+    static func endMainPath(_ end: (status: Int32, drained: Bool)) -> Int32 {
+        if !end.drained { _exit(end.status) }
+        return end.status
     }
 
     /// SIGINT, SIGTERM and SIGHUP go to `handle`, on their own queue.
