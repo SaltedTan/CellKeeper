@@ -284,7 +284,7 @@ public struct NotificationPlanner: Sendable {
         }
         calibrationRequestSeen = requestSeen
         if let seen = calibrationsEndedSeen, status.calibration.endedCount != seen, let report = status.calibration.outcome {
-            _ = offer(report.end.isCompleted ? .calibrationFinished : .calibrationEndedEarly, NotificationWording.calibrationEnded(report))
+            _ = offer(report.end.isCompleted ? .calibrationFinished : .calibrationEndedEarly, NotificationWording.calibrationEnded(report, status: status))
         }
         calibrationsEndedSeen = status.calibration.endedCount
 

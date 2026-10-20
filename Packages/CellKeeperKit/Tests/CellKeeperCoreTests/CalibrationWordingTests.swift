@@ -86,13 +86,15 @@ struct CalibrationWordingTests {
         #expect(line(status(nil)) == nil)
     }
 
-    @Test("The outcome asks to plug in after a low-battery end, and points to the report otherwise")
+    @Test("The outcome asks to plug in after a low-battery end, points to the report otherwise, and says only what macOS confirmed about the limit")
     func outcomes() {
         let s = session(.drain)
-        #expect(CalibrationWording.outcomeLine(CalibrationReport(s, end: .lowBattery(percent: 14), at: start, after: nil)) == "Plug in your Mac now: the battery is at 14%. The calibration has ended, and CellKeeper's limit applies again.")
-        #expect(CalibrationWording.outcomeLine(CalibrationReport(s, end: .completed, at: start, after: nil)) == "Calibration finished. CellKeeper's limit applies again; the report is in Settings › Charging.")
-        #expect(CalibrationWording.outcomeLine(CalibrationReport(s, end: .pluggedInDuringDrain, at: start, after: nil)) == "Calibration ended: the Mac was plugged in before the battery drained to 20%. CellKeeper's limit applies again; the report is in Settings › Charging.")
-        #expect(CalibrationWording.endNotification(CalibrationReport(s, end: .lowBattery(percent: 14), at: start, after: nil)).title == "Calibration ended: plug in your Mac now")
+        let confirmed = CalibrationLimitAfter.cellKeeperLimit(80)
+        #expect(CalibrationWording.outcomeLine(CalibrationReport(s, end: .lowBattery(percent: 14), at: start, after: nil), limit: confirmed, ownerLimit: 90) == "Plug in your Mac now: the battery is at 14%. The calibration has ended. CellKeeper's 80% limit applies again, confirmed by macOS.")
+        #expect(CalibrationWording.outcomeLine(CalibrationReport(s, end: .completed, at: start, after: nil), limit: confirmed, ownerLimit: 90) == "Calibration finished. CellKeeper's 80% limit applies again, confirmed by macOS. The report is in Settings › Charging.")
+        #expect(CalibrationWording.outcomeLine(CalibrationReport(s, end: .pluggedInDuringDrain, at: start, after: nil), limit: .ownLimit(90), ownerLimit: 90) == "Calibration ended: the Mac was plugged in before the battery drained to 20%. Your own Charge Limit of 90% applies again, confirmed by macOS. The report is in Settings › Charging.")
+        #expect(CalibrationWording.limitSentence(.unconfirmed(reported: nil), ownerLimit: 90) == "macOS has not confirmed CellKeeper's limit back yet, so its Charge Limit may still be at 100%. CellKeeper keeps asking; if it does not change, set your own limit, 90%, in System Settings › Battery › Charging.")
+        #expect(CalibrationWording.limitSentence(.unconfirmed(reported: 85), ownerLimit: 90).hasPrefix("macOS has not confirmed CellKeeper's limit back yet: it reports 85%."))
     }
 
     @Test("The report lists §7.9's items and says that the gauge decides and the result cannot be checked")

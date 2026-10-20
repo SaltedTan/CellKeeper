@@ -14,6 +14,19 @@ public enum CalibrationRequest: Sendable, Equatable {
     case plugIn
 }
 
+/// What a read-back establishes about macOS's Charge Limit after a guided
+/// calibration ended (``CalibrationWording/limitAfter(_:)``).
+public enum CalibrationLimitAfter: Sendable, Equatable {
+    /// CellKeeper's own limit is in effect, as wanted and read back.
+    case cellKeeperLimit(Int)
+    /// The owner's own limit is in effect: CellKeeper holds nothing. The
+    /// value macOS reported, if read.
+    case ownLimit(Int?)
+    /// Neither is confirmed: macOS's limit may still be at 100%. The value
+    /// macOS last reported, if read.
+    case unconfirmed(reported: Int?)
+}
+
 /// The words of a guided calibration: the requests (§7.5), the menu's and
 /// Settings' lines, the activity log, and the report (§7.9). They say what
 /// CellKeeper does and asks, never that the gauge relearnt anything: the
@@ -158,26 +171,76 @@ public enum CalibrationWording {
     /// (§7.7).
     public static let temperatureUnknown = "Battery temperature unknown: this Mac does not report it, so you confirmed a cool room."
 
-    /// What became of the session that ended in this run.
-    public static func outcomeLine(_ report: CalibrationReport) -> String {
-        switch report.end {
+    /// What became of the session that ended in this run, with what a
+    /// read-back now establishes about macOS's Charge Limit
+    /// (``limitAfter(_:)``): never that a limit applies before macOS has
+    /// confirmed it (R30).
+    public static func outcomeLine(_ report: CalibrationReport, status: ControllerStatus) -> String {
+        outcomeLine(report, limit: limitAfter(status), ownerLimit: status.nativeLimit?.ownerLimit ?? report.ownerLimit)
+    }
+
+    /// The outcome line for `limit`, what a read-back established;
+    /// `ownerLimit` is the value to set by hand if it is not confirmed.
+    public static func outcomeLine(_ report: CalibrationReport, limit: CalibrationLimitAfter, ownerLimit: Int) -> String {
+        let sentence = limitSentence(limit, ownerLimit: ownerLimit)
+        return switch report.end {
         case .completed:
-            "Calibration finished. CellKeeper's limit applies again; the report is in Settings › Charging."
+            "Calibration finished. \(sentence) The report is in Settings › Charging."
         case .lowBattery(let percent):
-            "Plug in your Mac now: the battery is at \(percent)%. The calibration has ended, and CellKeeper's limit applies again."
+            "Plug in your Mac now: the battery is at \(percent)%. The calibration has ended. \(sentence)"
         case .cancelled:
-            "Calibration cancelled. CellKeeper's limit applies again; the report is in Settings › Charging."
+            "Calibration cancelled. \(sentence) The report is in Settings › Charging."
         default:
-            "Calibration ended: \(report.end). CellKeeper's limit applies again; the report is in Settings › Charging."
+            "Calibration ended: \(report.end). \(sentence) The report is in Settings › Charging."
         }
     }
 
-    /// A notification's title and body for a session that ended.
-    public static func endNotification(_ report: CalibrationReport) -> (title: String, body: String) {
-        switch report.end {
-        case .completed: ("Calibration finished", outcomeLine(report))
-        case .lowBattery: ("Calibration ended: plug in your Mac now", outcomeLine(report))
-        default: ("Calibration ended early", outcomeLine(report))
+    /// A notification's title and body for a session that ended, as
+    /// `status`, the status it is planned from, shows the limit.
+    public static func endNotification(_ report: CalibrationReport, status: ControllerStatus) -> (title: String, body: String) {
+        let body = outcomeLine(report, status: status)
+        return switch report.end {
+        case .completed: ("Calibration finished", body)
+        case .lowBattery: ("Calibration ended: plug in your Mac now", body)
+        default: ("Calibration ended early", body)
+        }
+    }
+
+    /// What a read-back establishes about macOS's Charge Limit once a
+    /// session has ended: CellKeeper's own limit, wanted and read back; the
+    /// owner's own limit (CellKeeper holds nothing: it fell back to it, or
+    /// does not manage charging); or neither yet, as when the return is
+    /// deferred, failed, or its fallback to the owner's limit failed too.
+    public static func limitAfter(_ status: ControllerStatus) -> CalibrationLimitAfter {
+        let reported = status.nativeLimit?.reportedLimit
+        guard let current = status.currentMode, !status.isOwnLimitRestorePending, status.nativeLimit?.isRecordUnreadable != true else {
+            return .unconfirmed(reported: reported)
+        }
+        switch current {
+        case .normal:
+            return .ownLimit(reported)
+        case .nativeLimit(let percent) where status.decision?.desiredMode == current && percent == status.settings.chargeLimit:
+            return .cellKeeperLimit(percent)
+        default:
+            return .unconfirmed(reported: reported)
+        }
+    }
+
+    /// `limit` in a sentence; when it is not confirmed, with the recovery:
+    /// the owner's own limit to set in System Settings › Battery.
+    public static func limitSentence(_ limit: CalibrationLimitAfter, ownerLimit: Int) -> String {
+        switch limit {
+        case .cellKeeperLimit(let percent):
+            return "CellKeeper's \(NativeLimitWording.limit(percent)) limit applies again, confirmed by macOS."
+        case .ownLimit(let percent):
+            return "Your own Charge Limit\(percent.map { " of \(NativeLimitWording.limit($0))" } ?? "") applies again, confirmed by macOS."
+        case .unconfirmed(let reported):
+            let report: String = switch reported {
+            case 100?: ": it still reports its Charge Limit at 100%"
+            case let value?: ": it reports \(NativeLimitWording.limit(value))"
+            case nil: ", so its Charge Limit may still be at 100%"
+            }
+            return "macOS has not confirmed CellKeeper's limit back yet\(report). CellKeeper keeps asking; if it does not change, set your own limit, \(NativeLimitWording.limit(ownerLimit)), in System Settings › Battery › Charging."
         }
     }
 

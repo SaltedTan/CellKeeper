@@ -158,8 +158,8 @@ public enum NotificationWording {
     }
 
     /// A calibration that finished or ended by itself.
-    static func calibrationEnded(_ report: CalibrationReport) -> PlannedNotification {
-        let words = CalibrationWording.endNotification(report)
+    static func calibrationEnded(_ report: CalibrationReport, status: ControllerStatus) -> PlannedNotification {
+        let words = CalibrationWording.endNotification(report, status: status)
         return PlannedNotification(kind: report.end.isCompleted ? .calibrationFinished : .calibrationEndedEarly, title: words.title, body: words.body)
     }
 

@@ -458,9 +458,9 @@ struct CalibrationRunner {
         endedCount += 1
         refreshDisplay(at: stamp)
         if end.isCompleted {
-            log.append("Calibration finished. CellKeeper's normal policy applies again. \(CalibrationWording.reportSummary(report))")
+            log.append("Calibration finished. CellKeeper asks for its normal limit again. \(CalibrationWording.reportSummary(report))")
         } else {
-            log.append("Calibration ended in step \(ended.step.rawValue) (\(ended.step)): \(end). CellKeeper's normal policy applies again. \(CalibrationWording.reportSummary(report))")
+            log.append("Calibration ended in step \(ended.step.rawValue) (\(ended.step)): \(end). CellKeeper asks for its normal limit again; the lines that follow say what macOS confirmed. \(CalibrationWording.reportSummary(report))")
         }
         if !write(CalibrationStored(last: report)) {
             isEndUnsaved = true

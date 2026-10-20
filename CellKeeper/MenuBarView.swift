@@ -573,7 +573,7 @@ private struct CalibrationLines: View {
         }
         if calibration.session == nil, let outcome = calibration.outcome {
             HStack(alignment: .firstTextBaseline) {
-                Label(CalibrationWording.outcomeLine(outcome), systemImage: outcome.end.asksToPlugIn ? "exclamationmark.triangle" : "gauge.with.needle")
+                Label(CalibrationWording.outcomeLine(outcome, status: status), systemImage: outcome.end.asksToPlugIn ? "exclamationmark.triangle" : "gauge.with.needle")
                     .foregroundStyle(outcome.end.asksToPlugIn ? Color.warningText : Color.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()
