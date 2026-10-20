@@ -27,6 +27,8 @@ import ProbeCore
 ///    makes it not count (`ManualCutFlow.reconcile`); save the report, then
 ///    queue it for the console, give the console at most 2 s, and exit
 ///    (`BoundedEnd`). A second signal takes the same bounded path at once.
+///    The report is saved once (`OneShotSave`): whichever ending path comes
+///    first saves it, and the other waits for that save before it exits.
 enum WatchCommand {
     static func main(hold: Int) -> Int32 {
         // 1. Not as root, from a terminal.
@@ -65,7 +67,7 @@ enum WatchCommand {
         // 3. The report file, the console writer, sleep and idle sleep.
         let fileName = ManualCut.reportFileName(stamp: Clock.fileStamp())
         guard let reportFile = ReportFile(
-            name: fileName,
+            path: fileName,
             placeholder: "CellKeeper manual adapter-cut probe report: run started \(startedAt), still in progress or stopped before it finished.\n"
         ) else {
             Console.error("Refusing to run: cannot write \(fileName) in the current directory. Nothing was created.")
@@ -105,11 +107,15 @@ enum WatchCommand {
             ).render()
         }
 
+        // The report is saved once: the first ending path saves it; any
+        // other waits for that save (code review r2 of #101, must A).
+        let oneSave = OneShotSave()
+
         /// The bounded end: save the report first, then queue it, then give
         /// the console at most 2 s.
         @Sendable func finish(_ text: String, status: Int32, exit: @escaping (Int32, Bool) -> Void) {
             BoundedEnd.perform(status: status, steps: BoundedEnd.Steps(
-                persist: { reportFile.persist(text) },
+                persist: { oneSave.save { reportFile.persist(text) } },
                 print: { persisted in
                     console.enqueue("\n" + text)
                     console.enqueue(persisted
@@ -250,54 +256,5 @@ final class SleepGuardState: @unchecked Sendable {
 
     func update(_ change: (inout Report.SleepGuard) -> Void) {
         lock.withLock { change(&guardValue) }
-    }
-}
-
-/// The report file, kept open from the start. `persist` replaces its
-/// contents under a deadline that needs no lock, queue or output (SIGALRM's
-/// default action, as in `EmergencyExit`), one save at a time: a save that
-/// finds another under way leaves it to finish.
-final class ReportFile: @unchecked Sendable {
-    let name: String
-    private let descriptor: Int32
-    private let lock = NSLock()
-
-    init?(name: String, placeholder: String) {
-        let descriptor = open(name, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
-        guard descriptor >= 0 else { return nil }
-        self.name = name
-        self.descriptor = descriptor
-        guard Self.write(placeholder, to: descriptor) else { return nil }
-    }
-
-    deinit {
-        close(descriptor)
-    }
-
-    /// Saves `text` as the whole report; returns whether it was saved.
-    func persist(_ text: String) -> Bool {
-        guard lock.try() else { return false }
-        defer { lock.unlock() }
-        signal(SIGALRM, SIG_DFL)
-        alarm(EmergencyExit.deadline)
-        defer { alarm(0) }
-        guard ftruncate(descriptor, 0) == 0 else { return false }
-        return Self.write(text, to: descriptor)
-    }
-
-    static func write(_ text: String, to descriptor: Int32) -> Bool {
-        let bytes = Array(text.utf8)
-        var offset = 0
-        while offset < bytes.count {
-            let written = bytes[offset...].withUnsafeBytes { pwrite(descriptor, $0.baseAddress, $0.count, off_t(offset)) }
-            if written > 0 {
-                offset += written
-            } else if written < 0, errno == EINTR {
-                continue
-            } else {
-                return false
-            }
-        }
-        return true
     }
 }
