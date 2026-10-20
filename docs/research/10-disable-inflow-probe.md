@@ -798,8 +798,9 @@ firmware.
   owner decisions that had not been made: SMC writes (not authorized then,
   §2), and the clean-room rule (CONTRIBUTING.md §1), because the value to
   write is known only from other tools' code. *The owner made both
-  decisions on 2026-10-20; a manual adapter-cut test, observed by the
-  probe, is designed in [note 11](11-smc-adapter-cut.md).*
+  decisions on 2026-10-20; the owner's manual adapter-cut test, observed
+  by the probe, ran that day and cut the adapter's power
+  ([note 11](11-smc-adapter-cut.md) §10).*
 - Until then, macOS's own Charge Limit (80–100%) stays CellKeeper's only
   real control, and limits below 80% stay simulated.
 

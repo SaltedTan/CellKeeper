@@ -53,9 +53,11 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
   Its second, a `DisableInflow` probe, ran on 2026-10-20 and showed no
   effect either. The only mechanism left that is reported to work here,
   the SMC adapter cut, needed new owner decisions (SMC writes and the
-  clean-room rule); the owner made them on 2026-10-20, and a manual test,
-  observed by the probe, is designed
-  ([research note 11](research/11-smc-adapter-cut.md)).
+  clean-room rule); the owner made them on 2026-10-20, and the owner's
+  manual test, observed by the probe, ran that day: the cut worked, by the
+  owner's account that the adapter stayed plugged in
+  ([research note 11](research/11-smc-adapter-cut.md) §10). How
+  CellKeeper could use it is the owner's next decision.
 - While both were blocked, the owner approved three smaller features on
   2026-10-18, all done: Save Diagnostics… (milestone 3), opt-in
   notifications (milestone 3) and a one-shot scheduled full charge
@@ -293,21 +295,31 @@ with a narrow clean-room exception for the facts it needs
   the owner's; the probe prints the time to restore by and rings until
   the restore is confirmed. The key's values come from third-party
   open-source projects under the owner's clean-room exception, and are
-  claims until this test. *Designed; not run yet.* (A first design, in
-  which the probe wrote `CHIE` itself, was replaced on 2026-10-20: an
+  claims until this test. *Run by the owner on 2026-10-20: the adapter's
+  power was cut.* With `CHIE` at `08` the adapter stopped being reported
+  before the owner's read-back, and from about 76 s after the cut mark
+  until the restore the Mac ran from its battery with the adapter plugged
+  in and about 0.5 W of input; `00` brought adapter power and charging
+  back. The cut also made macOS report no adapter at all, so the probe's
+  verdict is `inconclusive` by its rule, and the owner's account that the
+  adapter stayed plugged in decides it (note 11 §10). It is not added to
+  the helper's allowlist. (A first design, in which the probe wrote
+  `CHIE` itself, was replaced on 2026-10-20: an
   automated safety check stopped an agent's response as it began writing
   the SMC client code, and the lead decided not to route around it.) Even
   if the cut works, CellKeeper's helper needs an SMC write layer that
-  agents will not write; after the result, the owner decides between a
-  layer the owner writes, an external tool, and stopping at macOS's own
-  80–100% limit (note 11 §8).
+  agents will not write; the owner now decides between a layer the owner
+  writes, an external tool, and stopping at macOS's own 80–100% limit
+  (note 11 §8). A persistence run (unplug/replug, sleep, restart) is a
+  separate owner decision, needed before any helper work.
 - Follow research note 02 §7: a read-only, allowlisted capability probe,
   then single reversible writes, then the persistence matrix. Evaluate
   Apple's private `ChargeInhibit` power assertion first: Apple's published
   source releases it when the owning process exits, and the test Mac must
   show whether it works, and is released, on shipping Apple silicon. Try the
   SMC adapter-cut key only if a genuine need remains. (Both assertions
-  showed no effect on this Mac; the adapter cut is the third step above.)
+  showed no effect on this Mac; the adapter cut, the third step above,
+  worked.)
 - Record the results per Mac model and firmware in `docs/research/`. Add a
   verified mechanism to the helper's allowlist, with behavioural
   verification in independent telemetry (`safety.md` precondition 5) and a
