@@ -38,7 +38,7 @@
 5. **The only SMC control still reported to work on macOS 27 is the adapter cut (`CHIE`).**
    - It runs the Mac from battery while plugged in, as root.
    - It is a crude, high-risk mechanism: it micro-cycles the battery and drains it if left set. Reports also say firmware ignores it while the native Charge Limit is active.
-6. **This dev machine is on the gated firmware.** Firmware 20457.1.29 on macOS 27.0.1 is exactly the combination reported as gated. Under the community reports, no SMC-key charge-inhibit or firmware-limit backend is available here; only the native limit and, reportedly, `CHIE` remain.
+6. **This dev machine is on the gated firmware.** Firmware 20457.1.29 on macOS 27.0.1 is exactly the combination reported as gated. Under the community reports, no SMC-key charge-inhibit or firmware-limit backend is available here; only the native limit and, reportedly, `CHIE` remain. *Confirmed for the inhibit keys on 2026-10-20: an owner-run, read-only read of `CHTE`, `CH0B` and `CH0C` printed `no data` for each (note 11 §10).*
 7. **Privilege by mechanism:**
    - SMC writes always required root, and newer keys reportedly need a private entitlement that third parties cannot obtain.
    - The native limit is user-settable through System Settings or Shortcuts.
@@ -385,7 +385,7 @@ Sources: S16–S28. The exact firmware boundaries where `CHTE`/`CHIE` replaced `
    - Apply it through a user-installed Shortcut.
    - Verify it through public IOPS state, and optionally the undocumented `pmset -g battlimit` (diagnostics only).
    - This needs no root, no helper and no private API on the write path.
-2. **Below-80% limits, "sailing" bands and force-discharge are not available through supported means on macOS 27.** On 20457.x firmware the only reported lever is the adapter cut (`CHIE`). It trades battery micro-cycling for a lower ceiling, is ignored when the native limit is active, and needs a root helper. Treat it as experimental and opt-in, behind the verification protocol, or decline it.
+2. **Below-80% limits, "sailing" bands and force-discharge are not available through supported means on macOS 27.** On 20457.x firmware the only reported lever is the adapter cut (`CHIE`). It trades battery micro-cycling for a lower ceiling, is ignored when the native limit is active, and needs a root helper. Treat it as experimental and opt-in, behind the verification protocol, or decline it. *Declined by the owner on 2026-10-20, after the cut was verified on this Mac (note 11 §2.3).*
 3. **Apple is actively closing SMC write paths.** It removed CHWA in macOS 15, gated `bf*` in macOS 27, and backported the firmware to 15.8/26.7. Any SMC backend should be assumed to break silently on any OS or firmware update. Gate it on **runtime capability probing of an allowlist**, never on OS version (several projects learned this; S18, S24).
 4. **Prefer Apple's private `ChargeInhibit` assertion over raw SMC writes if (big if) it works on AS.**
    - powerd releases it on process exit, so it fails safe.
@@ -492,7 +492,7 @@ The goal is to let a future developer confirm or refute **one** mechanism on **o
 2. What do `pmset -g battlimit` fields mean (`Drain`, `IsEOC`, `NoChargeToFull`, `Owner`)? Is the getter stable across 27.x? Is there any public replacement?
 3. Does the native limit hold during sleep and across restart on this M4 / 20457.1.29? What happens when shut down? This needs a clean machine.
 4. Do the private `ChargeInhibit` / `DisableInflow` assertions affect charging on Apple silicon (macOS 26/27)? *For `ChargeInhibit` on this Mac: no effect observed. In an owner-run probe on 2026-10-19, powerd accepted and released the assertion, and every reading while it was held showed charging (note 09 §10). For `DisableInflow` on this Mac: no effect observed either. In an owner-run probe on 2026-10-20, every reading while it was held, over three battery updates, showed adapter power and charging (note 10 §10). Read literally, Apple's published `AppleSmartBatteryManager` (PowerManagement-1846.0.25.0.1 and 1846.120.8.0.1) acts on neither selector outside Intel builds; the macOS 27 driver is not published (note 10 §3).*
-5. Is `CHIE` still writable by root on macOS 27.0.1 release firmware? Does an adapter cut survive unplug/replug, sleep and restart? *An owner-run manual test of the first question, observed by the probe, ran on 2026-10-20: writing `CHIE` cut the adapter's power, and restoring it brought power and charging back (note 11 §10). The persistence questions stay open (note 11 §8).*
+5. Is `CHIE` still writable by root on macOS 27.0.1 release firmware? Does an adapter cut survive unplug/replug, sleep and restart? *An owner-run manual test of the first question, observed by the probe, ran on 2026-10-20: writing `CHIE` cut the adapter's power, and restoring it brought power and charging back (note 11 §10). The owner then decided not to use it in CellKeeper, so the persistence questions are not pursued (note 11 §2.3, §8).*
 6. Where does the `bf*` gating live? Is it macOS-kernel or firmware enforcement (the 15.8 conflict)? Will Apple extend gating to `CHIE`?
 7. When exactly did `CHTE`/`CHIE` replace `CH0B`/`CH0C`/`CH0I` (firmware build)?
 8. Does Apple's native limit actively drain above the limit (−1.5 to −1.9 A reported)? Should CellKeeper surface that to users?

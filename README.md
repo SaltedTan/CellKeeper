@@ -72,8 +72,12 @@ third, of the SMC adapter cut (`CHIE`), which the owner authorized on
 key by hand with an existing open-source tool, while CellKeeper's probe
 only observed. The cut made the Mac run from its battery with the adapter
 plugged in, and restoring the key brought adapter power and charging back
-([research note 11](docs/research/11-smc-adapter-cut.md)). CellKeeper does
-not use it; how it could is the owner's next decision.
+([research note 11](docs/research/11-smc-adapter-cut.md)). The owner
+decided not to use it: a cut makes the Mac run from its battery, while
+CellKeeper's purpose is to stop charging at a limit and run from the
+adapter. The older SMC keys that stopped charging read empty on this
+Mac's firmware, so macOS's own Charge Limit (80–100%) stays CellKeeper's
+only real control, and limits below 80% stay simulated.
 
 ## Using macOS's Charge Limit (experimental)
 

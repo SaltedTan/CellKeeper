@@ -39,8 +39,11 @@ source-available tool, anything obtained from binaries, and any other key
 or mechanism (each needs its own owner decision). The owner may also use
 an OSI-licensed tool as an external test instrument, built and run outside
 the repository; nothing from it enters the repository, and CellKeeper
-never invokes it. This is a project rule, not a legal opinion or a
-licence-compatibility review. See
+never invokes it. Later on 2026-10-20 the owner also allowed one
+owner-run, read-only read of the inhibit keys `CHTE`, `CH0B` and `CH0C`
+by name, and decided not to use `CHIE` in CellKeeper (note 11 §2.3). This
+is a project rule, not a legal opinion or a licence-compatibility review.
+See
 [docs/research/11-smc-adapter-cut.md](docs/research/11-smc-adapter-cut.md).
 
 ### 2. Safety
