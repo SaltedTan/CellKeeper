@@ -295,30 +295,26 @@ struct ManualCutSupportTests {
 
     // MARK: The sources
 
-    /// The probe's source files, read from the package.
+    static let package = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+
+    /// A source file of the package, by its path in it.
     static func source(_ path: String) throws -> String {
-        let package = URL(fileURLWithPath: #filePath)
-            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        return try String(contentsOf: package.appendingPathComponent(path), encoding: .utf8)
+        try String(contentsOf: package.appendingPathComponent(path), encoding: .utf8)
     }
 
-    static let sourceFiles = [
-        "Sources/ProbeCore/Command.swift", "Sources/ProbeCore/EmergencyExit.swift", "Sources/ProbeCore/IOReturnName.swift",
-        "Sources/ProbeCore/ManualCut.swift", "Sources/ProbeCore/ManualCutReport.swift", "Sources/ProbeCore/PmsetOutput.swift",
-        "Sources/ProbeCore/Preconditions.swift", "Sources/ProbeCore/ProbeSchedule.swift", "Sources/ProbeCore/Report.swift",
-        "Sources/ProbeCore/ReportFormat.swift", "Sources/ProbeCore/Sample.swift", "Sources/ProbeCore/SleepQueue.swift",
-        "Sources/ProbeCore/SleepResponse.swift", "Sources/ProbeCore/Verdict.swift", "Sources/ProbeCore/VerdictTerms.swift",
-        "Sources/charge-inhibit-probe/AssertionHolder.swift", "Sources/charge-inhibit-probe/CheckCommand.swift",
-        "Sources/charge-inhibit-probe/Clock.swift", "Sources/charge-inhibit-probe/RunCommand.swift",
-        "Sources/charge-inhibit-probe/SleepWatch.swift", "Sources/charge-inhibit-probe/SystemReads.swift",
-        "Sources/charge-inhibit-probe/WatchCommand.swift", "Sources/charge-inhibit-probe/main.swift",
-    ]
-
-    /// The manual cut's own code paths.
-    static let manualCutFiles = [
-        "Sources/ProbeCore/ManualCut.swift", "Sources/ProbeCore/ManualCutReport.swift", "Sources/ProbeCore/VerdictTerms.swift",
-        "Sources/charge-inhibit-probe/WatchCommand.swift", "Sources/charge-inhibit-probe/CheckCommand.swift",
-    ]
+    /// Every source file of every target, found by walking `Sources`
+    /// recursively, so that a new file or a new target is checked too.
+    static func allSourceFiles() throws -> [String] {
+        let root = package.appendingPathComponent("Sources")
+        guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else { return [] }
+        let kinds: Set<String> = ["swift", "c", "h", "m", "mm", "cpp", "s"]
+        var files: [String] = []
+        for case let url as URL in walker where kinds.contains(url.pathExtension) {
+            files.append("Sources" + url.standardizedFileURL.path.dropFirst(root.standardizedFileURL.path.count))
+        }
+        return files.sorted()
+    }
 
     /// Code only: comments are dropped, so that the rules below can be
     /// explained in them.
@@ -328,17 +324,28 @@ struct ManualCutSupportTests {
             .joined(separator: "\n")
     }
 
+    /// `code` with every run of white space made one space, and none just
+    /// inside parentheses.
+    static func flattened(_ text: String) -> String {
+        code(text).split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            .replacingOccurrences(of: "( ", with: "(")
+            .replacingOccurrences(of: " )", with: ")")
+    }
+
+    @Test("The guard walks both targets' sources, recursively")
+    func walksBothTargets() throws {
+        let files = try Self.allSourceFiles()
+        #expect(files.contains("Sources/ProbeCore/ManualCut.swift"))
+        #expect(files.contains("Sources/ProbeCore/Verdict.swift"))
+        #expect(files.contains("Sources/charge-inhibit-probe/WatchCommand.swift"))
+        #expect(files.contains("Sources/charge-inhibit-probe/SystemReads.swift"))
+        #expect(files.contains("Sources/charge-inhibit-probe/main.swift"))
+        #expect(files.allSatisfy { $0.hasPrefix("Sources/") })
+    }
+
     @Test("Nothing in the probe touches the SMC: no AppleSMC matching, no user-client calls, no SMC structures")
     func noSMCCode() throws {
-        let packageFiles = try FileManager.default.contentsOfDirectory(
-            atPath: URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-                .deletingLastPathComponent().appendingPathComponent("Sources/ProbeCore").path
-        )
-        // Every source file is checked: a new one must be added to the list.
-        for file in packageFiles where file.hasSuffix(".swift") {
-            #expect(Self.sourceFiles.contains("Sources/ProbeCore/\(file)"), "\(file) is not in the list the tests check")
-        }
-        for path in Self.sourceFiles {
+        for path in try Self.allSourceFiles() {
             let text = Self.code(try Self.source(path))
             for forbidden in ["AppleSMC", "IOServiceOpen", "IOConnectCall", "IOConnectMap", "SMCParamStruct", "SMCKeyData", "kSMC", "SMCVal"] {
                 #expect(!text.contains(forbidden), "\(path) contains \(forbidden)")
@@ -346,20 +353,37 @@ struct ManualCutSupportTests {
         }
     }
 
-    @Test("The manual cut's code paths start no process: no Process, posix_spawn, system, popen, exec or new command")
-    func manualCutStartsNoProcess() throws {
-        for path in Self.manualCutFiles {
+    @Test("Only the three fixed, read-only getters start a process; nothing else does, and no tool command is run")
+    func onlyThreeCommands() throws {
+        let launches = ["Process(", "NSTask", "posix_spawn", "system(", "popen(", "execv", "execl", "execle", "fork(", "vfork(", "NSWorkspace", "NSAppleScript", "osascript"]
+        let readsPath = "Sources/charge-inhibit-probe/SystemReads.swift"
+        for path in try Self.allSourceFiles() where path != readsPath {
             let text = Self.code(try Self.source(path))
-            for forbidden in ["Process(", "NSTask", "posix_spawn", "system(", "popen(", "execv", "execl", "fork(", "ReadOnlyCommand(", "NSWorkspace", "NSAppleScript", "osascript"] {
+            for forbidden in launches + ["ReadOnlyCommand("] {
                 #expect(!text.contains(forbidden), "\(path) contains \(forbidden)")
             }
         }
-        // The probe's only commands stay the three fixed, read-only getters.
-        let reads = Self.code(try Self.source("Sources/charge-inhibit-probe/SystemReads.swift"))
-        #expect(reads.components(separatedBy: "ReadOnlyCommand(").count - 1 == 3)
-        #expect(!reads.contains("smc"))
-        // The tool's commands are written in one place only.
-        for path in Self.sourceFiles where path != "Sources/ProbeCore/ManualCut.swift" {
+        // In SystemReads, one Process, launched only by ReadOnlyCommand.run
+        // with the command's own executable and arguments...
+        let reads = Self.flattened(try Self.source(readsPath))
+        #expect(reads.components(separatedBy: "Process(").count - 1 == 1)
+        #expect(reads.contains("let process = Process() process.executableURL = URL(fileURLWithPath: executable) process.arguments = arguments"))
+        for forbidden in launches where forbidden != "Process(" {
+            #expect(!reads.contains(forbidden), "SystemReads contains \(forbidden)")
+        }
+        // ...and exactly these three commands, executable and arguments pinned.
+        let pinned = [
+            #"static let battlimit = ReadOnlyCommand(executable: "/usr/bin/pmset", arguments: ["-g", "battlimit"])"#,
+            #"static let assertions = ReadOnlyCommand(executable: "/usr/bin/pmset", arguments: ["-g", "assertions"])"#,
+            #"static let launchctlPrintAlDente = ReadOnlyCommand(executable: "/bin/launchctl", arguments: ["print", "system/\(Preconditions.aldenteHelperLabel)"])"#,
+        ]
+        for definition in pinned {
+            #expect(reads.contains(definition), "missing or changed: \(definition)")
+        }
+        #expect(reads.components(separatedBy: "ReadOnlyCommand(").count - 1 == pinned.count)
+        #expect(Preconditions.aldenteHelperLabel == "com.apphousekitchen.aldente-pro-setapp.helper")
+        // The tool's commands are written in one place only, and never run.
+        for path in try Self.allSourceFiles() where path != "Sources/ProbeCore/ManualCut.swift" {
             #expect(!(try Self.source(path)).contains("smc -k"), "\(path) spells out a tool command")
         }
     }
