@@ -670,7 +670,7 @@ about 30 seconds, reading `CHIE` after each and restoring it if it reads
 `08` — none of these is known to clear `CHIE`. If adapter power still does
 not come back, shut the Mac down before the battery runs low, and if it
 still does not take power from its adapter when started again, ask Apple
-Support for help. Note 11 §7 has the details.
+Support for help. Note 11 §7.1 has the details.
 
 ### Getting your own Charge Limit back
 

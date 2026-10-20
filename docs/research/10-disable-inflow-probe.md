@@ -57,6 +57,9 @@ SMC-based.
   any other private mechanism, and another `ChargeInhibit` run. The tool
   can still run note 09's test (`--assertion charge-inhibit`), so that it
   stays reproducible, but a second run needs its own owner decision.
+  *On 2026-10-20 the owner authorized the SMC adapter cut and a narrow
+  clean-room exception; the test is now a manual one, which the probe
+  only observes ([note 11](11-smc-adapter-cut.md) §2).*
 - This Mac stays the test Mac (note 09 §2). AlDente's helper must still be
   absent, checked read-only as in note 09.
 
@@ -791,12 +794,12 @@ firmware.
   helper's allowlist.
 - The only mechanism left in note 02 that is reported to work on this
   firmware is the SMC adapter cut (`CHIE`), known only from third-party
-  claims (note 02 §3.4). Using it needs owner decisions that were not
-  made: SMC writes (not authorized, §2), and the clean-room rule
-  (CONTRIBUTING.md §1), because the value to write is known only from
-  other tools' code. *The owner made both decisions on 2026-10-20; a manual
-  adapter-cut test, observed by the probe, is designed in
-  [note 11](11-smc-adapter-cut.md).*
+  claims (note 02 §3.4). When this run was made, using it needed two
+  owner decisions that had not been made: SMC writes (not authorized then,
+  §2), and the clean-room rule (CONTRIBUTING.md §1), because the value to
+  write is known only from other tools' code. *The owner made both
+  decisions on 2026-10-20; a manual adapter-cut test, observed by the
+  probe, is designed in [note 11](11-smc-adapter-cut.md).*
 - Until then, macOS's own Charge Limit (80–100%) stays CellKeeper's only
   real control, and limits below 80% stay simulated.
 
