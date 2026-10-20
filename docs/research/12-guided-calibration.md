@@ -56,8 +56,10 @@
   the owner to unplug, watches it drain to 20%, asks the owner to shut
   down (or sleep) the Mac unplugged and to plug it in again after a time
   at least 5 hours later, raises the limit to 100% again for the final
-  charge, and then returns to its normal limit. The limit is at 100% only
-  while the Mac is plugged in and awake and CellKeeper is running. It
+  charge, and then returns to its normal limit, confirmed. The limit is
+  at 100% only in the charge and rest steps, which begin with the Mac
+  plugged in and CellKeeper running (sleep, a crash or a failed return can
+  keep it there longer, §7.2). It
   takes one to two days, mostly unattended, and is user-initiated only
   (§7.8). Besides approving the design, two parts need the owner's
   decision: it cannot check the battery's temperature on macOS 27 (§7.7),
@@ -237,21 +239,38 @@ privileged interface.
 ### 7.2 Where the limit is at 100%, and who watches
 
 The session asks for macOS's limit at **100% only in steps 1, 2 and 7**
-(§7.3): while the Mac is on AC power, awake, and CellKeeper is running.
-In every other step, and after the session, CellKeeper's normal policy
-applies as if no session were running: its own configured limit, with
-management on. When CellKeeper quits, the backend restores the owner's
-own limit, as today. So during the drain and the rest at the bottom, when
-CellKeeper may not be running at all, the limit is never left at 100% by
-the session.
+(§7.3), which begin only while the Mac is on AC power and CellKeeper is
+running. In every other step, and after the session, CellKeeper's normal
+policy applies as if no session were running: its own configured limit,
+with management on. When CellKeeper quits, the backend restores the
+owner's own limit, as today.
 
-CellKeeper cannot act while it is not running. Its step bounds and the
-72 h cap are applied at its next evaluation, not on time; and if it is
-killed or crashes in steps 1, 2 or 7, macOS's limit stays at 100% until
-CellKeeper runs again or the owner sets the limit in System Settings ›
-Battery. Before a session starts, CellKeeper shows that recovery, with
-the value to set (the owner's own limit), as `safety.md` precondition 11
-requires.
+**Leaving 100% is confirmed, not assumed.** The session leaves step 2 for
+step 3, and step 7 for step 8, only once the backend has confirmed the
+normal limit by read-back; until then the menu shows "returning to your
+limit". The request is retried as the policy's rate limits allow; if the
+backend cannot confirm it, its existing failure path applies (a fault, and
+the notice that a restore is unconfirmed), and the session ends. So the
+drain and the rest at the bottom begin with the normal limit in effect.
+
+**Where 100% can last longer** (disclosed before the start):
+
+- **Sleep in steps 1, 2 or 7.** macOS keeps a limit through sleep (note 08,
+  O10), so 100% stays in effect while the Mac sleeps on AC power. That is
+  macOS's own default with no limit set, so it adds no risk beyond the
+  time at 100%; the step's bound still applies, at the first evaluation
+  after waking.
+- **A return that is deferred or fails,** as above, until it is confirmed
+  or the owner sets the limit.
+- **CellKeeper killed or crashing in steps 1, 2 or 7:** the limit stays at
+  100% until CellKeeper runs again (which restores the owner's limit
+  first, note 08 O9) or the owner sets it.
+
+CellKeeper cannot act while it is not running: its step bounds and the
+72 h cap are applied at its next evaluation, not on time. Before a session
+starts, CellKeeper shows the recovery, with the value to set in System
+Settings › Battery (the owner's own limit), as `safety.md` precondition
+11 requires.
 
 ### 7.3 The steps
 
@@ -264,12 +283,12 @@ clock that counts sleep.
 |---|---|---|---|---|---|
 | 0 | Start | normal | Checks §7.4; records the summary capacities and cycle count ("before"), the owner's own limit and CellKeeper's limit | Starts it, in Settings | Admitted, or refused with the reason |
 | 1 | Charge to full | 100% | — | Leaves it plugged in | macOS reports the battery charged (`FullyCharged`, or 100% and not charging); at most 6 h |
-| 2 | Rest at the top | 100% | Times the rest | Leaves it plugged in | 2 h of rest, timed by a running CellKeeper on AC power; the timer restarts after a resume (§7.6) |
+| 2 | Rest at the top | 100% | Times the rest | Leaves it plugged in | 2 h on AC power by the monotonic clock that counts sleep, the timer restarting after a resume (§7.6); then the normal limit, confirmed (§7.2) |
 | 3 | Unplug | normal | Asks the owner to unplug (§7.5) | Unplugs | The Mac is on battery power; at most 4 h |
 | 4 | Drain | normal | Watches the charge | Uses the Mac on battery, as usual | The charge reaches the target, 20% (if it is at 15% or below, §7.6) |
 | 5 | Rest at the bottom | normal | Shows the request with a clock time to plug in again, at least 5 h later | Shuts the Mac down (or puts it to sleep), unplugged; plugs in after the time shown | The Mac is back, and CellKeeper running (§7.6 decides whether the rest counts) |
 | 6 | Plug in | normal | If the Mac is still on battery, asks the owner to plug in | Plugs in | The Mac is on AC power |
-| 7 | Charge to full | 100% | — | Leaves it plugged in | macOS reports the battery charged; at most 6 h |
+| 7 | Charge to full | 100% | — | Leaves it plugged in | macOS reports the battery charged, at most 6 h; then the normal limit, confirmed (§7.2) |
 | 8 | Finish | normal | Records the "after" values and shows the report (§7.9) | — | Done |
 
 A session ends after 72 h, whatever its step. Ending, here and below,
@@ -336,29 +355,40 @@ has no launch at login yet); the request says that too.
 
 ### 7.6 Early ends, resuming, low battery, and the rest
 
-**Cancel**, at any step: the session is marked ended, written and read
-back, before CellKeeper's normal policy applies again; a session marked
-ended never resumes, even if removing its record fails later. The report
-says which steps were done.
+**Cancel**, at any step: CellKeeper's normal policy applies again at once,
+and the session is marked ended and removed from storage. The store, like
+the weekly full charge's, reads back every write but cannot promise that
+the last write survives a crash or a power loss; so durability does not
+rest on the mark (next paragraph). The report says which steps were done.
 
-**Resuming after a quit, a crash or a restart.** When CellKeeper starts
-and finds a session not marked ended:
+**Storage failures.** If a write of the session fails, or its read-back
+differs, the session stops at once in memory (normal policy), and the menu
+says so; CellKeeper does not wait for storage to recover.
 
-1. It ends the session if the 72 h cap or the current step's bound has
-   passed, by the monotonic clock within the same boot, and by the wall
-   clock across a restart.
-2. It checks §7.4's conditions again, as they apply to the current step;
-   any that fails ends the session.
-3. Before asking for 100% again (steps 1, 2 and 7), it reconciles
-   ownership. A quit restores the owner's own limit and deletes the
-   backend's record, so a limit the owner changed while CellKeeper was not
-   running would otherwise look like CellKeeper's own. CellKeeper
-   therefore requires macOS's current limit to be the value it expects:
-   the owner's own limit recorded in the session after a quit, or 100%
-   with the backend's record still present after a crash. Anything else
-   is the owner's change: the session ends, and nothing is written.
-4. Step 2's rest timer starts again: CellKeeper cannot know whether the
-   Mac stayed plugged in while it was not running.
+**Resuming after a quit, a crash or a restart.** A session found at
+launch never resumes on its own: an older record may have come back, or
+the owner may have cancelled it before a crash. Startup runs in this
+order:
+
+1. **Before anything is written,** CellKeeper reads the session, macOS's
+   current limit, and the backend's outstanding record, if any.
+2. **The backend's own recovery runs first, as today:** after a crash it
+   restores the owner's own limit and removes its record (note 08, O9).
+   Ordinary policy, and the session, write nothing until step 4.
+3. CellKeeper ends the session if the 72 h cap or the current step's
+   bound has passed (the monotonic clock within the same boot, the wall
+   clock across a restart), or if a §7.4 condition for the current step
+   fails. It also ends it, writing nothing, if the limit is not
+   accounted for: where the backend had a record (a crash), its recovery
+   already judges the limit it finds against that record, and if it
+   adopts an outside change, the session ends; where it had none (a quit
+   restored the owner's limit and removed it), the limit read in step 1
+   must equal the owner's own limit recorded in the session, and
+   anything else is the owner's change.
+4. Otherwise CellKeeper shows the session paused, with normal policy, and
+   asks the owner to continue or cancel. Only "continue" lets it ask for
+   100% again. Step 2's rest timer starts again: CellKeeper cannot know
+   whether the Mac stayed plugged in while it was not running.
 
 **Unexpected changes of power** end the session, as R23 requires:
 unplugging during step 1 (the battery is not full), and plugging in
@@ -385,9 +415,12 @@ lengthens the time at a low charge:
 - **Counted (sleep):** the Mac slept without restarting, CellKeeper kept
   running, and: it fell asleep on battery power at 15–20%; it slept for at
   least 5 h by the monotonic clock that counts sleep, with the wall clock
-  agreeing within 10 minutes; it woke on battery power, or the first
-  change of power after waking was the plug-in; and the charge after was
-  no higher, and at most 3 points lower.
+  agreeing within 10 minutes; its first fresh reading after waking was on
+  battery power (a later reading on AC power is then the plug-in); and
+  the charge at that reading was no higher, and at most 3 points lower.
+  Power notifications carry no state and can be coalesced, so a first
+  reading after waking already on AC power cannot show when the plug-in
+  happened, and the result is "not confirmed".
 - **By the owner's account (shutdown):** after a restart CellKeeper cannot
   know what happened. It asks the owner whether the Mac stayed shut down
   and unplugged until the time shown, and records the answer, with the
@@ -451,8 +484,9 @@ macOS 27 (§3). It goes into the activity log and the Diagnostics report.
 - **Never fight macOS (R26):** no response to macOS holding the charge or
   running from the battery on AC; a step that cannot finish ends at its
   bound.
-- **Unsupervised time:** none at 100% by design, except after CellKeeper
-  is killed or crashes in steps 1, 2 or 7 (§7.2).
+- **Unsupervised time:** none at 100% by design, except sleep during steps
+  1, 2 or 7, a deferred or failed return, or CellKeeper killed or crashing
+  in those steps (§7.2), all disclosed before the start.
 - **Recovery (precondition 11):** shown before the start; every end
   returns to the normal policy; if CellKeeper cannot, System Settings ›
   Battery › Charging sets the limit, with the value CellKeeper shows as
@@ -474,8 +508,10 @@ From the code as it stands (2026-10-21):
 - the policy's integration: a session-owned request for 100% in steps 1,
   2 and 7 (today's temporary full charge ends the moment the battery is
   full, which would end step 2 at once), and the normal policy otherwise;
-- resuming, with §7.6's checks and ownership reconciliation, and the
-  exclusion of full charges and schedules of §7.4;
+- resuming, in §7.6's order: evidence first, the backend's recovery, the
+  checks, then the owner's choice to continue; the confirmed return to the
+  normal limit (§7.2); and the exclusion of §7.4, with the schedules gated
+  before the controller applies them in its evaluation;
 - the requests in the menu and new notification kinds, the rest check,
   and the owner's answer after a restart;
 - the admission checks and their reasons, Settings' calibration section,
