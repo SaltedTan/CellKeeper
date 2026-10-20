@@ -240,7 +240,9 @@ struct ManualCutSessionTests {
         #expect(driver.session.snapshot.stage == .restorePrompt)
         driver.type("restorenow", at: mark + 182)
         #expect(driver.session.snapshot.stage == .restoreReadBack)
-        // restored00 is typed; the Mac sleeps before the main loop reads it.
+        // The read-back question is on the terminal; restored00 is typed;
+        // the Mac sleeps before the main loop reads it.
+        #expect(eventually { driver.session.inputEligible })
         driver.at(mark + 190)
         driver.input.type("restored00")
         ManualCut.willSleepHandler(latch: driver.latch, now: { mark + 189 })({})
@@ -249,6 +251,25 @@ struct ManualCutSessionTests {
         #expect(flow.stage == .readFirst)
         #expect(!flow.restoreConfirmed)
         #expect(flow.sleeps == [mark + 189])
+        // The answer was never taken: the sleep came first, inside the same
+        // critical section, not after it to undo it.
+        #expect(!flow.answers.contains { $0.word == "restored00" })
+        driver.session.stopReminder()
+    }
+
+    @Test("A sleep latched while the main loop is stuck is delivered by the reminder, not repeated over")
+    func reminderDeliversLatchedSleep() {
+        let console = ConsoleWriter { _ in }
+        let driver = SessionDriver(console: console)
+        driver.toHold()
+        let mark = driver.session.snapshot.cutMark?.time ?? 0
+        driver.at(mark + 180)
+        #expect(eventually { driver.session.snapshot.stage == .restorePrompt })
+        // The Mac sleeps; only the reminder's timer runs after the wake.
+        ManualCut.willSleepHandler(latch: driver.latch, now: { mark + 185 })({})
+        driver.at(mark + 205)
+        #expect(eventually { driver.session.snapshot.stage == .readFirst })
+        #expect(driver.session.snapshot.sleeps == [mark + 185])
         driver.session.stopReminder()
     }
 
