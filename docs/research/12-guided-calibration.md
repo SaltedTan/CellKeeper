@@ -1,8 +1,9 @@
 # 12 — Guided battery calibration, without SMC writes
 
 - **Date:** 2026-10-21
-- **Status:** Design approved by the owner on 2026-10-21, for
-  implementation; nothing is built yet. The owner asked on 2026-10-20 for a
+- **Status:** Design approved by the owner on 2026-10-21; implemented
+  (`architecture.md`, "Guided calibration", D112), not yet tried on a
+  Mac. The owner asked on 2026-10-20 for a
   calibration feature like the one other battery tools offer, and chose,
   from the options in §6, "write up, then build A": a calibration that
   CellKeeper guides and the owner carries out, with no SMC write, no

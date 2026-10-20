@@ -118,6 +118,7 @@ app (`AppModel`, `AppDelegate` and the views) are checked by hand.
 | Steps for turning macOS's Charge Limit off are offered only while it may be limiting and the backend accepts requests. They say that CellKeeper never changes these settings, that macOS may still hold charging, and that CellKeeper withholds its own restrictions meanwhile; with simulated controls they first say that the Simulated helper provides no replacement charge limit and the Mac may charge to 100%. The menu's notice says only what macOS reports, that CellKeeper withholds its own restrictions, and, where they apply, that a restriction of its own may remain and the simulation's caution. CellKeeper only opens System Settings › Battery | R25, R26, R30 | `MacOSChargeLimitGuide`, `ControlStatement.offersMacOSLimitGuide`, `MacOSChargeLimitGuideView` |
 | Decisions, requests, results, and safety fallbacks logged (unified logging + in-app activity log); no device identifiers read or logged | R32 | `ChargeController.record`, allowlists in `BatteryTelemetryParser` |
 | An automatic retry of a failed restore waits 60 s; user actions retry at once | R13 | `ChargingPolicy.restoreRetryRefusal`, `ChargeController` |
+| A guided calibration (research note 12 §7; implemented, not yet tried on a Mac) is user-initiated, with macOS's Charge Limit only, and its only output is that limit: 100% only in its two charges and the rest at the top, which begin on power with CellKeeper running, and CellKeeper's normal limit otherwise. It never discharges anything. Each 100% step is left only once a read-back confirms the normal limit; a return that fails goes through the existing failure handling and ends the session. Steps are bounded (6 h charges, 4 h waiting for the unplug) and every session ends after 72 h, on a monotonic clock that counts sleep within a boot and the wall clock across a restart. It never asks for a rest at 15% or below, and ends there before the rest, asking for a plug-in. An unplug while charging to full, a plug-in during the drain, management off, an outside change, a backend switch or fault, a temperature outside 10–40 °C or a reading that disappears, and a store that cannot save it end it; ending means the normal policy at once. Full charges and their schedules are refused while it exists. A session found at launch is checked after the backend's own recovery (an adopted change, or a limit that is not the owner's recorded one, ends it) and stays paused, asking for nothing, until you continue it. Sleep, a crash or a failed return in a 100% step can keep 100% in effect longer; Settings says so, with your own limit to set in System Settings › Battery, before you start | R5, R8, R22, R23, R26 | `CalibrationSession`, `CalibrationRunner`, `CalibrationAdmission`, `CalibrationStore`, `ChargingPolicy.evaluateNativeLimit`, `ChargeController` |
 
 ### macOS Charge Limit backend
 
@@ -609,6 +610,22 @@ limits on the helper's own calls into the hardware, is still missing.
   Releasing would only restore and re-apply the setting after every wake.
 - **Restore retries.** An automatic retry of a failed restore waits 60 s
   (user actions retry at once), so a broken backend is not run in a loop.
+- **Calibration temperature (R23).** R23 aborts a calibration outside
+  10–40 °C. Where CellKeeper reads the battery's temperature it does, and a
+  reading that disappears ends the session. Where it cannot, as on macOS 27,
+  a session starts only after you confirm a room at 10–35 °C with the Mac
+  out of a bag and off soft surfaces; the menu says "temperature unknown"
+  throughout and the report says it was not checked. A room's temperature
+  does not establish the battery's; the battery's own protections apply
+  either way. Decided by the owner on 2026-10-21 (note 12 §7.7).
+- **Calibration power changes (R23).** R23 aborts on unexpected changes of
+  power. Two requested actions arriving early are accepted instead and
+  recorded: unplugging during the rest at 100% moves to the drain, the rest
+  short, and asks for the normal limit at once; plugging in during the rest
+  at the bottom before the time shown moves to the final charge, the rest
+  short. Every other change of power that is not the requested action ends
+  the session, including an unplug during the final charge before full.
+  Decided by the owner on 2026-10-21 (note 12 §7.6).
 - **Outside changes with the native Charge Limit (R27).** R27 asks for a
   fault. With the native Charge Limit, a recognised value that CellKeeper did
   not set is instead adopted as your own limit: nothing is written, not even
