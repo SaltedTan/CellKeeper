@@ -787,7 +787,9 @@ words.
    charging. Keep the lid open and the Mac on a hard surface, and stay with
    it. Quit anything heavy (builds, games, video exports) and leave it idle
    during the run. If the Mac gets unusually hot, press Ctrl-C in terminal
-   A and follow the read-first steps it prints (§7.1) at once.
+   A. Unless you have already confirmed the restore, it prints the
+   read-first steps (§7.1): follow them at once. Either way, check recovery
+   (step 8).
 5. **Rules for the whole run:**
    - Do not touch the adapter or its cable, and do not close the lid or let
      the Mac sleep. The run is expected to leave the Mac running from its
@@ -848,8 +850,10 @@ words.
    6. **After.** 3 to 5 minutes of readings; then the report.
 
    The whole run takes about 7½ minutes with the default hold, up to about
-   12. Ctrl-C ends it at any time; after the CUT prompt it prints RESTORE
-   CHIE NOW, and you follow the read-first steps (§7.1).
+   12. Ctrl-C ends it at any time. After the CUT prompt and before you
+   have confirmed the restore, it prints RESTORE CHIE NOW, and you follow
+   the read-first steps (§7.1). After a confirmed restore, it only ends the
+   after readings early (§4.6); still check recovery (step 8).
 8. **After the run, check recovery first** — and if the Mac slept during
    the run, as soon as it wakes. Recovery counts only when **both** hold: a
    read in B shows `(bytes 00)`, **and** the battery menu shows the power
