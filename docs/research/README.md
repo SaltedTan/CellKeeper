@@ -18,6 +18,7 @@ before being committed. Architecture decisions based on them live in
 | 08 | [Native Charge Limit through Shortcuts](08-native-charge-limit.md) | Can CellKeeper set, read back and restore macOS's Charge Limit from the sandbox? |
 | 09 | [The ChargeInhibit probe](09-charge-inhibit-probe.md) | Does Apple's private `ChargeInhibit` power assertion stop charging on this Mac, and does charging resume when it is released? (owner-run 2026-10-19: no effect observed) |
 | 10 | [The DisableInflow probe](10-disable-inflow-probe.md) | Does Apple's private `DisableInflow` power assertion do nothing, stop charging on adapter power, or cut the adapter's power on this Mac, and does everything return when it is released? (owner-run 2026-10-20: no effect observed) |
+| 12 | [Guided battery calibration](12-guided-calibration.md) | What does a battery calibration need for the gauge to relearn, what do other tools do, and how can CellKeeper guide one with no SMC writes? (design, 2026-10-21, awaiting the owner's approval) |
 | 11 | [The SMC adapter cut, a manual test](11-smc-adapter-cut.md) | Does writing the SMC key `CHIE` cut the adapter's power on this Mac, so that it runs from its battery while plugged in, and does restoring the key bring adapter power and charging back? (owner-run 2026-10-20, by hand with an existing open-source tool, the probe only observing: the adapter's power was cut and came back on restore; macOS reported no adapter during the cut, so the owner's account decides it. Not used: the owner rejected a cut as CellKeeper's control, and the old inhibit keys read empty) |
 
 ## Classification legend
@@ -44,8 +45,8 @@ Some notes use their own evidence labels alongside these tags:
 | 04, 05 | `[Exp]` | Experiment performed during research (read-only or sandbox-probe only) |
 | 04, 05, 06 | `[Inference]`, `[I]` | Reasoning, not stated by a source |
 | 04, 05 | `[3P]` | Third-party secondary source |
-| 06 | `[S]`, numbered `[n]` | Sourced statement / source number in that note |
-| 06 | `[O]` | Open question |
+| 06, 12 | `[S]`, numbered `[n]` | Sourced statement / source number in that note |
+| 06, 12 | `[O]` | Open question |
 | 07 | `[F]`, `[V]`, `[I]` | Fetched source, verified locally, inference |
 
 ## Research environment and confound
