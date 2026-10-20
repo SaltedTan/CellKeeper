@@ -2477,8 +2477,9 @@ channel: they report what statuses establish and never affect charging.
   in again; whenever the request that holds changes; and when a session
   ends. The request it keeps is from then on withdrawn like one this run
   queued: once it no longer holds, and at once if notifications are turned
-  off, also before the list arrives. No new persistence: the center itself
-  is the record. While a session exists the limit hold is
+  off. If they are turned off while the list is on its way, the request is
+  removed with the others when the list arrives, not kept. No new
+  persistence: the center itself is the record. While a session exists the limit hold is
   not armed, since the calibration's 100% and returns are its own doing
   (see "Guided calibration", D112).
 - **Evidence.** A notification that says something happened needs positive
