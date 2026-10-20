@@ -296,9 +296,10 @@ with a narrow clean-room exception for the facts it needs
   the restore is confirmed. The key's values come from third-party
   open-source projects under the owner's clean-room exception, and are
   claims until this test. *Run by the owner on 2026-10-20: the adapter's
-  power was cut.* With `CHIE` at `08` the Mac ran from its battery for the
-  3-minute hold, with the adapter plugged in and about 0.5 W of input, and
-  `00` brought adapter power and charging back. The cut also made macOS
+  power was cut.* With `CHIE` at `08` the adapter stopped being reported
+  before the owner's read-back, and from about 76 s after the cut until the restore the
+  Mac ran from its battery with the adapter plugged in and about 0.5 W of
+  input; `00` brought adapter power and charging back. The cut also made macOS
   report no adapter at all, so the probe's verdict is `inconclusive` by its
   rule, and the owner's account that the adapter stayed plugged in decides
   it (note 11 §10). It is not added to the helper's allowlist. (A first

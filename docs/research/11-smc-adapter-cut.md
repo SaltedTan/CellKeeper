@@ -1110,9 +1110,12 @@ either.
 `00` (`start00`, +53.2 s) and typed `cutnow` (+110.1 s); the probe printed
 its GO line. The owner had not understood that GO meant running the cut at
 once, and ran no write. With no `cut08` within 90 s, the probe showed the
-read-first steps (+200.1 s); the owner read `CHIE` again, typed `00`
-(nothing to restore, nothing written; +247.3 s), and the run ended after
-its after readings (+427.4 s). Verdict: `inconclusive` ("the restore went
+read-first steps (+200.1 s); the owner typed `00` (nothing to restore,
+nothing written; +247.3 s), and the run ended after its after readings
+(+427.4 s). The owner's shell history shows no read of `CHIE` between the
+first read (21:31:17) and the second run's first read (21:42:17), so that
+`00` rests on the earlier read and on no write having been made, not on a
+fresh read. Verdict: `inconclusive` ("the restore went
 through the read-first steps: no cut08 within 90 s of the cut mark").
 Every one of its 188 readings showed charging, from 82 to 87%. §6 step
 7.3 now says that GO means running the cut at once. Between the two runs
@@ -1144,9 +1147,9 @@ run's preconditions were checked.
 
 The second run's report follows, with runs of sample rows whose values
 only differ in the update's age shortened, the warnings' text, the column
-legend and the criteria (§4.8) left out, and the title and section
-underlines removed; bracketed text is not in the report. It contains no
-serial numbers, user names or home paths.
+legend, the criteria (§4.8) and the closing privacy line left out, and
+the title and section underlines removed; bracketed text is not in the
+report. It contains no serial numbers, user names or home paths.
 
 ```text
 started:   2026-10-20 21:42:11 +11:00
@@ -1259,10 +1262,13 @@ from it.
 - `[VERIFIED-EXPERIMENTALLY]` By the owner's account that the adapter
   stayed plugged in, writing `CHIE` `08` with the tool cut the adapter's
   power on this Mac, macOS build and firmware, with the native Charge
-  Limit off: the Mac ran from its battery for the 3-minute hold, at about
-  1.1 A, with about 0.5 W of system power input. Writing `00` brought the
-  adapter back at once, and charging at the next battery update. This
-  answers §8 questions 1 and 2. It is one run, on one Mac.
+  Limit off. The adapter stopped being reported between the cut command
+  and the owner's read-back of it (21:43:25 and 21:43:37); from the
+  battery update 76.4 s after the cut mark until the
+  restore, about two minutes, every update showed the battery discharging
+  at about 1.1 A with about 0.5 W of system power input. Writing `00`
+  brought the adapter back at once, and charging at the next full battery
+  update. This answers §8 questions 1 and 2. It is one run, on one Mac.
 - `[VERIFIED-EXPERIMENTALLY]` The cut hid the adapter from every reading
   the probe makes, not only from `ExternalConnected` as reported (S4): it
   also turned `AppleRawExternalConnected` false and left
@@ -1279,13 +1285,21 @@ from it.
   first) and before the read at 21:43:37 that showed `08`; it came back
   between the readings at 21:46:48 and 21:46:50, within about a second of
   the restore entered at 21:46:49.
-- `[VERIFIED-EXPERIMENTALLY]` The adapter's state changed in the readings
-  at once, but the battery current and the system power input changed only
-  with the battery's updates, so the first update after the cut caught the
-  change part way (`mixed`), and the first after the restore still showed
-  discharging. The battery also updated early at each change (21:43:35,
-  32 s after the previous update; 21:46:48, 13 s after); otherwise it
-  updated once a minute.
+- `[VERIFIED-EXPERIMENTALLY]` The adapter's state changed from one 2 s
+  reading to the next, but the battery current and the system power input
+  changed only at the battery's updates. (Update times here are
+  reconstructed as a reading's clock minus the update's age, to the
+  second.) The first update after the cut command, at about 21:43:35,
+  showed 997 mA into the battery with the charging flag off and 32 222 mW
+  of input (`mixed`); the update at about 21:46:48, around the restore
+  command (entered at 21:46:49), still showed discharging. Updates came
+  about once a minute, and sooner three times: at about 21:43:35 (32 s
+  after the previous one), 21:46:48 (13 s) and 21:49:34 (46 s, as the
+  charge went from 88 to 89%).
+- `[INFERRED/UNVERIFIED]` The `mixed` update most likely straddled the
+  moment of the cut, and the two early updates around the cut and the
+  restore were most likely set off by the change of power state, as note
+  10 §10 saw updates set off by a change of charge.
 - **Not tested:** whether `CHIE` stays `08` across unplug/replug, sleep or
   a restart (§8 question 3), or whether the native limit makes it ignored
   (question 4); longer cuts, repeated cuts, other charge levels, and other
