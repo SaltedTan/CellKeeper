@@ -7,7 +7,12 @@
   Writing `00` brought both back. The probe's verdict is `inconclusive`
   by its own rule, because no reading during the cut reported the adapter
   attached, so the readings alone look like an unplug; the owner's account
-  that the adapter stayed plugged in decides it (§4.8, §10). Phase 2 as
+  that the adapter stayed plugged in decides it (§4.8, §10). **The owner
+  then decided, the same day, not to use `CHIE` in CellKeeper:** a cut
+  drains the battery and recharges it, while CellKeeper's purpose is to
+  stop charging at a limit and run from the adapter (§2.3). A read-only
+  read of the old charge-inhibit keys (`CHTE`, `CH0B`, `CH0C`) printed
+  `no data` for each (§10). Phase 2 as
   first planned, in which the probe itself would open the AppleSMC user
   client and write `CHIE`, was replaced by the owner's decision of
   2026-10-20: an automated safety check stopped an agent's response as it
@@ -99,7 +104,8 @@ the SMC adapter cut on this Mac. The decision, in three parts:
    licence-compatibility review.
 3. **The behaviour is accepted:** a level is held by cutting adapter power
    at the limit and restoring it below; macOS's own limit must be off; a cut
-   does not release itself.
+   does not release itself. *Withdrawn by the owner after the result
+   (§2.3).*
 
 AlDente's helper must still be absent, checked read-only as in note 09.
 This note and the probe consulted **no** AlDente source, documentation or
@@ -140,6 +146,26 @@ owner then chose, later on 2026-10-20, **"Existing tool, by hand"**:
 The lead fact-checked the tool, its licence and its commands before this
 revision (§4.1; S14, S15).
 
+### 2.3 After the result
+
+Later on 2026-10-20, after the run of §10, the owner made two more
+decisions:
+
+- **`CHIE` is not CellKeeper's control mechanism.** In the owner's words,
+  the main function of the app is "to preserve battery life by stopping
+  charging at certain limits and use energy from the adapter". An adapter
+  cut does the opposite while it is set: the Mac runs from its battery,
+  and a limit built on it drains the battery and recharges it. This
+  withdraws §2.1 item 3. No SMC write layer is needed (§8 question 7), and
+  the persistence run (question 3), which the owner had just queued for
+  later, is not needed for CellKeeper unless this decision changes.
+- **One read-only read of the old charge-inhibit keys** `CHTE`, `CH0B` and
+  `CH0C`, by the owner, with the same tool and its `-r` only: no `sudo`,
+  nothing written, nothing enumerated. Their names come from the
+  third-party reports cited in §3.3 (S3, S4, S11), under the same
+  facts-only exception. It answers whether this firmware still offers an
+  inhibit (§8 question 6). Agents still read no SMC key.
+
 ## 3. Mechanism and sources
 
 Every fact below is cited with its source and licence, and graded. Facts
@@ -178,9 +204,10 @@ SMC client, does.** These facts come from Apple's own open source and the
 public SDK, and are corroborated by two open-source SMC clients: SMCKit
 (MIT), which describes itself as a client for Intel-based Macs, and gosmc
 (GPL-2.0, strong copyleft). They describe how a client reaches **one**
-named key, not how to enumerate keys. They are kept as background, for the
-owner's later decision about a write layer (§8, question 7). This note
-gives no layout and no call sequence.
+named key, not how to enumerate keys. They were kept as background for
+the owner's decision about a write layer (§8, question 7), which §2.3 has
+since settled: none is needed. This note gives no layout and no call
+sequence.
 
 | Item | What the sources state | Source | Licence | Tags / grade |
 |---|---|---|---|---|
@@ -203,8 +230,9 @@ decisions for CellKeeper's own single-key client: a parameter-block layout
 derived from the sources, an open type, a confirming read in the writer's
 own process just before the cut, and no fallback to another layout. With
 the owner's decision of §2.2 that client will not be built, and those
-decisions are withdrawn. Whether CellKeeper ever needs an SMC write layer,
-and who would write it, is an open owner decision (§8, question 7).
+decisions are withdrawn. Whether CellKeeper needed an SMC write layer,
+and who would write it, was left to the owner (§8, question 7); after the
+result, the owner decided not to use `CHIE`, so none is needed (§2.3).
 
 ### 3.3 Reported behaviour (third-party claims — unverified)
 
@@ -992,12 +1020,14 @@ which has the same steps.
    (unplug/replug, sleep, restart; note 02 §7, Phase D) is **an owner
    decision** for before any helper work: it decides whether CellKeeper's
    own control needs a startup reconciliation and an uninstaller restore
-   (note 02 §6). *Still open: in the run of §10, the owner restored `CHIE`
-   by hand while the Mac was awake and plugged in.*
+   (note 02 §6). *Not tested: in the run of §10, the owner restored `CHIE`
+   by hand while the Mac was awake and plugged in. After the owner's
+   decision not to use `CHIE` (§2.3), it is not needed for CellKeeper.*
 4. Is `CHIE` ignored while the native Charge Limit is on, as reported
    (§3.3)? The test is done with the limit off, so this is not measured
    here; it matters because CellKeeper's own control must turn the native
-   limit off. *Still open: the limit was off for the run of §10.*
+   limit off. *Not measured: the limit was off for the run of §10; moot
+   for CellKeeper after §2.3.*
 5. On Apple silicon the matched service is an RTKit SMC endpoint, not the
    Intel AppleSMC device (§9). Does a client written for the Intel device
    read and write `CHIE` through it? The owner's reads and writes answer
@@ -1009,21 +1039,25 @@ which has the same steps.
    each is a key outside the allowlist and is **deliberately not read**;
    the allowlist is `CHIE` only (§2; lead's decision, 2026-10-20), and the
    owner never uses the tool's `-l`, `-f` or `-t`. Reading any of them,
-   even read-only, needs its own owner decision.
+   even read-only, needs its own owner decision. *Answered for the inhibit
+   keys (§2.3, §10): the owner's read-only reads of `CHTE`, `CH0B` and
+   `CH0C` each printed `no data`. `CH0I` and `CH0J` stay unread.*
 7. **If `CHIE` works, how would CellKeeper write it?** CellKeeper's own
-   helper would need an SMC write layer, and agents will not write one
-   (§2.2). This is **the next owner decision** after the result: a layer
-   the owner writes; an existing external tool that the helper uses, which
-   raises licence, signing and safety questions of its own; or stopping at
-   macOS's native 80–100% limit. Nothing is decided here. *The result of
-   §10 makes this the owner's next decision.*
+   helper would have needed an SMC write layer, and agents will not write
+   one (§2.2). The choices were a layer the owner writes; an existing
+   external tool that the helper uses, which raises licence, signing and
+   safety questions of its own; or stopping at macOS's native 80–100%
+   limit. *Decided on 2026-10-20 (§2.3): none of the first two. The owner
+   rejected `CHIE` as CellKeeper's control mechanism, so CellKeeper stays
+   on macOS's native limit.*
 8. **Can anything tell a `CHIE` cut from an unplugged adapter?** During
    the cut in §10, no reading the probe makes reported the adapter
    (IOPowerSources, `ExternalConnected`, `AppleRawExternalConnected`,
    `IOPSCopyExternalPowerAdapterDetails`). Whether any other read-only
    signal still does, so that CellKeeper's own control could notice a
    real unplug during a cut, is not investigated; any new read would need
-   its own review. *Added on 2026-10-20, after §10.*
+   its own review. *Added on 2026-10-20, after §10; moot for CellKeeper
+   after §2.3.*
 
 ## 9. Pre-run state
 
@@ -1324,11 +1358,46 @@ from it.
   CellKeeper included, sees an unplugged Mac. CellKeeper's own control
   would have to account for its own cut, and could not tell a real unplug
   during one from the readings the probe uses (§8 question 8).
-- The next decision is the owner's (§8 question 7): a layer the owner
-  writes, an external tool, or stopping at macOS's native 80–100% limit.
-  A persistence run (question 3) is a separate owner decision, needed
-  before any helper work. Until then, macOS's own Charge Limit stays
-  CellKeeper's only real control, and limits below 80% stay simulated.
+- The owner then decided not to use `CHIE` (§2.3), for the reason in the
+  previous bullet: CellKeeper's purpose is to stop charging at a limit
+  while the Mac runs from its adapter.
+
+### After the result: the inhibit keys read empty
+
+`[VERIFIED-EXPERIMENTALLY]` (owner-run, read-only, 2026-10-20, 22:33 local
+by the owner's shell history; the owner's decision in §2.3): with the same
+tool, in the same directory, without `sudo`, the owner read each of the
+old charge-inhibit keys once. Each printed the same thing:
+
+```text
+  CHTE  [    ]  no data
+  CH0B  [    ]  no data
+  CH0C  [    ]  no data
+```
+
+In the tool's source (S14), `no data` means the read call succeeded but
+reported a data size of zero, and the blank brackets are an empty type;
+the tool does not tell an absent key from a zero-size placeholder. So the
+reads exposed no value for any of the three keys; nothing was tried that
+would show whether a write is accepted. `[INFERRED/UNVERIFIED]` A key
+that reports no size offers nothing a charge limit could write to, so
+these keys are not a usable inhibit on this firmware. This matches
+the reports for 20457.x firmware (§3.3; note 02 §3.3, which says these
+keys are zero-size or "no data"). Nothing was written, and no other key
+was read.
+
+**What it means for phase 4c.** On this Mac, macOS build and firmware,
+nothing found stops charging while the Mac runs from its adapter except
+macOS's own Charge Limit (80–100%): note 10 §9 observed it holding 80% on
+AC power, not charging, with about 16 W drawn from the adapter. Apple's
+two private assertions had no effect (notes 09 and 10); the old inhibit
+keys read empty; the firmware-limit keys are reported empty or refused
+even to root (§3.3), and are not read here; and `CHIE`, which does work, is a
+cut, which the owner rejected (§2.3). So macOS's Charge Limit stays
+CellKeeper's only real control, and limits below 80% stay simulated. The
+reports tie this gating to firmware (note 02 §3.2), so a later macOS or
+firmware update could change it; that would need a new check, and new
+owner decisions.
 
 ## 11. Sources
 

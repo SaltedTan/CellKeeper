@@ -56,8 +56,14 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
   clean-room rule); the owner made them on 2026-10-20, and the owner's
   manual test, observed by the probe, ran that day: the cut worked, by the
   owner's account that the adapter stayed plugged in
-  ([research note 11](research/11-smc-adapter-cut.md) §10). How
-  CellKeeper could use it is the owner's next decision.
+  ([research note 11](research/11-smc-adapter-cut.md) §10). The owner
+  then decided not to use it, because a cut runs the Mac from its battery
+  instead of stopping charging, and an owner-run read showed the older
+  charge-inhibit keys empty on this firmware. On this Mac, macOS's own
+  Charge Limit (80–100%) is the only verified, usable control found so
+  far that stops charging on adapter power. Any further experiment (for
+  example the firmware-limit keys, which were not read) needs new
+  evidence and new owner decisions.
 - While both were blocked, the owner approved three smaller features on
   2026-10-18, all done: Save Diagnostics… (milestone 3), opt-in
   notifications (milestone 3) and a one-shot scheduled full charge
@@ -306,12 +312,13 @@ with a narrow clean-room exception for the facts it needs
   the helper's allowlist. (A first design, in which the probe wrote
   `CHIE` itself, was replaced on 2026-10-20: an
   automated safety check stopped an agent's response as it began writing
-  the SMC client code, and the lead decided not to route around it.) Even
-  if the cut works, CellKeeper's helper needs an SMC write layer that
-  agents will not write; the owner now decides between a layer the owner
-  writes, an external tool, and stopping at macOS's own 80–100% limit
-  (note 11 §8). A persistence run (unplug/replug, sleep, restart) is a
-  separate owner decision, needed before any helper work.
+  the SMC client code, and the lead decided not to route around it.)
+  *Not used (owner decision, 2026-10-20):* CellKeeper's purpose is to stop
+  charging at a limit while the Mac runs from its adapter, and a cut does
+  the opposite while it is set. So no SMC write layer and no persistence
+  run are needed. The owner also read the older charge-inhibit keys
+  (`CHTE`, `CH0B`, `CH0C`) once, read-only, with the same tool: each
+  printed `no data` (note 11 §10).
 - Follow research note 02 §7: a read-only, allowlisted capability probe,
   then single reversible writes, then the persistence matrix. Evaluate
   Apple's private `ChargeInhibit` power assertion first: Apple's published
@@ -319,7 +326,7 @@ with a narrow clean-room exception for the facts it needs
   show whether it works, and is released, on shipping Apple silicon. Try the
   SMC adapter-cut key only if a genuine need remains. (Both assertions
   showed no effect on this Mac; the adapter cut, the third step above,
-  worked.)
+  worked but is not used, and the inhibit keys read empty.)
 - Record the results per Mac model and firmware in `docs/research/`. Add a
   verified mechanism to the helper's allowlist, with behavioural
   verification in independent telemetry (`safety.md` precondition 5) and a
