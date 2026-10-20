@@ -1045,6 +1045,25 @@ public actor ChargeController {
         }
     }
 
+    /// Research note 12 §7.6: at launch, with no record held, macOS's Charge
+    /// Limit is not the owner's own limit recorded in the session, which is
+    /// what quitting left: the owner changed it. Kept as an outside change,
+    /// as the backend keeps one it finds against its record: nothing is
+    /// written, Manage charging is turned off until the owner turns it on
+    /// again, and the backend's adoption marker keeps it off at the next
+    /// launch. A limit that could not be read cannot be shown to be the
+    /// owner's, nor ruled out: nothing is written and Manage charging is
+    /// turned off too, without a marker.
+    private func keepUnaccountedLimit(found: Int?, ownerLimit: Int) async {
+        guard settings.isManagementEnabled else { return }
+        if let found, let native = backend as? NativeChargeLimitBackend, await native.keepOutsideLimit(found, previousOwnerLimit: ownerLimit) {
+            nativeLimit = await native.nativeLimitStatus()
+            adopt(await native.takeAdoptedLimitChange())
+            return
+        }
+        adopt(nil, unknownValue: "CellKeeper could not read macOS's Charge Limit when it started again, so it cannot tell whether it was changed while CellKeeper was not running (your own limit was \(ownerLimit)%). It changed nothing")
+    }
+
     /// Records what the calibration did since this was last called.
     private func recordCalibrationLog() {
         for line in calibration.takeLog() {
@@ -1375,6 +1394,13 @@ public actor ChargeController {
             at: calibrationStamp
         )
         recordCalibrationLog()
+        if let unaccounted = calibration.takeUnaccountedLimit() {
+            // Before the policy, so that it writes nothing over the owner's
+            // change.
+            await keepUnaccountedLimit(found: unaccounted.found, ownerLimit: unaccounted.ownerLimit)
+            input.settings = settings
+            input.currentMode = currentMode
+        }
         input.calibrationWantsFullLimit = calibration.wantsFullLimit
         let isCalibrating = calibration.isInProgress
         let oneShotStart = isCalibrating ? nil : applySchedule(to: &input)
@@ -2078,7 +2104,9 @@ public actor ChargeController {
     /// change was most likely deliberate (System Settings), so CellKeeper
     /// turns management off rather than override it; the user turns it on
     /// again to let CellKeeper manage the limit.
-    private func adopt(_ change: AdoptedLimitChange?) {
+    /// - Parameter unknownValue: what the log says, in place of the change,
+    ///   when no value could be read.
+    private func adopt(_ change: AdoptedLimitChange?, unknownValue: String? = nil) {
         currentMode = .normal
         ownedMode = .normal
         responsibleMode = nil
@@ -2092,7 +2120,7 @@ public actor ChargeController {
         let found = change.map { $0.isNoLimit ? "no limit (100%)" : "\($0.limit)%" } ?? "a new value"
         let expected = change.map { " (CellKeeper had set \($0.expectedLimit)%)" } ?? ""
         let when = change?.isFromEarlierSession == true ? "Before CellKeeper last stopped, " : ""
-        var message = "\(when)macOS's Charge Limit was changed outside CellKeeper to \(found)\(expected), for example in System Settings. CellKeeper kept it as your own limit and changed nothing"
+        var message = unknownValue ?? "\(when)macOS's Charge Limit was changed outside CellKeeper to \(found)\(expected), for example in System Settings. CellKeeper kept it as your own limit and changed nothing"
         if settings.isManagementEnabled {
             settings.isManagementEnabled = false
             message += "; it turned off Manage charging, so turn that on to let CellKeeper manage the limit again"

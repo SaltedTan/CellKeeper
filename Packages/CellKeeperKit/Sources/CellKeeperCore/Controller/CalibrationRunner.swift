@@ -156,6 +156,9 @@ struct CalibrationRunner {
     /// What happened since the controller last took it, for the activity
     /// log.
     private(set) var log: [String] = []
+    /// At launch the limit was not accounted for (§7.6 step 3): the
+    /// controller keeps it as the owner's change.
+    private var unaccountedLimit: (found: Int?, ownerLimit: Int)?
 
     init(store: (any CalibrationStoring)?, clock: CalibrationClock, run: UUID = UUID()) {
         self.store = store
@@ -193,6 +196,15 @@ struct CalibrationRunner {
     mutating func takeLog() -> [String] {
         defer { log = [] }
         return log
+    }
+
+    /// The limit found at launch that is not the one CellKeeper left, with
+    /// the owner's own limit recorded in the session, once: the session has
+    /// ended, and the controller keeps the limit as the owner's change,
+    /// writing nothing (§7.6).
+    mutating func takeUnaccountedLimit() -> (found: Int?, ownerLimit: Int)? {
+        defer { unaccountedLimit = nil }
+        return unaccountedLimit
     }
 
     /// A stamp for `wall`, read together with the monotonic clock. Without a
@@ -327,6 +339,9 @@ struct CalibrationRunner {
         if needsStartupCheck {
             needsStartupCheck = false
             if let end = startupEnd(current, startup: startup, context: context) {
+                if case .unaccountedLimit(let found, let expected) = end {
+                    unaccountedLimit = (found, expected)
+                }
                 finish(end, at: stamp, reading: context.reading)
                 return
             }

@@ -540,21 +540,54 @@ struct CalibrationControllerTests {
         #expect(second.system.reading == .limit(85))
     }
 
-    @Test("After a quit, a limit that is not the owner's own recorded in the session is the owner's change: the session ends, writing nothing")
-    func quitThenOutsideChange() async {
+    @Test("After a quit, a limit that is not the owner's own recorded in the session is the owner's change: kept, nothing written, Manage charging off, and the session ends")
+    func quitThenOutsideChange() async throws {
         let rig = CalibrationRig()
         _ = await rig.started()
         await rig.controller.shutdown(reason: "quit")
         rig.system.changeExternally(to: 95)
         let inputs = rig.system.runInputs
         let second = rig.relaunched(reading: calibrationReading(85))
-        let status = await second.controller.evaluate(.launch)
+        var status = await second.controller.evaluate(.launch)
         #expect(status.calibration.session == nil)
         #expect(status.calibration.last?.end == .unaccountedLimit(found: 95, expected: 90))
-        // The normal policy then treats 95% as the owner's own, as at any
-        // launch.
-        #expect(second.system.runInputs == inputs + ["80"])
+        #expect(second.system.runInputs == inputs, "nothing written")
+        #expect(!status.settings.isManagementEnabled)
+        #expect(status.adoptedChange?.limit == 95)
+        #expect(status.adoptionCount == 1)
+        #expect(status.decision?.state == .unmanaged)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: second.records)?.limit == 95, "the marker keeps Manage charging off at the next launch")
+        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("changed outside CellKeeper to 95%") && $0.message.contains("turned off Manage charging") })
+        second.clock.advance(by: 120)
+        status = await second.controller.evaluate(.periodic)
+        #expect(second.system.runInputs == inputs)
+        #expect(second.system.reading == .limit(95))
+        // Turning Manage charging on again retires the marker, and 95% is
+        // then recorded as the owner's own limit before CellKeeper's is set.
+        status = try await second.controller.apply(settings: ChargingSettings.default.withChargeLimit(80), adoptionsSeen: status.adoptionCount)
+        #expect(status.settings.isManagementEnabled)
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: second.records) == nil)
+        #expect(second.system.reading == .limit(80))
         #expect(status.nativeLimit?.ownerLimit == 95)
+    }
+
+    @Test("After a quit, a limit that cannot be read at launch is not accounted for either: nothing written, Manage charging off")
+    func quitThenUnreadable() async {
+        let rig = CalibrationRig()
+        _ = await rig.started()
+        await rig.controller.shutdown(reason: "quit")
+        rig.system.readFails = true
+        let inputs = rig.system.runInputs
+        let second = rig.relaunched(reading: calibrationReading(85))
+        var status = await second.controller.evaluate(.launch)
+        #expect(status.calibration.last?.end == .unaccountedLimit(found: nil, expected: 90))
+        #expect(!status.settings.isManagementEnabled)
+        #expect(status.events.contains { $0.kind == .safety && $0.message.contains("could not read macOS's Charge Limit when it started again") })
+        second.system.readFails = false
+        second.clock.advance(by: 120)
+        status = await second.controller.evaluate(.periodic)
+        #expect(second.system.runInputs == inputs, "nothing written, also once the limit can be read")
+        #expect(second.system.reading == .limit(90))
     }
 
     @Test("At launch, a passed cap (by the wall clock across a restart) or bound ends the session")
