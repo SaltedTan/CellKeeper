@@ -39,7 +39,8 @@
 //   manual-adapter-cut` (the owner, never as root, from a terminal) makes
 //   `check`'s reads, registers for sleep notifications, holds one public
 //   idle-sleep assertion, and asks the owner, on the terminal, for the tool
-//   commands' results; it reads no SMC key and starts no process.
+//   commands' results; it reads no SMC key and runs no control tool, only
+//   the three read-only getters it shares with `check`.
 
 import PackageDescription
 

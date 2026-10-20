@@ -91,9 +91,9 @@ public enum ManualCut {
                 """
         case .unconfirmed:
             return """
-                Could not save or confirm the report: ./\(fileName) is not the file the probe \
-                created or wrote, so what it holds is unknown. Copy the report above instead, \
-                and send it to the lead.
+                Could not save or confirm the report: the probe could not verify that ./\(fileName) \
+                is the file it created or wrote, so what it holds is unknown. Copy the report above \
+                instead, and send it to the lead.
                 """
         }
     }

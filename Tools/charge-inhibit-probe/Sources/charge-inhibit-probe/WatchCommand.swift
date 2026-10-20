@@ -4,9 +4,12 @@ import ProbeCore
 /// `charge-inhibit-probe watch --mechanism manual-adapter-cut [--hold
 /// SECONDS]`: the owner's observer of research note 11's manual adapter
 /// cut. The owner reads and writes the SMC key `CHIE` by hand, with an
-/// external tool in a second terminal; this command never touches the SMC,
-/// never runs that tool or any other process, and only reads the battery,
-/// asks the owner what to type and when, and judges the readings.
+/// external tool in a second terminal; this command never touches the SMC
+/// and never runs that tool. Apart from the three read-only getters its
+/// preconditions share with `check` (`pmset -g battlimit`, `pmset -g
+/// assertions`, `launchctl print`, in `SystemReads`), it starts no process:
+/// it reads the battery, asks the owner what to type and when, and judges
+/// the readings.
 ///
 /// Order, and why:
 /// 1. Refuse as root, or unless standard input and output are a terminal

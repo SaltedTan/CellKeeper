@@ -1120,7 +1120,7 @@ extension ManualCutTests {
             #expect(Self.contents(aside) == Self.placeholder)
             let line = ManualCut.savedLine(outcome, fileName: "r.txt")
             #expect(!line.contains("CHECK RECOVERY FIRST"))
-            #expect(line.hasPrefix("Could not save or confirm the report: ./r.txt"))
+            #expect(line.hasPrefix("Could not save or confirm the report: the probe could not verify that ./r.txt"))
             #expect(line.contains("Copy the report above instead"))
         }
 
