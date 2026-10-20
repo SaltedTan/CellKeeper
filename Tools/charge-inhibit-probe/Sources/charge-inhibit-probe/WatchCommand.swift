@@ -132,6 +132,15 @@ enum WatchCommand {
         ))
 
         let signalSources = installSignalHandlers { number in
+            // The first signal only ends the flow (`session.signal`); it does
+            // not arm the ending's watchdog. The main loop sees the end within
+            // one pass (a wait for input of at most 50 ms, and at most one
+            // reading), and the main path's end arms the watchdog as its first
+            // action. Arming here would instead put a deadline on a main loop
+            // that is stuck before it sees the end: the watchdog would end
+            // the process with only the placeholder in the report file,
+            // before a second Ctrl-C could take the bounded path below and
+            // save the report.
             guard case .quit = session.signal(number) else { return }
             // A second signal: the bounded path, at once, on a thread of its
             // own, so that its waits (the sleep queue's drain, the save, the
