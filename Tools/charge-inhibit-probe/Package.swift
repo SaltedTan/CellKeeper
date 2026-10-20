@@ -19,8 +19,13 @@
 //   teardown decisions, the sleep queue and the console guard that keeps
 //   it from blocking, the emergency exit's one write to the report file
 //   descriptor it is given, and the manual adapter cut's questions, marks
-//   and endings as a pure state machine. No IOKit, no processes, and it
-//   opens no files. This is what the tests exercise.
+//   and endings as a pure state machine, with the session, console writer
+//   and terminal input `watch` runs it with. No IOKit, no processes, and
+//   it opens no files. This is what the tests exercise.
+// - ProbeAtomics: a sequence number and a time, recorded and read with C11
+//   atomics: `watch`'s sleep latch, which the sleep notification records
+//   into without a lock (the package targets macOS 14, before Swift's
+//   Synchronization module).
 // - charge-inhibit-probe: the executable. `check` reads public
 //   IOPowerSources data (including the adapter's presence and wattage),
 //   AppleSmartBattery registry properties, two `pmset -g` getters,
@@ -44,7 +49,8 @@ let package = Package(
         .executable(name: "charge-inhibit-probe", targets: ["charge-inhibit-probe"]),
     ],
     targets: [
-        .target(name: "ProbeCore"),
+        .target(name: "ProbeAtomics"),
+        .target(name: "ProbeCore", dependencies: ["ProbeAtomics"]),
         .executableTarget(
             name: "charge-inhibit-probe",
             dependencies: ["ProbeCore"],

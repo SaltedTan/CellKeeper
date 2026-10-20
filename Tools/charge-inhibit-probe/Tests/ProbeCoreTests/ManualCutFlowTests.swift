@@ -33,11 +33,22 @@ struct FlowDriver {
         return baseline(time)
     }
 
+    /// The sleep latch, as the flow reads it with every event.
+    var latch = SleepLatch.Snapshot.none
+
     @discardableResult
     mutating func send(_ event: ManualCutFlow.Event) -> [ManualCutFlow.Action] {
-        let result = flow.handle(event)
+        let result = flow.handle(event, latch: latch)
         actions += result
         return result
+    }
+
+    /// Latches a sleep that began at `time` (default: now), as the sleep
+    /// notification does; the flow sees it with the next event, here a tick.
+    @discardableResult
+    mutating func sleep(at time: Double? = nil) -> [ManualCutFlow.Action] {
+        latch = SleepLatch.Snapshot(sequence: latch.sequence + 1, time: time ?? now)
+        return send(.tick(at: now, unixTime: Self.epoch + now))
     }
 
     mutating func begin() {
@@ -484,7 +495,7 @@ struct ManualCutFlowTests {
         var driver = FlowDriver()
         driver.toHold()
         driver.advance(by: 10)
-        driver.send(.slept(at: driver.now))
+        driver.sleep()
         #expect(driver.flow.stage == .readFirst)
         driver.run(until: .ended, limit: 300)
         #expect(!driver.questionsAsked.contains(.restore))
@@ -563,7 +574,7 @@ struct ManualCutFlowTests {
         var driver = FlowDriver()
         driver.toRestorePrompt()
         driver.type("restorenow")
-        driver.send(.slept(at: driver.now))
+        driver.sleep()
         #expect(driver.flow.stage == .readFirst)
         // A delayed answer meant for the superseded read-back question.
         let actions = driver.type("restored00")
@@ -582,7 +593,7 @@ struct ManualCutFlowTests {
         driver.begin()
         driver.type("start00")
         driver.advance(by: 6)
-        driver.send(.slept(at: driver.now))
+        driver.sleep()
         #expect(driver.flow.stage == .ended)
         #expect(driver.outcome.exitStatus == 2)
         #expect(driver.outcome.recoveryReason == nil)
@@ -610,7 +621,7 @@ struct ManualCutFlowTests {
                 driver.type("08")
             }
             #expect(driver.flow.stage == stage)
-            let actions = driver.send(.slept(at: driver.now))
+            let actions = driver.sleep()
             #expect(actions.first == .banner(.restoreChieFirst), "\(stage)")
             #expect(actions.suffix(2) == [.discardInput, .ask(.readFirst, repeated: false)], "\(stage)")
             #expect(driver.flow.stage == .readFirst)
@@ -621,11 +632,12 @@ struct ManualCutFlowTests {
         }
     }
 
-    @Test("A sleep after a confirmed restore asks nothing new; the run is inconclusive")
+    @Test("A sleep that begins after a confirmed restore asks nothing new; the run is inconclusive")
     func sleepAfterRecovery() {
         var driver = FlowDriver()
         driver.toAfter()
-        let actions = driver.send(.slept(at: driver.now))
+        driver.advance(by: 1)
+        let actions = driver.sleep()
         #expect(!actions.contains(.discardInput))
         #expect(!actions.contains { if case .ask = $0 { true } else { false } })
         #expect(driver.flow.stage == .after)
@@ -636,11 +648,85 @@ struct ManualCutFlowTests {
         #expect(outcome.exitStatus == 2)
     }
 
-    @Test("The will-sleep handler acknowledges at once and does nothing else")
+    @Test("Review r1's ordering: a sleep latched after the input was read, with restored00 queued, ends in read-first")
+    func sleepLatchedBeforeQueuedAnswer() {
+        var driver = FlowDriver()
+        driver.toRestorePrompt()
+        driver.type("restorenow")
+        driver.advance(by: 5)
+        // The owner typed restored00; then the Mac slept before the line was
+        // handled. The latch moved, so the sleep is delivered first and the
+        // queued answer meets the read-first question, which it does not
+        // answer.
+        driver.latch = SleepLatch.Snapshot(sequence: driver.latch.sequence + 1, time: driver.now - 1)
+        let actions = driver.flow.handleLines(["restored00"], at: driver.now, unixTime: FlowDriver.epoch + driver.now, latch: driver.latch)
+        #expect(actions.first == .banner(.restoreChieFirst))
+        #expect(driver.flow.stage == .readFirst)
+        #expect(!driver.flow.restoreConfirmed)
+        #expect(driver.flow.restoreConfirmedBy == nil)
+    }
+
+    @Test("A sleep that began before a confirmation, but is seen only after it, makes the confirmation not count")
+    func lateSleepNoticeUndoesConfirmation() {
+        var driver = FlowDriver()
+        driver.toRestorePrompt()
+        driver.type("restorenow")
+        driver.advance(by: 5)
+        let sleepBegan = driver.now - 0.001
+        driver.type("restored00")
+        #expect(driver.flow.restoreConfirmed)
+        // The notification recorded the sleep's start just before the answer
+        // was accepted, but the latch's move became visible only after it.
+        let actions = driver.sleep(at: sleepBegan)
+        #expect(actions.first == .banner(.restoreChieFirst))
+        #expect(driver.flow.stage == .readFirst)
+        #expect(!driver.flow.restoreConfirmed)
+        #expect(driver.flow.answers.last?.outcome.contains("does not count") == true)
+        driver.run(until: .ended, limit: 60)
+        #expect(driver.flow.stage == .readFirst)
+    }
+
+    @Test("A sleep latched while the reminder fires is delivered instead of repeating the stale question")
+    func sleepLatchedAtReminder() throws {
+        var driver = FlowDriver()
+        driver.toRestorePrompt()
+        driver.type("restorenow")
+        let shown = try #require(driver.flow.lastShownAt)
+        driver.now = shown + 20
+        driver.latch = SleepLatch.Snapshot(sequence: driver.latch.sequence + 1, time: shown + 19)
+        let actions = driver.reminderTick()
+        #expect(!actions.contains(.ask(.restoreReadBack, repeated: true)))
+        #expect(actions.first == .banner(.restoreChieFirst))
+        #expect(actions.suffix(2) == [.discardInput, .ask(.readFirst, repeated: false)])
+        #expect(driver.flow.questionLatch == driver.latch.sequence)
+    }
+
+    @Test("An answer to a question published before the latest sleep is never accepted")
+    func answerNeedsCurrentQuestionLatch() {
+        var driver = FlowDriver()
+        driver.toGo()
+        driver.type("cutfail")
+        #expect(driver.flow.stage == .readFirst)
+        let published = driver.flow.questionLatch
+        driver.sleep()
+        #expect(driver.flow.questionLatch == published + 1)
+        driver.type("00")
+        #expect(driver.flow.restoreConfirmed)
+    }
+
+    @Test("The will-sleep handler records the sleep in the latch, then acknowledges at once")
     func willSleepHandler() {
+        let latch = SleepLatch()
+        #expect(latch.snapshot == .none)
         let calls = Counter()
-        ManualCut.willSleepHandler()({ calls.add() })
+        ManualCut.willSleepHandler(latch: latch, now: { 42 })({
+            // The latch is recorded before the sleep is allowed.
+            #expect(latch.snapshot == SleepLatch.Snapshot(sequence: 1, time: 42))
+            calls.add()
+        })
         #expect(calls.value == 1)
+        ManualCut.willSleepHandler(latch: latch, now: { 50 })({ calls.add() })
+        #expect(latch.snapshot == SleepLatch.Snapshot(sequence: 2, time: 50))
     }
 
     // MARK: Signals
@@ -782,7 +868,7 @@ struct ManualCutFlowTests {
     func reminderReadFirst() {
         var driver = FlowDriver()
         driver.toCutPrompt()
-        let actions = driver.send(.slept(at: driver.now))
+        let actions = driver.sleep()
         #expect(actions.contains(.armReminder))
         driver.now += 20
         #expect(driver.reminderTick() == [.ask(.readFirst, repeated: true)])
@@ -843,7 +929,7 @@ struct ManualCutFlowTests {
         driver.toCutPrompt()
         // The owner typed cutnow and, ahead of GO, cut08: the second line was
         // typed before the read-back question was shown, and is dropped.
-        let actions = driver.flow.handleLines(["cutnow", "cut08"], at: driver.now, unixTime: FlowDriver.epoch + driver.now)
+        let actions = driver.flow.handleLines(["cutnow", "cut08"], at: driver.now, unixTime: FlowDriver.epoch + driver.now, latch: driver.latch)
         #expect(actions.contains(.armReminder))
         #expect(driver.flow.stage == .cutReadBack)
         #expect(!driver.flow.cutConfirmed)
@@ -852,7 +938,7 @@ struct ManualCutFlowTests {
         // Lines that open no new question are all handled.
         var restore = FlowDriver()
         restore.toRestorePrompt()
-        _ = restore.flow.handleLines(["", "nonsense", "restorenow", "restored00"], at: restore.now, unixTime: FlowDriver.epoch + restore.now)
+        _ = restore.flow.handleLines(["", "nonsense", "restorenow", "restored00"], at: restore.now, unixTime: FlowDriver.epoch + restore.now, latch: restore.latch)
         #expect(restore.flow.stage == .restoreReadBack)
         #expect(!restore.flow.restoreConfirmed)
     }
@@ -877,7 +963,7 @@ struct ManualCutFlowTests {
         driver.type("other")
         #expect(driver.flow.stage == .ended)
         #expect(driver.type("00").isEmpty)
-        #expect(driver.send(.slept(at: driver.now)).isEmpty)
+        #expect(driver.sleep().isEmpty)
         #expect(driver.send(.signal(SIGINT, at: driver.now)).isEmpty)
         #expect(driver.reminderTick().isEmpty)
     }

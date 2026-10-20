@@ -82,10 +82,11 @@ func eventually(timeout: Double = 3, _ condition: () -> Bool) -> Bool {
 struct SessionDriver {
     let clock = FakeClock()
     let input = FakeInput()
+    let latch = SleepLatch()
     let session: ManualCutSession
 
     init(console: ConsoleWriter, reminderTick: Double = 0.02) {
-        session = ManualCutSession(hold: 180, console: console, input: input, clock: clock.portable, reminderTick: reminderTick)
+        session = ManualCutSession(hold: 180, console: console, input: input, latch: latch, clock: clock.portable, reminderTick: reminderTick)
     }
 
     func at(_ time: Double) {
@@ -197,6 +198,29 @@ struct ManualCutSessionTests {
         driver.session.stopReminder()
         #expect(!driver.session.reminderIsArmed)
         #expect(Date().timeIntervalSince(start) < 0.5)
+    }
+
+    @Test("A sleep latched after restored00 was typed, before it was handled, leaves recovery unconfirmed (must 2)")
+    func sessionSleepBeforeQueuedAnswer() {
+        let console = ConsoleWriter { _ in }
+        let driver = SessionDriver(console: console)
+        driver.toHold()
+        let mark = driver.session.snapshot.cutMark?.time ?? 0
+        driver.at(mark + 180)
+        driver.session.poll()
+        #expect(driver.session.snapshot.stage == .restorePrompt)
+        driver.type("restorenow", at: mark + 182)
+        #expect(driver.session.snapshot.stage == .restoreReadBack)
+        // restored00 is typed; the Mac sleeps before the main loop reads it.
+        driver.at(mark + 190)
+        driver.input.type("restored00")
+        ManualCut.willSleepHandler(latch: driver.latch, now: { mark + 189 })({})
+        driver.session.poll()
+        let flow = driver.session.snapshot
+        #expect(flow.stage == .readFirst)
+        #expect(!flow.restoreConfirmed)
+        #expect(flow.sleeps == [mark + 189])
+        driver.session.stopReminder()
     }
 
     @Test("The bounded end saves the report first, then queues it, then waits at most 2 s, then exits")

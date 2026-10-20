@@ -18,9 +18,9 @@ import ProbeCore
 ///    queue) and create the public idle-sleep assertion; refuse if either
 ///    fails.
 /// 4. Run the flow (`ManualCutSession`): the main loop hands it the owner's
-///    lines, the clock, the readings and the sleep notices; the reminder's
-///    own timer and the signal handlers hand it events too. None of them
-///    waits on the terminal.
+///    lines, the clock and the readings; the reminder's own timer and the
+///    signal handlers hand it events too; every event reads the sleep latch
+///    first. None of them waits on the terminal.
 /// 5. Release the idle-sleep assertion and deregister; save the report,
 ///    then queue it for the console, give the console at most 2 s, and
 ///    exit (`BoundedEnd`). A second signal takes the same bounded path at
@@ -71,10 +71,12 @@ enum WatchCommand {
         }
         // From here on, only the writer's thread writes to the terminal.
         let console = ConsoleWriter { TerminalInput.writeAll($0 + "\n", to: STDOUT_FILENO) }
+        let latch = SleepLatch()
         let session = ManualCutSession(
             hold: hold,
             console: console,
             input: TerminalInput(descriptor: STDIN_FILENO),
+            latch: latch,
             clock: ManualCutClock(
                 now: { clock.now },
                 unixNow: { Clock.unixNow },
@@ -144,10 +146,11 @@ enum WatchCommand {
             signalSources.forEach { $0.cancel() }
         }
 
-        // Sleep: acknowledged at once, nothing released, no I/O on the sleep
-        // queue; the sleep watch records the notice, and the main loop hands
-        // it to the flow after the wake.
-        let registered = sleepWatch.start(onWillSleep: ManualCut.willSleepHandler())
+        // Sleep: the notification records into the sleep latch, lock-free,
+        // and allows the sleep at once; nothing is released and no I/O is
+        // done on the sleep queue. Every event the flow handles reads the
+        // latch first, inside the run's lock.
+        let registered = sleepWatch.start(onWillSleep: ManualCut.willSleepHandler(latch: latch, now: { clock.now }))
         guardState.update { $0.registered = registered }
         var refusal: String?
         if !registered {
@@ -171,13 +174,7 @@ enum WatchCommand {
         // 4. The flow: the main loop.
         session.begin()
         var deadline: Double?
-        var sleepNoticesSeen = 0
         while !session.isEnded {
-            let notices = sleepWatch.notices
-            for notice in notices.dropFirst(sleepNoticesSeen) where notice.message == "kIOMessageSystemWillSleep" {
-                session.slept(at: notice.time)
-            }
-            sleepNoticesSeen = notices.count
             session.poll()
             if session.wantsReadings {
                 let due = deadline ?? clock.now

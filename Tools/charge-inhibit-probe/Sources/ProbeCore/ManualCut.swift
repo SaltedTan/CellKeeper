@@ -97,12 +97,16 @@ public enum ManualCut {
         printed to the lead (\(note) §7.1).
         """
 
-    /// The will-sleep handler for `watch`: it holds nothing that must be
-    /// released before a sleep and cannot restore `CHIE`, so it allows the
-    /// sleep at once (note 11 §4.7). No I/O: it runs on the sleep queue,
-    /// where the sleep watch has already recorded the notice in memory.
-    public static func willSleepHandler() -> @Sendable (_ acknowledge: () -> Void) -> Void {
-        { acknowledge in acknowledge() }
+    /// The will-sleep handler for `watch`: it records the sleep, and when it
+    /// began, in the sleep latch (lock-free, no I/O), then allows the sleep
+    /// at once: the probe holds nothing that must be released before a
+    /// sleep, and cannot restore `CHIE` (note 11 §4.7). It runs on the
+    /// sleep queue.
+    public static func willSleepHandler(latch: SleepLatch, now: @escaping @Sendable () -> Double) -> @Sendable (_ acknowledge: () -> Void) -> Void {
+        { acknowledge in
+            latch.record(at: now())
+            acknowledge()
+        }
     }
 
     /// What the console shows for a banner.
@@ -260,9 +264,6 @@ public struct ManualCutFlow: Sendable {
         case tick(at: Double, unixTime: Double)
         /// A reading; the flow sets its phase from the marks.
         case reading(Sample)
-        /// A `kIOMessageSystemWillSleep` the main thread found after the
-        /// wake (at the notice's time).
-        case slept(at: Double)
         /// The first SIGINT, SIGTERM or SIGHUP.
         case signal(Int32, at: Double)
         /// The reminder's own timer.
@@ -373,6 +374,11 @@ public struct ManualCutFlow: Sendable {
     /// When the open restore request was last shown.
     public private(set) var lastShownAt: Double?
     public private(set) var ending: Ending?
+    /// The sleep latch's sequence the flow has seen.
+    public private(set) var seenLatch: UInt64 = 0
+    /// The latch's sequence when the open question was published: an
+    /// answer counts only if no sleep came since.
+    public private(set) var questionLatch: UInt64 = 0
     private var askedAt: Double?
     /// Whether any held reading showed the battery discharging (for the
     /// after readings, as in note 10).
@@ -426,8 +432,32 @@ public struct ManualCutFlow: Sendable {
     }
 
     /// Handles one event and returns the actions to perform, in order.
-    public mutating func handle(_ event: Event) -> [Action] {
+    ///
+    /// `latch` is the sleep latch as read inside the same critical section
+    /// (code review r1 of #101, must 2). A sleep it shows that the flow has
+    /// not seen is delivered first, so it supersedes the open question
+    /// before any answer, prompt or reminder of this event: an answer typed
+    /// before a sleep is never accepted after it.
+    public mutating func handle(_ event: Event, latch: SleepLatch.Snapshot) -> [Action] {
         guard stage != .ended else { return [] }
+        var actions: [Action] = []
+        if latch.sequence > seenLatch {
+            seenLatch = latch.sequence
+            actions += slept(at: latch.time, now: max(Self.time(of: event), latch.time))
+            guard stage != .ended else { return actions }
+        }
+        return actions + handleEvent(event)
+    }
+
+    /// When `event` happened, on the run's clock.
+    static func time(of event: Event) -> Double {
+        switch event {
+        case let .begin(time), let .line(_, time, _), let .tick(time, _), let .signal(_, time), let .reminderTick(time): time
+        case let .reading(sample): sample.time
+        }
+    }
+
+    private mutating func handleEvent(_ event: Event) -> [Action] {
         switch event {
         case let .begin(time):
             guard stage == .notStarted else { return [] }
@@ -439,8 +469,6 @@ public struct ManualCutFlow: Sendable {
             return tick(at: time, unixTime: unixTime)
         case let .reading(sample):
             return reading(sample)
-        case let .slept(time):
-            return slept(at: time)
         case let .signal(number, time):
             return signal(number, at: time)
         case let .reminderTick(time):
@@ -452,11 +480,11 @@ public struct ManualCutFlow: Sendable {
     /// after one whose actions discard input was typed before that discard,
     /// and is dropped with it: an answer typed ahead, or meant for an
     /// earlier question, never carries over.
-    public mutating func handleLines(_ lines: [String], at time: Double, unixTime: Double) -> [Action] {
+    public mutating func handleLines(_ lines: [String], at time: Double, unixTime: Double, latch: SleepLatch.Snapshot) -> [Action] {
         var all: [Action] = []
         for line in lines {
             guard stage != .ended else { break }
-            let actions = handle(.line(line, at: time, unixTime: unixTime))
+            let actions = handle(.line(line, at: time, unixTime: unixTime), latch: latch)
             all += actions
             if actions.contains(.discardInput) { break }
         }
@@ -469,6 +497,7 @@ public struct ManualCutFlow: Sendable {
         stage = Self.stage(for: question)
         askedAt = time
         lastShownAt = time
+        questionLatch = seenLatch
         return [.discardInput, .ask(question, repeated: false)]
     }
 
@@ -486,6 +515,9 @@ public struct ManualCutFlow: Sendable {
 
     private mutating func answer(_ text: String, at time: Double, unixTime: Double) -> [Action] {
         guard let question = openQuestion else { return [] }
+        // An answer counts only for a question published since the latest
+        // sleep (``handle(_:latch:)`` delivers a sleep first).
+        guard questionLatch == seenLatch else { return [] }
         let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         // An empty line (Return alone) is not an answer to anything.
         guard !typed.isEmpty else { return [] }
@@ -766,25 +798,40 @@ public struct ManualCutFlow: Sendable {
 
     // MARK: Sleep, signals, the reminder
 
-    private mutating func slept(at time: Double) -> [Action] {
+    /// A sleep that began at `time`, delivered at `now` from the latch. A
+    /// notice that arrives late is judged by when the sleep began: one that
+    /// began before the owner's confirmation was accepted makes that
+    /// confirmation not count.
+    private mutating func slept(at time: Double, now: Double) -> [Action] {
         sleeps.append(time)
+        let reason = """
+            the system slept (kIOMessageSystemWillSleep at +\(seconds(time))) after the CUT \
+            prompt, before a confirmed restore
+            """
         switch stage {
         case .notStarted, .firstRead, .baseline:
             let reason = "the system slept (kIOMessageSystemWillSleep at +\(seconds(time))) before the CUT prompt"
             note(time, reason)
-            return end(.endedBeforeCut(reason), at: time)
+            return end(.endedBeforeCut(reason), at: now)
                 + [.say("The Mac slept before the CUT prompt: the run ends. Nothing has been written; nothing to restore.")]
         case .after:
+            if let confirmed = restoreConfirmedAt, time <= confirmed {
+                // The sleep began before the confirmation was accepted.
+                answers.append(Answer(
+                    time: now, question: restoreConfirmedBy == "restored00" ? .restoreReadBack : restoreConfirmedBy == "00" ? .readFirst : .recheck,
+                    word: nil, outcome: "the confirmation at +\(seconds(confirmed)) does not count: a sleep began before it"
+                ))
+                restoreConfirmedAt = nil
+                restoreConfirmedBy = nil
+                return [.banner(.restoreChieFirst)] + toReadFirst(reason, at: now)
+            }
             note(time, "the system slept after the restore was confirmed; the run is inconclusive")
             return [.say("The Mac slept after the restore was confirmed: the run is inconclusive. Check recovery when it ends.")]
         case .cutPrompt, .cutReadBack, .hold, .restorePrompt, .restoreReadBack, .readFirst, .recheck:
             if let question = openQuestion {
-                answers.append(Answer(time: time, question: question, word: nil, outcome: "superseded by a sleep"))
+                answers.append(Answer(time: now, question: question, word: nil, outcome: "superseded by a sleep"))
             }
-            return [.banner(.restoreChieFirst)] + toReadFirst("""
-                the system slept (kIOMessageSystemWillSleep at +\(seconds(time))) after the CUT \
-                prompt, before a confirmed restore
-                """, at: time)
+            return [.banner(.restoreChieFirst)] + toReadFirst(reason, at: now)
         case .ended:
             return []
         }
