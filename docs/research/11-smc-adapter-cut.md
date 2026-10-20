@@ -398,6 +398,11 @@ These rules hold throughout:
   over. A line typed when no question is open is discarded too.
 - Recovery counts as confirmed only by an answer to a question shown
   after the latest supersession.
+- A reminder repeats the question open at that moment, with its exact
+  answer words: the RESTORE prompt or its read-back question, the
+  read-first question or the re-check question. Repeating a question is not
+  a new question: it neither supersedes it, nor changes any mark, nor
+  discards input typed for it.
 - The standard RESTORE prompt (step 9) is used **only** when the cut was
   confirmed (`cut08`) and no sleep has come since. Every other restore
   request uses the read-first steps (step 10).
@@ -525,8 +530,9 @@ Exit status, with note 10's meanings: 0 a verdict; 1 refused before the
 CUT prompt; 2 inconclusive, but only for a run whose restore was confirmed
 or that ended before the CUT prompt without a refusal; 3 "follow the
 recovery steps the report prints" — a run after which charging did not
-resume, and **any end after the CUT prompt without a confirmed restore**;
-64 a usage error.
+resume, a run ended by a signal after a confirmed restore whose last
+reading does not show charging on adapter power (§4.6), and **any end
+after the CUT prompt without a confirmed restore**; 64 a usage error.
 
 ### 4.5 The marks, and the two checks at the cut
 
@@ -612,8 +618,10 @@ the reminders below are what stands in for one:
 - **A reminder on its own timer**, armed at the cut mark **before** the GO
   line is printed: no GO line means no reminder, and then no cut. At the
   end of the hold it shows the current restore request — the RESTORE
-  prompt, or the read-first steps (§4.4) — and it rings and shows it again
-  every 20 s until the owner answers. It runs apart from the sampling loop
+  prompt, or the read-first steps (§4.4) — and it rings and shows the
+  question open at that moment again, with its answer words, every 20 s
+  until the owner has confirmed recovery (§4.4, "Questions and answer
+  words"). It runs apart from the sampling loop
   and the report, so a reading that hangs does not hold it up. An early
   stop (§4.4 step 8) shows the request sooner.
 - **No lock, no write.** The probe holds no lock that anything outside it
@@ -632,12 +640,16 @@ the reminders below are what stands in for one:
   recovery request, first clear anything typed but not run in terminal B
   (Ctrl-C at the prompt). Recovery is never established while a cut
   command might still run.
-- **Ctrl-C, `SIGTERM` or `SIGHUP` after the CUT prompt** print RESTORE
-  CHIE NOW with the read-first recovery steps, write the report opening
-  with CHECK RECOVERY FIRST, and end the run with exit status 3. A second
-  Ctrl-C quits at once, also with exit status 3, after printing RESTORE
-  CHIE NOW once more. Before the CUT prompt, a signal ends the run as in
-  note 10, with nothing to restore. A closed terminal cannot show the
+- **Ctrl-C, `SIGTERM` or `SIGHUP` after the CUT prompt and before a
+  confirmed restore** print RESTORE CHIE NOW with the read-first recovery
+  steps, write the report opening with CHECK RECOVERY FIRST, and end the
+  run with exit status 3. A second Ctrl-C quits at once, also with exit
+  status 3, after printing RESTORE CHIE NOW once more. **After a confirmed
+  restore** (`restored00`, or read-first's `00` or `recheck00`), a signal
+  ends the after readings early and the run is inconclusive: exit status 2
+  if the last reading shows charging on adapter power; otherwise the report
+  opens with CHECK RECOVERY FIRST and the exit status is 3. Before the CUT
+  prompt, a signal ends the run as in note 10, with nothing to restore. A closed terminal cannot show the
   `SIGHUP` warning, which is why the owner never closes terminal A during a
   run (§6).
 - **What the probe cannot know:** whether the owner ran the cut or the

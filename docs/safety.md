@@ -646,8 +646,14 @@ want them. Note 09 §7 and note 10 §7 have the details.
 
 After the SMC adapter-cut test (research note 11), or if the Mac slept
 during one, first make sure the key is restored, because a written SMC key
-is **not** released when anything exits. In the tool's folder
-(`~/smc-test/smc-command`), read it:
+is **not** released when anything exits. First clear anything typed but
+not run in the tool's terminal (Ctrl-C at the prompt), so no cut command is
+left to run. If any command below has not returned within about 10
+seconds, press Ctrl-C: a read that hangs, errors or prints something
+unexpected is not trustworthy, so treat the state as unknown, write
+nothing, and go to the escalation steps below (save your work, then
+unplug and replug, restart, shut down). In the
+tool's folder (`~/smc-test/smc-command`), read it:
 
 ```sh
 ./smc -k CHIE -r
