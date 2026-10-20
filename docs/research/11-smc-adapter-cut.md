@@ -571,9 +571,13 @@ which keeps the Mac awake for the restore after the wake.
 cut survives sleep is not known (§8); one tool restores before sleep
 (S12). After the wake, the main thread finds the notice. Before the CUT
 prompt, the run ends inconclusive, with nothing to restore. After it, the
-probe prints **RESTORE CHIE FIRST**, shows the RESTORE prompt (if it is not
-showing already), and carries on to the after readings once the owner
-answers. Any sleep notification makes the run inconclusive.
+state of `CHIE` is unknown — the sleep may or may not have cleared the cut —
+so the probe prints **RESTORE CHIE FIRST** and shows the §7.1 read-first
+steps in place of the RESTORE prompt, answered as in §4.4 step 7, and
+carries on to the after readings once the owner answers. Any sleep
+notification makes the run inconclusive. What the owner's read showed after
+the wake is worth sending with the report (§6): one observation, not a
+persistence test (§8).
 
 ### 4.8 The verdict (reuses note 10)
 
