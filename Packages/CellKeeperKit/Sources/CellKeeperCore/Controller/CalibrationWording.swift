@@ -19,8 +19,8 @@ public enum CalibrationRequest: Sendable, Equatable {
 public enum CalibrationLimitAfter: Sendable, Equatable {
     /// CellKeeper's own limit is in effect, as wanted and read back.
     case cellKeeperLimit(Int)
-    /// The owner's own limit is in effect: CellKeeper holds nothing. The
-    /// value macOS reported, if read.
+    /// The owner's own limit is in effect: CellKeeper holds nothing, and
+    /// macOS reported this value.
     case ownLimit(Int?)
     /// Neither is confirmed: macOS's limit may still be at 100%. The value
     /// macOS last reported, if read.
@@ -133,7 +133,7 @@ public enum CalibrationWording {
             if status.needsRestAnswer, let after = time(session.plugInAfter) {
                 return "Calibration paused in step 5 of 7: CellKeeper started again after a restart. Did your Mac stay shut down and unplugged until \(after)?"
             }
-            return "Calibration paused in \(step.lowercased()) (\(session.step)): CellKeeper was not running. Continue to go on, or cancel it. Meanwhile your \(NativeLimitWording.limit(cellKeeperLimit)) limit applies."
+            return "Calibration paused in \(step.lowercased()) (\(session.step)): CellKeeper was not running. Continue to go on, or cancel it. Meanwhile CellKeeper asks for its own \(NativeLimitWording.limit(cellKeeperLimit)) limit."
         }
         if session.isReturning {
             return "Calibration, \(step.lowercased()): returning to your limit. CellKeeper asks macOS for its \(NativeLimitWording.limit(cellKeeperLimit)) limit again and waits for macOS to confirm it."
@@ -211,15 +211,22 @@ public enum CalibrationWording {
     /// owner's own limit (CellKeeper holds nothing: it fell back to it, or
     /// does not manage charging); or neither yet, as when the return is
     /// deferred, failed, or its fallback to the owner's limit failed too.
+    /// Either confirmation needs the latest read of macOS's limit to have
+    /// succeeded and shown that value (100% for no limit): holding no
+    /// record (`.normal`) says only that nothing of CellKeeper's is owed,
+    /// not what macOS enforces.
     public static func limitAfter(_ status: ControllerStatus) -> CalibrationLimitAfter {
-        let reported = status.nativeLimit?.reportedLimit
-        guard let current = status.currentMode, !status.isOwnLimitRestorePending, status.nativeLimit?.isRecordUnreadable != true else {
+        let native = status.nativeLimit
+        let reported = native?.reportedLimit
+        guard let current = status.currentMode, let reported, native?.readProblem == nil,
+              !status.isOwnLimitRestorePending, native?.isRecordUnreadable != true
+        else {
             return .unconfirmed(reported: reported)
         }
         switch current {
         case .normal:
             return .ownLimit(reported)
-        case .nativeLimit(let percent) where status.decision?.desiredMode == current && percent == status.settings.chargeLimit:
+        case .nativeLimit(let percent) where percent == reported && status.decision?.desiredMode == current && percent == status.settings.chargeLimit:
             return .cellKeeperLimit(percent)
         default:
             return .unconfirmed(reported: reported)

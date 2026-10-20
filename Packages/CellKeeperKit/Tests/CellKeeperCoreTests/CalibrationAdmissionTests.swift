@@ -120,6 +120,38 @@ struct CalibrationAdmissionTests {
     }
 }
 
+@Suite("Calibration: what confirms the limit after a session")
+struct CalibrationLimitAfterTests {
+    @Test("A confirmation needs a successful read that shows the value; holding no record alone confirms nothing")
+    func evidence() {
+        var status = settled()
+        status.decision = PolicyDecision(state: .osEnforcedLimit, desiredMode: .nativeLimit(percent: 80), action: .noAction, reason: .nativeLimitActive(limit: 80), notes: [], memory: PolicyMemory(), overrideEnded: nil)
+        #expect(CalibrationWording.limitAfter(status) == .cellKeeperLimit(80))
+        var stale = status
+        stale.nativeLimit?.reportedLimit = nil
+        stale.nativeLimit?.readProblem = "read failed"
+        #expect(CalibrationWording.limitAfter(stale) == .unconfirmed(reported: nil))
+        var other = status
+        other.nativeLimit?.reportedLimit = 85
+        #expect(CalibrationWording.limitAfter(other) == .unconfirmed(reported: 85))
+        var released = status
+        released.currentMode = .normal
+        released.nativeLimit = NativeLimitStatus(reportedLimit: 90, readAt: referenceDate)
+        #expect(CalibrationWording.limitAfter(released) == .ownLimit(90))
+        released.nativeLimit = NativeLimitStatus(reportedLimit: 100, readAt: referenceDate)
+        #expect(CalibrationWording.limitAfter(released) == .ownLimit(100), "a no-limit read is a value")
+        released.nativeLimit = NativeLimitStatus(reportedLimit: nil, readAt: referenceDate, readProblem: "read failed")
+        #expect(CalibrationWording.limitAfter(released) == .unconfirmed(reported: nil))
+        var unknown = status
+        unknown.currentMode = nil
+        #expect(CalibrationWording.limitAfter(unknown) == .unconfirmed(reported: 80))
+        var owed = status
+        owed.currentMode = .nativeLimit(percent: 100)
+        owed.nativeLimit = NativeLimitStatus(reportedLimit: 100, readAt: referenceDate, ownerLimit: 90, target: 100, isRestoreUnfinished: true)
+        #expect(CalibrationWording.limitAfter(owed) == .unconfirmed(reported: 100))
+    }
+}
+
 @Suite("Calibration: policy")
 struct CalibrationPolicyTests {
     private func decide(_ reading: BatterySnapshot?, settings: ChargingSettings = ChargingSettings.default.withChargeLimit(80), override: ChargeOverride? = nil, capabilities: ControlCapabilities = nativeCapabilities, wantsFull: Bool = true, currentMode: ChargeControlMode? = .nativeLimit(percent: 80)) -> PolicyDecision {

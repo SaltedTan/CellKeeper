@@ -81,7 +81,7 @@ struct CalibrationWordingTests {
         var returning = session(.restAtTop)
         returning.isReturning = true
         #expect(line(status(returning)) == "Calibration, step 2 of 7: returning to your limit. CellKeeper asks macOS for its 80% limit again and waits for macOS to confirm it.")
-        #expect(line(status(session(.drain), paused: true)) == "Calibration paused in step 4 of 7 (drain): CellKeeper was not running. Continue to go on, or cancel it. Meanwhile your 80% limit applies.")
+        #expect(line(status(session(.drain), paused: true)) == "Calibration paused in step 4 of 7 (drain): CellKeeper was not running. Continue to go on, or cancel it. Meanwhile CellKeeper asks for its own 80% limit.")
         #expect(line(status(session(.restAtBottom, plugInAfter: shown), paused: true, needsAnswer: true)) == "Calibration paused in step 5 of 7: CellKeeper started again after a restart. Did your Mac stay shut down and unplugged until 1:40 PM?")
         #expect(line(status(nil)) == nil)
     }

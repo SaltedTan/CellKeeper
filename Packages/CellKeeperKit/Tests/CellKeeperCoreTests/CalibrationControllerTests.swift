@@ -645,7 +645,7 @@ struct CalibrationControllerTests {
     }
 
     @Test("After a quit, a limit that cannot be read at launch is not accounted for either: nothing written, Manage charging off")
-    func quitThenUnreadable() async {
+    func quitThenUnreadable() async throws {
         let rig = CalibrationRig()
         _ = await rig.started()
         await rig.controller.shutdown(reason: "quit")
@@ -656,11 +656,18 @@ struct CalibrationControllerTests {
         #expect(status.calibration.last?.end == .unaccountedLimit(found: nil, expected: 90))
         #expect(!status.settings.isManagementEnabled)
         #expect(status.events.contains { $0.kind == .safety && $0.message.contains("could not read macOS's Charge Limit when it started again") })
+        // No record is held, but nothing read the limit: not confirmed.
+        let report = try #require(status.calibration.outcome)
+        let unread = CalibrationWording.outcomeLine(report, status: status)
+        #expect(!unread.contains("applies again"))
+        #expect(unread.contains("macOS has not confirmed CellKeeper's limit back yet, so its Charge Limit may still be at 100%."))
+        #expect(unread.contains("set your own limit, 90%, in System Settings › Battery › Charging"))
         second.system.readFails = false
         second.clock.advance(by: 120)
         status = await second.controller.evaluate(.periodic)
         #expect(second.system.runInputs == inputs, "nothing written, also once the limit can be read")
         #expect(second.system.reading == .limit(90))
+        #expect(CalibrationWording.outcomeLine(report, status: status).contains("Your own Charge Limit of 90% applies again, confirmed by macOS."))
     }
 
     @Test("At launch, a passed cap (by the wall clock across a restart) or bound ends the session")
