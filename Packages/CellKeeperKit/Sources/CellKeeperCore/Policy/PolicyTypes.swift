@@ -37,6 +37,9 @@ public enum PolicyState: String, Sendable, Equatable, Codable, CaseIterable, Cus
     /// ended is up to the read-back, not this state. Never used with a
     /// native-limit backend.
     case deferringToMacOS
+    /// A guided calibration's step asks for macOS's Charge Limit at 100%
+    /// (research note 12 §7.2). Used only with a native-limit backend.
+    case calibrating
 
     public var description: String {
         switch self {
@@ -51,6 +54,7 @@ public enum PolicyState: String, Sendable, Equatable, Codable, CaseIterable, Cus
         case .discharging: "discharging to the limit"
         case .osEnforcedLimit: "limit enforced by macOS"
         case .deferringToMacOS: "deferring to macOS's Charge Limit"
+        case .calibrating: "guided calibration at 100%"
         }
     }
 }
@@ -154,6 +158,9 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
     case nativeLimitActive(limit: Int)
     /// A temporary full charge raises macOS's Charge Limit to 100%.
     case nativeFullCharge
+    /// A guided calibration's step raises macOS's Charge Limit to 100%; it
+    /// does not end when the battery is full.
+    case calibrationFullCharge
     /// The charge limit cannot be expressed as macOS's Charge Limit.
     case nativeLimitUnsupported(limit: Int, steps: [Int])
     /// macOS reports its own Charge Limit on at `limit`% (below 100), so the
@@ -231,6 +238,8 @@ public enum DecisionReason: Sendable, Equatable, CustomStringConvertible {
             "CellKeeper wants macOS's Charge Limit at \(limit)%; macOS enforces it, including its own resume point."
         case .nativeFullCharge:
             "Temporary full charge: CellKeeper wants macOS's Charge Limit at 100% until the battery is full."
+        case .calibrationFullCharge:
+            "Guided calibration: CellKeeper wants macOS's Charge Limit at 100% for this step, and asks for its own limit again when the step ends."
         case .nativeLimitUnsupported(let limit, let steps):
             "A \(limit)% limit cannot be set with macOS's Charge Limit (\(steps.map { "\($0)%" }.joined(separator: ", "))); your own macOS limit stays in effect."
         case .macOSChargeLimitActive(let limit):
@@ -296,7 +305,7 @@ public enum PolicyNote: Sendable, Equatable, CustomStringConvertible {
         case .safetyFloor: "the safety floor takes precedence"
         case .onBattery: "being on battery power takes precedence"
         case .temperaturePause: "temperature protection takes precedence"
-        case .fullChargeOverride, .charging, .holding, .discharging, .osEnforcedLimit: nil
+        case .fullChargeOverride, .charging, .holding, .discharging, .osEnforcedLimit, .calibrating: nil
         }
     }
 }
@@ -516,6 +525,11 @@ public struct PolicyInput: Sendable, Equatable {
     /// Set when the controller needs `.normal` restored whatever the
     /// settings say.
     public var releaseReason: ReleaseReason?
+    /// A guided calibration's step asks for macOS's Charge Limit at 100%
+    /// (``CalibrationSession/asksForFullLimit``). Unlike a temporary full
+    /// charge it does not end when the battery is full; the session decides
+    /// when it ends. Ignored by a backend that switches charging itself.
+    public var calibrationWantsFullLimit: Bool
 
     public init(
         now: Date,
@@ -531,7 +545,8 @@ public struct PolicyInput: Sendable, Equatable {
         recentRestrictingRequests: [TimeInterval] = [],
         isSleepImminent: Bool = false,
         restoreRetryNotBefore: TimeInterval? = nil,
-        releaseReason: ReleaseReason? = nil
+        releaseReason: ReleaseReason? = nil,
+        calibrationWantsFullLimit: Bool = false
     ) {
         self.now = now
         self.uptime = uptime
@@ -547,6 +562,7 @@ public struct PolicyInput: Sendable, Equatable {
         self.isSleepImminent = isSleepImminent
         self.restoreRetryNotBefore = restoreRetryNotBefore
         self.releaseReason = releaseReason
+        self.calibrationWantsFullLimit = calibrationWantsFullLimit
     }
 }
 

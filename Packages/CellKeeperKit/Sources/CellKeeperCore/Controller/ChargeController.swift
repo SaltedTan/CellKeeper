@@ -75,6 +75,16 @@ import os
 ///   passes twice in a run; the store is then brought in line and read
 ///   back, and a write that fails delays nothing and is retried at every
 ///   evaluation.
+/// - A guided calibration (``CalibrationSession``, research note 12 §7) is
+///   checked inside an evaluation after the backend's mode was read and
+///   before the schedules: while a session exists, running or paused, no
+///   full charge starts, from the menu, Settings, a Shortcuts action or a
+///   schedule, and a weekly occurrence that falls due is recorded as
+///   skipped. The session asks for macOS's Charge Limit at 100% only in
+///   steps 1, 2 and 7, and leaves those steps only once a read-back
+///   confirms the normal limit. A session found at launch is checked
+///   against what the first evaluation read before writing, and stays
+///   paused, with the normal policy, until the owner continues it.
 public actor ChargeController {
     public static let maximumConsecutiveFailures = 3
     /// A failure-free period of this length resets the failure count.
@@ -141,6 +151,11 @@ public actor ChargeController {
     /// The next occurrence as of the latest evaluation.
     private var weeklyNext: WeeklyFullChargeOccurrence?
     private var weeklyOutcome: WeeklyFullChargeOutcome?
+    /// The guided calibration, its store and its clocks.
+    private var calibration: CalibrationRunner
+    /// Requests sent to the backend, so an evaluation can tell whether one
+    /// of its own failed.
+    private var requestsMade = 0
     private var memory = PolicyMemory()
     private var snapshot: BatterySnapshot?
     private var telemetryError: String?
@@ -247,6 +262,11 @@ public actor ChargeController {
     ///     is saved, together with `now`; never captured once.
     ///   - uptime: monotonic seconds that keep counting during sleep, for
     ///     override expiry and rate limiting. Defaults to `ContinuousClock`.
+    ///   - calibrationStore: where a guided calibration is kept; nil turns
+    ///     calibration off.
+    ///   - calibrationClock: the boot-wide monotonic clock and boot identity
+    ///     a calibration is timed with. Defaults to `uptime`, with no boot
+    ///     identity: then only this run counts as the same boot.
     public init(
         telemetry: any TelemetryProvider,
         backend: any ChargingBackend,
@@ -254,9 +274,11 @@ public actor ChargeController {
         adoptionMarkerStore: (any OwnershipRecordStore)? = nil,
         scheduleStore: (any FullChargeScheduleStoring)? = nil,
         weeklyStore: (any WeeklyFullChargeStoring)? = nil,
+        calibrationStore: (any CalibrationStoring)? = nil,
         now: @escaping @Sendable () -> Date = { Date() },
         timeZone: @escaping @Sendable () -> TimeZone = { TimeZone.current },
-        uptime: (@Sendable () -> TimeInterval)? = nil
+        uptime: (@Sendable () -> TimeInterval)? = nil,
+        calibrationClock: CalibrationClock? = nil
     ) {
         self.telemetry = telemetry
         self.backend = backend
@@ -266,7 +288,9 @@ public actor ChargeController {
         self.settings = settings
         self.now = now
         self.timeZone = timeZone
-        self.uptime = uptime ?? Self.continuousUptime()
+        let uptime = uptime ?? Self.continuousUptime()
+        self.uptime = uptime
+        calibration = CalibrationRunner(store: calibrationStore, clock: calibrationClock ?? CalibrationClock(monotonic: uptime, bootSession: { nil }))
     }
 
     private static func continuousUptime() -> @Sendable () -> TimeInterval {
@@ -315,7 +339,8 @@ public actor ChargeController {
             weeklyFullChargeOutcome: weeklyOutcome,
             weeklyFullChargeStoreProblem: weeklyStoreProblem,
             lastEndedOverride: lastEndedOverride,
-            overridesEnded: overridesEnded
+            overridesEnded: overridesEnded,
+            calibration: calibration.status
         )
     }
 
@@ -393,6 +418,12 @@ public actor ChargeController {
                 record(.override, "Temporary full charge not started: charge management is off.")
                 return
             }
+            calibration.loadIfNeeded()
+            recordCalibrationLog()
+            guard !calibration.isInProgress else {
+                record(.override, "Temporary full charge not started: \(CalibrationWording.inProgress.lowercased())")
+                return
+            }
             let startUptime = uptime()
             if let running = activeOverride, running.isLive(atUptime: startUptime) {
                 let what = running.kind == .fullCharge ? "a temporary full charge is already running" : "a discharge to the limit is running"
@@ -426,6 +457,12 @@ public actor ChargeController {
         await exclusively {
             guard settings.isManagementEnabled, ChargingPolicy.dischargeTargetRange.contains(settings.chargeLimit) else {
                 record(.override, "Discharge not started: requires charge management on and a limit of \(ChargingPolicy.dischargeTargetRange.lowerBound)–\(ChargingPolicy.dischargeTargetRange.upperBound)%.", level: .default)
+                return
+            }
+            calibration.loadIfNeeded()
+            recordCalibrationLog()
+            guard !calibration.isInProgress else {
+                record(.override, "Discharge not started: \(CalibrationWording.inProgress.lowercased())")
                 return
             }
             let startUptime = uptime()
@@ -467,8 +504,16 @@ public actor ChargeController {
             }
             throw error
         }
-        return await exclusively {
+        var refusal: FullChargeScheduleError?
+        let status = await exclusively {
             loadScheduleIfNeeded()
+            calibration.loadIfNeeded()
+            recordCalibrationLog()
+            guard !calibration.isInProgress else {
+                refusal = FullChargeScheduleError(issues: [.calibrationInProgress])
+                record(.override, "Scheduled full charge not set: \(CalibrationWording.inProgress.lowercased())")
+                return
+            }
             guard let scheduleStore else {
                 record(.override, "Scheduled full charge not set: scheduling is not available.", level: .error)
                 return
@@ -487,6 +532,8 @@ public actor ChargeController {
             record(.override, "Scheduled full charge \(replaced ? "changed" : "set"): \(Self.describeWindow(newSchedule)).")
             await performEvaluation(.scheduleChanged)
         }
+        if let refusal { throw refusal }
+        return status
     }
 
     /// Removes the armed schedule, if any, and evaluates. A full charge it
@@ -558,6 +605,13 @@ public actor ChargeController {
         var failure: WeeklyFullChargeError?
         let status = await exclusively {
             loadWeeklyIfNeeded()
+            calibration.loadIfNeeded()
+            recordCalibrationLog()
+            guard !calibration.isInProgress else {
+                failure = .calibrationInProgress
+                record(.override, "Weekly full charge not saved: \(CalibrationWording.inProgress.lowercased())")
+                return
+            }
             guard weeklyStore != nil else {
                 failure = .notAvailable
                 record(.override, "Weekly full charge not saved: it is not available.", level: .error)
@@ -677,7 +731,7 @@ public actor ChargeController {
     /// and the store is brought in line. A failed write delays nothing: it
     /// is retried at later evaluations. Returns how it met the override
     /// running, if it started. Updates the next occurrence.
-    private func applyWeekly(to input: inout PolicyInput, timeZone: TimeZone) -> ScheduledStart? {
+    private func applyWeekly(to input: inout PolicyInput, timeZone: TimeZone, isCalibrating: Bool) -> ScheduledStart? {
         // Once per evaluation, after anything this evaluation handled.
         defer {
             if isWeeklyStoreDirty { syncWeeklyStore() }
@@ -690,6 +744,13 @@ public actor ChargeController {
         var start: ScheduledStart?
         var isHandled = false
         switch armed.check(input: input, timeZone: timeZone) {
+        case .start(let occurrence, _) where isCalibrating, .waiting(let occurrence, _) where isCalibrating:
+            // Note 12 §7.4: skipped, and recorded as handled with the
+            // reason; the schedule continues after the calibration.
+            isHandled = true
+            handleWeekly(occurrence, as: .skippedForCalibration)
+            weeklyOutcome = .skippedForCalibration(occurrence)
+            record(.override, "Weekly full charge (\(Self.describeWindow(occurrence.window))) skipped: \(CalibrationWording.inProgress.lowercased()) The weekly schedule continues after it.")
         case .nothingDue:
             weeklyDue = nil
         case .waiting(let occurrence, let wait):
@@ -871,6 +932,126 @@ public actor ChargeController {
         input.activeOverride = running
     }
 
+    // MARK: - Guided calibration
+
+    /// Starts a guided calibration (research note 12 §7) if every condition
+    /// of §7.4 holds on a fresh evaluation (``CalibrationAdmission``);
+    /// otherwise ``CalibrationStatus/refusal`` says why and nothing starts.
+    /// The session is saved and read back before it asks for anything; then
+    /// an evaluation asks for macOS's Charge Limit at 100% for step 1.
+    ///
+    /// - Parameter isNotifying: whether the owner's notifications are on and
+    ///   shown, so that requests reach them outside the menu.
+    @discardableResult
+    public func startCalibration(_ confirmations: CalibrationConfirmations, isNotifying: Bool) async -> ControllerStatus {
+        await exclusively {
+            await performEvaluation(.manual)
+            calibration.refusal = nil
+            if let refusal = CalibrationAdmission.refusal(status: status, settings: settings, confirmations: confirmations, isNotifying: isNotifying, now: now()) {
+                calibration.refusal = refusal
+                record(.calibration, "Calibration not started: \(refusal)")
+                return
+            }
+            let startNow = now()
+            // Admission requires both; checked again for the compiler.
+            guard let reading = ChargingPolicy.usableSnapshot(snapshot, now: startNow), let ownerLimit = nativeLimit?.ownerLimit ?? nativeLimit?.reportedLimit else { return }
+            let session = CalibrationSession.start(
+                id: UUID(),
+                at: calibration.stamp(at: startNow),
+                ownerLimit: ownerLimit,
+                cellKeeperLimit: settings.chargeLimit,
+                before: CalibrationCapacities(reading.health),
+                temperatureCheck: reading.temperatureCelsius == nil ? .ownerConfirmedCoolRoom : .measured,
+                optimizedCharging: confirmations.optimizedCharging ?? .boundAccepted
+            )
+            let isStarted = calibration.start(session)
+            recordCalibrationLog()
+            if isStarted {
+                await performEvaluation(.overrideChanged)
+            }
+        }
+    }
+
+    /// Ends the calibration in progress, running or paused: its report
+    /// replaces it in the store, and the normal policy applies at once.
+    @discardableResult
+    public func cancelCalibration() async -> ControllerStatus {
+        await exclusively {
+            calibration.loadIfNeeded()
+            recordCalibrationLog()
+            guard calibration.isInProgress else { return }
+            let cancelNow = now()
+            calibration.cancel(at: calibration.stamp(at: cancelNow), reading: ChargingPolicy.usableSnapshot(snapshot, now: cancelNow))
+            recordCalibrationLog()
+            await performEvaluation(.overrideChanged)
+        }
+    }
+
+    /// The owner's "continue" for a session found at launch (§7.6 step 4).
+    /// An evaluation runs first, for a fresh reading and, at the first
+    /// command after launch, the startup checks; then the session goes on
+    /// from that reading (``CalibrationSession/continued(at:reading:run:restAnswer:bootTime:)``),
+    /// and only then may it ask for 100% again. `restAnswer` is the owner's
+    /// answer whether the Mac stayed shut down and unplugged until the time
+    /// shown, needed in step 5 after a restart.
+    @discardableResult
+    public func continueCalibration(restAnswer: Bool? = nil) async -> ControllerStatus {
+        await exclusively {
+            calibration.loadIfNeeded()
+            recordCalibrationLog()
+            guard calibration.status.isPaused else { return }
+            await performEvaluation(.manual)
+            guard calibration.status.isPaused, !calibration.needsStartupCheck else { return }
+            let continueNow = now()
+            calibration.continueSession(restAnswer: restAnswer, reading: ChargingPolicy.usableSnapshot(snapshot, now: continueNow), at: calibration.stamp(at: continueNow))
+            recordCalibrationLog()
+            if calibration.isInProgress, !calibration.status.isPaused {
+                await performEvaluation(.overrideChanged)
+            }
+        }
+    }
+
+    /// Forgets the ended session's outcome once the owner has seen it; its
+    /// report stays as the last calibration.
+    @discardableResult
+    public func dismissCalibrationOutcome() async -> ControllerStatus {
+        await exclusively {
+            calibration.dismissOutcome()
+        }
+    }
+
+    /// The latest reading if the policy accepts it now.
+    private var usableSnapshotNow: BatterySnapshot? {
+        ChargingPolicy.usableSnapshot(snapshot, now: now())
+    }
+
+    private func calibrationContext(at evaluationNow: Date, adoptionsBefore: Int) -> CalibrationContext {
+        CalibrationContext(
+            settings: settings,
+            capabilities: capabilities,
+            isBackendFaulted: isBackendFaulted,
+            hasPendingBackend: pendingBackend != nil,
+            hasSchedule: schedule != nil,
+            hasAdoptedChange: adoptionCount > adoptionsBefore,
+            reading: ChargingPolicy.usableSnapshot(snapshot, now: evaluationNow)
+        )
+    }
+
+    private static func calibrationEvent(_ trigger: EvaluationTrigger) -> CalibrationObservation.Event {
+        switch trigger {
+        case .willSleep: .willSleep
+        case .didWake: .didWake
+        default: .check
+        }
+    }
+
+    /// Records what the calibration did since this was last called.
+    private func recordCalibrationLog() {
+        for line in calibration.takeLog() {
+            record(.calibration, line)
+        }
+    }
+
     /// Confirms `.normal` on the current backend, then switches to
     /// `newBackend`. If `.normal` cannot be confirmed, the current backend
     /// stays responsible: the switch is refused for now and stays pending,
@@ -888,6 +1069,9 @@ public actor ChargeController {
                 }
                 return
             }
+            calibration.loadIfNeeded()
+            calibration.endIfInProgress(.controlChanged, at: calibration.stamp(at: now()), reading: usableSnapshotNow)
+            recordCalibrationLog()
             pendingBackend = newBackend
             guard await restoreNormal(reason: "switching backend") else {
                 record(.safety, "Backend switch to \(newBackend.descriptor.displayName) refused for now: normal charging could not be confirmed on \(backend.descriptor.displayName). CellKeeper keeps trying and switches once it is confirmed.", level: .fault)
@@ -1091,6 +1275,16 @@ public actor ChargeController {
     private func performEvaluation(_ trigger: EvaluationTrigger) async {
         loadScheduleIfNeeded()
         loadWeeklyIfNeeded()
+        calibration.loadIfNeeded()
+        recordCalibrationLog()
+        // Note 12 §7.6 step 1: before anything is written, whether the
+        // backend holds a record of the owner's limit (what it loaded; no
+        // new I/O). Its own recovery then runs first, as always.
+        var calibrationHadRecord: Bool?
+        if calibration.needsStartupCheck {
+            calibrationHadRecord = await backend.nativeLimitStatus()?.hasUnresolvedOwnership ?? false
+        }
+        let adoptionsBefore = adoptionCount
         let previousSnapshot = snapshot
         do {
             let fresh = try await telemetry.currentSnapshot()
@@ -1166,12 +1360,25 @@ public actor ChargeController {
                 : nil,
             releaseReason: releaseReason
         )
-        // After the backend's mode was read, so that an adoption that turned
-        // management off in this evaluation is seen, and on the input the
-        // policy then evaluates. The one-shot first, then the weekly one: if
-        // both start, the second meets the first's full charge (D82).
-        let oneShotStart = applySchedule(to: &input)
-        let weeklyStart = applyWeekly(to: &input, timeZone: evaluationTimeZone)
+        // The calibration, then the schedules, after the backend's mode was
+        // read, so that an adoption that turned management off in this
+        // evaluation is seen, and on the input the policy then evaluates.
+        // A session excludes full charges, so it is checked first (note 12
+        // §7.4). The one-shot first, then the weekly one: if both start, the
+        // second meets the first's full charge (D82).
+        let calibrationStamp = calibration.stamp(at: evaluationNow)
+        calibration.check(
+            event: Self.calibrationEvent(trigger),
+            observedMode: currentMode,
+            context: calibrationContext(at: evaluationNow, adoptionsBefore: adoptionsBefore),
+            startup: calibrationHadRecord.map { CalibrationStartupEvidence(hadRecord: $0, limitRead: nativeLimit?.reportedLimit) },
+            at: calibrationStamp
+        )
+        recordCalibrationLog()
+        input.calibrationWantsFullLimit = calibration.wantsFullLimit
+        let isCalibrating = calibration.isInProgress
+        let oneShotStart = isCalibrating ? nil : applySchedule(to: &input)
+        let weeklyStart = applyWeekly(to: &input, timeZone: evaluationTimeZone, isCalibrating: isCalibrating)
         refreshOverrideDeadlineEstimate(in: &input)
         restrictingRequests.removeAll { input.uptime - $0.uptime >= 60 * 60 }
         let newDecision = ChargingPolicy.evaluate(input)
@@ -1204,8 +1411,22 @@ public actor ChargeController {
         }
         decision = newDecision
 
+        let requestsBefore = requestsMade
         await execute(newDecision.action)
         nativeLimit = await backend.nativeLimitStatus()
+        var requestFailed = false
+        if requestsMade != requestsBefore, case .failed? = lastExecution?.result {
+            requestFailed = true
+        }
+        calibration.afterRequests(
+            wantedFull: input.calibrationWantsFullLimit,
+            decision: newDecision,
+            currentMode: currentMode,
+            requestFailed: requestFailed,
+            context: calibrationContext(at: evaluationNow, adoptionsBefore: adoptionsBefore),
+            at: calibrationStamp
+        )
+        recordCalibrationLog()
         if let held = heldWhenMacOSLimitStarted {
             recordMacOSLimitRelease(of: held)
         } else if let held = macOSLimitReleaseUnconfirmed, currentMode == .normal {
@@ -1435,6 +1656,7 @@ public actor ChargeController {
     }
 
     private func request(_ mode: ChargeControlMode, for action: ChargingAction) async {
+        requestsMade += 1
         let isRestricting = mode.isRestricting(from: currentMode)
         if isRestricting {
             // Attempts count, not just successes, so failures cannot cause
@@ -2033,6 +2255,7 @@ public actor ChargeController {
         case .started: "started"
         case .passed: "passed before it could start"
         case .beforeSave: "began before the schedule was saved"
+        case .skippedForCalibration: "skipped: a calibration was in progress"
         }
     }
 

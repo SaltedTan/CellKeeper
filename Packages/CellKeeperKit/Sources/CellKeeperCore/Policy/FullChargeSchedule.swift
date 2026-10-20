@@ -107,6 +107,8 @@ public enum FullChargeScheduleIssue: Sendable, Equatable, CustomStringConvertibl
     case windowTooLong
     case startNotInFuture
     case startTooFarAhead
+    /// A guided calibration is in progress (note 12 §7.4).
+    case calibrationInProgress
 
     public var description: String {
         switch self {
@@ -120,6 +122,8 @@ public enum FullChargeScheduleIssue: Sendable, Equatable, CustomStringConvertibl
             "The start must be in the future."
         case .startTooFarAhead:
             "The start must be at most \(Int(FullChargeSchedule.maximumLeadTime / 86_400)) days ahead."
+        case .calibrationInProgress:
+            CalibrationWording.inProgress
         }
     }
 }

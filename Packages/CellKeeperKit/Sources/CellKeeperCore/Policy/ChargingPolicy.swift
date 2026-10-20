@@ -290,7 +290,10 @@ public enum ChargingPolicy {
     ///    user's own limit.
     /// 2. A temporary full charge → 100% until full, unplugged or expired.
     ///    A discharge session cannot run and is interrupted.
-    /// 3. Otherwise → the configured limit.
+    /// 3. A guided calibration's step that asks for 100%
+    ///    (``PolicyInput/calibrationWantsFullLimit``) → 100%, also once the
+    ///    battery is full: the session, not the policy, ends the step.
+    /// 4. Otherwise → the configured limit.
     ///
     /// Unusable telemetry does not release the limit: macOS enforces it from
     /// its own measurements, and releasing would only restore and re-apply
@@ -333,6 +336,9 @@ public enum ChargingPolicy {
         }
         if isFullChargeActive, let full = steps.last {
             return make(.fullChargeOverride, .nativeLimit(percent: full), .nativeFullCharge)
+        }
+        if input.calibrationWantsFullLimit, let full = steps.last {
+            return make(.calibrating, .nativeLimit(percent: full), .calibrationFullCharge)
         }
         return make(.osEnforcedLimit, .nativeLimit(percent: limit), .nativeLimitActive(limit: limit))
     }

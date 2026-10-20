@@ -86,6 +86,7 @@ public enum WeeklyFullChargeWording {
         switch record.result {
         case .started: return "Last: \(start), started"
         case .passed: return "Last: \(start), passed before it could start"
+        case .skippedForCalibration: return "Last: \(start), skipped: a calibration was in progress"
         case .beforeSave: return nil
         }
     }
@@ -120,6 +121,8 @@ public enum WeeklyFullChargeWording {
             return "The weekly full charge of \(start(occurrence)) passed before it could start.\(lastChecked)"
         case .discarded(let reason):
             return "A saved weekly full charge could not be used and is removed: \(reason)."
+        case .skippedForCalibration(let occurrence):
+            return "The weekly full charge of \(start(occurrence)) was skipped: a calibration was in progress. The weekly schedule continues after it."
         }
     }
 

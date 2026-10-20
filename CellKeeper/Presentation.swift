@@ -71,6 +71,7 @@ extension PolicyState {
         case .discharging: "Discharging to limit"
         case .osEnforcedLimit: "Limit enforced by macOS"
         case .deferringToMacOS: "Deferring to macOS's Charge Limit"
+        case .calibrating: "Calibration: macOS's limit at 100%"
         }
     }
 }
@@ -241,6 +242,7 @@ extension ControlEvent.Kind {
         case .safety: "Safety"
         case .settings: "Settings"
         case .override: "Override"
+        case .calibration: "Calibration"
         }
     }
 }

@@ -553,6 +553,8 @@ public enum DiagnosticsReport {
             "window passed before it could start (\(window(occurrence)))\(lastWait.map { "; last checked: \($0)" } ?? "")"
         case .discarded(let reason):
             "a saved weekly full charge could not be used and is removed: \(reason)"
+        case .skippedForCalibration(let occurrence):
+            "skipped: a calibration was in progress (window \(window(occurrence)))"
         }
     }
 }
