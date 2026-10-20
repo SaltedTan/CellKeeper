@@ -133,10 +133,12 @@ struct NotificationContentTests {
         #expect(NativeLimitWording.limit(100) == "100% (no limit)")
     }
 
-    @Test("A restore's confirmation replaces its warning in Notification Center; other kinds replace only their own")
+    @Test("A restore's confirmation replaces its warning in Notification Center, a calibration's notifications replace each other; other kinds replace only their own")
     func replacementKeys() {
+        let calibration: [NotificationKind] = [.calibrationUnplug, .calibrationRest, .calibrationPlugIn, .calibrationFinished, .calibrationEndedEarly]
         let keys = NotificationKind.allCases.map(\.replacementKey)
-        #expect(Set(keys).count == NotificationKind.allCases.count - 1)
+        #expect(Set(keys).count == NotificationKind.allCases.count - 1 - (calibration.count - 1))
         #expect(NotificationKind.restoreResolved.replacementKey == NotificationKind.restoreUnconfirmed.replacementKey)
+        #expect(Set(calibration.map(\.replacementKey)) == ["calibration"])
     }
 }

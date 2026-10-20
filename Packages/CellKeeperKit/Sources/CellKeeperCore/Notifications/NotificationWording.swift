@@ -16,7 +16,7 @@ public enum NotificationWording {
     static let simulatedNote = "CellKeeper's control is simulated: your Mac's charging is not changed."
 
     /// What Settings says notifications are about.
-    public static let settingsSummary = "CellKeeper notifies you when it holds charging at your limit or pauses it because the battery is warm, when a temporary full charge or a discharge ends without you stopping it, when its control backend faults, and when it cannot confirm that its own restriction ended or that your own Charge Limit is back, and once that is resolved. With macOS's Charge Limit, it notifies you when macOS reports the battery at or above the limit CellKeeper chose and not charging. Notifications say only what CellKeeper observed, and say so when its control is simulated."
+    public static let settingsSummary = "CellKeeper notifies you when it holds charging at your limit or pauses it because the battery is warm, when a temporary full charge or a discharge ends without you stopping it, when its control backend faults, and when it cannot confirm that its own restriction ended or that your own Charge Limit is back, and once that is resolved. With macOS's Charge Limit, it notifies you when macOS reports the battery at or above the limit CellKeeper chose and not charging, and during a calibration when it asks you to unplug, rest or plug in your Mac, and when the calibration finishes or ends early. Notifications say only what CellKeeper observed, and say so when its control is simulated."
 
     /// `percent`: the charge usable telemetry showed with the hold.
     static func limitReached(_ status: ControllerStatus, limit: Int, percent: Int) -> PlannedNotification {
@@ -145,6 +145,22 @@ public enum NotificationWording {
                 body: "At your request, CellKeeper discarded its unreadable record of your own Charge Limit, so it will not restore a limit from it."
             )
         }
+    }
+
+    /// A calibration's request, worded as the menu words it but "from now",
+    /// since it is posted when the request begins (note 12 §7.5).
+    static func calibrationRequest(_ request: CalibrationRequest, status: ControllerStatus) -> PlannedNotification {
+        PlannedNotification(
+            kind: NotificationKind.calibration(request),
+            title: CalibrationWording.title(request),
+            body: CalibrationWording.text(request, atRequest: true, now: status.lastEvaluation ?? Date())
+        )
+    }
+
+    /// A calibration that finished or ended by itself.
+    static func calibrationEnded(_ report: CalibrationReport) -> PlannedNotification {
+        let words = CalibrationWording.endNotification(report)
+        return PlannedNotification(kind: report.end.isCompleted ? .calibrationFinished : .calibrationEndedEarly, title: words.title, body: words.body)
     }
 
     private static func titled(_ title: String, _ status: ControllerStatus) -> String {

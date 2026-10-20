@@ -22,6 +22,17 @@ public enum NotificationKind: String, Sendable, CaseIterable {
     /// restore, a limit set outside CellKeeper was kept as the user's own,
     /// or the user discarded an unreadable record.
     case restoreResolved
+    /// A guided calibration asks the owner to unplug (step 3).
+    case calibrationUnplug
+    /// A guided calibration asks the owner to rest the Mac unplugged, with
+    /// the time to plug in again (step 5), or once to rest it again.
+    case calibrationRest
+    /// A guided calibration asks the owner to plug in (step 6).
+    case calibrationPlugIn
+    /// A guided calibration finished.
+    case calibrationFinished
+    /// A guided calibration ended by itself before it finished.
+    case calibrationEndedEarly
 
     /// The shortest time between two notifications of this kind, on the
     /// monotonic clock. A transition within it is dropped, not delayed.
@@ -36,6 +47,8 @@ public enum NotificationKind: String, Sendable, CaseIterable {
         // One per override, which the user started; and one per posted
         // restore warning.
         case .overrideEnded, .restoreResolved: 0
+        // One per request of a session, and one per session's end.
+        case .calibrationUnplug, .calibrationRest, .calibrationPlugIn, .calibrationFinished, .calibrationEndedEarly: 0
         }
     }
 
@@ -48,16 +61,28 @@ public enum NotificationKind: String, Sendable, CaseIterable {
         switch self {
         case .backendFault, .restoreUnconfirmed, .restoreResolved: true
         case .limitReached, .temperaturePause, .overrideEnded: false
+        case .calibrationUnplug, .calibrationRest, .calibrationPlugIn, .calibrationFinished, .calibrationEndedEarly: false
         }
     }
 
     /// Identifies the notification to the system, so a newer one of the
     /// same kind replaces an older one in Notification Center. A restore's
-    /// resolution replaces its warning. Not shown to the user.
+    /// resolution replaces its warning, and a calibration's latest request
+    /// or end replaces the one before. Not shown to the user.
     public var replacementKey: String {
         switch self {
         case .restoreUnconfirmed, .restoreResolved: "restore"
+        case .calibrationUnplug, .calibrationRest, .calibrationPlugIn, .calibrationFinished, .calibrationEndedEarly: "calibration"
         default: rawValue
+        }
+    }
+
+    /// The kind that posts `request`.
+    static func calibration(_ request: CalibrationRequest) -> NotificationKind {
+        switch request {
+        case .unplug: .calibrationUnplug
+        case .rest, .restAgain: .calibrationRest
+        case .plugIn: .calibrationPlugIn
         }
     }
 }
@@ -109,6 +134,12 @@ public struct PlannedNotification: Sendable, Equatable {
 /// - **Minimum interval.** At most one notification of a kind per
 ///   ``NotificationKind/minimumInterval`` of monotonic time, across
 ///   backends; a transition within it is dropped, not delayed.
+/// - **Calibration requests** (note 12 §7.5) are posted once each, when a
+///   session's request begins: a request is identified by the session and
+///   what it asks (a rest asked again is a new one), and a session's end
+///   by ``CalibrationStatus/endedCount``. They follow the same rules as an
+///   override's end: only from automatic evaluations, never replayed. The
+///   menu shows every request whether or not one is posted.
 /// - **No replay.** Nothing true in the first status is reported, except
 ///   the safety kinds (``NotificationKind/isSafety``). Statuses of the
 ///   user's own commands (settings, overrides, a schedule, backend switch,
@@ -117,6 +148,8 @@ public struct PlannedNotification: Sendable, Equatable {
 ///   restore warning without a claim about how it ended. The limit is armed
 ///   only for the limit in force when charging toward it was seen, so
 ///   lowering it below the charge posts nothing.
+///   While a calibration session exists, running or paused, the limit is
+///   not armed at all: its 100% steps and returns are its own doing.
 ///
 /// When notifications are not delivered (off, or macOS does not show
 /// them), statuses still update the arming, so turning them on later
@@ -155,6 +188,16 @@ public struct NotificationPlanner: Sendable {
     /// positive evidence resolves it.
     private var restoreWarning: RestoreEvidence?
     private var lastPostedAt: [NotificationKind: TimeInterval] = [:]
+    /// The calibration request shown by the last status, with its session.
+    private var calibrationRequestSeen: CalibrationRequestSeen?
+    /// ``CalibrationStatus/endedCount`` when last seen; nil before the
+    /// first status, which only sets it.
+    private var calibrationsEndedSeen: Int?
+
+    private struct CalibrationRequestSeen: Equatable {
+        var session: UUID
+        var request: CalibrationRequest
+    }
 
     public init() {}
 
@@ -198,7 +241,12 @@ public struct NotificationPlanner: Sendable {
         }
         overridesEndedSeen = status.overridesEnded
 
-        if let held = Self.heldLimit(status) {
+        if status.calibration.isInProgress {
+            // A calibration takes the battery to 100% and back on purpose:
+            // a hold at the limit is not news until charging toward it is
+            // seen again after the session.
+            limitArmedAt = nil
+        } else if let held = Self.heldLimit(status) {
             if limitArmedAt == held.limit {
                 _ = offer(.limitReached, NotificationWording.limitReached(status, limit: held.limit, percent: held.percent))
             }
@@ -224,6 +272,21 @@ public struct NotificationPlanner: Sendable {
                 _ = offer(.backendFault, NotificationWording.backendFault(status))
             }
         }
+
+        // A calibration's new request, and its end, as recorded.
+        let request = CalibrationWording.request(for: status)
+        var requestSeen: CalibrationRequestSeen?
+        if let session = status.calibration.session, let request {
+            requestSeen = CalibrationRequestSeen(session: session.id, request: request)
+        }
+        if previous != nil, let requestSeen, let request, requestSeen != calibrationRequestSeen {
+            _ = offer(NotificationKind.calibration(request), NotificationWording.calibrationRequest(request, status: status))
+        }
+        calibrationRequestSeen = requestSeen
+        if let seen = calibrationsEndedSeen, status.calibration.endedCount != seen, let report = status.calibration.outcome {
+            _ = offer(report.end.isCompleted ? .calibrationFinished : .calibrationEndedEarly, NotificationWording.calibrationEnded(report))
+        }
+        calibrationsEndedSeen = status.calibration.endedCount
 
         let evidence = RestoreEvidence(status)
         if let warned = restoreWarning, let resolution = Self.resolution(since: warned, now: evidence, status: status) {
