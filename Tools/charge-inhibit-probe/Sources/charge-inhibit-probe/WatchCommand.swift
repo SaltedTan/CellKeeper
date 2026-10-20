@@ -74,10 +74,7 @@ enum WatchCommand {
             return 1
         }
         // From here on, only the writer's thread writes to the terminal.
-        let console = ConsoleWriter {
-            TerminalInput.writeAll($0 + "\n", to: STDOUT_FILENO)
-            return true
-        }
+        let console = ConsoleWriter { TerminalInput.writeAll($0 + "\n", to: STDOUT_FILENO) }
         let sleepLog = SleepLog()
         let session = ManualCutSession(
             hold: hold,

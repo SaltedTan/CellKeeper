@@ -267,6 +267,9 @@ public struct ManualCutFlow: Sendable {
         /// The console has written the prompt of question `generation`
         /// (``Action/publish(_:generation:)``).
         case published(generation: UInt64, at: Double)
+        /// The console could not write an actionable message in full: the
+        /// terminal is unusable (code review r2 of #101, must E).
+        case consoleFailed(at: Double)
         /// The first SIGINT, SIGTERM or SIGHUP.
         case signal(Int32, at: Double)
         /// The reminder's own timer.
@@ -322,6 +325,9 @@ public struct ManualCutFlow: Sendable {
         case unconfirmedRecovery(String)
         /// A signal after a confirmed restore ended the after readings.
         case afterReadingsEndedEarly(String)
+        /// After the CUT prompt, the terminal could not show the probe's
+        /// output, whether or not a restore was confirmed.
+        case terminalUnusable(String)
         /// The after readings ran their course.
         case completed
     }
@@ -481,8 +487,8 @@ public struct ManualCutFlow: Sendable {
     /// When `event` happened, on the run's clock.
     static func time(of event: Event) -> Double {
         switch event {
-        case let .begin(time), let .line(_, time, _), let .tick(time, _), let .published(_, time), let .signal(_, time),
-             let .reminderTick(time): time
+        case let .begin(time), let .line(_, time, _), let .tick(time, _), let .published(_, time), let .consoleFailed(time),
+             let .signal(_, time), let .reminderTick(time): time
         case let .reading(sample): sample.time
         }
     }
@@ -505,6 +511,15 @@ public struct ManualCutFlow: Sendable {
             guard generation == questionGeneration, openQuestion != nil, !inputEligible else { return [] }
             inputEligible = true
             return [.discardInput]
+        case let .consoleFailed(time):
+            // The question never becomes answerable; the run ends, and the
+            // report is saved before the probe exits.
+            let reason = "the terminal could not show the probe's output (a write to it failed)"
+            note(time, reason)
+            if cutPromptAt == nil {
+                return end(.endedBeforeCut(reason), at: time)
+            }
+            return end(.terminalUnusable(reason), at: time)
         case let .signal(number, time):
             return signal(number, at: time)
         case let .reminderTick(time):
@@ -1122,6 +1137,11 @@ public struct ManualCutOutcome: Sendable, Equatable {
             return ManualCutOutcome(
                 verdict: .inconclusive(reason: reason), exitStatus: lastCharging ? 2 : 3,
                 recoveryReason: lastCharging ? nil : notCharging
+            )
+        case let .terminalUnusable(reason):
+            return ManualCutOutcome(
+                verdict: .inconclusive(reason: reason), exitStatus: 3,
+                recoveryReason: "The run ended because \(reason), so the owner may not have seen its questions or recovery text."
             )
         case nil where flow.cutPromptAt == nil:
             return ManualCutOutcome(verdict: .inconclusive(reason: "the run had not ended"), exitStatus: 2, recoveryReason: nil)

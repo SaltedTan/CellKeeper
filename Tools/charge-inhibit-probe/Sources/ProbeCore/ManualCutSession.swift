@@ -58,10 +58,13 @@ public final class TerminalInput: AnswerInput {
         return poll(&entry, 1, milliseconds) > 0 && entry.revents & Int16(POLLIN) != 0
     }
 
-    /// Writes all of `text` to `descriptor`, retrying after an interruption
-    /// and giving up on any other error. For the console writer's thread
-    /// only: it may block on a terminal that is not reading.
-    public static func writeAll(_ text: String, to descriptor: Int32) {
+    /// Writes all of `text` to `descriptor`, retrying after an interruption;
+    /// returns true only if every byte was written. Any other error, or a
+    /// write that makes no progress, is a failure (code review r2 of #101,
+    /// must E). For the console writer's thread only: it may block on a
+    /// terminal that is not reading.
+    @discardableResult
+    public static func writeAll(_ text: String, to descriptor: Int32) -> Bool {
         var bytes = Array(text.utf8)[...]
         while !bytes.isEmpty {
             let written = bytes.withUnsafeBytes { Darwin.write(descriptor, $0.baseAddress, $0.count) }
@@ -70,9 +73,10 @@ public final class TerminalInput: AnswerInput {
             } else if written < 0, errno == EINTR {
                 continue
             } else {
-                return
+                return false
             }
         }
+        return true
     }
 }
 
@@ -218,6 +222,20 @@ public final class ManualCutSession: @unchecked Sendable {
         send(.published(generation: generation, at: clock.now()))
     }
 
+    /// The console could not write an actionable message: the terminal is
+    /// unusable, and the run ends (code review r2 of #101, must E).
+    private func consoleFailed() {
+        send(.consoleFailed(at: clock.now()))
+    }
+
+    /// What the writer reports for an actionable message: a failure ends
+    /// the run.
+    private func onActionable() -> @Sendable (ConsoleWriter.Result) -> Void {
+        { [weak self] result in
+            if result == .failed { self?.consoleFailed() }
+        }
+    }
+
     /// Whether the open question's prompt has been written and the owner's
     /// lines may answer it.
     public var inputEligible: Bool {
@@ -271,16 +289,21 @@ public final class ManualCutSession: @unchecked Sendable {
                 // prompt; then the flow discards pending input and only
                 // then takes answers. Nobody waits for the writer: it calls
                 // back.
+                // Only a prompt written in full makes input eligible; one
+                // that could not be written ends the run.
                 console.enqueue(Self.text(question, repeated: false), generation: generation) { [weak self] result in
-                    guard result == .written else { return }
-                    self?.published(questionGeneration)
+                    switch result {
+                    case .written: self?.published(questionGeneration)
+                    case .failed: self?.consoleFailed()
+                    case .superseded: break
+                    }
                 }
             case let .remind(question):
-                console.enqueue(Self.text(question, repeated: true), generation: generation)
+                console.enqueue(Self.text(question, repeated: true), generation: generation, onWritten: onActionable())
             case let .say(text):
-                console.enqueue(text, generation: generation)
+                console.enqueue(text, generation: generation, onWritten: onActionable())
             case let .banner(banner):
-                console.enqueue("\n" + ManualCut.text(banner), generation: generation)
+                console.enqueue("\n" + ManualCut.text(banner), generation: generation, onWritten: onActionable())
             case .armReminder:
                 armReminder()
             case let .go(restoreByUnix):
@@ -290,7 +313,7 @@ public final class ManualCutSession: @unchecked Sendable {
 
                     GO — run the cut now in terminal B. Restore by \(time).
                     Write \(time) down, or set a phone timer for it, before you run the cut.
-                    """, generation: generation)
+                    """, generation: generation, onWritten: onActionable())
             case .end:
                 break
             }

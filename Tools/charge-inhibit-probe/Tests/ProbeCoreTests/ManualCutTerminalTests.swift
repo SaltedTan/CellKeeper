@@ -165,7 +165,75 @@ extension ManualCutTests {
             driver.session.stopReminder()
         }
 
-        @Test("restorenow typed before the RESTORE prompt appears marks nothing")
+        @Test("Review r2's case: output to the terminal opened read-only; no prompt appears and start00 is not taken (must E)")
+    func readOnlyTerminalOutput() throws {
+        let terminal = try PseudoTerminal()
+        // The probe's output: the same terminal, opened read-only, so every
+        // write fails while isatty still says it is a terminal.
+        let name = String(cString: ttyname(terminal.slave))
+        let output = open(name, O_RDONLY | O_NOCTTY)
+        try #require(output >= 0)
+        defer { close(output) }
+        #expect(isatty(output) == 1)
+        let console = ConsoleWriter { TerminalInput.writeAll($0 + "\n", to: output) }
+        let clock = FakeClock()
+        let session = ManualCutSession(
+            hold: 180, console: console, input: TerminalInput(descriptor: terminal.slave),
+            sleepLog: SleepLog(), clock: clock.portable, reminderTick: 0.05
+        )
+        session.begin()
+        #expect(eventually { session.isEnded })
+        terminal.type("start00\n")
+        for _ in 0..<20 {
+            session.poll()
+            usleep(5000)
+        }
+        let flow = session.snapshot
+        #expect(flow.answers.isEmpty)
+        #expect(flow.baselineStart == nil)
+        #expect(!flow.inputEligible)
+        #expect(!terminal.output.contains("FIRST READ"))
+        let outcome = ManualCutOutcome.of(flow, sleepNotices: [])
+        #expect(outcome.exitStatus == 2)
+        #expect(outcome.recoveryReason == nil)
+        #expect(outcome.verdict?.title == "inconclusive")
+    }
+
+    @Test("After the CUT prompt, a prompt the terminal cannot take ends the run with CHECK RECOVERY FIRST and exit 3")
+    func failedWriteAfterTheCutPrompt() {
+        let failing = Counter()
+        let console = ConsoleWriter { _ in failing.value == 0 }
+        let driver = SessionDriver(console: console)
+        driver.toHold()
+        let mark = driver.session.snapshot.cutMark?.time ?? 0
+        failing.add()
+        driver.at(mark + 180)
+        driver.session.poll()
+        #expect(eventually { driver.session.isEnded })
+        let flow = driver.session.snapshot
+        guard case .terminalUnusable = flow.ending else {
+            Issue.record("expected the terminal to be unusable, got \(String(describing: flow.ending))")
+            return
+        }
+        #expect(!flow.inputEligible)
+        let outcome = ManualCutOutcome.of(flow, sleepNotices: [])
+        #expect(outcome.exitStatus == 3)
+        #expect(outcome.recoveryReason != nil)
+        driver.session.stopReminder()
+    }
+
+    @Test("writeAll reports a write it could not finish")
+    func writeAllReportsFailure() throws {
+        var pipeEnds: [Int32] = [0, 0]
+        try #require(pipe(&pipeEnds) == 0)
+        defer { close(pipeEnds[0]) }
+        #expect(TerminalInput.writeAll("fine\n", to: pipeEnds[1]))
+        close(pipeEnds[1])
+        #expect(!TerminalInput.writeAll("closed\n", to: pipeEnds[1]))
+        #expect(!TerminalInput.writeAll("not a descriptor\n", to: -1))
+    }
+
+    @Test("restorenow typed before the RESTORE prompt appears marks nothing")
         func restorenowTypedBeforeThePrompt() throws {
             let driver = try TerminalDriver()
             let mark = driver.toHold()
