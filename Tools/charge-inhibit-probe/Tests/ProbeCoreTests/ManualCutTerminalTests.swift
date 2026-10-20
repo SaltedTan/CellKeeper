@@ -123,97 +123,99 @@ struct TerminalDriver {
     }
 }
 
-@Suite("watch takes an answer only once its question is on the terminal (code review r1 of #101, must 3)", .serialized)
-struct ManualCutTerminalTests {
-    @Test("Review r1's case: 00 typed after recheckfail, before the read-first question appears, confirms nothing")
-    func zeroTypedBeforeReadFirstAppears() throws {
-        let driver = try TerminalDriver()
-        let mark = driver.toRestorePrompt()
-        #expect(driver.session.snapshot.stage == .restorePrompt)
-        driver.answer("restorenow", at: mark + 182)
-        driver.answer("restorefail", at: mark + 186)
-        #expect(driver.session.snapshot.stage == .readFirst)
-        driver.answer("08", at: mark + 190)
-        #expect(driver.session.snapshot.stage == .recheck)
-        #expect(eventually { driver.session.inputEligible })
+extension ManualCutTests {
+    @Suite("watch takes an answer only once its question is on the terminal (code review r1 of #101, must 3)")
+    struct ManualCutTerminalTests {
+        @Test("Review r1's case: 00 typed after recheckfail, before the read-first question appears, confirms nothing")
+        func zeroTypedBeforeReadFirstAppears() throws {
+            let driver = try TerminalDriver()
+            let mark = driver.toRestorePrompt()
+            #expect(driver.session.snapshot.stage == .restorePrompt)
+            driver.answer("restorenow", at: mark + 182)
+            driver.answer("restorefail", at: mark + 186)
+            #expect(driver.session.snapshot.stage == .readFirst)
+            driver.answer("08", at: mark + 190)
+            #expect(driver.session.snapshot.stage == .recheck)
+            #expect(eventually { driver.session.inputEligible })
 
-        // The terminal stops taking output; recheckfail opens read-first,
-        // whose prompt is queued but not written.
-        driver.gate.close()
-        driver.answer("recheckfail", at: mark + 195)
-        #expect(driver.session.snapshot.stage == .readFirst)
-        #expect(!driver.session.inputEligible)
-        // The owner types 00, and half of another answer, before the
-        // question is visible.
-        driver.typeEarly("00\n")
-        driver.typeEarly("0")
-        #expect(!driver.session.snapshot.restoreConfirmed)
-        #expect(driver.session.snapshot.answers.last?.word == "recheckfail")
+            // The terminal stops taking output; recheckfail opens read-first,
+            // whose prompt is queued but not written.
+            driver.gate.close()
+            driver.answer("recheckfail", at: mark + 195)
+            #expect(driver.session.snapshot.stage == .readFirst)
+            #expect(!driver.session.inputEligible)
+            // The owner types 00, and half of another answer, before the
+            // question is visible.
+            driver.typeEarly("00\n")
+            driver.typeEarly("0")
+            #expect(!driver.session.snapshot.restoreConfirmed)
+            #expect(driver.session.snapshot.answers.last?.word == "recheckfail")
 
-        // The terminal takes the prompt: pending input, the partial line
-        // included, is discarded, and only then do answers count.
-        driver.gate.open()
-        #expect(eventually { driver.session.inputEligible })
-        driver.answer("0", at: mark + 200)
-        let flow = driver.session.snapshot
-        #expect(!flow.restoreConfirmed, "the partial 0 typed early joined the 0 typed after")
-        #expect(flow.stage == .readFirst)
-        // Typed after the question appeared, 00 counts.
-        driver.answer("00", at: mark + 205)
-        #expect(driver.session.snapshot.restoreConfirmed)
-        driver.session.stopReminder()
-    }
+            // The terminal takes the prompt: pending input, the partial line
+            // included, is discarded, and only then do answers count.
+            driver.gate.open()
+            #expect(eventually { driver.session.inputEligible })
+            driver.answer("0", at: mark + 200)
+            let flow = driver.session.snapshot
+            #expect(!flow.restoreConfirmed, "the partial 0 typed early joined the 0 typed after")
+            #expect(flow.stage == .readFirst)
+            // Typed after the question appeared, 00 counts.
+            driver.answer("00", at: mark + 205)
+            #expect(driver.session.snapshot.restoreConfirmed)
+            driver.session.stopReminder()
+        }
 
-    @Test("restorenow typed before the RESTORE prompt appears marks nothing")
-    func restorenowTypedBeforeThePrompt() throws {
-        let driver = try TerminalDriver()
-        let mark = driver.toHold()
-        driver.gate.close()
-        driver.clock.set(mark + 180)
-        driver.session.poll()
-        #expect(driver.session.snapshot.stage == .restorePrompt)
-        #expect(!driver.session.inputEligible)
-        driver.typeEarly("restorenow\n")
-        #expect(driver.session.snapshot.restoreMark == nil)
-        driver.gate.open()
-        #expect(eventually { driver.session.inputEligible })
-        for _ in 0..<20 {
+        @Test("restorenow typed before the RESTORE prompt appears marks nothing")
+        func restorenowTypedBeforeThePrompt() throws {
+            let driver = try TerminalDriver()
+            let mark = driver.toHold()
+            driver.gate.close()
+            driver.clock.set(mark + 180)
             driver.session.poll()
+            #expect(driver.session.snapshot.stage == .restorePrompt)
+            #expect(!driver.session.inputEligible)
+            driver.typeEarly("restorenow\n")
+            #expect(driver.session.snapshot.restoreMark == nil)
+            driver.gate.open()
+            #expect(eventually { driver.session.inputEligible })
+            for _ in 0..<20 {
+                driver.session.poll()
+            }
+            #expect(driver.session.snapshot.restoreMark == nil)
+            #expect(driver.session.snapshot.stage == .restorePrompt)
+            driver.answer("restorenow", at: mark + 190)
+            #expect(driver.session.snapshot.restoreMark != nil)
+            driver.session.stopReminder()
         }
-        #expect(driver.session.snapshot.restoreMark == nil)
-        #expect(driver.session.snapshot.stage == .restorePrompt)
-        driver.answer("restorenow", at: mark + 190)
-        #expect(driver.session.snapshot.restoreMark != nil)
-        driver.session.stopReminder()
-    }
 
-    @Test("cut08 typed ahead, before GO and the read-back question, never confirms the cut")
-    func cut08TypedAhead() throws {
-        let driver = try TerminalDriver()
-        driver.session.begin()
-        driver.answer("start00", at: 5)
-        var time = 5.5
-        while driver.session.snapshot.stage == .baseline {
-            driver.read(.charging, at: time)
-            time += 2
+        @Test("cut08 typed ahead, before GO and the read-back question, never confirms the cut")
+        func cut08TypedAhead() throws {
+            let driver = try TerminalDriver()
+            driver.session.begin()
+            driver.answer("start00", at: 5)
+            var time = 5.5
+            while driver.session.snapshot.stage == .baseline {
+                driver.read(.charging, at: time)
+                time += 2
+            }
+            driver.gate.close()
+            // cutnow and, at once, cut08: the second line meets the read-back
+            // question before its prompt is written.
+            driver.clock.set(time + 1)
+            driver.terminal.type("cutnow\ncut08\n")
+            _ = eventually {
+                driver.session.poll()
+                return driver.session.snapshot.stage == .cutReadBack
+            }
+            driver.typeEarly("")
+            #expect(!driver.session.snapshot.cutConfirmed)
+            driver.gate.open()
+            #expect(eventually { driver.session.inputEligible })
+            for _ in 0..<20 {
+                driver.session.poll()
+            }
+            #expect(!driver.session.snapshot.cutConfirmed)
+            driver.session.stopReminder()
         }
-        driver.gate.close()
-        // cutnow and, at once, cut08: the second line meets the read-back
-        // question before its prompt is written.
-        driver.clock.set(time + 1)
-        driver.terminal.type("cutnow\ncut08\n")
-        _ = eventually {
-            driver.session.poll()
-            return driver.session.snapshot.stage == .cutReadBack
-        }
-        driver.typeEarly("")
-        #expect(!driver.session.snapshot.cutConfirmed)
-        driver.gate.open()
-        #expect(eventually { driver.session.inputEligible })
-        for _ in 0..<20 {
-            driver.session.poll()
-        }
-        #expect(!driver.session.snapshot.cutConfirmed)
-        driver.session.stopReminder()
     }
 }

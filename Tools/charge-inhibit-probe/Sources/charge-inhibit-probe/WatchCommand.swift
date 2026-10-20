@@ -121,14 +121,20 @@ enum WatchCommand {
 
         let signalSources = installSignalHandlers { number in
             guard case let .quit(banner, status) = session.signal(number) else { return }
-            // A second signal: the bounded path, at once, from here.
+            // A second signal: the bounded path, at once, on a thread of its
+            // own, so that its waits (the save, the console's 2 s) never hold
+            // a thread of the shared dispatch pool that the reminder and the
+            // sleep queue run on.
             if let banner {
                 console.enqueue("\n\(signalName(number)) again: quitting. " + ManualCut.text(banner))
             }
             let flow = session.snapshot
-            finish(render(outcome: ManualCutOutcome.of(flow, sleepNotices: sleepWatch.notices), flow: flow), status: status) { status, _ in
-                _exit(status)
-            }
+            let text = render(outcome: ManualCutOutcome.of(flow, sleepNotices: sleepWatch.notices), flow: flow)
+            Thread {
+                finish(text, status: status) { status, _ in
+                    _exit(status)
+                }
+            }.start()
         }
         var tornDown = false
         func tearDown() {
