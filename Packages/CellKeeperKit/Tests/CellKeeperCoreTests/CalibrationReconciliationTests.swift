@@ -58,6 +58,53 @@ struct CalibrationReconciliationTests {
         #expect(poster.identifiers.isEmpty)
     }
 
+    @Test("A request kept by reconciliation is withdrawn like one this run posted: turning notifications off removes it, and cancelling then removes nothing more")
+    func keptThenOptOutThenCancel() async throws {
+        let poster = FakeNotificationPoster(permission: .shown)
+        let (rest, second) = try await postedRestThenRelaunched(poster)
+        let notifier = await makeNotifier(poster, clock: second.clock)
+        notifier.observe(await second.controller.evaluate(.launch), trigger: .launch)
+        await settle(notifier)
+        #expect(poster.removed.isEmpty, "kept: the paused session's rest holds")
+        await notifier.setEnabled(false)
+        notifier.observe(await second.controller.cancelCalibration(), trigger: .overrideChanged)
+        await settle(notifier)
+        #expect(poster.removed == [[rest.identifier]])
+        #expect(poster.identifiers.isEmpty)
+    }
+
+    @Test("Turning notifications off before the list arrives: the request it would have kept is removed")
+    func optOutBeforeListing() async throws {
+        let poster = FakeNotificationPoster(permission: .shown)
+        let (rest, second) = try await postedRestThenRelaunched(poster)
+        let notifier = await makeNotifier(poster, clock: second.clock)
+        poster.listing.hold()
+        let listedBefore = poster.listings
+        notifier.observe(await second.controller.evaluate(.launch), trigger: .launch)
+        await waitBounded("the listing to be asked for") {
+            while poster.listings == listedBefore { await Task.yield() }
+        }
+        await notifier.setEnabled(false)
+        poster.listing.release()
+        await settle(notifier)
+        #expect(poster.removed == [[rest.identifier]])
+        notifier.observe(await second.controller.cancelCalibration(), trigger: .overrideChanged)
+        await settle(notifier)
+        #expect(poster.removed == [[rest.identifier]])
+    }
+
+    @Test("A request kept by reconciliation is withdrawn when the session ends, with notifications on")
+    func keptThenCancelOnce() async throws {
+        let poster = FakeNotificationPoster(permission: .shown)
+        let (rest, second) = try await postedRestThenRelaunched(poster)
+        let notifier = await makeNotifier(poster, clock: second.clock)
+        notifier.observe(await second.controller.evaluate(.launch), trigger: .launch)
+        await settle(notifier)
+        notifier.observe(await second.controller.cancelCalibration(), trigger: .overrideChanged)
+        await settle(notifier)
+        #expect(poster.removed == [[rest.identifier]], "once, by its withdrawal; reconciliation leaves it to that")
+    }
+
     @Test("A request posted before a relaunch is removed once a newer request replaces it")
     func relaunchThenRestAgain() async throws {
         let poster = FakeNotificationPoster(permission: .shown)

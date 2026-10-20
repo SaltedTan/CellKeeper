@@ -492,11 +492,13 @@ final class FakeNotificationPoster: NotificationPosting, @unchecked Sendable {
     /// How many times the center was asked what it holds.
     var listings: Int { lock.withLock { _listings } }
 
+    /// Listings wait here, after counting, before the center answers.
+    let listing = TestGate()
+
     func notificationIdentifiers() async -> [String] {
-        lock.withLock {
-            _listings += 1
-            return _center.sorted()
-        }
+        lock.withLock { _listings += 1 }
+        await listing.pass()
+        return lock.withLock { _center.sorted() }
     }
     var permissionReads: Int { lock.withLock { _permissionReads } }
     /// Reads that returned, after any hold.

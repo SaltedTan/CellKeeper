@@ -90,9 +90,9 @@ public protocol NotificationPosting: Sendable {
 ///
 /// The one exception is withdrawing a calibration's request that no longer
 /// holds (``NotificationPlan/withdrawals``): it removes only a request this
-/// notifier queued under an opt-in, belongs to no generation, and runs also
-/// after notifications were turned off, which withdraws every outstanding
-/// request at once. Removing CellKeeper's own notifications asks for no
+/// notifier queued, or kept from an earlier run, under an opt-in, belongs to
+/// no generation, and runs also after notifications were turned off, which
+/// withdraws every outstanding request at once. Removing CellKeeper's own notifications asks for no
 /// permission and posts nothing.
 @MainActor
 public final class ChargingNotifier {
@@ -138,6 +138,10 @@ public final class ChargingNotifier {
     /// request that no longer holds is always removed: by the planner's
     /// withdrawal, or at once when notifications are turned off.
     private var outstanding: Set<String> = []
+    /// Requests an earlier run posted that reconciliation kept because they
+    /// still held, also in ``outstanding``. The planner never planned them,
+    /// so each is withdrawn here once it no longer holds.
+    private var inherited: Set<String> = []
     /// Removal tasks that have not finished. Not part of a generation:
     /// turning notifications off or on never cancels one.
     private var removalTasks: [Int: Task<Void, Never>] = [:]
@@ -255,6 +259,10 @@ public final class ChargingNotifier {
         }
         standingRequest = standing
         endedSeen = status.calibration.endedCount
+        let lapsed = inherited.filter { $0 != standing }
+        if !lapsed.isEmpty {
+            withdraw(lapsed.sorted())
+        }
         if isReconciliationDue, optIn.isEnabled {
             isReconciliationDue = false
             reconcile()
@@ -322,6 +330,7 @@ public final class ChargingNotifier {
             withdrawals[identifier, default: 0] += 1
         }
         outstanding.subtract(identifiers)
+        inherited.subtract(identifiers)
         let number = nextRemovalTask
         nextRemovalTask += 1
         let task = Task { [weak self, poster] in
@@ -336,19 +345,30 @@ public final class ChargingNotifier {
     /// request (``NotificationWording/calibrationRequestPrefix``) other than
     /// the one that holds, judged when the list arrives: not one queued in
     /// this run and not withdrawn (``outstanding``), and not one this run
-    /// withdrew already, which its withdrawal handles. A session's end
-    /// report has another prefix and stays.
+    /// withdrew already, which its withdrawal handles. The one that holds is
+    /// kept and from then on withdrawn like one this run posted
+    /// (``inherited``), or removed with the rest if notifications were
+    /// turned off meanwhile. A session's end report has another prefix and
+    /// stays.
     private func reconcile() {
         let number = nextRemovalTask
         nextRemovalTask += 1
         let task = Task { [weak self, poster] in
             let listed = await poster.notificationIdentifiers()
             guard let self else { return }
-            let obsolete = listed.filter { identifier in
+            let earlier = listed.filter { identifier in
                 identifier.hasPrefix(NotificationWording.calibrationRequestPrefix)
-                    && identifier != self.standingRequest
                     && !self.outstanding.contains(identifier)
                     && self.withdrawals[identifier] == nil
+            }
+            var obsolete: [String] = []
+            for identifier in earlier {
+                if identifier == self.standingRequest, self.optIn.isEnabled {
+                    self.outstanding.insert(identifier)
+                    self.inherited.insert(identifier)
+                } else {
+                    obsolete.append(identifier)
+                }
             }
             if !obsolete.isEmpty {
                 for identifier in obsolete {
