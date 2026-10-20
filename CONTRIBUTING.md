@@ -29,11 +29,15 @@ OSI-licensed open-source projects: the name, type and size of the SMC
 adapter-cut key `CHIE`, the values those projects write to it, and the
 AppleSMC user-client interface needed to read and write one key. Each fact
 is cited in `docs/research` with its source and licence and treated as a
-third-party claim until verified on a test Mac. No code, comments, structure
-or other text is copied; the implementation is written independently. Not
-covered: AlDente or any other proprietary or source-available tool, anything
-obtained from binaries, and any other key or mechanism (each needs its own
-owner decision). See
+third-party claim until verified on a test Mac. No code, comments or other
+text is copied, and no project's implementation structure (its files,
+types, functions or control flow); the wire-level facts needed to call the
+interface (the parameter block's fields, sizes and offsets, and the
+selector and command values) are used as facts. The implementation is
+written independently. Not covered: AlDente or any other proprietary or
+source-available tool, anything obtained from binaries, and any other key
+or mechanism (each needs its own owner decision). This is a project rule,
+not a legal opinion or a licence-compatibility review. See
 [docs/research/11-smc-adapter-cut.md](docs/research/11-smc-adapter-cut.md).
 
 ### 2. Safety

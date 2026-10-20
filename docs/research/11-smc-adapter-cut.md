@@ -43,9 +43,11 @@ a power assertion. Two facts follow from that and shape the whole design:
   §3.10; §3 here).
 - **A written key does not release itself.** powerd frees a power assertion
   when its owner exits (notes 09–10); nothing frees an SMC key if the writer
-  crashes. So the probe restores the key on every path, offers a separate
-  `restore` command, and says plainly what is not known about whether
-  unplug/replug, sleep or a restart clears `CHIE` (§4, §7, §8).
+  crashes. So the probe arms a restore deadline before it cuts, restores the
+  key on every path it can, offers a separate `restore` command, and says
+  plainly what it cannot guarantee: a hung SMC call, a crash or a sleep can
+  leave the cut in place, and whether unplug/replug, sleep or a restart
+  clears `CHIE` is not known (§4, §7, §8).
 
 It does not test sleep, restart, unplugging or persistence as outcomes; it
 measures one cut and one restore while the Mac is awake, lid open, with the
@@ -69,14 +71,19 @@ the SMC adapter cut on this Mac. The decision, in three parts:
    claims until verified on the test Mac — the `CHIE` key's name, type and
    size, the values those projects write to cut and restore adapter power,
    and the AppleSMC user-client interface needed to read and write one key.
-   No code, comments, structure or other text is copied; everything is
-   written independently. **Not covered:** AlDente (its repository is under a
-   proprietary evaluation licence that calls its source a trade secret) or
-   any other proprietary or source-available tool; decompiling,
-   disassembling or string-dumping any binary (Apple's included); any other
-   key or mechanism (each needs its own owner decision). Permissively
-   licensed sources are preferred where the same fact is available, and the
-   note records which sources agree or disagree.
+   No code, comments or other text is copied, and no project's
+   implementation structure (its files, types, functions or control flow);
+   the wire-level facts needed to call the interface — the parameter
+   block's fields, sizes and offsets, and the selector and command values —
+   are used as facts, and everything is written independently. **Not
+   covered:** AlDente (its repository is under a proprietary evaluation
+   licence that calls its source a trade secret) or any other proprietary
+   or source-available tool; decompiling, disassembling or string-dumping
+   any binary (Apple's included); any other key or mechanism (each needs
+   its own owner decision). Permissively licensed sources are preferred
+   where the same fact is available, and the note records which sources
+   agree or disagree. This is a project rule, not a legal opinion or a
+   licence-compatibility review.
 3. **The behaviour is accepted:** a level is held by cutting adapter power
    at the limit and restoring it below; macOS's own limit must be off; a cut
    does not release itself if the writer crashes.
@@ -98,9 +105,9 @@ depends on one.
 Every fact below is cited with its source and licence, and graded. Facts
 about `CHIE`'s values are **third-party claims — unverified** until the
 owner's `run` confirms them on this Mac; the interface facts come from
-Apple's own open source and the public SDK. No code or structure was
-copied from any source; facts are restated in this note's own words, and
-the probe is written independently.
+Apple's own open source and the public SDK. No code, comment or
+implementation structure was copied from any source; facts are restated in
+this note's own words, and the probe is written independently.
 
 ### 3.1 The key, its type and size, and the cut/restore values
 
@@ -159,7 +166,8 @@ Design decisions for the interface, each written independently:
   agrees). With the SDK's 64-bit `IOByteCount` on arm64 (S10) it would be
   88 bytes. The probe uses the fixed 32-bit field, as gosmc does (S9) — and
   batt, which uses gosmc, is reported to work on Apple silicon (S1, S12) —
-  so the size sent is 80 bytes `[INFERRED/UNVERIFIED]`. It encodes and
+  so the size sent is 80 bytes, provisionally `[INFERRED/UNVERIFIED]`. It
+  encodes and
   decodes the 80 bytes at those offsets explicitly, rather than relying on
   a Swift struct's layout, and the tests check every offset.
 - **Opening.** `IOServiceOpen` with type `0` and no `kSMCUserClientOpen`
@@ -171,15 +179,23 @@ Design decisions for the interface, each written independently:
 - **Confirmation before any write — one layout, no fallback.** The
   interface was written for the Intel SMC device, and on Apple silicon the
   matched service is an RTKit endpoint (§9). So the probe treats the
-  interface, and the 80-byte layout in particular, as a third-party claim
-  until a `GetKeyInfo` and a `ReadKey` of `CHIE`, sent with **exactly** the
-  layout `run` writes with, both succeed and report type `hex_`, size 1
-  and a value. Any IOReturn error, non-zero result byte, or other type or
-  size makes `check` FAIL and `run` refuse (§5). The probe has one layout
-  and never falls back to another — not at check time, and not at write
-  time. A wrong struct size is expected to fail the call
-  (`kIOReturnBadArgument` or similar) rather than act
-  `[INFERRED/UNVERIFIED]`.
+  interface, the 80-byte layout and open type `0` as third-party claims. A
+  `GetKeyInfo` and a `ReadKey` of `CHIE`, sent with **exactly** the layout
+  `run` writes with, must both succeed: an 80-byte response, IOReturn
+  success **and** result byte `0`, type `hex_`, size 1. Any IOReturn
+  error, non-zero result byte, other response size, or other type or size
+  makes `check` FAIL and `run` refuse (§5), and `run` repeats both calls
+  itself, in the same process, immediately before the cut (§4) rather
+  than relying on an earlier `check`. The probe has one layout and never
+  falls back to another — not at check time, and not at write time. A
+  wrong struct size is expected to fail the call (`kIOReturnBadArgument`
+  or similar) rather than act `[INFERRED/UNVERIFIED]`.
+- **What a successful read does not prove.** It shows that this layout and
+  open type work for *reading* `CHIE`. It does not show how the SMC
+  interprets a write, whether root may write the key, whether a write is
+  applied atomically, or what the firmware does with the value. Those stay
+  third-party claims until the owner's run reads `0x08` back after the cut
+  and the readings change (§4, §8).
 
 ### 3.3 Reported behaviour (third-party claims — unverified)
 
@@ -220,10 +236,12 @@ can confirm.
 **Clean room.** The interface facts come from Apple's open source and the
 public SDK; the `CHIE` facts from the GPL-2.0 batt, the MIT
 actuallymentor/battery and their issue reports, and the dual-licensed Linux
-macsmc driver, each cited above with its licence. No code, comment, data
-layout or other text was copied from any of them; the probe is written
-independently. No binary was disassembled, decompiled or string-dumped, and
-no AlDente source, documentation or binary was consulted.
+macsmc driver, each cited above with its licence. No code, comment or
+other text, and no implementation structure, was copied from any of them;
+the parameter block's fields and sizes are used as interface facts, its
+offsets were derived here (§3.2), and the probe is written independently.
+No binary was disassembled, decompiled or string-dumped, and no AlDente
+source, documentation or binary was consulted.
 
 ## 4. Method
 
@@ -255,8 +273,8 @@ A new selector, `--mechanism`, chooses the mechanism:
 Subcommands:
 
 - `check` — read-only, **no root needed** if the user client allows it:
-  "in order to write values, the program must be run as root. This is not
-  required for reading values" (bclm, MIT; cited in note 02 §3.8 as S20 — a third-party claim). If
+  bclm's documentation says root is needed to write SMC keys but not to
+  read them (bclm, MIT; cited in note 02 §3.8 as S20 — a third-party claim). If
   the user client cannot be opened without root, `check` FAILs and says so;
   it never asks for root. Opens the AppleSMC user client, reads `CHIE`'s type,
   size and value, and **FAILs** if the type is not `hex_` or the size is not
@@ -266,11 +284,13 @@ Subcommands:
   `disable-inflow` run (on AC, Charge Limit 100%, charge ≥ 40%, adapter
   attached, no other battery tool, `UpdateTime` and `SystemPowerIn`
   readable, no assertion held), plus the `CHIE` type/size/value check. It
-  records a baseline, writes the cut value, reads it back, holds, writes the
-  restore value, reads it back, and watches after.
-- `restore` — **owner only, `sudo`.** For the case a writer crashed and
-  left the adapter cut. It reads first, after the same type, size and
-  layout check (lead's decision, 2026-10-20):
+  records a baseline, writes the cut value `0x08`, reads it back, holds,
+  writes the restore value `0x00`, reads it back, and watches after. It
+  writes no other value: it refuses to start unless `CHIE` reads `0x00`
+  (§5), so `0x00` is both the starting state and the restore value.
+- `restore` — **owner only, `sudo`.** For the case a writer crashed, or the
+  Mac slept, and left the adapter cut. It reads first, after the same type,
+  size and layout check (lead's decision, 2026-10-20):
   - `CHIE` reads `0x00`: it writes **nothing** and reports "already
     restored";
   - `CHIE` reads `0x08`: it writes `0x00`, reads it back, and reports
@@ -304,25 +324,35 @@ As in note 10 §4, with the assertion create/release replaced by SMC writes:
    its battery; idle sleep becomes likelier). The idle-sleep assertion is
    the **only** power assertion this mechanism creates.
 3. **Baseline:** readings every 2 s for at least 20 s and until 2 battery
-   updates, all steady charging on AC power, exactly as note 10. Immediately
-   before the cut write, re-check (under the writer's lock) that the
-   baseline is fresh and that `CHIE` still reads `0x00`; else nothing is
-   written and the report says why.
-4. **Cut:** `GetKeyInfo(CHIE)`, verify `hex_`/1 byte against the baseline,
-   `WriteKey(CHIE, 0x08)`, then `ReadKey(CHIE)` and verify it is `0x08`. A
-   write that does not read back `0x08` is treated as a failed cut:
-   **restore at once** (write `0x00`, read back), and the run is
-   inconclusive.
-5. **Hold:** 180 s by default, 165–300 s with `--hold`. The probe restores
+   updates, all steady charging on AC power, exactly as note 10.
+4. **Confirm, in this process, immediately before the cut.** Under the
+   writer's lock: the baseline is still fresh, and a `GetKeyInfo` and a
+   `ReadKey` of `CHIE` both pass every test of §3.2 (80-byte response,
+   IOReturn success and result byte `0`, type `hex_`, size 1) and read
+   `0x00`. An earlier `check` or `READY` does not count. On any failure
+   nothing is written and the report says why.
+5. **Arm the restore deadline, then mark a restore as needed — both before
+   the write.** The deadline runs on its own thread, independent of
+   sampling, console and report output: at the hold plus 15 s after the cut
+   write (at most 315 s), it restores `CHIE` (writes `0x00`, reads back)
+   whatever the rest of the probe is doing, and does no I/O until it has.
+   If its restore is confirmed, the run carries on and the report says the
+   deadline restored it; if not, it follows the emergency path below.
+   Marking the restore as needed before the write means every path
+   restores if the write *may* have happened — including a write call that
+   returned an error, or a read-back that failed.
+6. **Cut:** `WriteKey(CHIE, 0x08)`, then `ReadKey(CHIE)` and verify it is
+   `0x08`. A write that fails, or does not read back `0x08`, is treated as
+   a possible cut: **restore at once** (write `0x00`, read back), and the
+   run is inconclusive.
+7. **Hold:** 180 s by default, 165–300 s with `--hold`. The probe restores
    early (writes `0x00`, reads back) when a reading is unreadable, shows
    100% or charged, shows a charge below 25%, or shows a battery update more
    than 150 s old. Battery power is **not** a reason to restore early: it is
    the expected effect of a cut.
-6. **Restore:** write `CHIE` the exact value it read **before** the cut,
-   then `ReadKey` and verify. Since `run` refuses unless `CHIE` reads
-   `0x00` at the start (§5), that value is always `0x00`. Retry a failed
-   write a bounded number of times.
-7. **After:** readings for 180 s after the restore (up to 120 s more until
+8. **Restore:** write `0x00`, then `ReadKey` and verify it is `0x00`, then
+   cancel the deadline. Retry a failed write a bounded number of times.
+9. **After:** readings for 180 s after the restore (up to 120 s more until
    charging has resumed), then release the idle-sleep assertion, deregister
    from sleep notifications and write the report. The longest run matches
    note 10.
@@ -330,35 +360,55 @@ As in note 10 §4, with the assertion create/release replaced by SMC writes:
 ### Restore on every path
 
 The cut value is written in exactly one place; the **restore** is driven on
-every path out of the hold, writing back the exact value read before the
-cut and reading it back each time:
+every path out of the hold, writing `0x00` and reading it back each time (a
+restore that finds the run already restored does nothing):
 
 - the end of the hold;
+- the restore deadline (step 5), if the hold has not ended by then;
 - `SIGINT`/`SIGTERM`/`SIGHUP` (the teardown's first step is the restore);
 - an early stop (charge below 25%, a stale battery update, an unreadable or
   full reading);
-- a `will-sleep` notification — **the restore and its read-back happen
-  BEFORE the sleep is acknowledged**, under the same no-I/O-on-the-sleep-
-  queue rules as note 10: the restore write and read-back are the queue's
-  only blocking work (bounded retries); if the restore cannot be confirmed,
-  the probe does **not** allow the sleep, appends one line to the open
-  report file under a 2 s exit deadline, and `_exit`s — but, unlike an
-  assertion, **exiting does not undo the write**, so the line tells the
-  owner to run `restore` and follow the recovery steps;
+- a `will-sleep` notification (below);
 - a `defer` on every path out of the run.
 
-**The crash caveat, stated plainly.** A power assertion is released when its
-owner exits (notes 09–10); a written SMC key is not. If the probe is killed
-with `SIGKILL`, panics, or loses power mid-run, `CHIE` may stay at `0x08`
-and the Mac may keep running from its battery while plugged in. Recovery is
-the `restore` command (or any tool that writes `CHIE 0x00`), an unplug/
-replug, or a restart — and it is **unknown** whether unplug/replug, sleep or
-a restart clears `CHIE` by itself (§8). Every report and the owner steps
-print this and the `restore` command prominently.
+**Sleep cannot be held off.** `kIOMessageSystemWillSleep` announces a sleep
+that cannot be cancelled, and if the probe does not answer, macOS sleeps
+anyway after 30 s (`IOPMLib.h`, cited in note 10 §3). On `will-sleep` the
+probe restores and reads back **before** it acknowledges, under the same
+no-I/O-on-the-sleep-queue rules as note 10: the restore write and read-back
+are the queue's only blocking work (bounded retries). If the restore cannot
+be confirmed, the probe does not acknowledge, appends one line to the open
+report file under a 2 s exit deadline, and `_exit`s. **The Mac then sleeps
+anyway, and `CHIE` may still be `0x08`:** unlike an assertion, exiting does
+not undo the write. The line tells the owner to recover at once after the
+Mac wakes, with `restore` (§6 step 7, §7).
+
+The emergency path of the restore deadline is the same: if its restore
+cannot be confirmed, it appends one line under the 2 s exit deadline and
+`_exit`s, and the line tells the owner to recover at once.
+
+**What the probe cannot guarantee, stated plainly.** A power assertion is
+released when its owner exits (notes 09–10); a written SMC key is not. The
+SMC calls are synchronous calls into the kernel: bounded retries bound the
+number of calls, not how long one call takes, and if a call hangs, neither
+the deadline nor any other path can complete a restore. If the probe hangs,
+is killed with `SIGKILL`, panics, or loses power mid-run, or the Mac sleeps
+before a restore is confirmed, `CHIE` may stay at `0x08` and the Mac may
+keep running from its battery while plugged in. Recovery is the `restore`
+command, confirmed by its read-back **and** by adapter power coming back
+(§7). Unplugging and replugging the adapter, and restarting, are
+**unverified** recovery attempts: it is unknown whether either, or a sleep,
+clears `CHIE` (§8). Every report and the owner steps print this and the
+`restore` command prominently.
 
 **Never** writes any key other than `CHIE`; **never** a value other than the
 cited `0x08` (cut) and `0x00` (restore); verifies type and size before every
 write; reads back after every write.
+
+**Under the same caveat, a short supervised run only.** The 40% start and
+25% floor (§5, §7) are reasonable for a few minutes on battery with the
+owner present and the readings working. They give no guarantee after a
+crash, a hang or a sleep.
 
 ### The verdict (reuses note 10)
 
@@ -382,6 +432,22 @@ which, read against note 02 §3.4, would mean this firmware ignores `CHIE`
 (`discharging with adapter attached`, `discharging, did not resume`,
 `inconclusive`) apply unchanged.
 
+**What telemetry cannot tell, carried forward from note 10 §4.** No reading
+can tell an adapter cut from the owner unplugging the adapter. Here it is
+sharper than in note 10: after a `CHIE` cut, `ExternalConnected` is
+reported to go false (S4), so that flag is **expected** to say the adapter
+is gone, and it is not used to judge attachment. Whether
+`AppleRawExternalConnected` or the public adapter details still report an
+adapter during a cut is unknown `[INFERRED/UNVERIFIED]`. If neither does, a
+real cut and an unplug look the same, and the verdict is `inconclusive`
+with the times in its reason; the owner's account of whether the adapter
+stayed plugged in (§6) is then the only evidence, and the report never
+claims a definite unplug. A system power input near zero, alone, shows
+neither that the adapter is attached nor that the Mac is drawing nothing
+from it. Phase 2's tests must include synthetic runs in which the
+connection signals disappear during the hold, and in which the input power
+cannot be read, and check that neither is judged an `adapter cut`.
+
 ## 5. Preconditions
 
 `check --mechanism smc-adapter-cut` prints these and exits 0 if none fails,
@@ -394,7 +460,7 @@ absent), with these changes:
 |---|---|---|
 | `CHIE` present with the expected type and size | **fails** if the AppleSMC user client cannot be opened, `CHIE` is `kSMCKeyNotFound` or unreadable, its type is not `hex_`, or its size is not 1 byte | A wrong type or size means a different key layout; the probe refuses to write (note 02 §6, "writing unknown keys or wrong widths"). |
 | `CHIE` reads `0x00` | **fails** if `CHIE` reads `0x08` or any value other than `0x00` (lead's decision, 2026-10-20) | `0x08` means something else already holds a cut; any other value is an unknown state. Either way the run would start from a state it cannot justify restoring to, so it refuses. |
-| The round-trip read uses the write's layout | **fails** if `GetKeyInfo` or `ReadKey` of `CHIE`, sent with the exact 80-byte layout `run` would write with (§3.2), returns an IOReturn error or a non-zero result byte, or reports anything but type `hex_` and size 1 | The layout question (80 vs 88 bytes, §3.2) is settled only by this read succeeding. There is no fallback: a mismatch never makes the probe try another layout, at check time or at write time. |
+| The round-trip read uses the write's layout | **fails** if `GetKeyInfo` or `ReadKey` of `CHIE`, sent with the exact 80-byte layout `run` would write with (§3.2), returns an IOReturn error, a non-zero result byte or a response of another size, or reports anything but type `hex_` and size 1 | For reading, the layout question (80 vs 88 bytes, §3.2) is settled only by this read succeeding; for writing it stays open until the run (§3.2). `run` repeats this read in its own process immediately before the cut (§4). There is no fallback: a mismatch never makes the probe try another layout, at check time or at write time. |
 | macOS's Charge Limit is 100% | **fails** below 100% (note 10 already checks this) | `CHIE` is reported ignored while the native limit is active (§3.3); the limit must be off for a meaningful result. |
 
 The 40% floor-margin check, the "charge in 50–74%" warning and the
@@ -414,7 +480,9 @@ Optimized Battery Charging warning carry over from note 10 §5.
    whole experiment. The charge must be at least 40%; 50–74% is best.
 3. Connect the Apple power adapter and wait until the battery menu shows it
    charging. Keep the lid open and the Mac on a hard surface, and stay with
-   it.
+   it. Quit anything heavy (builds, games, video exports) and leave it idle
+   during the run. If the Mac gets unusually hot, press Ctrl-C: that
+   restores `CHIE` and ends the run.
 4. **During the run, do not touch the adapter or its cable.** The run is
    expected to leave the Mac running from its battery while the adapter is
    plugged in, for the hold (3 minutes by default): that is the effect. If
@@ -438,17 +506,21 @@ Optimized Battery Charging warning carry over from note 10 §5.
    It takes about 6½ minutes with the default hold, up to about 10½ if the
    baseline waits for a battery update or charging is slow to resume. Ctrl-C
    at any time restores `CHIE` and ends the run with a report.
-7. **After the run, check recovery first.** The battery menu must show the
-   Mac on power adapter and charging again. If not, or if the report opens
-   with "CHECK RECOVERY FIRST":
+7. **After the run, check recovery first** — and if the Mac slept during
+   the run, do this as soon as it wakes. The battery menu must show the Mac
+   on power adapter and charging again. If not, or if the report or the
+   console says "CHECK RECOVERY FIRST", run, from the same folder
+   (`Tools/charge-inhibit-probe` in the CellKeeper checkout):
 
    ```sh
    sudo .build/release/charge-inhibit-probe restore --mechanism smc-adapter-cut
    ```
 
-   then follow §7's recovery steps. **A crash does not undo the cut** — if
-   the Mac ran from its battery and the probe did not confirm the restore,
-   run `restore` (or unplug and replug the adapter) before anything else.
+   Recovery counts only when **both** hold: `restore` reports that `CHIE`
+   read back `0x00` (or was already `0x00`), **and** the battery menu shows
+   the power adapter again. **A crash or a sleep does not undo the cut**, so
+   do this before anything else. If either fails, follow §7's recovery
+   steps.
 8. Only then set the Charge Limit and Optimized Battery Charging back the
    way you want them, and send the file
    `Tools/charge-inhibit-probe/charge-inhibit-probe-smc-adapter-cut-<timestamp>.txt`
@@ -458,42 +530,64 @@ Optimized Battery Charging warning carry over from note 10 §5.
 ## 7. Safety
 
 - **What it changes.** One SMC key, `CHIE`, set to `0x08` for the hold
-  (180 s by default, at most 300 s) and restored to the value read before
-  the write; one public idle-sleep assertion for the run; a registration
-  for sleep notifications. No other key, no other value, no `pmset`
+  (180 s by default, at most 300 s) and restored to `0x00`, the value it
+  must read before the write; one public idle-sleep assertion for the run;
+  a registration for sleep notifications. No other key, no other value, no `pmset`
   setting, no launchd job, no persistent file but the report.
 - **Running from the battery.** When `CHIE` is `0x08`, the Mac runs from its
   battery while plugged in. At the 10–16 W it draws while not charging,
-  300 s is about 1 Wh, a percent or two `[INFERRED/UNVERIFIED]`. The probe
-  ends the hold and restores at once if the charge falls below 25% (note 02
-  §7 puts the floor for an adapter cut at about 25–30%), and refuses to
-  start below 40% (§5).
+  300 s is about 1 Wh, a percent or two `[INFERRED/UNVERIFIED]`; a heavy
+  workload draws more and warms the battery, so the owner leaves the Mac
+  idle and stops the run on unusual heat (§6). The probe ends the hold and
+  restores at once if the charge falls below 25% (note 02 §7 puts the floor
+  for an adapter cut at about 25–30%), and refuses to start below 40% (§5).
 - **No self-release.** Unlike a power assertion, a written SMC key is **not**
-  freed when the writer exits (§4). The probe restores on every path and
-  reads the restore back; a `restore` command exists for a crash. **Unknown:
+  freed when the writer exits (§4). The probe arms a restore deadline before
+  the cut, restores on every path it can and reads the restore back; a
+  `restore` command exists for a crash, a hang or a sleep. A hung SMC call
+  or a killed process can still defeat every one of these (§4). **Unknown:
   whether unplug/replug, sleep or a restart clears `CHIE`** — the published
   Apple source does not say, and this probe does not test persistence (§8).
 - **Sleep.** A closed lid or the Apple menu still sleeps the Mac; the
   idle-sleep assertion stops only idle sleep. On `will-sleep` the probe
-  restores `CHIE` and reads it back **before** allowing the sleep; if the
-  restore cannot be confirmed it does not allow the sleep, records one line
-  and exits — but exiting does **not** undo the write, so that line and the
-  report tell the owner to run `restore`. A sleep makes the run
-  inconclusive.
-- **Fail-safe restore, in layers:** after the hold; on `SIGINT`/`SIGTERM`/
-  `SIGHUP`; on an early-end reading; on a `will-sleep` notification; and in a
-  `defer` on every path. A failed restore is retried a bounded number of
-  times, and every report and the owner steps print the `restore` command.
+  restores `CHIE` and reads it back before acknowledging, but it **cannot
+  delay the sleep**: macOS sleeps anyway after 30 s. If the restore cannot
+  be confirmed, the probe records one line and exits, and the Mac may
+  sleep with `CHIE` still at `0x08`; the owner then recovers as soon as it
+  wakes (§6 step 7). A sleep makes the run inconclusive.
+- **Fail-safe restore, in layers:** after the hold; by the restore
+  deadline; on `SIGINT`/`SIGTERM`/`SIGHUP`; on an early-end reading; on a
+  `will-sleep` notification; and in a `defer` on every path. A failed
+  restore is retried a bounded number of times, and every report and the
+  owner steps print the `restore` command.
 - **What the probe never does:** run as root unless the owner starts it with
-  `sudo`; write any SMC key but `CHIE`; write any value but `0x08` and the
-  restore value; write without first confirming `CHIE`'s type and size;
+  `sudo`; write any SMC key but `CHIE`; write any value but `0x08` and
+  `0x00`; write without first confirming `CHIE`'s type and size;
   skip the read-back after a write; enumerate the SMC key table; read any
   SMC key but `CHIE`; open a user client of the battery manager; change
   `pmset` settings; read the AlDente helper's files; keep anything of the
   adapter details but presence and wattage.
 
-These recovery steps follow
-[`safety.md`, "If charging does not resume"](../safety.md#if-charging-does-not-resume).
+### Recovery steps
+
+If adapter power did not come back after the run, or the probe did not
+confirm its restore:
+
+1. Run `restore` (§6 step 7). Recovery counts only when it reports `CHIE`
+   at `0x00` **and** the battery menu shows the power adapter again.
+2. If `restore` refuses, fails, or the adapter still does not show: the Mac
+   is running from its battery. **Save your work.**
+3. Then try, in order, unplugging and replugging the adapter, and
+   restarting the Mac, running `restore` again after each. Neither is known
+   to clear `CHIE` (§8); they are attempts, not a verified fix.
+4. If adapter power still does not come back, **shut the Mac down before
+   the battery runs low**, and send the report to the lead. If a Mac that
+   was shut down still does not take power from its adapter when started
+   again, ask Apple Support for help.
+
+These steps extend
+[`safety.md`, "If charging does not resume"](../safety.md#if-charging-does-not-resume),
+which has the same steps.
 
 ## 8. Open questions
 
@@ -517,7 +611,10 @@ These recovery steps follow
    Intel AppleSMC device (§9). Does the `IOServiceMatching("AppleSMC")` /
    `kSMCHandleYPCEvent` / `SMCParamStruct` interface (§3.2), written for the
    Intel device, work against that endpoint for a single-key read and write?
-   The round-trip read in `check` answers this before any write.
+   The round-trip read in `check` answers it for reading, before any write.
+   For writing — how the SMC interprets the write, whether root may write
+   `CHIE`, and what the firmware does with it — only the run's read-back
+   and readings answer it (§3.2).
 6. Reading the sibling adapter keys (`CH0I`/`CH0J`) or the inhibit keys
    (`CHTE`) read-only would characterise this firmware's generation, but
    each is a key outside the allowlist and is **deliberately not read**; the
@@ -550,8 +647,10 @@ names or home paths) will be recorded here, as in notes 09 §10 and 10 §10.
 ## 11. Sources
 
 All fetched on 2026-10-20 unless stated otherwise. Each is cited for the
-facts it supports; no code, comment, structure or other text was copied from
-any of them.
+facts it supports; no code, comment, implementation structure or other
+text was copied from any of them. For an issue or pull-request comment, the
+licence given is the project's; it does not necessarily cover the comment,
+which is cited only as a report.
 
 **Third-party open-source projects (claims — unverified)**
 

@@ -280,10 +280,13 @@ with a narrow clean-room exception for the facts it needs
   ([research note 11](research/11-smc-adapter-cut.md)). The same tool,
   run with `--mechanism smc-adapter-cut`: `check` reads the one SMC key
   `CHIE` (its type, size and value) without privileges; `sudo … run`
-  writes `CHIE`'s reported cut value for 180 s, restores the value it read
-  before, reads each write back, and judges the run with note 10's rules
-  for an adapter cut. A written key is not released when the probe exits,
-  so the tool also has a `sudo … restore` command. The key's values come
+  starts only if `CHIE` reads its reported restore value `0x00`, writes
+  the reported cut value `0x08` for 180 s, writes `0x00` back, reads each
+  write back, and judges the run with note 10's rules for an adapter cut.
+  A written key is not released when the probe exits, and the Mac can
+  sleep before a restore is confirmed, so the tool also has a
+  `sudo … restore` command, which writes `0x00` only if `CHIE` reads
+  `0x08` and refuses on any other value. The key's values come
   from third-party open-source projects under the owner's clean-room
   exception, and are claims until this run. *Designed; not run yet.*
 - Follow research note 02 §7: a read-only, allowlisted capability probe,

@@ -157,12 +157,18 @@ before telemetry validation) or recorded as preconditions in
   cited with its source and licence, and treated as a third-party claim
   until verified on a test Mac; prefer permissively licensed sources where
   the same fact is available, and record which sources agree or disagree.
-  No code, comments, structure or other text is copied; the implementation
-  is written independently. Not covered: AlDente or any other proprietary
-  or source-available tool, anything obtained from binaries, and any other
-  key or mechanism (each needs its own owner decision). Note 11 applies
-  it; [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) §1 has the same
-  text.
+  No code, comments or other text is copied, and no project's
+  implementation structure (its files, types, functions or control flow);
+  the wire-level facts needed to call the interface (the parameter block's
+  fields, sizes and offsets, and the selector and command values) are used
+  as facts. The implementation is written independently. Not covered:
+  AlDente or any other proprietary or source-available tool, anything
+  obtained from binaries, and any other key or mechanism (each needs its
+  own owner decision). This is a project rule, not a legal opinion or a
+  licence-compatibility review; for an issue or pull-request comment, the
+  licence noted is the project's and does not necessarily cover the
+  comment, which is cited only as a report. Note 11 applies it;
+  [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) §1 has the same rule.
 - Never disassemble, decompile, or string-dump proprietary binaries,
   including Apple's.
 - Never write to hardware or probe unknown keys to answer a research
