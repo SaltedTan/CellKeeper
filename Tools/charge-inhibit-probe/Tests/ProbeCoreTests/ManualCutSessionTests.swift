@@ -135,9 +135,9 @@ struct SessionDriver {
 
     /// Waits until the open question's prompt has been written, then types
     /// `line`.
-    func type(_ line: String, at time: Double) {
+    func type(_ line: String, at time: Double, sourceLocation: SourceLocation = #_sourceLocation) {
         clock.set(time)
-        _ = eventually { session.inputEligible }
+        #expect(eventually { session.inputEligible }, "\(line): the question never took answers", sourceLocation: sourceLocation)
         input.type(line)
         session.poll()
     }

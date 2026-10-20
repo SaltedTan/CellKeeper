@@ -69,16 +69,35 @@ struct TerminalDriver {
     }
 
     /// Waits until the open question takes answers, types `word` and a
-    /// Return, and polls until the session has read it.
-    func answer(_ word: String, at time: Double) {
+    /// Return, and polls until the session has read and recorded it; unless
+    /// `isWord` is false, as one of the question's answer words.
+    func answer(_ word: String, at time: Double, isWord: Bool = true, sourceLocation: SourceLocation = #_sourceLocation) {
         clock.set(time)
-        #expect(eventually { session.inputEligible }, "\(word): the question never took answers")
+        #expect(eventually { session.inputEligible }, "\(word): the question never took answers", sourceLocation: sourceLocation)
         let before = session.snapshot.answers.count
         terminal.type(word + "\n")
-        _ = eventually {
+        let read = eventually {
             session.poll()
             return session.snapshot.answers.count > before
         }
+        #expect(read, "\(word) was never read", sourceLocation: sourceLocation)
+        #expect(session.snapshot.answers.last?.word == (isWord ? word : nil), "\(word) was not recorded as expected", sourceLocation: sourceLocation)
+    }
+
+    /// Runs the baseline until the CUT prompt is on the terminal and takes
+    /// answers; returns the time of the last reading.
+    func toCutPrompt() -> Double {
+        session.begin()
+        answer("start00", at: 5)
+        #expect(session.snapshot.stage == .baseline)
+        var time = 5.5
+        while session.snapshot.stage == .baseline, time < 200 {
+            read(.charging, at: time)
+            time += 2
+        }
+        #expect(session.snapshot.stage == .cutPrompt)
+        #expect(eventually { session.inputEligible }, "the CUT prompt never took answers")
+        return time
     }
 
     /// Types without waiting for the question, and polls for a while, as
@@ -100,17 +119,17 @@ struct TerminalDriver {
     /// The first read, the baseline, the cut and its read-back; returns
     /// the cut mark's time.
     func toHold() -> Double {
-        session.begin()
-        answer("start00", at: 5)
-        var time = 5.5
-        while session.snapshot.stage == .baseline {
-            read(.charging, at: time)
-            time += 2
-        }
+        let time = toCutPrompt()
         read(.charging, at: time)
         answer("cutnow", at: time + 0.5)
+        // The milestones: the cut mark, the GO line, the read-back question.
+        #expect(session.snapshot.cutMark != nil)
+        #expect(session.restoreByText != nil)
+        #expect(session.snapshot.stage == .cutReadBack)
         read(.cut, at: time + 2)
         answer("cut08", at: time + 6)
+        #expect(session.snapshot.stage == .hold)
+        #expect(session.snapshot.cutConfirmed)
         return session.snapshot.cutMark?.time ?? 0
     }
 
@@ -119,6 +138,7 @@ struct TerminalDriver {
         let mark = toHold()
         clock.set(mark + 180)
         session.poll()
+        #expect(session.snapshot.stage == .restorePrompt)
         return mark
     }
 }
@@ -155,7 +175,7 @@ extension ManualCutTests {
             // included, is discarded, and only then do answers count.
             driver.gate.open()
             #expect(eventually { driver.session.inputEligible })
-            driver.answer("0", at: mark + 200)
+            driver.answer("0", at: mark + 200, isWord: false)
             let flow = driver.session.snapshot
             #expect(!flow.restoreConfirmed, "the partial 0 typed early joined the 0 typed after")
             #expect(flow.stage == .readFirst)
@@ -242,6 +262,7 @@ extension ManualCutTests {
             driver.session.poll()
             #expect(driver.session.snapshot.stage == .restorePrompt)
             #expect(!driver.session.inputEligible)
+            #expect(!driver.terminal.output.contains(ManualCutQuestion.restore.prompt.prefix(30)))
             driver.typeEarly("restorenow\n")
             #expect(driver.session.snapshot.restoreMark == nil)
             driver.gate.open()
@@ -259,30 +280,39 @@ extension ManualCutTests {
         @Test("cut08 typed ahead, before GO and the read-back question, never confirms the cut")
         func cut08TypedAhead() throws {
             let driver = try TerminalDriver()
-            driver.session.begin()
-            driver.answer("start00", at: 5)
-            var time = 5.5
-            while driver.session.snapshot.stage == .baseline {
-                driver.read(.charging, at: time)
-                time += 2
-            }
+            // The CUT prompt is on the terminal and takes answers.
+            let time = driver.toCutPrompt()
+            let generation = driver.session.snapshot.questionGeneration
             driver.gate.close()
             // cutnow and, at once, cut08: the second line meets the read-back
             // question before its prompt is written.
             driver.clock.set(time + 1)
             driver.terminal.type("cutnow\ncut08\n")
-            _ = eventually {
+            let reached = eventually {
                 driver.session.poll()
                 return driver.session.snapshot.stage == .cutReadBack
             }
+            // The milestones: cutnow was taken, the cut is marked, GO was
+            // queued, and the read-back question was published but is not yet
+            // on the terminal.
+            #expect(reached)
+            #expect(driver.session.snapshot.cutMark?.time == time + 1)
+            #expect(driver.session.restoreByText != nil)
+            #expect(driver.session.snapshot.questionGeneration == generation + 1)
+            #expect(!driver.session.inputEligible)
+            #expect(driver.session.snapshot.answers.map(\.word).last == "cutnow")
             driver.typeEarly("")
             #expect(!driver.session.snapshot.cutConfirmed)
             driver.gate.open()
             #expect(eventually { driver.session.inputEligible })
+            #expect(eventually { driver.terminal.output.contains("GO — run the cut now") })
             for _ in 0..<20 {
                 driver.session.poll()
             }
+            // The early cut08 was dropped, never taken.
             #expect(!driver.session.snapshot.cutConfirmed)
+            #expect(!driver.session.snapshot.answers.contains { $0.word == "cut08" })
+            #expect(driver.session.snapshot.stage == .cutReadBack)
             driver.session.stopReminder()
         }
     }
