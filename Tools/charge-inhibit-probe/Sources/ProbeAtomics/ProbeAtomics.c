@@ -45,3 +45,28 @@ double probe_log_time(probe_log *log, uint32_t index) {
 bool probe_log_overflowed(probe_log *log) {
     return atomic_load_explicit(&log->overflowed, memory_order_acquire);
 }
+
+struct probe_value {
+    _Atomic uint64_t number;
+};
+
+probe_value *probe_value_create(void) {
+    probe_value *value = malloc(sizeof *value);
+    if (value == NULL) {
+        return NULL;
+    }
+    atomic_init(&value->number, 0);
+    return value;
+}
+
+void probe_value_destroy(probe_value *value) {
+    free(value);
+}
+
+void probe_value_store(probe_value *value, uint64_t number) {
+    atomic_store_explicit(&value->number, number, memory_order_release);
+}
+
+uint64_t probe_value_load(probe_value *value) {
+    return atomic_load_explicit(&value->number, memory_order_acquire);
+}

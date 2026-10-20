@@ -944,6 +944,8 @@ public struct ManualCutFlow: Sendable {
         self.ending = ending
         stage = .ended
         inputEligible = false
+        // Prompts still queued for the console are superseded by the end.
+        questionGeneration += 1
         note(time, "the run ended")
         return [.end]
     }

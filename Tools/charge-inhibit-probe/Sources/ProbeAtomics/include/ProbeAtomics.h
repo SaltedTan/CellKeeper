@@ -38,4 +38,18 @@ double probe_log_time(probe_log *log, uint32_t index);
 /// the log is full, so read it before the count.
 bool probe_log_overflowed(probe_log *log);
 
+/// A 64-bit value stored and loaded atomically: `watch`'s current question
+/// generation, which the console writer reads without the run's lock (code
+/// review r2 of #101, must B).
+typedef struct probe_value probe_value;
+
+/// A new value of 0; NULL if memory runs out.
+probe_value *probe_value_create(void);
+
+void probe_value_destroy(probe_value *value);
+
+void probe_value_store(probe_value *value, uint64_t number);
+
+uint64_t probe_value_load(probe_value *value);
+
 #endif

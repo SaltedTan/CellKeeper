@@ -249,27 +249,38 @@ public final class ManualCutSession: @unchecked Sendable {
 
     /// Performs `actions` in order, under the lock; output is only queued.
     /// Returns whether input was discarded.
+    ///
+    /// Every actionable message (prompt, reminder, GO, instructions and
+    /// banners) is queued under the question generation the flow has
+    /// reached with this event, which the console writer is told first:
+    /// anything queued for an earlier generation and not yet written is
+    /// then dropped, so the superseding text (RESTORE CHIE FIRST and the
+    /// read-first question, say) is the next actionable text to appear
+    /// (code review r2 of #101, must B).
     private func perform(_ actions: [ManualCutFlow.Action]) -> Bool {
+        let generation = flow.questionGeneration
+        console.setCurrentGeneration(generation)
         var discarded = false
         for action in actions {
             switch action {
             case .discardInput:
                 input.discard()
                 discarded = true
-            case let .publish(question, generation):
+            case let .publish(question, questionGeneration):
                 // Input stays ineligible until the writer has written this
                 // prompt; then the flow discards pending input and only
                 // then takes answers. Nobody waits for the writer: it calls
                 // back.
-                console.enqueue(Self.text(question, repeated: false)) { [weak self] in
-                    self?.published(generation)
+                console.enqueue(Self.text(question, repeated: false), generation: generation) { [weak self] result in
+                    guard result == .written else { return }
+                    self?.published(questionGeneration)
                 }
             case let .remind(question):
-                console.enqueue(Self.text(question, repeated: true))
+                console.enqueue(Self.text(question, repeated: true), generation: generation)
             case let .say(text):
-                console.enqueue(text)
+                console.enqueue(text, generation: generation)
             case let .banner(banner):
-                console.enqueue("\n" + ManualCut.text(banner))
+                console.enqueue("\n" + ManualCut.text(banner), generation: generation)
             case .armReminder:
                 armReminder()
             case let .go(restoreByUnix):
@@ -279,7 +290,7 @@ public final class ManualCutSession: @unchecked Sendable {
 
                     GO — run the cut now in terminal B. Restore by \(time).
                     Write \(time) down, or set a phone timer for it, before you run the cut.
-                    """)
+                    """, generation: generation)
             case .end:
                 break
             }

@@ -50,6 +50,7 @@ final class BlockingSink: @unchecked Sendable {
     private let condition = NSCondition()
     private var blocked: Bool
     private var lines: [String] = []
+    private var calls = 0
     private let then: @Sendable (String) -> Void
 
     init(blocked: Bool = true, then: @escaping @Sendable (String) -> Void = { _ in }) {
@@ -61,14 +62,21 @@ final class BlockingSink: @unchecked Sendable {
         condition.withLock { lines }
     }
 
-    lazy var sink: @Sendable (String) -> Void = { [self] text in
+    /// How many messages the writer has handed the sink, written or not.
+    var entered: Int {
+        condition.withLock { calls }
+    }
+
+    lazy var sink: @Sendable (String) -> Bool = { [self] text in
         condition.lock()
+        calls += 1
         while blocked {
             condition.wait()
         }
         lines.append(text)
         condition.unlock()
         then(text)
+        return true
     }
 
     /// Lets the sink write from now on.
@@ -82,6 +90,20 @@ final class BlockingSink: @unchecked Sendable {
     /// Makes the sink block from now on, as a terminal that stops reading.
     func close() {
         condition.withLock { blocked = true }
+    }
+}
+
+/// The console writer's results, in order.
+final class ResultLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var results: [ConsoleWriter.Result] = []
+
+    func add(_ result: ConsoleWriter.Result) {
+        lock.withLock { results.append(result) }
+    }
+
+    var values: [ConsoleWriter.Result] {
+        lock.withLock { results }
     }
 }
 
@@ -232,7 +254,7 @@ extension ManualCutTests {
 
         @Test("A sleep logged after restored00 was typed, before it was handled, leaves recovery unconfirmed (must 2)")
         func sessionSleepBeforeQueuedAnswer() {
-            let console = ConsoleWriter { _ in }
+            let console = ConsoleWriter { _ in true }
             let driver = SessionDriver(console: console)
             driver.toHold()
             let mark = driver.session.snapshot.cutMark?.time ?? 0
@@ -260,7 +282,7 @@ extension ManualCutTests {
 
         @Test("A sleep logged while the main loop is stuck is delivered by the reminder, not repeated over")
         func reminderDeliversLatchedSleep() {
-            let console = ConsoleWriter { _ in }
+            let console = ConsoleWriter { _ in true }
             let driver = SessionDriver(console: console)
             driver.toHold()
             let mark = driver.session.snapshot.cutMark?.time ?? 0
@@ -288,7 +310,7 @@ extension ManualCutTests {
 
         @Test("Review r2's sequence: a sleep notification paused after taking its time, a confirmation, a signal; the end still finds the sleep (must C)")
         func lateSleepFoundAtTheEnd() {
-            let driver = SessionDriver(console: ConsoleWriter { _ in })
+            let driver = SessionDriver(console: ConsoleWriter { _ in true })
             let mark = Self.atRestoreReadBack(driver)
             // The real handler, on a real sleep queue, paused after it took
             // the sleep's time and before it logged it.
@@ -325,7 +347,7 @@ extension ManualCutTests {
 
         @Test("If the sleep queue cannot be drained within its bound, the confirmation does not count")
         func undrainedSleepQueue() {
-            let driver = SessionDriver(console: ConsoleWriter { _ in })
+            let driver = SessionDriver(console: ConsoleWriter { _ in true })
             let mark = Self.atRestoreReadBack(driver)
             let sleepQueue = SleepQueue(label: "test.sleep")
             let sampled = DispatchSemaphore(value: 0)
@@ -351,7 +373,7 @@ extension ManualCutTests {
 
         @Test("A sleep found at the end that began after the confirmation leaves it standing, and the run is inconclusive")
         func laterSleepFoundAtTheEnd() {
-            let driver = SessionDriver(console: ConsoleWriter { _ in })
+            let driver = SessionDriver(console: ConsoleWriter { _ in true })
             let mark = Self.atRestoreReadBack(driver)
             driver.type("restored00", at: mark + 190)
             #expect(driver.session.signal(SIGINT) == .handled)
@@ -405,7 +427,7 @@ extension ManualCutTests {
             let exited = Counter()
             let exitedAfterRelease = Counter()
             let released = Counter()
-            let console = ConsoleWriter { _ in }
+            let console = ConsoleWriter { _ in true }
             Thread {
                 BoundedEnd.perform(status: 3, steps: BoundedEnd.Steps(
                     persist: { oneSave.save { file.persist("the second ending's report\n") } },
@@ -449,6 +471,58 @@ extension ManualCutTests {
             // now; here the file holds only the first save's 8 bytes.
             #expect(try String(contentsOfFile: path, encoding: .utf8) == "xxxxxxxx")
             gate.signal()
+        }
+
+        @Test("The writer drops an actionable message whose generation is no longer current, and writes the rest")
+        func writerDropsSuperseded() {
+            let blocked = BlockingSink()
+            let console = ConsoleWriter(sink: blocked.sink)
+            let results = ResultLog()
+            console.setCurrentGeneration(1)
+            console.enqueue("in flight", generation: 1)
+            #expect(eventually { blocked.entered == 1 })
+            console.enqueue("old prompt", generation: 1) { results.add($0) }
+            console.enqueue("a sample", kind: .sample)
+            console.enqueue("report line")
+            console.setCurrentGeneration(2)
+            console.enqueue("new prompt", generation: 2) { results.add($0) }
+            blocked.open()
+            #expect(console.drain(timeout: 3))
+            #expect(blocked.written == ["in flight", "a sample", "report line", "new prompt"])
+            #expect(results.values == [.superseded, .written])
+            #expect(console.supersededMessages == 1)
+        }
+
+        @Test("Review r2's sequence: RESTORE queued behind a blocked terminal, then a sleep; the old restore text never appears (must B)")
+        func supersededRestorePromptNeverAppears() {
+            let blocked = BlockingSink(blocked: false)
+            let driver = SessionDriver(console: ConsoleWriter(sink: blocked.sink))
+            driver.toHold()
+            let mark = driver.session.snapshot.cutMark?.time ?? 0
+            // The terminal stops taking output while a sample line is being
+            // written.
+            blocked.close()
+            driver.read(.cut, at: mark + 100)
+            // The hold ends: the RESTORE prompt is queued behind it.
+            driver.at(mark + 180)
+            driver.session.poll()
+            #expect(driver.session.snapshot.stage == .restorePrompt)
+            // A sleep: RESTORE CHIE FIRST and the read-first question.
+            driver.sleepLog.record(at: mark + 181)
+            driver.at(mark + 182)
+            driver.session.poll()
+            #expect(driver.session.snapshot.stage == .readFirst)
+            blocked.open()
+            #expect(driver.session.console.drain(timeout: 3))
+            let written = blocked.written.joined(separator: "\n")
+            #expect(!written.contains(ManualCutQuestion.restore.prompt), "the superseded RESTORE prompt appeared")
+            let first = written.range(of: "RESTORE CHIE FIRST")
+            let readFirst = written.range(of: "READ CHIE FIRST")
+            #expect(first != nil && readFirst != nil)
+            if let first, let readFirst { #expect(first.lowerBound < readFirst.lowerBound) }
+            #expect(driver.session.console.supersededMessages >= 1)
+            #expect(eventually { driver.session.inputEligible })
+            driver.session.stopReminder()
         }
 
         @Test("The bounded end saves the report first, then queues it, then waits at most 2 s, then exits")
