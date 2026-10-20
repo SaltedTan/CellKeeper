@@ -522,7 +522,7 @@ private struct CalibrationSection: View {
                 isMenuOnlyAcknowledged = false
             }
         } message: {
-            Text("CellKeeper will set macOS's Charge Limit to 100% now, and over the next one to two days ask you to unplug, rest and plug in your Mac. You can cancel it at any time.")
+            Text("CellKeeper will set macOS's Charge Limit to 100% now, and over the next one to two days (three at most) ask you to unplug, rest and plug in your Mac. You can cancel it at any time.")
         }
         Text(CalibrationWording.frequency)
             .font(.caption)
