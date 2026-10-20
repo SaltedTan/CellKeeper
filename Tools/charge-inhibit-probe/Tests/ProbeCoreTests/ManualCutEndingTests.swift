@@ -28,12 +28,22 @@ extension ManualCutTests {
                 .appendingPathComponent("charge-inhibit-probe-manual-adapter-cut-\(UUID().uuidString).txt").path
         }
 
+        /// Removes the report file at `path` and its partial file.
+        static func remove(_ path: String) {
+            try? FileManager.default.removeItem(atPath: path)
+            try? FileManager.default.removeItem(atPath: ReportFile.partialPath(for: path))
+        }
+
+        static func contents(_ path: String) -> String? {
+            try? String(contentsOfFile: path, encoding: .utf8)
+        }
+
         /// A report file whose first write stops after 8 bytes and waits for
         /// `gate`, signalling `paused`; later writes go through. Each write
         /// is logged.
         static func pausingFile(path: String, paused: DispatchSemaphore, gate: DispatchSemaphore, events: EventLog) -> ReportFile? {
             let first = Counter()
-            let hooks = ReportFile.Hooks { descriptor, bytes, offset in
+            let hooks = ReportFile.Hooks(write: { descriptor, bytes, offset in
                 events.add("write")
                 first.add()
                 guard first.value == 1 else { return pwrite(descriptor, bytes.baseAddress, bytes.count, offset) }
@@ -41,7 +51,7 @@ extension ManualCutTests {
                 paused.signal()
                 gate.wait()
                 return written
-            }
+            })
             return ReportFile(path: path, placeholder: "placeholder\n", hooks: hooks)
         }
 
@@ -120,7 +130,7 @@ extension ManualCutTests {
         @Test("Every ending path arms the watchdog first: before the teardown, the sleep queue's drain and the save (must 1)")
         func watchdogArmedFirst() throws {
             let path = Self.temporaryPath()
-            defer { try? FileManager.default.removeItem(atPath: path) }
+            defer { Self.remove(path) }
             let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
             let main = EventLog()
             let mainEnd = Self.ending(Self.stoppedInTheHold(), file: file, events: main, watchdog: Self.watchdog(main))
@@ -142,7 +152,7 @@ extension ManualCutTests {
         @Test("Review r3's case: while the first save is paused, a competing ending waits past the old 2.5 s and exits only after the save completes (must 1)")
         func competingEndingWaitsForTheSave() throws {
             let path = Self.temporaryPath()
-            defer { try? FileManager.default.removeItem(atPath: path) }
+            defer { Self.remove(path) }
             let events = EventLog()
             let paused = DispatchSemaphore(value: 0)
             let gate = DispatchSemaphore(value: 0)
@@ -170,7 +180,10 @@ extension ManualCutTests {
             Thread.sleep(forTimeInterval: 3)
             #expect(exited.value == 0)
             #expect(!ending.isSettled)
-            #expect(try String(contentsOfFile: path, encoding: .utf8) == "report 1")
+            // The placeholder is whole; the save's 8 bytes are in the
+            // partial file beside it.
+            #expect(Self.contents(path) == "placeholder\n")
+            #expect(Self.contents(ReportFile.partialPath(for: path)) == "report 1")
             released.add()
             gate.signal()
             #expect(eventually { exited.value == 1 && mainEnded.value == 1 })
@@ -210,7 +223,7 @@ extension ManualCutTests {
         @Test("An ending paused just before its watchdog is armed: the other ending's arm waits for it, claims nothing and never exits on the placeholder; then one save, and both exit (must 1)")
         func pausedBeforeArmingClaimsNothing() throws {
             let path = Self.temporaryPath()
-            defer { try? FileManager.default.removeItem(atPath: path) }
+            defer { Self.remove(path) }
             let events = EventLog()
             let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
             let pausedInArm = DispatchSemaphore(value: 0)
@@ -280,7 +293,7 @@ extension ManualCutTests {
         )
         func lockHeldAfterTheDrainTimesOut(path endingPath: String) throws {
             let path = Self.temporaryPath()
-            defer { try? FileManager.default.removeItem(atPath: path) }
+            defer { Self.remove(path) }
             let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
             let events = EventLog()
             // The sleep watch's lock, held by a teardown or an acknowledgement
@@ -325,7 +338,7 @@ extension ManualCutTests {
         @Test("After a drain that completed, the notices are read and reported; the report says nothing is unavailable")
         func noticesAfterACompletedDrain() throws {
             let path = Self.temporaryPath()
-            defer { try? FileManager.default.removeItem(atPath: path) }
+            defer { Self.remove(path) }
             let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
             let events = EventLog()
             let notice = ProbeRun.SleepNotice(time: 400, message: "kIOMessageCanSystemSleep")
@@ -434,7 +447,7 @@ extension ManualCutTests {
         @Test("Review r3's case: after a confirmed restore and a charging reading, SIGINT, and the end banner's write fails late; the end waits for that result, exits 3, and the report opens with CHECK RECOVERY FIRST (should 3)")
         func failedEndBanner() throws {
             let path = Self.temporaryPath()
-            defer { try? FileManager.default.removeItem(atPath: path) }
+            defer { Self.remove(path) }
             let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
             let events = EventLog()
             let driver = Self.stoppedAfterAConfirmedRestore(console: Self.failing(ManualCut.text(.afterReadingsEndedEarly), after: 0.5))
@@ -449,7 +462,7 @@ extension ManualCutTests {
         @Test("A second signal's banner that the terminal cannot write: exit 3 and CHECK RECOVERY FIRST, even after a confirmed restore (should 3)")
         func failedSecondSignalBanner() throws {
             let path = Self.temporaryPath()
-            defer { try? FileManager.default.removeItem(atPath: path) }
+            defer { Self.remove(path) }
             let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
             let events = EventLog()
             let driver = Self.stoppedAfterAConfirmedRestore(console: Self.failing("again: quitting", after: 0.3))
@@ -465,7 +478,7 @@ extension ManualCutTests {
         @Test("A terminal that does not take the end's output within its bound: after a confirmed restore, 3 and CHECK RECOVERY FIRST; the report is saved and the end keeps to its bounds (should 3)")
         func terminalNotTakingTheEnd() throws {
             let path = Self.temporaryPath()
-            defer { try? FileManager.default.removeItem(atPath: path) }
+            defer { Self.remove(path) }
             let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
             let events = EventLog()
             let blocked = BlockingSink(blocked: false)
@@ -513,7 +526,7 @@ extension ManualCutTests {
         @Test("Review r4's case: the main path has claimed the end; a second signal's banner, queued before the boundary, fails; the main save is paused; both exit 3, and the saved report opens with CHECK RECOVERY FIRST")
         func bannerBeforeTheBoundaryCounts() throws {
             let path = Self.temporaryPath()
-            defer { try? FileManager.default.removeItem(atPath: path) }
+            defer { Self.remove(path) }
             let events = EventLog()
             let paused = DispatchSemaphore(value: 0)
             let gate = DispatchSemaphore(value: 0)
@@ -556,7 +569,7 @@ extension ManualCutTests {
         @Test("Review r4's case, after the boundary: the main path has settled on 2 and its save is paused when a second signal comes; it adds no banner, and both exit 2, the saved report's status")
         func secondSignalAfterTheBoundary() throws {
             let path = Self.temporaryPath()
-            defer { try? FileManager.default.removeItem(atPath: path) }
+            defer { Self.remove(path) }
             let events = EventLog()
             let paused = DispatchSemaphore(value: 0)
             let gate = DispatchSemaphore(value: 0)
@@ -587,7 +600,7 @@ extension ManualCutTests {
         @Test("The boundary comes before the claimant's drain of the console: a second signal while that drain waits on a slow terminal adds no banner, and both exit with the settled status")
         func boundaryBeforeTheDrain() throws {
             let path = Self.temporaryPath()
-            defer { try? FileManager.default.removeItem(atPath: path) }
+            defer { Self.remove(path) }
             let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
             let events = EventLog()
             let handed = EventLog()
@@ -631,7 +644,7 @@ extension ManualCutTests {
         func endingsAgree() throws {
             for _ in 0..<20 {
                 let path = Self.temporaryPath()
-                defer { try? FileManager.default.removeItem(atPath: path) }
+                defer { Self.remove(path) }
                 let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
                 let events = EventLog()
                 let handed = EventLog()
@@ -665,7 +678,7 @@ extension ManualCutTests {
         )
         func waiterTakesTheSettledStatus(mainSettles: Bool) throws {
             let path = Self.temporaryPath()
-            defer { try? FileManager.default.removeItem(atPath: path) }
+            defer { Self.remove(path) }
             let events = EventLog()
             let paused = DispatchSemaphore(value: 0)
             let gate = DispatchSemaphore(value: 0)
@@ -720,6 +733,187 @@ extension ManualCutTests {
             #expect(driver.session.console.drain(timeout: 3))
             #expect(!handed.values.contains { $0.contains("(Reminder)") || $0 == "an announcement" })
             driver.session.stopReminder()
+        }
+
+        // MARK: The report's atomic save, and the settled banner first (code review r5 of #101)
+
+        /// `watch`'s placeholder, as far as these tests need it.
+        static let placeholder = """
+            CHECK RECOVERY FIRST: this run stopped before it finished its report, so whether CHIE was restored is unknown.
+            CellKeeper manual adapter-cut probe report: run started 2026-10-20 12:00:00 +11:00, still in progress or stopped before it finished.
+
+            """
+
+        static let report = String(repeating: "a line of the final report\n", count: 40)
+
+        @Test("A save writes the whole report to the partial file, syncs it, then renames it over the placeholder: the file is exactly the report, and no partial file is left")
+        func atomicSave() throws {
+            let path = Self.temporaryPath()
+            defer { Self.remove(path) }
+            let events = EventLog()
+            let file = try #require(ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
+                write: { descriptor, bytes, offset in
+                    events.add("write")
+                    return ReportFile.Hooks.pwrite(descriptor, bytes, offset)
+                },
+                sync: { descriptor in
+                    events.add("sync")
+                    return ReportFile.Hooks.fsync(descriptor)
+                },
+                rename: { from, to in
+                    events.add("rename \(from == ReportFile.partialPath(for: path) && to == path)")
+                    return ReportFile.Hooks.rename(from, to)
+                }
+            )))
+            #expect(Self.contents(path) == Self.placeholder)
+            #expect(events.values.isEmpty)
+            #expect(file.partialPath.hasSuffix(".partial.txt"))
+            #expect((file.partialPath as NSString).deletingLastPathComponent == (path as NSString).deletingLastPathComponent)
+            #expect(file.persist(Self.report))
+            #expect(events.values == ["write", "sync", "rename true"])
+            #expect(Self.contents(path) == Self.report)
+            #expect(!FileManager.default.fileExists(atPath: file.partialPath))
+            #expect(ReportFile.partialPath(for: "charge-inhibit-probe-manual-adapter-cut-20261020-101500.txt")
+                == "charge-inhibit-probe-manual-adapter-cut-20261020-101500.partial.txt")
+        }
+
+        @Test(
+            "A save whose write stops part way or fails, or whose sync or rename fails, leaves the whole placeholder",
+            arguments: ["write fails", "sync fails", "rename fails"]
+        )
+        func failedSaveKeepsThePlaceholder(failing step: String) throws {
+            let path = Self.temporaryPath()
+            defer { Self.remove(path) }
+            let file = try #require(ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
+                write: { descriptor, bytes, offset in
+                    guard step == "write fails" else { return ReportFile.Hooks.pwrite(descriptor, bytes, offset) }
+                    // Some of it, then an error.
+                    if offset == 0 { return ReportFile.Hooks.pwrite(descriptor, UnsafeRawBufferPointer(rebasing: bytes.prefix(8)), offset) }
+                    errno = EIO
+                    return -1
+                },
+                sync: { descriptor in
+                    guard step == "sync fails" else { return ReportFile.Hooks.fsync(descriptor) }
+                    errno = EIO
+                    return -1
+                },
+                rename: { from, to in
+                    guard step == "rename fails" else { return ReportFile.Hooks.rename(from, to) }
+                    errno = EXDEV
+                    return -1
+                }
+            )))
+            #expect(!file.persist(Self.report))
+            #expect(Self.contents(path) == Self.placeholder)
+        }
+
+        @Test("A save whose write pauses after 8 bytes leaves the whole placeholder while it waits")
+        func pausedSaveKeepsThePlaceholder() throws {
+            let path = Self.temporaryPath()
+            defer { Self.remove(path) }
+            let paused = DispatchSemaphore(value: 0)
+            let gate = DispatchSemaphore(value: 0)
+            let first = Counter()
+            let file = try #require(ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
+                write: { descriptor, bytes, offset in
+                    first.add()
+                    guard first.value == 1 else { return ReportFile.Hooks.pwrite(descriptor, bytes, offset) }
+                    let written = ReportFile.Hooks.pwrite(descriptor, UnsafeRawBufferPointer(rebasing: bytes.prefix(8)), offset)
+                    paused.signal()
+                    gate.wait()
+                    return written
+                }
+            )))
+            let saved = Counter()
+            Thread {
+                if file.persist(Self.report) { saved.add() }
+            }.start()
+            #expect(paused.wait(timeout: .now() + 2) == .success)
+            #expect(Self.contents(path) == Self.placeholder)
+            #expect(Self.contents(file.partialPath) == "a line o")
+            gate.signal()
+            #expect(eventually { saved.value == 1 })
+            #expect(Self.contents(path) == Self.report)
+        }
+
+        @Test("Review r5's case: a delayed sleep overturns a confirmed restore at settlement, and the save's first write hangs; the settled CHECK RECOVERY FIRST was queued before the save and is the last guidance on screen, and the file keeps the whole placeholder")
+        func hungSaveAfterTheSettledBanner() throws {
+            let path = Self.temporaryPath()
+            defer { Self.remove(path) }
+            let events = EventLog()
+            let handed = EventLog()
+            let console = ConsoleWriter { text in
+                handed.add(text)
+                return true
+            }
+            let driver = Self.stoppedAfterAConfirmedRestore(console: console)
+            #expect(console.drain(timeout: 3))
+            // The confirmed restore's banner is on screen.
+            #expect(handed.values.contains { $0.contains(ManualCut.text(.afterReadingsEndedEarly)) })
+            // A sleep that began before the confirmation, logged late: the
+            // end will find it, and the confirmation will not count.
+            let confirmed = try #require(driver.session.snapshot.restoreConfirmedAt)
+            driver.sleepLog.record(at: confirmed - 1)
+            let hang = DispatchSemaphore(value: 0)
+            defer { hang.signal() }
+            let file = try #require(ReportFile(path: path, placeholder: Self.placeholder, hooks: ReportFile.Hooks(
+                write: { _, _, _ in
+                    // The save has started: what had been queued by now?
+                    _ = console.drain(timeout: 2)
+                    let shown = handed.values.contains { $0.contains("CHECK RECOVERY FIRST") }
+                    events.add(shown ? "save started after the settled banner" : "save started before it")
+                    hang.wait()
+                    errno = EIO
+                    return -1
+                }
+            )))
+            let ending = ManualCutEnding(session: driver.session, watchdog: Self.watchdog(events), parts: ManualCutEnding.Parts(
+                stopSleepNotifications: {}, sleepNotices: { [] }, render: Self.realReport,
+                persist: { file.persist($0) }, savedLine: { "saved: \($0)" }
+            ))
+            let statuses = EventLog()
+            Thread {
+                statuses.add("\(ending.endMainPath(tearDown: {}).status)")
+            }.start()
+            // The save hangs; in watch, the watchdog armed first would end
+            // the process within its bound.
+            #expect(eventually { events.values.contains { $0.hasPrefix("save started") } })
+            #expect(events.values.first == "arm \(EndingWatchdog.bound)")
+            #expect(events.values.contains("save started after the settled banner"))
+            let last = try #require(handed.values.last)
+            #expect(last.contains("CHECK RECOVERY FIRST"))
+            #expect(last.contains("in a way that counts: a sleep began at"))
+            #expect(last.contains(ManualCut.readFirstSteps))
+            #expect(Self.contents(path) == Self.placeholder)
+            #expect(statuses.values.isEmpty)
+            // The write fails at last: the save fails, and the file is still
+            // the placeholder.
+            hang.signal()
+            #expect(eventually { statuses.values == ["3"] })
+            #expect(Self.contents(path) == Self.placeholder)
+        }
+
+        @Test("The settled banner: CHECK RECOVERY FIRST with the reason and the recovery steps for exit 3; otherwise the verdict and the exit status")
+        func settledBannerText() {
+            let recovery = ManualCut.settledBanner(
+                ManualCutOutcome(verdict: .inconclusive(reason: "r"), exitStatus: 3, recoveryReason: "The owner has not confirmed that CHIE was restored."),
+                status: 3
+            )
+            #expect(recovery.contains("CHECK RECOVERY FIRST: The owner has not confirmed that CHIE was restored."))
+            #expect(recovery.contains(ManualCut.recoverySteps))
+            let inconclusive = ManualCut.settledBanner(
+                ManualCutOutcome(verdict: .inconclusive(reason: "r"), exitStatus: 2, recoveryReason: nil),
+                status: 2
+            )
+            #expect(inconclusive == "\nThe run is over (verdict: inconclusive); exit status 2. Saving the report.")
+            #expect(!inconclusive.contains("CHECK RECOVERY FIRST"))
+            let refused = ManualCut.settledBanner(
+                ManualCutOutcome(verdict: nil, exitStatus: 1, recoveryReason: nil, refusal: "no read"),
+                status: 1
+            )
+            #expect(refused == "\nThe run is over (refused: no read); exit status 1. Saving the report.")
+            #expect(ManualCut.settledBanner(ManualCutOutcome(verdict: nil, exitStatus: 2, recoveryReason: nil), status: 130)
+                == "\nThe run is over (no verdict); exit status 130. Saving the report.")
         }
     }
 }

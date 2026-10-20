@@ -109,8 +109,11 @@ public final class EndingWatchdog: @unchecked Sendable {
 /// is queued after it. Then it drains the console, so that every result of
 /// that output is in (r3, should 3); only then reads the flow and the sleep
 /// log once more (``ManualCutSession/reconciledFlow(drainSleepQueue:)``)
-/// and decides the outcome; renders the report and takes the bounded end
-/// (``BoundedEnd``): the save, then the console, then the exit. A second
+/// and decides the outcome; renders the report; queues the settled
+/// outcome's own banner (r5: CHECK RECOVERY FIRST for exit 3), so that it
+/// is on screen before the save starts; and takes the bounded end
+/// (``BoundedEnd``): the save, which replaces the placeholder atomically
+/// (``ReportFile``), then the console, then the exit. A second
 /// signal that comes while another path settles the end queues its banner
 /// only before the boundary, where its result counts; after it, it adds
 /// nothing and only waits. So whatever means exit 3 (a failed or untaken
@@ -119,9 +122,10 @@ public final class EndingWatchdog: @unchecked Sendable {
 /// can change it. Each step is a part, so the tests drive the order and the
 /// waits.
 ///
-/// If the claimant itself hangs before it has saved the report (in the
-/// teardown, say), the watchdog ends the process, and the report file keeps
-/// its placeholder.
+/// If the claimant itself hangs before the save has replaced the
+/// placeholder (in the teardown or the save, say), the watchdog ends the
+/// process, and the report file keeps its placeholder, which asks for the
+/// recovery check.
 ///
 /// A write of an actionable message that fails, at any point of the run,
 /// the end's banners included, and a terminal that does not take the
@@ -219,9 +223,9 @@ public final class ManualCutEnding: @unchecked Sendable {
             let status = awaitSettled()
             return (status, session.console.drain(timeout: consoleDrainBound))
         }
-        let (text, status) = settle(refusal: refusal, secondSignal: nil)
-        var result = (status: status, drained: false)
-        finish(text, status: status) { result = ($0, $1) }
+        let settled = settle(refusal: refusal, secondSignal: nil)
+        var result = (status: settled.status, drained: false)
+        finish(settled) { result = ($0, $1) }
         return result
     }
 
@@ -238,8 +242,7 @@ public final class ManualCutEnding: @unchecked Sendable {
             exit(status)
             return
         }
-        let (text, status) = settle(refusal: nil, secondSignal: number)
-        finish(text, status: status) { status, _ in exit(status) }
+        finish(settle(refusal: nil, secondSignal: number)) { status, _ in exit(status) }
     }
 
     /// Claims the end for the calling path, if no path has; the watchdog
@@ -275,6 +278,15 @@ public final class ManualCutEnding: @unchecked Sendable {
         }
     }
 
+    /// The end as the claimant settles it, once.
+    private struct Settled {
+        /// The report.
+        var text: String
+        var status: Int32
+        /// What the console shows before the save (``ManualCut/settledBanner(_:status:)``).
+        var banner: String
+    }
+
     /// The claimant's settlement: the report's text and the exit status,
     /// decided once. After the sleep queue's drain (once for the run) and a
     /// second signal's banner, the closing boundary; then the console's
@@ -284,7 +296,7 @@ public final class ManualCutEnding: @unchecked Sendable {
     /// and the sleep log are read once more, and the sleep notices only if
     /// the sleep queue's drain completed: if not, the sleep watch's lock is
     /// never taken again (must 2).
-    private func settle(refusal: ManualCutOutcome?, secondSignal: Int32?) -> (text: String, status: Int32) {
+    private func settle(refusal: ManualCutOutcome?, secondSignal: Int32?) -> Settled {
         if let secondSignal {
             queueBanner(secondSignal)
         }
@@ -300,14 +312,27 @@ public final class ManualCutEnding: @unchecked Sendable {
         if refusal == nil, let secondSignal {
             status = flow.secondSignal(secondSignal).exitStatus
         }
-        return (parts.render(outcome, refusal == nil ? flow : nil, notices), status)
+        return Settled(
+            text: parts.render(outcome, refusal == nil ? flow : nil, notices),
+            status: status,
+            banner: ManualCut.settledBanner(outcome, status: status)
+        )
     }
 
-    /// The claimant's bounded end: the save, then the report and where it
-    /// is, queued for the console; then the end is settled for every path;
-    /// then the console's drain, then `exit`.
-    private func finish(_ text: String, status: Int32, exit: @escaping (Int32, Bool) -> Void) {
+    /// The claimant's bounded end: the settled banner; the save; then the
+    /// report and where it is, queued for the console; then the end is
+    /// settled for every path; then the console's drain, then `exit`.
+    private func finish(_ settled: Settled, exit: @escaping (Int32, Bool) -> Void) {
         let console = session.console
+        let (text, status) = (settled.text, settled.status)
+        // The settled result's own announcement, queued before the save
+        // starts (code review r5 of #101): if the save hangs and the
+        // watchdog ends the process, it, not an earlier banner it may have
+        // overturned, is the last guidance on screen. It goes straight to
+        // the console, not through the session, so the closing boundary
+        // does not hold it back; and it has no result callback, so a failed
+        // write of it cannot change the outcome already settled.
+        console.enqueue(settled.banner)
         BoundedEnd.perform(status: status, bound: consoleDrainBound, steps: BoundedEnd.Steps(
             persist: { [parts] in parts.persist(text) },
             print: { [parts] saved in

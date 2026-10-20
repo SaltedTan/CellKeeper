@@ -135,6 +135,28 @@ public enum ManualCut {
                 """
         }
     }
+
+    /// What the console shows as soon as the end is settled, before the
+    /// report is saved (code review r5 of #101), so that the settled
+    /// guidance, not an earlier banner it may have overturned, is on screen
+    /// even if the save hangs: for exit 3, CHECK RECOVERY FIRST with the
+    /// reason and the recovery steps, which begin with the read-first steps;
+    /// otherwise one line with the verdict and the exit status.
+    public static func settledBanner(_ outcome: ManualCutOutcome, status: Int32) -> String {
+        if status == 3 {
+            let reason = outcome.recoveryReason ?? "The run ended with exit status 3."
+            return "\nCHECK RECOVERY FIRST: \(reason) \(recoverySteps)"
+        }
+        let result: String
+        if let verdict = outcome.verdict {
+            result = "verdict: \(verdict.title)"
+        } else if let refusal = outcome.refusal {
+            result = "refused: \(refusal)"
+        } else {
+            result = "no verdict"
+        }
+        return "\nThe run is over (\(result)); exit status \(status). Saving the report."
+    }
 }
 
 /// One of the owner's questions, and its answer words (note 11 §4.4, the

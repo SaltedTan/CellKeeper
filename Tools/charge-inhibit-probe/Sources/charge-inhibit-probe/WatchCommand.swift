@@ -76,6 +76,8 @@ enum WatchCommand {
         // the run dies before its report is saved (the ending watchdog, a
         // crash), only this placeholder is left, so it asks for the
         // recovery check: the probe cannot know whether CHIE was restored.
+        // The save replaces it atomically (`ReportFile`), so a save that
+        // hangs, stops part way or fails leaves it whole.
         let fileName = ManualCut.reportFileName(stamp: Clock.fileStamp())
         guard let reportFile = ReportFile(
             path: fileName,
@@ -135,7 +137,10 @@ enum WatchCommand {
             savedLine: { saved in
                 saved
                     ? "Report written to ./\(fileName). Please send it to the lead."
-                    : "Could not write ./\(fileName). Copy the report above instead."
+                    : """
+                        Could not save the report: ./\(fileName) still says CHECK RECOVERY FIRST. \
+                        Copy the report above instead, and send it to the lead.
+                        """
             }
         ))
 
