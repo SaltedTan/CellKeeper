@@ -44,6 +44,9 @@ public struct SystemNotificationPoster: NotificationPosting {
     /// holds this queue, never Swift's cooperative pool or the main thread.
     private let handOverQueue = DispatchQueue(label: "io.github.saltedtan.CellKeeper.notification-hand-over")
     private let queuedHandOvers: QueuedHandOvers
+    /// Identifiers handed to the center whose add has not been answered,
+    /// and those withdrawn meanwhile.
+    private let inFlight = InFlightAdds()
 
     public init() {
         self.init(submission: { request, completion in
@@ -114,6 +117,10 @@ public struct SystemNotificationPoster: NotificationPosting {
         let outcome = PostOutcome()
         let submission = submission
         let queuedHandOvers = queuedHandOvers
+        let inFlight = inFlight
+        let removal = removal
+        let handOverQueue = handOverQueue
+        let identifier = notification.identifier
         handOverQueue.async {
             defer { queuedHandOvers.release() }
             guard generation.isCurrent else {
@@ -121,8 +128,14 @@ public struct SystemNotificationPoster: NotificationPosting {
                 return
             }
             guard !outcome.isSettled else { return }
+            inFlight.begin(identifier)
             submission(Self.request(for: notification)) { error in
                 outcome.settle(error.map { .failed(code: Self.errorCode($0)) } ?? .posted)
+                // An answer after a withdrawal, also one after the wait
+                // timed out: what it showed is removed again.
+                if inFlight.end(identifier) {
+                    handOverQueue.async { removal([identifier]) }
+                }
             }
         }
         scheduleTimeout(answerBound) {
@@ -135,11 +148,15 @@ public struct SystemNotificationPoster: NotificationPosting {
         }
     }
 
-    /// Runs on the hand-over queue, after every hand-over already queued,
-    /// so a notification being handed over is removed once it is shown.
+    /// Runs on the hand-over queue, after every hand-over already queued.
+    /// An add of one of them that the center has not answered yet, also
+    /// one whose wait timed out, is removed again when its answer comes,
+    /// so a withdrawn notification never stays shown.
     public func remove(identifiers: [String]) async {
         let removal = removal
+        let inFlight = inFlight
         handOverQueue.async {
+            inFlight.withdraw(identifiers)
             removal(identifiers)
         }
     }
@@ -225,6 +242,44 @@ final class PostOutcome: @unchecked Sendable {
 }
 
 /// Hand-overs queued or under way, up to a limit.
+/// The identifiers whose add the center has not answered, and those
+/// withdrawn while it had not. Thread-safe; the center's answers arrive on
+/// its own queue.
+final class InFlightAdds: @unchecked Sendable {
+    private let lock = NSLock()
+    private var counts: [String: Int] = [:]
+    private var withdrawn: Set<String> = []
+
+    func begin(_ identifier: String) {
+        lock.withLock { counts[identifier, default: 0] += 1 }
+    }
+
+    /// The add of `identifier` was answered (shown or failed): true if it
+    /// was withdrawn while unanswered, so it is to be removed again.
+    func end(_ identifier: String) -> Bool {
+        lock.withLock {
+            let left = (counts[identifier] ?? 1) - 1
+            let wasWithdrawn = withdrawn.contains(identifier)
+            if left <= 0 {
+                counts[identifier] = nil
+                withdrawn.remove(identifier)
+            } else {
+                counts[identifier] = left
+            }
+            return wasWithdrawn
+        }
+    }
+
+    /// Notes the identifiers among `identifiers` with an add unanswered.
+    func withdraw(_ identifiers: [String]) {
+        lock.withLock {
+            for identifier in identifiers where counts[identifier] != nil {
+                withdrawn.insert(identifier)
+            }
+        }
+    }
+}
+
 final class QueuedHandOvers: @unchecked Sendable {
     private let lock = NSLock()
     private let limit: Int
