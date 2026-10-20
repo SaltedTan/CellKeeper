@@ -40,8 +40,8 @@ public final class ReportFile: @unchecked Sendable {
     }
 
     /// Saves `text` as the whole report; returns whether it was saved.
-    /// Called once per run, through ``OneShotSave``, after the ending's
-    /// watchdog is armed.
+    /// Called once per run, by the ending path that settles the end
+    /// (``ManualCutEnding``), after the ending's watchdog is armed.
     public func persist(_ text: String) -> Bool {
         guard ftruncate(descriptor, 0) == 0 else { return false }
         return Self.write(text, to: descriptor, with: hooks.write)
@@ -65,58 +65,5 @@ public final class ReportFile: @unchecked Sendable {
             }
         }
         return true
-    }
-}
-
-/// The run's one save of its report (code review r2 of #101, must A; r3,
-/// must 1). The first ending path to get here claims the save and runs it.
-/// Every other path, a second signal's included, never saves: it waits
-/// until that save has finished, with no timeout of its own, and only then
-/// goes on to the console and the exit.
-///
-/// No save is claimed before the ending's watchdog is armed: every ending
-/// path arms it first, and ``save(_:)`` arms it too, which sets it if no
-/// path has and otherwise leaves it as the first arm set it. So a path
-/// never waits on a save the watchdog does not bound: if the save hangs,
-/// the watchdog ends the process.
-public final class OneShotSave: @unchecked Sendable {
-    private let watchdog: EndingWatchdog
-    private let condition = NSCondition()
-    private var claimed = false
-    private var finished = false
-    private var saved = false
-
-    public init(watchdog: EndingWatchdog) {
-        self.watchdog = watchdog
-    }
-
-    /// Runs `save` if no path has claimed the save yet; otherwise waits
-    /// until the claimed one has finished. Returns whether the report was
-    /// saved.
-    public func save(_ save: () -> Bool) -> Bool {
-        watchdog.arm()
-        condition.lock()
-        guard claimed else {
-            claimed = true
-            condition.unlock()
-            let result = save()
-            condition.withLock {
-                saved = result
-                finished = true
-                condition.broadcast()
-            }
-            return result
-        }
-        while !finished {
-            condition.wait()
-        }
-        let result = saved
-        condition.unlock()
-        return result
-    }
-
-    /// Whether the claimed save has finished.
-    public var isFinished: Bool {
-        condition.withLock { finished }
     }
 }

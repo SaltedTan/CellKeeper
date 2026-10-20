@@ -5,11 +5,12 @@ import Foundation
 /// anything down, drains the sleep queue, claims the report's save or waits
 /// for the console. From then on nothing in the ending can outlast it:
 /// SIGALRM's default action ends the process, whatever is blocked, as #98's
-/// emergency exit does (``EmergencyExit``). So a path that waits for
-/// another's save needs no timeout of its own (``OneShotSave``).
+/// emergency exit does (``EmergencyExit``). So a path that waits for the
+/// end another path settles needs no timeout of its own
+/// (``ManualCutEnding``).
 ///
 /// It is never cancelled: every ending exits the process. The first arm
-/// wins: a later one, from a second signal's ending or the save, never
+/// wins: a later one, from a second signal's ending or a claim, never
 /// moves the deadline, so pressing Ctrl-C again cannot postpone it; it only
 /// waits until the first arm has set it.
 public final class EndingWatchdog: @unchecked Sendable {
@@ -81,7 +82,7 @@ public final class EndingWatchdog: @unchecked Sendable {
     }
 }
 
-/// Every way `watch` ends (code review r3 of #101, must 1).
+/// Every way `watch` ends (code review r3 of #101, must 1; r4).
 ///
 /// - The main path, once the flow has ended: the after readings ran their
 ///   course, a timeout or an early stop ended the run, the first signal
@@ -90,14 +91,37 @@ public final class EndingWatchdog: @unchecked Sendable {
 ///   takes this path too.
 /// - A second signal, at once, on a thread of its own.
 ///
-/// Each arms the ending's watchdog first (``EndingWatchdog``), then drains
-/// the sleep queue; then the console, so that every result of the run's
-/// last output is in (code review r3 of #101, should 3); only then reads
-/// the flow and the sleep log once more
-/// (``ManualCutSession/reconciledFlow(drainSleepQueue:)``) and decides the
-/// outcome; renders the report and takes the bounded end (``BoundedEnd``):
-/// the save, once for the run (``OneShotSave``), then the console, then the
-/// exit. Each step is a part, so the tests drive the order and the waits.
+/// Each arms the ending's watchdog first (``EndingWatchdog``). Then the
+/// first path to arrive claims the end and settles it once for every path
+/// (code review r4 of #101): the report's text and the exit status. Every
+/// other path never decides a status or a report of its own: it waits,
+/// bounded only by the watchdog, until the claimant has saved the report
+/// and queued it for the console; then it gives the console its bounded
+/// drain and exits with exactly the settled status. So every path exits
+/// with the same status, and the saved report is the one that status came
+/// from.
+///
+/// The claimant tears down (on the main path) and drains the sleep queue,
+/// and a second signal's claimant queues its banner; then it closes
+/// actionable output (``ManualCutSession/closeActionableOutput()``): the
+/// closing boundary. Anything actionable queued before it, a second
+/// signal's banner included, is in the console's queue; nothing actionable
+/// is queued after it. Then it drains the console, so that every result of
+/// that output is in (r3, should 3); only then reads the flow and the sleep
+/// log once more (``ManualCutSession/reconciledFlow(drainSleepQueue:)``)
+/// and decides the outcome; renders the report and takes the bounded end
+/// (``BoundedEnd``): the save, then the console, then the exit. A second
+/// signal that comes while another path settles the end queues its banner
+/// only before the boundary, where its result counts; after it, it adds
+/// nothing and only waits. So whatever means exit 3 (a failed or untaken
+/// actionable write, an invalidated confirmation, a sleep queue that could
+/// not be drained) is in the settled result, and nothing after the boundary
+/// can change it. Each step is a part, so the tests drive the order and the
+/// waits.
+///
+/// If the claimant itself hangs before it has saved the report (in the
+/// teardown, say), the watchdog ends the process, and the report file keeps
+/// its placeholder.
 ///
 /// A write of an actionable message that fails, at any point of the run,
 /// the end's banners included, and a terminal that does not take the
@@ -151,9 +175,13 @@ public final class ManualCutEnding: @unchecked Sendable {
     public let watchdog: EndingWatchdog
     private let session: ManualCutSession
     private let parts: Parts
-    private let oneSave: OneShotSave
     private let sleepDrain: BoundedOnce
     private let consoleDrainBound: Double
+    private let condition = NSCondition()
+    private var claimed = false
+    /// The settled status, once the claimant has saved the report and
+    /// queued it for the console.
+    private var settledStatus: Int32?
 
     /// `sleepDrainBound` and `consoleDrainBound`: the most the end waits
     /// for the sleep queue's drain and for each of the console's; the tests
@@ -169,78 +197,135 @@ public final class ManualCutEnding: @unchecked Sendable {
         self.watchdog = watchdog
         self.parts = parts
         self.consoleDrainBound = consoleDrainBound
-        oneSave = OneShotSave(watchdog: watchdog)
         sleepDrain = BoundedOnce(within: sleepDrainBound, parts.stopSleepNotifications)
     }
 
-    /// Whether the report's save has finished.
-    public var saveFinished: Bool {
-        oneSave.isFinished
+    /// Whether the end is settled: the report saved (or its save failed)
+    /// and queued for the console.
+    public var isSettled: Bool {
+        condition.withLock { settledStatus != nil }
     }
 
     /// The main path's end, once the flow has ended; or, with `refusal`,
     /// the end of a probe that refused to start after it registered for
     /// sleep. `tearDown` releases what the run holds; it may block, so it
-    /// comes after the watchdog is armed. Returns the status, and whether
-    /// the console took everything (if not, `watch` exits at once).
+    /// comes after the watchdog is armed. Returns the settled status, and
+    /// whether the console took everything (if not, `watch` exits at once).
     public func endMainPath(refusal: ManualCutOutcome? = nil, tearDown: () -> Void) -> (status: Int32, drained: Bool) {
         watchdog.arm()
+        let isClaimant = claim()
         tearDown()
-        let (flow, notices) = settled()
-        let outcome = refusal ?? ManualCutOutcome.of(flow, sleepNotices: notices ?? [])
-        let text = parts.render(outcome, refusal == nil ? flow : nil, notices)
-        var result = (status: outcome.exitStatus, drained: false)
-        finish(text, status: outcome.exitStatus) { result = ($0, $1) }
+        guard isClaimant else {
+            let status = awaitSettled()
+            return (status, session.console.drain(timeout: consoleDrainBound))
+        }
+        let (text, status) = settle(refusal: refusal, secondSignal: nil)
+        var result = (status: status, drained: false)
+        finish(text, status: status) { result = ($0, $1) }
         return result
     }
 
     /// A second signal's end: at once, on a thread of its own in `watch`.
-    /// The console shows again what the owner must do, if anything
-    /// (``ManualCutFlow/secondSignal(_:)``); `exit` ends the process.
+    /// Before the closing boundary, the console shows again what the owner
+    /// must do, if anything (``ManualCutFlow/secondSignal(_:)``). `exit`
+    /// ends the process, with the settled status.
     public func endAtSecondSignal(_ number: Int32, exit: @escaping (Int32) -> Void) {
         watchdog.arm()
-        // The banner comes from the flow after the sleep log's last read
-        // (a sleep may have made a confirmation not count), and is queued
-        // before the console's drain, so that its result counts.
+        guard claim() else {
+            queueBanner(number)
+            let status = awaitSettled()
+            _ = session.console.drain(timeout: consoleDrainBound)
+            exit(status)
+            return
+        }
+        let (text, status) = settle(refusal: nil, secondSignal: number)
+        finish(text, status: status) { status, _ in exit(status) }
+    }
+
+    /// Claims the end for the calling path, if no path has; the watchdog
+    /// is armed first.
+    private func claim() -> Bool {
+        watchdog.arm()
+        return condition.withLock {
+            guard !claimed else { return false }
+            claimed = true
+            return true
+        }
+    }
+
+    /// Waits, with no timeout of its own, until the claimant has settled
+    /// the end; the watchdog bounds the wait. Returns the settled status.
+    private func awaitSettled() -> Int32 {
+        condition.lock()
+        defer { condition.unlock() }
+        while settledStatus == nil {
+            condition.wait()
+        }
+        return settledStatus ?? 3
+    }
+
+    /// A second signal's banner, while actionable output is open, from the
+    /// flow after the sleep log's last read (a sleep may have made a
+    /// confirmation not count). After the boundary it adds nothing.
+    private func queueBanner(_ number: Int32) {
+        guard !session.isActionableOutputClosed else { return }
         let drained = sleepDrain.run()
         if let banner = session.reconciledFlow(drainSleepQueue: { drained }).secondSignal(number).banner {
             session.announce("\n\(ManualCutFlow.signalName(number)) again: quitting. " + ManualCut.text(banner))
         }
-        let (flow, notices) = settled()
-        let text = parts.render(ManualCutOutcome.of(flow, sleepNotices: notices ?? []), flow, notices)
-        finish(text, status: flow.secondSignal(number).exitStatus) { status, _ in exit(status) }
     }
 
-    /// The flow, settled for the outcome: after the sleep queue's drain
-    /// (once for the run), then the console's, so that every result of the
-    /// output queued so far is in, a failed write's included; or, if the
-    /// terminal did not take it all within its bound, that is recorded. Then
-    /// the flow and the sleep log are read once more. And the sleep notices,
-    /// only if the sleep queue's drain completed: if not, the sleep watch's
-    /// lock is never taken again (must 2).
-    private func settled() -> (flow: ManualCutFlow, sleepNotices: [ProbeRun.SleepNotice]?) {
+    /// The claimant's settlement: the report's text and the exit status,
+    /// decided once. After the sleep queue's drain (once for the run) and a
+    /// second signal's banner, the closing boundary; then the console's
+    /// drain, so that every result of the actionable output queued before
+    /// the boundary is in, a failed write's included; or, if the terminal
+    /// did not take it all within its bound, that is recorded. Then the flow
+    /// and the sleep log are read once more, and the sleep notices only if
+    /// the sleep queue's drain completed: if not, the sleep watch's lock is
+    /// never taken again (must 2).
+    private func settle(refusal: ManualCutOutcome?, secondSignal: Int32?) -> (text: String, status: Int32) {
+        if let secondSignal {
+            queueBanner(secondSignal)
+        }
         let drained = sleepDrain.run()
+        session.closeActionableOutput()
         if !session.console.drain(timeout: consoleDrainBound) {
             session.outputNotTaken(within: consoleDrainBound)
         }
         let flow = session.reconciledFlow { drained }
-        return (flow, drained ? parts.sleepNotices() : nil)
+        let notices = drained ? parts.sleepNotices() : nil
+        let outcome = refusal ?? ManualCutOutcome.of(flow, sleepNotices: notices ?? [])
+        var status = outcome.exitStatus
+        if refusal == nil, let secondSignal {
+            status = flow.secondSignal(secondSignal).exitStatus
+        }
+        return (parts.render(outcome, refusal == nil ? flow : nil, notices), status)
     }
 
-    /// The bounded end: the save (or the wait for another path's), then the
-    /// report and where it is, queued for the console, then the console's
-    /// drain, then `exit`.
+    /// The claimant's bounded end: the save, then the report and where it
+    /// is, queued for the console; then the end is settled for every path;
+    /// then the console's drain, then `exit`.
     private func finish(_ text: String, status: Int32, exit: @escaping (Int32, Bool) -> Void) {
         let console = session.console
         BoundedEnd.perform(status: status, bound: consoleDrainBound, steps: BoundedEnd.Steps(
-            persist: { [oneSave, parts] in oneSave.save { parts.persist(text) } },
+            persist: { [parts] in parts.persist(text) },
             print: { [parts] saved in
                 console.enqueue("\n" + text)
                 console.enqueue(parts.savedLine(saved))
+                self.publish(status)
             },
             drain: { console.drain(timeout: $0) },
             exit: exit
         ))
+    }
+
+    /// Settles the end for every path: the waiting ones exit with `status`.
+    private func publish(_ status: Int32) {
+        condition.withLock {
+            settledStatus = status
+            condition.broadcast()
+        }
     }
 }
 

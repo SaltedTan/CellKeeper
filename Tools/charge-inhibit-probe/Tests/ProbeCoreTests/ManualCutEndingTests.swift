@@ -169,7 +169,7 @@ extension ManualCutTests {
             // not exited, and the save is not complete.
             Thread.sleep(forTimeInterval: 3)
             #expect(exited.value == 0)
-            #expect(!ending.saveFinished)
+            #expect(!ending.isSettled)
             #expect(try String(contentsOfFile: path, encoding: .utf8) == "report 1")
             released.add()
             gate.signal()
@@ -250,35 +250,6 @@ extension ManualCutTests {
             #expect(events.values.filter { $0 == "persist" }.count == 1)
             #expect(events.values.filter { $0.hasPrefix("arm") }.count == 1)
             #expect(try String(contentsOfFile: path, encoding: .utf8) == saved)
-        }
-
-        @Test("The save arms the watchdog before it is claimed, if no ending path has; a waiter waits for the save however long it takes")
-        func oneShotSaveArmsFirst() {
-            let events = EventLog()
-            let save = OneShotSave(watchdog: Self.watchdog(events))
-            let gate = DispatchSemaphore(value: 0)
-            let started = DispatchSemaphore(value: 0)
-            Thread {
-                _ = save.save {
-                    events.add("save")
-                    started.signal()
-                    gate.wait()
-                    return true
-                }
-            }.start()
-            #expect(started.wait(timeout: .now() + 2) == .success)
-            #expect(events.values == ["arm \(EndingWatchdog.bound)", "save"])
-            let waited = Counter()
-            Thread {
-                if save.save({ events.add("second save"); return false }) { waited.add() }
-            }.start()
-            Thread.sleep(forTimeInterval: 3)
-            #expect(waited.value == 0)
-            gate.signal()
-            #expect(eventually { waited.value == 1 })
-            #expect(!events.values.contains("second save"))
-            // The second path found the watchdog armed and did not arm it again.
-            #expect(events.values.filter { $0.hasPrefix("arm") }.count == 1)
         }
 
         /// A run whose restore was confirmed and whose last reading charges,
@@ -523,6 +494,232 @@ extension ManualCutTests {
             let report = try String(contentsOfFile: path, encoding: .utf8)
             #expect(report.contains("CHECK RECOVERY FIRST"))
             #expect(report.contains("the terminal did not take the probe's last output within 0.3 s"))
+        }
+
+        // MARK: One settled end for overlapping endings (code review r4 of #101)
+
+        /// A second signal's banner, as the console shows it.
+        static let secondBanner = "again: quitting"
+
+        /// A console that logs each message it is handed in `handed`, and
+        /// fails any that contains `failing`.
+        static func recordingConsole(_ handed: EventLog, failing: String) -> ConsoleWriter {
+            ConsoleWriter { text in
+                handed.add(text)
+                return !text.contains(failing)
+            }
+        }
+
+        @Test("Review r4's case: the main path has claimed the end; a second signal's banner, queued before the boundary, fails; the main save is paused; both exit 3, and the saved report opens with CHECK RECOVERY FIRST")
+        func bannerBeforeTheBoundaryCounts() throws {
+            let path = Self.temporaryPath()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let events = EventLog()
+            let paused = DispatchSemaphore(value: 0)
+            let gate = DispatchSemaphore(value: 0)
+            let file = try #require(Self.pausingFile(path: path, paused: paused, gate: gate, events: events))
+            let handed = EventLog()
+            let driver = Self.stoppedAfterAConfirmedRestore(console: Self.recordingConsole(handed, failing: Self.secondBanner))
+            let ending = Self.ending(driver, file: file, events: events, watchdog: Self.watchdog(events), report: Self.realReport)
+            // The main path claims the end, then waits in its teardown,
+            // before its boundary.
+            let inTearDown = DispatchSemaphore(value: 0)
+            let resumeTearDown = DispatchSemaphore(value: 0)
+            let statuses = EventLog()
+            Thread {
+                let end = ending.endMainPath(tearDown: {
+                    inTearDown.signal()
+                    resumeTearDown.wait()
+                })
+                statuses.add("main \(end.status)")
+            }.start()
+            #expect(inTearDown.wait(timeout: .now() + 2) == .success)
+            // A second signal: its banner goes out, and the terminal fails it.
+            Thread {
+                ending.endAtSecondSignal(SIGINT) { statuses.add("second \($0)") }
+            }.start()
+            #expect(eventually { handed.values.contains { $0.contains(Self.secondBanner) } })
+            resumeTearDown.signal()
+            // The main path settles and saves; its save pauses; nobody exits.
+            #expect(paused.wait(timeout: .now() + 3) == .success)
+            Thread.sleep(forTimeInterval: 0.3)
+            #expect(statuses.values.isEmpty)
+            gate.signal()
+            #expect(eventually { statuses.values.count == 2 })
+            #expect(Set(statuses.values) == ["main 3", "second 3"])
+            let report = try String(contentsOfFile: path, encoding: .utf8)
+            #expect(report.contains("CHECK RECOVERY FIRST"))
+            #expect(report.contains("failed after the run ended"))
+            #expect(events.values.filter { $0 == "persist" }.count == 1)
+        }
+
+        @Test("Review r4's case, after the boundary: the main path has settled on 2 and its save is paused when a second signal comes; it adds no banner, and both exit 2, the saved report's status")
+        func secondSignalAfterTheBoundary() throws {
+            let path = Self.temporaryPath()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let events = EventLog()
+            let paused = DispatchSemaphore(value: 0)
+            let gate = DispatchSemaphore(value: 0)
+            let file = try #require(Self.pausingFile(path: path, paused: paused, gate: gate, events: events))
+            let handed = EventLog()
+            let driver = Self.stoppedAfterAConfirmedRestore(console: Self.recordingConsole(handed, failing: Self.secondBanner))
+            let ending = Self.ending(driver, file: file, events: events, watchdog: Self.watchdog(events), report: Self.realReport)
+            let statuses = EventLog()
+            Thread {
+                statuses.add("main \(ending.endMainPath(tearDown: {}).status)")
+            }.start()
+            #expect(paused.wait(timeout: .now() + 3) == .success)
+            #expect(driver.session.isActionableOutputClosed)
+            Thread {
+                ending.endAtSecondSignal(SIGINT) { statuses.add("second \($0)") }
+            }.start()
+            Thread.sleep(forTimeInterval: 0.5)
+            #expect(statuses.values.isEmpty)
+            gate.signal()
+            #expect(eventually { statuses.values.count == 2 })
+            #expect(Set(statuses.values) == ["main 2", "second 2"])
+            #expect(!handed.values.contains { $0.contains(Self.secondBanner) })
+            let report = try String(contentsOfFile: path, encoding: .utf8)
+            #expect(!report.contains("CHECK RECOVERY FIRST"))
+            #expect(events.values.filter { $0 == "persist" }.count == 1)
+        }
+
+        @Test("The boundary comes before the claimant's drain of the console: a second signal while that drain waits on a slow terminal adds no banner, and both exit with the settled status")
+        func boundaryBeforeTheDrain() throws {
+            let path = Self.temporaryPath()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+            let events = EventLog()
+            let handed = EventLog()
+            let slow = DispatchSemaphore(value: 0)
+            let slowEntered = DispatchSemaphore(value: 0)
+            defer { slow.signal() }
+            let console = ConsoleWriter { text in
+                handed.add(text)
+                if text == "a slow line" {
+                    slowEntered.signal()
+                    slow.wait()
+                }
+                return !text.contains(Self.secondBanner)
+            }
+            let driver = Self.stoppedAfterAConfirmedRestore(console: console)
+            #expect(console.drain(timeout: 3))
+            // The terminal is slow to take a line queued before the end.
+            console.enqueue("a slow line")
+            #expect(slowEntered.wait(timeout: .now() + 2) == .success)
+            let ending = Self.ending(driver, file: file, events: events, watchdog: Self.watchdog(events))
+            let statuses = EventLog()
+            Thread {
+                statuses.add("main \(ending.endMainPath(tearDown: {}).status)")
+            }.start()
+            // The main path has drained the sleep queue and waits on the
+            // console.
+            #expect(eventually { events.values.contains("drain") })
+            Thread.sleep(forTimeInterval: 0.1)
+            Thread {
+                ending.endAtSecondSignal(SIGINT) { statuses.add("second \($0)") }
+            }.start()
+            Thread.sleep(forTimeInterval: 0.3)
+            slow.signal()
+            #expect(eventually { statuses.values.count == 2 })
+            #expect(!handed.values.contains { $0.contains(Self.secondBanner) })
+            #expect(Set(statuses.values) == ["main 2", "second 2"])
+            #expect(try String(contentsOfFile: path, encoding: .utf8).hasPrefix("report 1: exit 2\n"))
+        }
+
+        @Test("Whatever the order of the two endings, both exit with the one settled status, the saved report's; a second signal's banner went out only if it counted")
+        func endingsAgree() throws {
+            for _ in 0..<20 {
+                let path = Self.temporaryPath()
+                defer { try? FileManager.default.removeItem(atPath: path) }
+                let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+                let events = EventLog()
+                let handed = EventLog()
+                let driver = Self.stoppedAfterAConfirmedRestore(console: Self.recordingConsole(handed, failing: Self.secondBanner))
+                let ending = Self.ending(driver, file: file, events: events, watchdog: Self.watchdog(events))
+                let statuses = EventLog()
+                let mainDelay = UInt32.random(in: 0...3_000)
+                let secondDelay = UInt32.random(in: 0...3_000)
+                Thread {
+                    usleep(mainDelay)
+                    statuses.add("\(ending.endMainPath(tearDown: {}).status)")
+                }.start()
+                Thread {
+                    usleep(secondDelay)
+                    ending.endAtSecondSignal(SIGINT) { statuses.add("\($0)") }
+                }.start()
+                #expect(eventually { statuses.values.count == 2 })
+                let values = statuses.values
+                let status = values.first ?? "none"
+                #expect(values == [status, status])
+                #expect(try String(contentsOfFile: path, encoding: .utf8).hasPrefix("report 1: exit \(status)\n"))
+                let bannerWentOut = handed.values.contains { $0.contains(Self.secondBanner) }
+                #expect(bannerWentOut == (status == "3"), "banner out: \(bannerWentOut), status \(status)")
+                #expect(events.values.filter { $0 == "persist" }.count == 1)
+            }
+        }
+
+        @Test(
+            "Before the CUT prompt, the path that waits exits with the settling path's status: 2 from the main path, or 128 plus the signal from a second signal's",
+            arguments: [true, false]
+        )
+        func waiterTakesTheSettledStatus(mainSettles: Bool) throws {
+            let path = Self.temporaryPath()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let events = EventLog()
+            let paused = DispatchSemaphore(value: 0)
+            let gate = DispatchSemaphore(value: 0)
+            let file = try #require(Self.pausingFile(path: path, paused: paused, gate: gate, events: events))
+            let driver = SessionDriver(console: ConsoleWriter { _ in true })
+            driver.session.begin()
+            driver.type("start00", at: 5)
+            #expect(driver.session.signal(SIGINT) == .handled)
+            driver.session.stopReminder()
+            #expect(ManualCutOutcome.of(driver.session.snapshot, sleepNotices: []).exitStatus == 2)
+            #expect(driver.session.snapshot.secondSignal(SIGINT) == (nil, 128 + SIGINT))
+            let ending = Self.ending(driver, file: file, events: events, watchdog: Self.watchdog(events))
+            let statuses = EventLog()
+            let main = Thread {
+                statuses.add("main \(ending.endMainPath(tearDown: {}).status)")
+            }
+            let second = Thread {
+                ending.endAtSecondSignal(SIGINT) { statuses.add("second \($0)") }
+            }
+            // The settling path's save pauses; then the other path comes.
+            (mainSettles ? main : second).start()
+            #expect(paused.wait(timeout: .now() + 3) == .success)
+            (mainSettles ? second : main).start()
+            Thread.sleep(forTimeInterval: 0.3)
+            #expect(statuses.values.isEmpty)
+            gate.signal()
+            #expect(eventually { statuses.values.count == 2 })
+            let status = mainSettles ? 2 : 128 + SIGINT
+            #expect(Set(statuses.values) == ["main \(status)", "second \(status)"])
+        }
+
+        @Test("Once actionable output is closed, the session queues nothing actionable: the flow's reminder is not shown, and an announcement is refused")
+        func closedOutputQueuesNothingActionable() {
+            let handed = EventLog()
+            let driver = SessionDriver(console: ConsoleWriter { text in
+                handed.add(text)
+                return true
+            })
+            driver.toHold()
+            let mark = driver.session.snapshot.cutMark?.time ?? 0
+            driver.at(mark + 180)
+            driver.session.poll()
+            #expect(driver.session.snapshot.stage == .restorePrompt)
+            #expect(eventually { handed.values.contains { $0.contains(ManualCutQuestion.restore.prompt) } })
+            driver.session.closeActionableOutput()
+            #expect(driver.session.isActionableOutputClosed)
+            #expect(!driver.session.announce("an announcement"))
+            // The reminder is due: the flow reminds, and nothing is queued.
+            let shown = driver.session.snapshot.lastShownAt ?? 0
+            driver.at(shown + ManualCut.reminderInterval)
+            #expect(eventually { driver.session.snapshot.lastShownAt == shown + ManualCut.reminderInterval })
+            #expect(driver.session.console.drain(timeout: 3))
+            #expect(!handed.values.contains { $0.contains("(Reminder)") || $0 == "an announcement" })
+            driver.session.stopReminder()
         }
     }
 }

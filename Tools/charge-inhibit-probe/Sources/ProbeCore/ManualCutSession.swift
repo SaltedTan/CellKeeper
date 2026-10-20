@@ -125,6 +125,9 @@ public final class ManualCutSession: @unchecked Sendable {
     private var restoreBy: String?
     private var signals = 0
     private var printedHeader = false
+    /// Whether the end's settlement has closed actionable output
+    /// (``closeActionableOutput()``).
+    private var actionableClosed = false
 
     public init(
         hold: Int,
@@ -238,10 +241,31 @@ public final class ManualCutSession: @unchecked Sendable {
     }
 
     /// Queues actionable text from outside the flow, such as a second
-    /// signal's banner: a write of it that fails counts as any actionable
+    /// signal's banner, unless actionable output is closed; returns whether
+    /// it was queued. A write of it that fails counts as any actionable
     /// message's does.
-    public func announce(_ text: String) {
-        console.enqueue(text, onWritten: onActionable())
+    @discardableResult
+    public func announce(_ text: String) -> Bool {
+        lock.withLock {
+            guard !actionableClosed else { return false }
+            console.enqueue(text, onWritten: onActionable())
+            return true
+        }
+    }
+
+    /// The closing boundary of the end's settlement (code review r4 of
+    /// #101): from now on nothing actionable is queued, neither by the flow
+    /// nor by ``announce(_:)``. Everything actionable queued before it is
+    /// already in the console's queue, so the end's drain of the console,
+    /// which comes next, delivers every result that can change the
+    /// outcome.
+    public func closeActionableOutput() {
+        lock.withLock { actionableClosed = true }
+    }
+
+    /// Whether actionable output is closed.
+    public var isActionableOutputClosed: Bool {
+        lock.withLock { actionableClosed }
     }
 
     /// The end's drain of the console did not complete within `bound`
@@ -288,10 +312,16 @@ public final class ManualCutSession: @unchecked Sendable {
     /// anything queued for an earlier generation and not yet written is
     /// then dropped, so the superseding text (RESTORE CHIE FIRST and the
     /// read-first question, say) is the next actionable text to appear
-    /// (code review r2 of #101, must B).
+    /// (code review r2 of #101, must B). Once the end has closed actionable
+    /// output, none is queued (r4).
     private func perform(_ actions: [ManualCutFlow.Action]) -> Bool {
         let generation = flow.questionGeneration
         console.setCurrentGeneration(generation)
+        let closed = actionableClosed
+        func actionable(_ text: String, onWritten: @escaping @Sendable (ConsoleWriter.Result) -> Void) {
+            guard !closed else { return }
+            console.enqueue(text, generation: generation, onWritten: onWritten)
+        }
         var discarded = false
         for action in actions {
             switch action {
@@ -305,7 +335,7 @@ public final class ManualCutSession: @unchecked Sendable {
                 // back.
                 // Only a prompt written in full makes input eligible; one
                 // that could not be written ends the run.
-                console.enqueue(Self.text(question, repeated: false), generation: generation) { [weak self] result in
+                actionable(Self.text(question, repeated: false)) { [weak self] result in
                     switch result {
                     case .written: self?.published(questionGeneration)
                     case .failed: self?.consoleFailed()
@@ -313,21 +343,21 @@ public final class ManualCutSession: @unchecked Sendable {
                     }
                 }
             case let .remind(question):
-                console.enqueue(Self.text(question, repeated: true), generation: generation, onWritten: onActionable())
+                actionable(Self.text(question, repeated: true), onWritten: onActionable())
             case let .say(text):
-                console.enqueue(text, generation: generation, onWritten: onActionable())
+                actionable(text, onWritten: onActionable())
             case let .banner(banner):
-                console.enqueue("\n" + ManualCut.text(banner), generation: generation, onWritten: onActionable())
+                actionable("\n" + ManualCut.text(banner), onWritten: onActionable())
             case .armReminder:
                 armReminder()
             case let .go(restoreByUnix):
                 let time = clock.clockTime(restoreByUnix)
                 restoreBy = time
-                console.enqueue("""
+                actionable("""
 
                     GO — run the cut now in terminal B. Restore by \(time).
                     Write \(time) down, or set a phone timer for it, before you run the cut.
-                    """, generation: generation, onWritten: onActionable())
+                    """, onWritten: onActionable())
             case .end:
                 break
             }

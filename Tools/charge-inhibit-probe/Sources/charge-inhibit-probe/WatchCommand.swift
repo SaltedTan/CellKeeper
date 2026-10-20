@@ -23,19 +23,20 @@ import ProbeCore
 ///    first. None of them waits on the terminal.
 /// 5. The end (`ManualCutEnding`): arm the ending's watchdog first
 ///    (`EndingWatchdog`: SIGALRM's default action ends the process if the
-///    end outlasts its bound); release the idle-sleep assertion; deregister
-///    from sleep notifications and drain their queue (once, at most 2 s);
-///    give the console at most 2 s, so that a failed write of the end's
-///    output counts (after the CUT prompt, it makes the run end with 3);
-///    then read the sleep log once more, so that a sleep that began before a
+///    end outlasts its bound). The first ending path to get there (the main
+///    path's, or a second signal's) settles the end once for both: release
+///    the idle-sleep assertion; deregister from sleep notifications and
+///    drain their queue (once, at most 2 s); close actionable output; give
+///    the console at most 2 s, so that a failed write of the end's output
+///    counts (after the CUT prompt, it makes the run end with 3); then read
+///    the sleep log once more, so that a sleep that began before a
 ///    confirmation still makes it not count (`ManualCutFlow.reconcile`); if
 ///    the sleep queue's drain did not complete, never touch the sleep watch
 ///    again (its lock may be held) and render the report from the sleep log
 ///    alone; save the report, then queue it for the console, give the
-///    console at most 2 s, and exit (`BoundedEnd`). A second signal takes the same
-///    bounded path at once. The report is saved once (`OneShotSave`):
-///    whichever ending path comes first saves it, and the other waits for
-///    that save, bounded only by the watchdog, before it exits.
+///    console at most 2 s, and exit (`BoundedEnd`). The other path waits
+///    for that, bounded only by the watchdog, and exits with the same
+///    status.
 enum WatchCommand {
     static func main(hold: Int) -> Int32 {
         // 1. Not as root, from a terminal.
