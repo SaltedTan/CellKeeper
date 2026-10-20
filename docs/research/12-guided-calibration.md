@@ -248,10 +248,16 @@ owner's own limit, as today.
 **Leaving 100% is confirmed, not assumed.** The session leaves step 2 for
 step 3, and step 7 for step 8, only once the backend has confirmed the
 normal limit by read-back; until then the menu shows "returning to your
-limit". The request is retried as the policy's rate limits allow; if the
-backend cannot confirm it, its existing failure path applies (a fault, and
-the notice that a restore is unconfirmed), and the session ends. So the
-drain and the rest at the bottom begin with the normal limit in effect.
+limit". The request is retried as the policy's rate limits allow. If the
+backend cannot apply it, the controller's existing failure handling
+applies: it records the failure and falls back to the owner's own limit;
+if that is confirmed, the owner's limit is in effect, and if not, the
+notice that a restore is unconfirmed follows; three failures in a row
+mark the backend faulted. Either way the session ends. So the drain and
+the rest at the bottom begin with the normal limit in effect, except
+after an early unplug (§7.6), when the return may still be pending as the
+drain begins; on battery power the limit changes nothing until the Mac is
+plugged in again.
 
 **Where 100% can last longer** (disclosed before the start):
 
@@ -397,7 +403,10 @@ actions arriving early are accepted instead, and recorded: unplugging
 during step 2 moves to step 4 with the top rest short; plugging in during
 step 5, before the time shown, moves to step 7 with the bottom rest short.
 **These two acceptances read R23's "unexpected" as "not the requested
-action"; that reading needs the owner's decision.**
+action"; that reading needs the owner's decision.** An early unplug
+during step 2 requests the return to the normal limit at once, with the
+same confirmation as §7.2: the menu shows "returning to your limit" until
+it is confirmed, and if it cannot be, the session ends as there.
 
 **Low battery.** CellKeeper does not discharge anything, so it cannot
 stop a drain; it can only ask, and never ask for a rest at too low a
