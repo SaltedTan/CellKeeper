@@ -482,8 +482,8 @@ These rules hold throughout:
    probe goes to read-first (step 10).
 10. **Read-first** — every other restore request: a cut read-back that is
     unconfirmed or still pending, an early stop before confirmation, a
-    restore read-back that is not `restored00`, a sleep after the CUT
-    prompt (§4.7), or an error the probe can carry on from. The probe
+    restore read-back that is not `restored00`, or a sleep after the CUT
+    prompt (§4.7). The probe
     supersedes any open question, prints the read-first steps of §7.1, and
     asks what the read showed; its reminder repeats them, with the bell,
     every 20 s until the owner answers:
@@ -508,7 +508,7 @@ These rules hold throughout:
 
 **Any end after the CUT prompt without a confirmed restore** — a withdrawn
 prompt, NO GO, no `cutnow` in time, `other` in read-first, Ctrl-C,
-`SIGTERM`, `SIGHUP`, an error the probe cannot carry on from — prints
+`SIGTERM`, `SIGHUP`, any error — prints
 **RESTORE CHIE NOW** with the read-first recovery steps (§7.1), opens the
 report with **CHECK RECOVERY FIRST**, and exits 3. The probe cannot know
 whether the owner ran the cut or the restore. The report also opens that
@@ -529,10 +529,11 @@ probe keeps reminding until it ends.
 Exit status, with note 10's meanings: 0 a verdict; 1 refused before the
 CUT prompt; 2 inconclusive, but only for a run whose restore was confirmed
 or that ended before the CUT prompt without a refusal; 3 "follow the
-recovery steps the report prints" — a run after which charging did not
-resume, a run ended by a signal after a confirmed restore whose last
-reading does not show charging on adapter power (§4.6), and **any end
-after the CUT prompt without a confirmed restore**; 64 a usage error.
+recovery steps the report prints" — a run whose restore was confirmed
+but whose last reading does not show charging on adapter power (whether
+it ran its course and charging did not resume, or a signal ended the
+after readings early, §4.6), and **any end after the CUT prompt without a
+confirmed restore**; 64 a usage error.
 
 ### 4.5 The marks, and the two checks at the cut
 
