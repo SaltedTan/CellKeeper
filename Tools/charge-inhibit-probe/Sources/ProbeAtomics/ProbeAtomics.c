@@ -2,39 +2,46 @@
 
 #include <stdatomic.h>
 #include <stdlib.h>
-#include <string.h>
 
-struct probe_latch {
-    _Atomic uint64_t sequence;
-    _Atomic uint64_t time_bits;
+struct probe_log {
+    double times[PROBE_LOG_CAPACITY];
+    _Atomic uint32_t count;
+    _Atomic bool overflowed;
 };
 
-probe_latch *probe_latch_create(void) {
-    probe_latch *latch = malloc(sizeof *latch);
-    if (latch == NULL) {
+probe_log *probe_log_create(void) {
+    probe_log *log = calloc(1, sizeof *log);
+    if (log == NULL) {
         return NULL;
     }
-    atomic_init(&latch->sequence, 0);
-    atomic_init(&latch->time_bits, 0);
-    return latch;
+    atomic_init(&log->count, 0);
+    atomic_init(&log->overflowed, false);
+    return log;
 }
 
-void probe_latch_destroy(probe_latch *latch) {
-    free(latch);
+void probe_log_destroy(probe_log *log) {
+    free(log);
 }
 
-void probe_latch_record(probe_latch *latch, double time) {
-    uint64_t bits;
-    memcpy(&bits, &time, sizeof bits);
-    atomic_store_explicit(&latch->time_bits, bits, memory_order_relaxed);
-    atomic_fetch_add_explicit(&latch->sequence, 1, memory_order_release);
-}
-
-uint64_t probe_latch_read(probe_latch *latch, double *time) {
-    uint64_t sequence = atomic_load_explicit(&latch->sequence, memory_order_acquire);
-    if (time != NULL) {
-        uint64_t bits = atomic_load_explicit(&latch->time_bits, memory_order_relaxed);
-        memcpy(time, &bits, sizeof *time);
+void probe_log_append(probe_log *log, double time) {
+    // Only this writer changes count, so a relaxed load of it is exact.
+    uint32_t count = atomic_load_explicit(&log->count, memory_order_relaxed);
+    if (count >= PROBE_LOG_CAPACITY) {
+        atomic_store_explicit(&log->overflowed, true, memory_order_release);
+        return;
     }
-    return sequence;
+    log->times[count] = time;
+    atomic_store_explicit(&log->count, count + 1, memory_order_release);
+}
+
+uint32_t probe_log_count(probe_log *log) {
+    return atomic_load_explicit(&log->count, memory_order_acquire);
+}
+
+double probe_log_time(probe_log *log, uint32_t index) {
+    return log->times[index];
+}
+
+bool probe_log_overflowed(probe_log *log) {
+    return atomic_load_explicit(&log->overflowed, memory_order_acquire);
 }

@@ -54,7 +54,7 @@ struct TerminalDriver {
     let terminal: PseudoTerminal
     let gate: BlockingSink
     let clock = FakeClock()
-    let latch = SleepLatch()
+    let sleepLog = SleepLog()
     let session: ManualCutSession
 
     init() throws {
@@ -64,7 +64,7 @@ struct TerminalDriver {
         gate = BlockingSink(blocked: false) { TerminalInput.writeAll($0 + "\n", to: slave) }
         session = ManualCutSession(
             hold: 180, console: ConsoleWriter(sink: gate.sink), input: TerminalInput(descriptor: slave),
-            latch: latch, clock: clock.portable, reminderTick: 0.02
+            sleepLog: sleepLog, clock: clock.portable, reminderTick: 0.02
         )
     }
 

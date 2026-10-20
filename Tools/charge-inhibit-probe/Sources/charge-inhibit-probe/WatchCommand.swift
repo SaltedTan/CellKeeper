@@ -19,7 +19,7 @@ import ProbeCore
 ///    fails.
 /// 4. Run the flow (`ManualCutSession`): the main loop hands it the owner's
 ///    lines, the clock and the readings; the reminder's own timer and the
-///    signal handlers hand it events too; every event reads the sleep latch
+///    signal handlers hand it events too; every event reads the sleep log
 ///    first. None of them waits on the terminal.
 /// 5. Release the idle-sleep assertion and deregister; save the report,
 ///    then queue it for the console, give the console at most 2 s, and
@@ -71,12 +71,12 @@ enum WatchCommand {
         }
         // From here on, only the writer's thread writes to the terminal.
         let console = ConsoleWriter { TerminalInput.writeAll($0 + "\n", to: STDOUT_FILENO) }
-        let latch = SleepLatch()
+        let sleepLog = SleepLog()
         let session = ManualCutSession(
             hold: hold,
             console: console,
             input: TerminalInput(descriptor: STDIN_FILENO),
-            latch: latch,
+            sleepLog: sleepLog,
             clock: ManualCutClock(
                 now: { clock.now },
                 unixNow: { Clock.unixNow },
@@ -152,11 +152,11 @@ enum WatchCommand {
             signalSources.forEach { $0.cancel() }
         }
 
-        // Sleep: the notification records into the sleep latch, lock-free,
+        // Sleep: the notification appends to the sleep log, lock-free,
         // and allows the sleep at once; nothing is released and no I/O is
         // done on the sleep queue. Every event the flow handles reads the
-        // latch first, inside the run's lock.
-        let registered = sleepWatch.start(onWillSleep: ManualCut.willSleepHandler(latch: latch, now: { clock.now }))
+        // log first, inside the run's lock.
+        let registered = sleepWatch.start(onWillSleep: ManualCut.willSleepHandler(log: sleepLog, now: { clock.now }))
         guardState.update { $0.registered = registered }
         var refusal: String?
         if !registered {

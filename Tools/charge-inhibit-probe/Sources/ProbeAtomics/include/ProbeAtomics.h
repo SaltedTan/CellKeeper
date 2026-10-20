@@ -1,26 +1,41 @@
 #ifndef PROBE_ATOMICS_H
 #define PROBE_ATOMICS_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
-/// A sequence number and the moment of the latest event, recorded by one
-/// thread and read by others without a lock (C11 atomics). `watch` uses one
-/// as its sleep latch: the sleep notification records into it and does
-/// nothing else (code review r1 of #101, must 2).
-typedef struct probe_latch probe_latch;
+/// The most occurrences a log keeps; past that it only says it overflowed.
+#define PROBE_LOG_CAPACITY 64
 
-/// A new latch at sequence 0. Never fails on a working system; NULL if
-/// memory runs out.
-probe_latch *probe_latch_create(void);
+/// An append-only log of occurrence times, written by one thread and read by
+/// others without a lock (C11 atomics). `watch` uses one as its sleep log:
+/// the sleep notification appends to it and does nothing else (code review
+/// r2 of #101, must D).
+///
+/// The single writer stores `times[count]` and then publishes `count + 1`
+/// with release ordering; a reader loads `count` with acquire ordering and
+/// then reads `times[0 ..< count]`, every one of which was written before
+/// that release. So a reader's snapshot is always a coherent prefix of the
+/// log: no torn pair, no time without its place.
+typedef struct probe_log probe_log;
 
-void probe_latch_destroy(probe_latch *latch);
+/// A new, empty log; NULL if memory runs out.
+probe_log *probe_log_create(void);
 
-/// Records an event at `time`: stores the time, then advances the
-/// sequence with release ordering. Lock-free; no I/O.
-void probe_latch_record(probe_latch *latch, double time);
+void probe_log_destroy(probe_log *log);
 
-/// The sequence, read with acquire ordering, and the time recorded with
-/// the latest event (into `time`, if not NULL).
-uint64_t probe_latch_read(probe_latch *latch, double *time);
+/// For the single writer only: appends `time`. Past the capacity it appends
+/// nothing and marks the log overflowed. Lock-free; no I/O.
+void probe_log_append(probe_log *log, double time);
+
+/// How many times the log holds (acquire).
+uint32_t probe_log_count(probe_log *log);
+
+/// The time at `index`, which must be below a count this thread has read.
+double probe_log_time(probe_log *log, uint32_t index);
+
+/// Whether an append found the log full (acquire). It is set only after
+/// the log is full, so read it before the count.
+bool probe_log_overflowed(probe_log *log);
 
 #endif

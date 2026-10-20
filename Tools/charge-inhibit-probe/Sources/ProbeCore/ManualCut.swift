@@ -98,13 +98,13 @@ public enum ManualCut {
         """
 
     /// The will-sleep handler for `watch`: it records the sleep, and when it
-    /// began, in the sleep latch (lock-free, no I/O), then allows the sleep
+    /// began, in the sleep log (lock-free, no I/O), then allows the sleep
     /// at once: the probe holds nothing that must be released before a
     /// sleep, and cannot restore `CHIE` (note 11 §4.7). It runs on the
     /// sleep queue.
-    public static func willSleepHandler(latch: SleepLatch, now: @escaping @Sendable () -> Double) -> @Sendable (_ acknowledge: () -> Void) -> Void {
+    public static func willSleepHandler(log: SleepLog, now: @escaping @Sendable () -> Double) -> @Sendable (_ acknowledge: () -> Void) -> Void {
         { acknowledge in
-            latch.record(at: now())
+            log.record(at: now())
             acknowledge()
         }
     }
@@ -383,16 +383,22 @@ public struct ManualCutFlow: Sendable {
     /// When the open restore request was last shown.
     public private(set) var lastShownAt: Double?
     public private(set) var ending: Ending?
-    /// The sleep latch's sequence the flow has seen.
-    public private(set) var seenLatch: UInt64 = 0
+    /// How many of the sleep log's occurrences the flow has seen.
+    public private(set) var seenSleeps = 0
+    /// Whether the sleep log overflowed: every confirmation is then
+    /// invalid, and the run inconclusive.
+    public private(set) var sleepLogOverflowed = false
+    /// How many occurrences the flow had seen when the restore's
+    /// confirmation was accepted.
+    public private(set) var restoreConfirmedSleeps: Int?
     /// The number of the latest question published.
     public private(set) var questionGeneration: UInt64 = 0
     /// Whether the owner's lines may answer the open question: only once
     /// its prompt has been written and pending input discarded.
     public private(set) var inputEligible = false
-    /// The latch's sequence when the open question was published: an
-    /// answer counts only if no sleep came since.
-    public private(set) var questionLatch: UInt64 = 0
+    /// How many occurrences the flow had seen when the open question was
+    /// published: an answer counts only if no sleep came since.
+    public private(set) var questionSleeps = 0
     private var askedAt: Double?
     /// Whether any held reading showed the battery discharging (for the
     /// after readings, as in note 10).
@@ -447,17 +453,23 @@ public struct ManualCutFlow: Sendable {
 
     /// Handles one event and returns the actions to perform, in order.
     ///
-    /// `latch` is the sleep latch as read inside the same critical section
-    /// (code review r1 of #101, must 2). A sleep it shows that the flow has
-    /// not seen is delivered first, so it supersedes the open question
-    /// before any answer, prompt or reminder of this event: an answer typed
-    /// before a sleep is never accepted after it.
-    public mutating func handle(_ event: Event, latch: SleepLatch.Snapshot) -> [Action] {
+    /// `sleeps` is the sleep log as read inside the same critical section
+    /// (code review r1 of #101, must 2; r2, must D). Each occurrence the
+    /// flow has not seen is delivered first, in order, so it supersedes the
+    /// open question before any answer, prompt or reminder of this event: an
+    /// answer typed before a sleep is never accepted after it.
+    public mutating func handle(_ event: Event, sleeps: SleepLog.Snapshot) -> [Action] {
         guard stage != .ended else { return [] }
         var actions: [Action] = []
-        if latch.sequence > seenLatch {
-            seenLatch = latch.sequence
-            actions += slept(at: latch.time, now: max(Self.time(of: event), latch.time))
+        let now = Self.time(of: event)
+        for time in sleeps.times.dropFirst(seenSleeps) {
+            seenSleeps += 1
+            actions += slept(at: time, now: max(now, time))
+            guard stage != .ended else { return actions }
+        }
+        if sleeps.overflowed, !sleepLogOverflowed {
+            sleepLogOverflowed = true
+            actions += logOverflowed(now: now)
             guard stage != .ended else { return actions }
         }
         return actions + handleEvent(event)
@@ -502,11 +514,11 @@ public struct ManualCutFlow: Sendable {
     /// its prompt is written, while input is not eligible, and is dropped:
     /// an answer typed ahead, or meant for an earlier question, never
     /// carries over.
-    public mutating func handleLines(_ lines: [String], at time: Double, unixTime: Double, latch: SleepLatch.Snapshot) -> [Action] {
+    public mutating func handleLines(_ lines: [String], at time: Double, unixTime: Double, sleeps: SleepLog.Snapshot) -> [Action] {
         var all: [Action] = []
         for line in lines {
             guard stage != .ended else { break }
-            all += handle(.line(line, at: time, unixTime: unixTime), latch: latch)
+            all += handle(.line(line, at: time, unixTime: unixTime), sleeps: sleeps)
         }
         return all
     }
@@ -517,7 +529,7 @@ public struct ManualCutFlow: Sendable {
         stage = Self.stage(for: question)
         askedAt = time
         lastShownAt = time
-        questionLatch = seenLatch
+        questionSleeps = seenSleeps
         questionGeneration += 1
         inputEligible = false
         return [.publish(question, generation: questionGeneration)]
@@ -541,8 +553,8 @@ public struct ManualCutFlow: Sendable {
         // input discarded, answers nothing.
         guard inputEligible else { return [] }
         // An answer counts only for a question published since the latest
-        // sleep (``handle(_:latch:)`` delivers a sleep first).
-        guard questionLatch == seenLatch else { return [] }
+        // sleep (``handle(_:sleeps:)`` delivers a sleep first).
+        guard questionSleeps == seenSleeps else { return [] }
         let typed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         // An empty line (Return alone) is not an answer to anything.
         guard !typed.isEmpty else { return [] }
@@ -680,6 +692,7 @@ public struct ManualCutFlow: Sendable {
     private mutating func confirmRestore(at time: Double, word: String) -> [Action] {
         restoreConfirmedAt = time
         restoreConfirmedBy = word
+        restoreConfirmedSleeps = seenSleeps
         stage = .after
         note(time, "the owner confirmed recovery (\(word)); the after readings")
         return [.discardInput, .say("""
@@ -823,7 +836,7 @@ public struct ManualCutFlow: Sendable {
 
     // MARK: Sleep, signals, the reminder
 
-    /// A sleep that began at `time`, delivered at `now` from the latch. A
+    /// A sleep that began at `time`, delivered at `now` from the log. A
     /// notice that arrives late is judged by when the sleep began: one that
     /// began before the owner's confirmation was accepted makes that
     /// confirmation not count.
@@ -848,6 +861,7 @@ public struct ManualCutFlow: Sendable {
                 ))
                 restoreConfirmedAt = nil
                 restoreConfirmedBy = nil
+                restoreConfirmedSleeps = nil
                 return [.banner(.restoreChieFirst)] + toReadFirst(reason, at: now)
             }
             note(time, "the system slept after the restore was confirmed; the run is inconclusive")
@@ -856,6 +870,27 @@ public struct ManualCutFlow: Sendable {
             if let question = openQuestion {
                 answers.append(Answer(time: now, question: question, word: nil, outcome: "superseded by a sleep"))
             }
+            return [.banner(.restoreChieFirst)] + toReadFirst(reason, at: now)
+        case .ended:
+            return []
+        }
+    }
+
+    /// More sleeps than the log holds: their times are lost, so no
+    /// confirmation can be trusted; a confirmation already given no longer
+    /// counts, and the run is inconclusive (``ManualCutOutcome``).
+    private mutating func logOverflowed(now: Double) -> [Action] {
+        let reason = "more than \(SleepLog.capacity) sleeps came, so when they began is lost"
+        note(now, reason)
+        switch stage {
+        case .notStarted, .firstRead, .baseline:
+            return end(.endedBeforeCut(reason), at: now)
+        case .after:
+            restoreConfirmedAt = nil
+            restoreConfirmedBy = nil
+            restoreConfirmedSleeps = nil
+            return [.banner(.restoreChieFirst)] + toReadFirst(reason, at: now)
+        case .cutPrompt, .cutReadBack, .hold, .restorePrompt, .restoreReadBack, .readFirst, .recheck:
             return [.banner(.restoreChieFirst)] + toReadFirst(reason, at: now)
         case .ended:
             return []
@@ -1004,6 +1039,15 @@ public struct ManualCutOutcome: Sendable, Equatable {
             .map { Verdict.isChargingOnAdapter($0, criteria: criteria) } ?? false
         let notCharging = "The last reading did not show charging on adapter power."
         let unconfirmed = "The owner has not confirmed that CHIE was restored"
+        // After the CUT prompt, a sleep log that overflowed lost when sleeps
+        // began, so no confirmation counts (code review r2 of #101, must D).
+        if flow.sleepLogOverflowed, flow.cutPromptAt != nil {
+            let reason = "more than \(SleepLog.capacity) sleeps came, so when they began is lost"
+            return ManualCutOutcome(
+                verdict: .inconclusive(reason: reason), exitStatus: 3,
+                recoveryReason: "\(unconfirmed) in a way that counts: \(reason)."
+            )
+        }
         switch flow.ending {
         case let .refused(reason):
             return ManualCutOutcome(verdict: nil, exitStatus: 1, recoveryReason: nil, refusal: reason)

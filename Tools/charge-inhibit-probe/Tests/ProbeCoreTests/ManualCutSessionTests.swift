@@ -100,11 +100,11 @@ func eventually(timeout: Double = 3, _ condition: () -> Bool) -> Bool {
 struct SessionDriver {
     let clock = FakeClock()
     let input = FakeInput()
-    let latch = SleepLatch()
+    let sleepLog = SleepLog()
     let session: ManualCutSession
 
     init(console: ConsoleWriter, reminderTick: Double = 0.02) {
-        session = ManualCutSession(hold: 180, console: console, input: input, latch: latch, clock: clock.portable, reminderTick: reminderTick)
+        session = ManualCutSession(hold: 180, console: console, input: input, sleepLog: sleepLog, clock: clock.portable, reminderTick: reminderTick)
     }
 
     func at(_ time: Double) {
@@ -230,7 +230,7 @@ extension ManualCutTests {
             #expect(Date().timeIntervalSince(start) < 0.5)
         }
 
-        @Test("A sleep latched after restored00 was typed, before it was handled, leaves recovery unconfirmed (must 2)")
+        @Test("A sleep logged after restored00 was typed, before it was handled, leaves recovery unconfirmed (must 2)")
         func sessionSleepBeforeQueuedAnswer() {
             let console = ConsoleWriter { _ in }
             let driver = SessionDriver(console: console)
@@ -246,7 +246,7 @@ extension ManualCutTests {
             #expect(eventually { driver.session.inputEligible })
             driver.at(mark + 190)
             driver.input.type("restored00")
-            ManualCut.willSleepHandler(latch: driver.latch, now: { mark + 189 })({})
+            ManualCut.willSleepHandler(log: driver.sleepLog, now: { mark + 189 })({})
             driver.session.poll()
             let flow = driver.session.snapshot
             #expect(flow.stage == .readFirst)
@@ -258,7 +258,7 @@ extension ManualCutTests {
             driver.session.stopReminder()
         }
 
-        @Test("A sleep latched while the main loop is stuck is delivered by the reminder, not repeated over")
+        @Test("A sleep logged while the main loop is stuck is delivered by the reminder, not repeated over")
         func reminderDeliversLatchedSleep() {
             let console = ConsoleWriter { _ in }
             let driver = SessionDriver(console: console)
@@ -267,7 +267,7 @@ extension ManualCutTests {
             driver.at(mark + 180)
             #expect(eventually { driver.session.snapshot.stage == .restorePrompt })
             // The Mac sleeps; only the reminder's timer runs after the wake.
-            ManualCut.willSleepHandler(latch: driver.latch, now: { mark + 185 })({})
+            ManualCut.willSleepHandler(log: driver.sleepLog, now: { mark + 185 })({})
             driver.at(mark + 205)
             #expect(eventually { driver.session.snapshot.stage == .readFirst })
             #expect(driver.session.snapshot.sleeps == [mark + 185])

@@ -96,8 +96,8 @@ public struct ManualCutClock: Sendable {
 /// `watch`'s run: one lock around the flow (``ManualCutFlow``), the owner's
 /// input and the reminder's timer. The main loop, the reminder's own timer
 /// and the signal handlers each hand the flow an event and perform its
-/// actions under this lock, with the sleep latch read inside it
-/// (``SleepLatch``). Performing an action never waits on the terminal:
+/// actions under this lock, with the sleep log read inside it
+/// (``SleepLog``). Performing an action never waits on the terminal:
 /// console output is only queued (``ConsoleWriter``).
 public final class ManualCutSession: @unchecked Sendable {
     /// What a signal does.
@@ -113,7 +113,7 @@ public final class ManualCutSession: @unchecked Sendable {
     private var flow: ManualCutFlow
     public let console: ConsoleWriter
     private let input: any AnswerInput
-    private let latch: SleepLatch
+    private let sleepLog: SleepLog
     private let clock: ManualCutClock
     private let reminderTick: Double
     private let reminderQueue = DispatchQueue(label: "charge-inhibit-probe.reminder")
@@ -126,14 +126,14 @@ public final class ManualCutSession: @unchecked Sendable {
         hold: Int,
         console: ConsoleWriter,
         input: any AnswerInput,
-        latch: SleepLatch,
+        sleepLog: SleepLog,
         clock: ManualCutClock,
         reminderTick: Double = ManualCut.reminderTick
     ) {
         flow = ManualCutFlow(hold: hold)
         self.console = console
         self.input = input
-        self.latch = latch
+        self.sleepLog = sleepLog
         self.clock = clock
         self.reminderTick = reminderTick
     }
@@ -177,7 +177,7 @@ public final class ManualCutSession: @unchecked Sendable {
     public func record(_ sample: Sample) {
         lock.lock()
         defer { lock.unlock() }
-        _ = perform(flow.handle(.reading(sample), latch: latch.snapshot))
+        _ = perform(flow.handle(.reading(sample), sleeps: sleepLog.snapshot))
         guard flow.openQuestion == nil, flow.stage != .ended, let recorded = flow.samples.last else { return }
         if !printedHeader {
             console.enqueue(ReportFormat.sampleHeader, kind: .sample)
@@ -195,7 +195,7 @@ public final class ManualCutSession: @unchecked Sendable {
             let second = flow.secondSignal(number)
             return .quit(banner: second.banner, status: second.exitStatus)
         }
-        _ = perform(flow.handle(.signal(number, at: clock.now()), latch: latch.snapshot))
+        _ = perform(flow.handle(.signal(number, at: clock.now()), sleeps: sleepLog.snapshot))
         console.enqueue("\(ManualCutFlow.signalName(number)): finishing the report; press Ctrl-C again to quit at once.")
         return .handled
     }
@@ -223,7 +223,7 @@ public final class ManualCutSession: @unchecked Sendable {
     func send(_ event: ManualCutFlow.Event) {
         lock.lock()
         defer { lock.unlock() }
-        _ = perform(flow.handle(event, latch: latch.snapshot))
+        _ = perform(flow.handle(event, sleeps: sleepLog.snapshot))
     }
 
     /// Hands the flow the owner's complete lines (``ManualCutFlow/handleLines(_:at:unixTime:)``).
@@ -232,7 +232,7 @@ public final class ManualCutSession: @unchecked Sendable {
         defer { lock.unlock() }
         let lines = input.availableLines()
         guard !lines.isEmpty else { return }
-        _ = perform(flow.handleLines(lines, at: clock.now(), unixTime: clock.unixNow(), latch: latch.snapshot))
+        _ = perform(flow.handleLines(lines, at: clock.now(), unixTime: clock.unixNow(), sleeps: sleepLog.snapshot))
     }
 
     /// Performs `actions` in order, under the lock; output is only queued.
