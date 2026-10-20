@@ -269,6 +269,14 @@ public final class ChargingNotifier {
                     continue
                 }
                 Self.log(await poster.add(notification, in: generation), for: notification.kind)
+                // A withdrawal made while the post was on its way to the
+                // center may have reached the center first: the post, now
+                // shown or still being handed over after a timeout, is
+                // removed again (the poster removes once more one it
+                // answers later).
+                if let self, self.withdrawals[notification.identifier] != queuedWithdrawals[notification.identifier] {
+                    await poster.remove(identifiers: [notification.identifier])
+                }
             }
             self?.postTasks[number] = nil
         }

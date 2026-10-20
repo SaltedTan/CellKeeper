@@ -173,6 +173,28 @@ struct CalibrationWithdrawalTests {
         #expect(poster.removed.first?.first?.hasSuffix(".rest") == true)
     }
 
+    @Test("A withdrawal during the hand-over, before the center has the request, removes it again once it is shown")
+    func withdrawnDuringHandOver() async throws {
+        let rig = CalibrationRig()
+        let poster = FakeNotificationPoster(permission: .shown)
+        let notifier = await makeNotifier(poster, clock: rig.clock)
+        notifier.observe(await rig.drive(to: .drain), trigger: .periodic)
+        rig.clock.advance(by: 4 * hour)
+        // The rest's post passes every check and is held on its way to the
+        // center, as in the hop into the poster.
+        poster.adds.hold()
+        notifier.observe(await rig.read(calibrationReading(20, .battery)), trigger: .periodic)
+        await waitBounded("the post to reach the center's door") { await poster.adds.waitForArrivals(1) }
+        notifier.observe(await rig.controller.cancelCalibration(), trigger: .overrideChanged)
+        await waitBounded("the withdrawal to reach the center") {
+            while poster.removed.isEmpty { await Task.yield() }
+        }
+        poster.adds.release()
+        await settle(notifier)
+        let rest = try #require(poster.posted.first)
+        #expect(poster.events == ["remove \(rest.identifier)", "add \(rest.identifier)", "remove \(rest.identifier)"])
+    }
+
     @Test("Without the owner's opt-in nothing is posted and Notification Center is not touched")
     func notOptedIn() async {
         let rig = CalibrationRig()
