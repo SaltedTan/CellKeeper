@@ -18,7 +18,7 @@ before being committed. Architecture decisions based on them live in
 | 08 | [Native Charge Limit through Shortcuts](08-native-charge-limit.md) | Can CellKeeper set, read back and restore macOS's Charge Limit from the sandbox? |
 | 09 | [The ChargeInhibit probe](09-charge-inhibit-probe.md) | Does Apple's private `ChargeInhibit` power assertion stop charging on this Mac, and does charging resume when it is released? (owner-run 2026-10-19: no effect observed) |
 | 10 | [The DisableInflow probe](10-disable-inflow-probe.md) | Does Apple's private `DisableInflow` power assertion do nothing, stop charging on adapter power, or cut the adapter's power on this Mac, and does everything return when it is released? (owner-run 2026-10-20: no effect observed) |
-| 11 | [The SMC adapter-cut probe](11-smc-adapter-cut.md) | Does writing the SMC key `CHIE` cut the adapter's power on this Mac, so that it runs from its battery while plugged in, and does restoring the key bring adapter power and charging back? (design; not run yet) |
+| 11 | [The SMC adapter cut, a manual test](11-smc-adapter-cut.md) | Does writing the SMC key `CHIE` cut the adapter's power on this Mac, so that it runs from its battery while plugged in, and does restoring the key bring adapter power and charging back? (design: the owner writes the key by hand with an existing open-source tool, and the probe only observes; not run yet) |
 
 ## Classification legend
 
@@ -66,10 +66,11 @@ Some notes use their own evidence labels alongside these tags:
   `ChargeInhibit` power assertion (note 09). After its result, the owner
   authorized one more, of the private `DisableInflow` assertion (note 10).
   After both showed no effect, the owner decided on 2026-10-20 to pursue
-  the SMC adapter cut (`CHIE`) on this Mac (note 11 §2): an owner-run
-  `sudo` test may write `CHIE`; agents never write any SMC key and never
-  run `sudo`, and may read only allowlisted keys (`CHIE`), never
-  enumerating the key table. Every other private control mechanism stays
+  the SMC adapter cut (`CHIE`) on this Mac (note 11 §2), and then chose a
+  manual test: the owner reads and writes `CHIE` by hand with an existing
+  open-source tool, run outside the repository, while CellKeeper's probe
+  only observes. Agents never read or write any SMC key, never run the
+  tool and never run `sudo`. Every other private control mechanism stays
   documentary (see [`../roadmap.md`](../roadmap.md), milestone 4).
 - Notes written before the bundle identifier was chosen use the placeholder
   `com.example.CellKeeper`; the project uses `io.github.saltedtan.CellKeeper`.
@@ -83,13 +84,14 @@ Some notes use their own evidence labels alongside these tags:
   idle-sleep assertion and registers for sleep notifications, which
   connects it to the power-management root domain
   (`IORegisterForSystemPower`). The owner ran it once, on 2026-10-20. In
-  notes 01–10 no user client of the battery or the SMC was opened by
-  CellKeeper or its probes, and no SMC key was read or written. Note 11's
-  probe, the same tool, opens the AppleSMC user client to read and write
-  one key, `CHIE`: its `check` reads `CHIE` only, without root; its `run`
-  and `restore` write it, and only when the owner runs them with `sudo`.
-  In all notes no `pmset` setting was changed, and no proprietary binary
-  (Apple's or anyone else's) was disassembled or string-dumped.
+  notes 01–11 no user client of the battery or the SMC was opened by
+  CellKeeper or its probes, and CellKeeper reads and writes no SMC key. In
+  note 11's test the owner writes one key, `CHIE`, by hand, with an
+  existing open-source tool (smcFanControl's `smc`) that the owner builds
+  and runs outside the repository; the same probe, run without `sudo`,
+  only observes and prompts. In all notes no `pmset` setting was changed,
+  and no proprietary binary (Apple's or anyone else's) was disassembled or
+  string-dumped.
 
 ## Key findings (lead's synthesis)
 
@@ -104,7 +106,7 @@ Some notes use their own evidence labels alongside these tags:
 | Health / condition / "Maximum Capacity" | Gated by a private entitlement; only undocumented `system_profiler` output | PRIVILEGED / PRIVATE | Not shown; CellKeeper shows its own computed full-charge ÷ design ratio, labelled as such |
 | Native Charge Limit (80–100%) | System Settings; “Set Battery Charge Limit” Shortcuts action run with the `shortcuts` CLI | PUBLIC (user setting, CLI), ARCH-SPECIFIC (Apple silicon, macOS 26.4+), verified from the App Sandbox (08) | Used by the opt-in macOS Charge Limit backend |
 | Read native limit state | `pmset -g battlimit` | PRIVATE/UNDOCUMENTED, verified read-only (08) | Used read-only to confirm every change; unrecognised output blocks changes |
-| Inhibit charging / force discharge | Only private: SMC keys (largely gated on macOS 27 firmware), private `ChargeInhibit`/`DisableInflow` assertions (root) | PRIVATE, PRIVILEGED, SMC/HW, unverified | Not implemented; simulated. An owner-run probe of `ChargeInhibit` showed no effect on this Mac (09); nor did one of `DisableInflow` (10). An owner-run probe of the SMC adapter cut `CHIE` is designed (11), not run yet |
+| Inhibit charging / force discharge | Only private: SMC keys (largely gated on macOS 27 firmware), private `ChargeInhibit`/`DisableInflow` assertions (root) | PRIVATE, PRIVILEGED, SMC/HW, unverified | Not implemented; simulated. An owner-run probe of `ChargeInhibit` showed no effect on this Mac (09); nor did one of `DisableInflow` (10). An owner-run manual test of the SMC adapter cut `CHIE`, with an existing tool and observed by the probe, is designed (11), not run yet |
 | Privileged helper | `SMAppService` daemon + XPC with code-signing requirements | PUBLIC-API | Logic and NSXPC transport implemented and tested, on a simulated control; the daemon exists and serves the authenticated transport, but controls no hardware, is neither embedded nor registered, and the app does not connect to it yet |
 | Mac App Store with control | Incompatible (sandbox, no root, no helpers) | — | Not a goal |
 | Intel | macOS 26 is the last Intel release; no supported control | — | Telemetry only (code is architecture-neutral) |
@@ -167,14 +169,18 @@ before telemetry validation) or recorded as preconditions in
   own owner decision). This is a project rule, not a legal opinion or a
   licence-compatibility review; for an issue or pull-request comment, the
   licence noted is the project's and does not necessarily cover the
-  comment, which is cited only as a report. Note 11 applies it;
+  comment, which is cited only as a report. The owner may also use an
+  OSI-licensed tool as an external test instrument, built and run outside
+  the repository; nothing from it enters the repository, and CellKeeper
+  never invokes it. Note 11 applies it;
   [`../../CONTRIBUTING.md`](../../CONTRIBUTING.md) §1 has the same rule.
 - Never disassemble, decompile, or string-dump proprietary binaries,
   including Apple's.
 - Never write to hardware or probe unknown keys to answer a research
   question. Observation from read-only interfaces only. The one exception
   is an owner decision for one mechanism on the test Mac, run by the owner
-  (notes 09–11); even then agents never write and never enumerate keys.
+  (notes 09–11); even then agents never write and never enumerate keys,
+  and in note 11 they read none.
 - Record exactly how each observation was made, on which model, macOS build,
   and firmware, and separate observation from inference.
 - Never record serial numbers or other device identifiers.

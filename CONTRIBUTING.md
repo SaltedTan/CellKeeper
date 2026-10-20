@@ -36,8 +36,11 @@ interface (the parameter block's fields, sizes and offsets, and the
 selector and command values) are used as facts. The implementation is
 written independently. Not covered: AlDente or any other proprietary or
 source-available tool, anything obtained from binaries, and any other key
-or mechanism (each needs its own owner decision). This is a project rule,
-not a legal opinion or a licence-compatibility review. See
+or mechanism (each needs its own owner decision). The owner may also use
+an OSI-licensed tool as an external test instrument, built and run outside
+the repository; nothing from it enters the repository, and CellKeeper
+never invokes it. This is a project rule, not a legal opinion or a
+licence-compatibility review. See
 [docs/research/11-smc-adapter-cut.md](docs/research/11-smc-adapter-cut.md).
 
 ### 2. Safety

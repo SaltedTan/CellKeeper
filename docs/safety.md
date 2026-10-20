@@ -44,14 +44,18 @@ private power assertions, `ChargeInhibit` ([research note
 note 10](research/10-disable-inflow-probe.md)), stops charging or cuts the
 adapter's power; it holds one assertion for a bounded time, with a
 timeout, and releases it, also before the Mac sleeps. After both showed no
-effect, the owner decided on 2026-10-20 to test the SMC adapter cut with
-the same tool ([research note 11](research/11-smc-adapter-cut.md)): the
-owner runs it with `sudo` to write one SMC key, `CHIE`, for a bounded time
-and restore it, also when the Mac is about to sleep. Unlike an assertion, a
-written key is not released when the probe exits, and the probe cannot
-delay a sleep, so a crash, a hang or a sleep can leave the adapter cut; the
-tool therefore also has a `restore` command. Agents never write SMC keys;
-its read-only `check` reads `CHIE` only. Nothing ships from it.
+effect, the owner decided on 2026-10-20 to test the SMC adapter cut
+([research note 11](research/11-smc-adapter-cut.md)) by hand: the owner
+writes one SMC key, `CHIE`, with an existing open-source command-line tool
+(smcFanControl's `smc`), built and run outside the repository, and
+restores it the same way. The probe only observes: run without `sudo`, it
+opens no SMC connection, never runs the tool, and tells the owner what to
+type and when, with a reminder until the restore is confirmed. Unlike an
+assertion, a written key is not released when anything exits, and a
+process cannot cancel a sleep (it can only delay one, by at most 30
+seconds), so a missed restore or a sleep can leave the adapter cut until
+the owner restores it. Agents never read or write SMC keys and never run
+the tool. Nothing ships from either.
 
 Your Mac's own protections — the battery pack's management system, firmware
 charge termination and thermal limits, and macOS battery health management —
@@ -169,12 +173,12 @@ list.
    ([research note 10](research/10-disable-inflow-probe.md)). The probe is
    a separate tool outside the app; nothing ships from it. On 2026-10-20,
    after both showed no effect, the owner authorized SMC access on this Mac
-   for one mechanism, the adapter cut (`CHIE`), in an owner-run `sudo`
-   test with the same probe
+   for one mechanism, the adapter cut (`CHIE`), in a test the owner makes
+   by hand with an existing open-source tool while the same probe observes
    ([research note 11](research/11-smc-adapter-cut.md)), and a narrow
    clean-room exception for the facts it needs
-   ([`CONTRIBUTING.md`](../CONTRIBUTING.md) §1). Agents never write SMC
-   keys, and read only allowlisted ones. Include the persistence matrix (sleep, wake,
+   ([`CONTRIBUTING.md`](../CONTRIBUTING.md) §1). Agents never read or
+   write SMC keys. Include the persistence matrix (sleep, wake,
    restart, shutdown, helper crash, unplug), and record the results in
    `docs/research/`.
 2. **Allowlist, never probe.** Writes only to keys or interfaces on a reviewed
@@ -640,23 +644,33 @@ down, waiting about 30 seconds and starting again is the strongest step.
 Then set macOS's Charge Limit and Optimized Battery Charging back as you
 want them. Note 09 §7 and note 10 §7 have the details.
 
-After a run of the SMC adapter-cut probe (research note 11), or if the Mac
-slept during one, first restore the key, because a written SMC key is
-**not** released when the probe exits. From the CellKeeper checkout:
+After the SMC adapter-cut test (research note 11), or if the Mac slept
+during one, first make sure the key is restored, because a written SMC key
+is **not** released when anything exits. In the tool's folder
+(`~/smc-test/smc-command`), read it:
 
 ```sh
-sudo Tools/charge-inhibit-probe/.build/release/charge-inhibit-probe restore --mechanism smc-adapter-cut
+./smc -k CHIE -r
 ```
 
-It reads `CHIE` first, writes nothing if it is already restored, writes
-the restore value and reads it back if it is cut, and refuses on any other
-value. Recovery counts only when it reports `CHIE` restored **and** the
-battery menu shows the power adapter again. If not, save your work; then
-try unplugging and replugging the adapter, and restarting, running
-`restore` again after each — neither is known to clear `CHIE`. If adapter
-power still does not come back, shut the Mac down before the battery runs
-low, and if it still does not take power from its adapter when started
-again, ask Apple Support for help. Note 11 §7 has the details.
+If it shows `(bytes 08)`, restore it and read it again:
+
+```sh
+sudo ./smc -k CHIE -w 00
+./smc -k CHIE -r
+```
+
+If it shows anything but `00` or `08`, write nothing. Recovery counts only
+when a read shows `(bytes 00)` **and** the battery menu shows the power
+adapter again. If `CHIE` reads `00` but the Mac still runs from its
+battery, wait a minute and check the adapter and its outlet; write nothing
+else. If adapter power still does not come back, save your work; then try
+unplugging and replugging the adapter, restarting, and shutting down for
+about 30 seconds, reading `CHIE` after each and restoring it if it reads
+`08` — none of these is known to clear `CHIE`. If adapter power still does
+not come back, shut the Mac down before the battery runs low, and if it
+still does not take power from its adapter when started again, ask Apple
+Support for help. Note 11 §7 has the details.
 
 ### Getting your own Charge Limit back
 

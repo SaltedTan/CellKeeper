@@ -36,8 +36,8 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
   assertion (phase 4c), and after its result one more, of the private
   `DisableInflow` assertion. After both showed no effect, the owner
   authorized SMC access on this Mac on 2026-10-20 for one mechanism, the
-  adapter cut (`CHIE`), in an owner-run `sudo` test; agents never write
-  SMC keys.
+  adapter cut (`CHIE`), in a test the owner makes by hand with an existing
+  open-source tool; agents never read or write SMC keys.
 - Phase 4a was completed on 2026-10-11, and its follow-ups on
   2026-10-17: the request pacer (#67) and three timing-sensitive tests
   ([issue #1](https://github.com/SaltedTan/CellKeeper/issues/1)). The
@@ -53,8 +53,9 @@ so a limit can be set at any level from 20 to 100%, not only at macOS's 80,
   Its second, a `DisableInflow` probe, ran on 2026-10-20 and showed no
   effect either. The only mechanism left that is reported to work here,
   the SMC adapter cut, needed new owner decisions (SMC writes and the
-  clean-room rule); the owner made them on 2026-10-20, and its probe is
-  designed ([research note 11](research/11-smc-adapter-cut.md)).
+  clean-room rule); the owner made them on 2026-10-20, and a manual test,
+  observed by the probe, is designed
+  ([research note 11](research/11-smc-adapter-cut.md)).
 - While both were blocked, the owner approved three smaller features on
   2026-10-18, all done: Save Diagnostics… (milestone 3), opt-in
   notifications (milestone 3) and a one-shot scheduled full charge
@@ -276,19 +277,30 @@ with a narrow clean-room exception for the facts it needs
   while it was held, over three battery updates, showed adapter power and
   charging, so `DisableInflow` stays unverified and is not added to the
   helper's allowlist.
-- **Third step: the SMC adapter-cut probe**
-  ([research note 11](research/11-smc-adapter-cut.md)). The same tool,
-  run with `--mechanism smc-adapter-cut`: `check` reads the one SMC key
-  `CHIE` (its type, size and value) without privileges; `sudo … run`
-  starts only if `CHIE` reads its reported restore value `0x00`, writes
-  the reported cut value `0x08` for 180 s, writes `0x00` back, reads each
-  write back, and judges the run with note 10's rules for an adapter cut.
-  A written key is not released when the probe exits, and the Mac can
-  sleep before a restore is confirmed, so the tool also has a
-  `sudo … restore` command, which writes `0x00` only if `CHIE` reads
-  `0x08` and refuses on any other value. The key's values come
-  from third-party open-source projects under the owner's clean-room
-  exception, and are claims until this run. *Designed; not run yet.*
+- **Third step: the SMC adapter cut, by hand**
+  ([research note 11](research/11-smc-adapter-cut.md)). The owner reads
+  and writes the one SMC key `CHIE` with an existing open-source tool,
+  smcFanControl's `smc` command (GPL-2.0-or-later), built and run outside
+  the repository. CellKeeper's probe, run without `sudo` as
+  `watch --mechanism manual-adapter-cut`, only observes: it opens no SMC
+  connection, never runs the tool, tells the owner what to type and when,
+  and judges the readings with note 10's rules for an adapter cut. The
+  start rule: before the cut, the owner's read must show `CHIE` as `00`
+  (type `hex_`, one byte); on anything else, the test stops and nothing
+  is written. Then the owner writes `08`, reads it back, and after the
+  hold (180 s) writes `00` and reads it back; no other value is written.
+  A written key is not released when anything exits, so the restore is
+  the owner's; the probe prints the time to restore by and rings until
+  the restore is confirmed. The key's values come from third-party
+  open-source projects under the owner's clean-room exception, and are
+  claims until this test. *Designed; not run yet.* (A first design, in
+  which the probe wrote `CHIE` itself, was replaced on 2026-10-20: an
+  automated safety check stopped an agent's response as it began writing
+  the SMC client code, and the lead decided not to route around it.) Even
+  if the cut works, CellKeeper's helper needs an SMC write layer that
+  agents will not write; after the result, the owner decides between a
+  layer the owner writes, an external tool, and stopping at macOS's own
+  80–100% limit (note 11 §8).
 - Follow research note 02 §7: a read-only, allowlisted capability probe,
   then single reversible writes, then the persistence matrix. Evaluate
   Apple's private `ChargeInhibit` power assertion first: Apple's published
