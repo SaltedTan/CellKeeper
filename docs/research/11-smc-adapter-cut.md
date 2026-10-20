@@ -422,8 +422,23 @@ open is ignored.
    restore by then even if the probe says nothing more, and arms its
    restore reminder (§4.6). Then it asks the owner to run the cut, run the
    read, and type `yes` only if the read shows `(bytes 08)`. It waits up to
-   60 s. On `yes`, the cut is confirmed. On anything else, or no answer, it
-   shows the RESTORE prompt at once (step 9), and the run is inconclusive.
+   60 s. On `yes`, the cut is confirmed. On anything else, or no answer,
+   the state of `CHIE` is unknown, and the run is inconclusive. The probe
+   does **not** show the RESTORE prompt (which says to write `00`); it
+   shows the read-first steps of §7.1 at once, and from then on its
+   reminder repeats those, with the bell, until the owner answers:
+   - read `CHIE`;
+   - `(bytes 08)`: run the restore, read again, and type `yes` only if
+     that read shows `(bytes 00)`;
+   - `(bytes 00)`: nothing to restore; type `yes`. The report then says
+     that no restore was written;
+   - anything else: write nothing, follow the recovery steps (§7.1), and
+     type `no`.
+
+   A `yes` here counts as a confirmed restore, at the time of the answer
+   (there is no restore mark); the probe then reads for the after period
+   (step 10), and the report keeps the run inconclusive. Anything else ends
+   the run as in step 9.
 8. **Hold:** 180 s by default, 165–300 s with `--hold`, measured from the
    cut mark. The probe asks for the restore early — the RESTORE prompt at
    once — when a reading is unreadable, shows 100% or charged, shows a
@@ -437,20 +452,21 @@ open is ignored.
    the owner answers, it shows the reminder again, with a terminal bell,
    every 20 s. The owner's Return is the restore time: the verdict's
    "release". On `yes`, the restore is confirmed. On anything else, it
-   prints the recovery steps (§7.1) at once, ends the readings, and writes
-   the report, opening with **CHECK RECOVERY FIRST**.
+   prints the recovery steps (§7.1) at once, ends the readings, writes the
+   report, opening with **CHECK RECOVERY FIRST**, and exits 3.
 10. **After, and the end.** After a confirmed restore, readings for 180 s
     after the restore mark, up to 120 s more until charging has resumed,
     as in note 10. Then the probe releases the idle-sleep assertion,
     deregisters from sleep notifications and writes the report.
 
 **Any end after the CUT prompt without a confirmed restore** — a withdrawn
-prompt, a timeout, a `no`, Ctrl-C, `SIGTERM`, `SIGHUP`, an error — prints
-**RESTORE CHIE NOW** with the recovery steps (§7.1), and the report opens
-with **CHECK RECOVERY FIRST**. The probe cannot know whether the owner ran
-the cut or the restore. The report also opens that way when the restore
-was confirmed but the last reading does not show charging on adapter power
-(note 10 §4 step 8).
+prompt, a timeout, a `no` to the RESTORE prompt or to the read-first steps
+(step 7), Ctrl-C, `SIGTERM`, `SIGHUP`, an error — prints **RESTORE CHIE
+NOW** with the read-first recovery steps (§7.1), opens the report with
+**CHECK RECOVERY FIRST**, and exits 3. The probe cannot know whether the
+owner ran the cut or the restore. The report also opens that way when the
+restore was confirmed but the last reading does not show charging on
+adapter power (note 10 §4 step 8).
 
 With the default hold and a prompt owner, the run takes about 7 minutes
 (a baseline of 20–60 s, a few seconds to the cut, the 180 s hold, a few
@@ -459,8 +475,12 @@ for a battery update or charging is slow to resume. The bounded parts are
 at most 150 + 120 + 300 + 300 s; the wait for the owner's restore is not
 bounded, and the probe keeps reminding until it ends.
 
-Exit status, as in note 10: 0 a verdict; 1 refused before the CUT prompt;
-2 inconclusive; 3 did not resume; 64 a usage error.
+Exit status, with note 10's meanings: 0 a verdict; 1 refused before the
+CUT prompt; 2 inconclusive, but only for a run whose restore was confirmed
+or that ended before the CUT prompt without a refusal; 3 "follow the
+recovery steps the report prints" — a run after which charging did not
+resume, and **any end after the CUT prompt without a confirmed restore**;
+64 a usage error.
 
 ### 4.5 Why the owner presses Return before each write
 
@@ -526,10 +546,11 @@ the reminders below are what stands in for one:
 - **If the tool hangs** on a write, press Ctrl-C in its terminal and read
   `CHIE` again; if it still does not answer, follow §7.1 from step 3.
 - **Ctrl-C, `SIGTERM` or `SIGHUP` after the CUT prompt** print RESTORE
-  CHIE NOW with the recovery steps, write the report opening with CHECK
-  RECOVERY FIRST, and end the run. A second Ctrl-C quits at once, after
-  printing the restore command once more. Before the CUT prompt, a signal
-  ends the run as in note 10, with nothing to restore.
+  CHIE NOW with the read-first recovery steps, write the report opening
+  with CHECK RECOVERY FIRST, and end the run with exit status 3. A second
+  Ctrl-C quits at once, also with exit status 3, after printing RESTORE
+  CHIE NOW once more. Before the CUT prompt, a signal ends the run as in
+  note 10, with nothing to restore.
 - **What the probe cannot know:** whether the owner ran the cut or the
   restore, and what the tool printed. It records what the owner answered,
   and when. Every report calls the cut time, the restore time and both
@@ -615,16 +636,17 @@ judged an `adapter cut`.
 fails, 1 otherwise. `watch` checks them again and refuses on any failure.
 Everything note 10 §5 checks for `disable-inflow` applies: on AC power,
 battery present, charge below 95% and at least 40%, macOS charging now,
-battery current, `UpdateTime` and `SystemPowerIn` readable, the adapter
-reported attached (a warning), macOS's Charge Limit at 100%, AlDente
-absent, no other battery-control daemon (a warning), no `ChargeInhibit` or
-`DisableInflow` assertion held, and the warnings for a charge outside
-50–74% and for Optimized Battery Charging. With these additions:
+battery current, `UpdateTime` and `SystemPowerIn` readable, macOS's
+Charge Limit at 100%, AlDente absent, no other battery-control daemon (a
+warning), no `ChargeInhibit` or `DisableInflow` assertion held, and the
+warnings for a charge outside 50–74% and for Optimized Battery Charging.
+With these changes:
 
 | Check | Fails / warns when | Why |
 |---|---|---|
 | Not run as root | `watch` **refuses** when the effective user is root | Nothing in `watch` needs privileges. The owner's two writes use `sudo`, in the tool's own terminal (§4.3). |
 | Input is a terminal | `watch` **refuses** otherwise | Only the owner answers its questions (§4.3). |
+| Adapter reported attached | **fails** unless `AppleRawExternalConnected` is yes **or** `IOPSCopyExternalPowerAdapterDetails` returns an adapter (§4.8) | Without either, a cut can only end inconclusive, and every write carries risk. Note 10 keeps this check a warning for the two assertions; for `--mechanism manual-adapter-cut` only, it fails. |
 | `CHIE` reads `00` (the owner's read) | `check` **always warns**: the probe reads no SMC key. `watch` asks the owner before the baseline and **refuses** unless the owner types `yes`: the tool printed `[hex_]`, one byte, `00` (§4.4 step 4). | `0x08` would mean something else already holds a cut, and any other value is an unknown state: either way, the restore value `0x00` would not return the key to where it started (lead's decision, 2026-10-20). The tool checks a write's length but not the key's type (§4.1), so the type and size are part of the owner's answer (note 02 §6, "writing unknown keys or wrong widths"). |
 | macOS's Charge Limit is 100% | **fails** below 100% (note 10 already checks this) | `CHIE` is reported ignored while the native limit is active (§3.3); the limit must be off for a meaningful result. |
 
@@ -681,7 +703,9 @@ to type; §4.1 has them all.
    3. **CUT.** Type the cut command in B, without pressing Return. Press
       Return in A, then at once press Return in B (`sudo` may ask for your
       password). Then run the read in B, and type `yes` in A only if it
-      shows `(bytes 08)`. Note the restore time A prints.
+      shows `(bytes 08)`. Note the restore time A prints. If it shows
+      anything else, type `no`: A then shows the read-first steps of §7.1
+      instead of the RESTORE prompt; follow them.
    4. **Hold.** 3 minutes by default. The Mac is expected to run from its
       battery with the adapter plugged in. Leave everything as it is.
    5. **RESTORE.** When A rings and shows the RESTORE prompt: type the
@@ -754,15 +778,19 @@ to type; §4.1 has them all.
 
 ### 7.1 Recovery steps
 
-If adapter power did not come back after the run, if you did not answer
-`yes` to the restore, if the report or the console says CHECK RECOVERY
-FIRST or RESTORE CHIE NOW, or if the probe stopped after its CUT prompt:
+Follow these steps if adapter power did not come back after the run, if
+you did not answer `yes` to the restore, if the report or the console says
+CHECK RECOVERY FIRST or RESTORE CHIE NOW, or if the probe stopped after
+its CUT prompt. The probe also shows step 1 itself when the cut's
+read-back was not confirmed (§4.4 step 7), and asks for an answer:
 
-1. **Read `CHIE`** with the tool (§4.1).
-   - `(bytes 08)`: run the restore, then read again.
-   - `(bytes 00)`: nothing to restore; go to step 2 if the Mac still runs
-     from its battery.
-   - Anything else: **write nothing**; go to step 3.
+1. **Read `CHIE`** with the tool (§4.1). Never write before this read.
+   - `(bytes 08)`: run the restore, then read again. If the probe asks,
+     type `yes` only if that read shows `(bytes 00)`.
+   - `(bytes 00)`: nothing to restore; write nothing. If the probe asks,
+     type `yes`. Go to step 2 if the Mac still runs from its battery.
+   - Anything else: **write nothing**. If the probe asks, type `no`. Go to
+     step 3.
 
    Recovery counts only when a read shows `(bytes 00)` **and** the battery
    menu shows the power adapter again.
