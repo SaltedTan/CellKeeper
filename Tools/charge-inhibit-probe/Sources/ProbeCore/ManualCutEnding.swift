@@ -37,8 +37,10 @@ public final class EndingWatchdog: @unchecked Sendable {
     /// report's rendering, the exit.
     public static let margin = 1.0
     /// The deadline, in seconds, from the arm: the sleep queue's drain, the
-    /// save, the console's drain (``BoundedEnd/drainBound``) and the margin.
-    public static let bound = UInt32((sleepDrainBound + saveBound + BoundedEnd.drainBound + margin).rounded(.up))
+    /// console's drain before the outcome is decided (code review r3 of
+    /// #101, should 3), the save, the console's drain after it
+    /// (``BoundedEnd/drainBound`` each) and the margin.
+    public static let bound = UInt32((sleepDrainBound + 2 * BoundedEnd.drainBound + saveBound + margin).rounded(.up))
 
     private let hooks: Hooks
     private let lock = NSLock()
@@ -78,11 +80,20 @@ public final class EndingWatchdog: @unchecked Sendable {
 /// - A second signal, at once, on a thread of its own.
 ///
 /// Each arms the ending's watchdog first (``EndingWatchdog``), then drains
-/// the sleep queue and reads the sleep log once more
-/// (``ManualCutSession/reconciledFlow(drainSleepQueue:)``), renders the
-/// report and takes the bounded end (``BoundedEnd``): the save, once for the
-/// run (``OneShotSave``), then the console, then the exit. Each step is a
-/// part, so the tests drive the order and the waits.
+/// the sleep queue; then the console, so that every result of the run's
+/// last output is in (code review r3 of #101, should 3); only then reads
+/// the flow and the sleep log once more
+/// (``ManualCutSession/reconciledFlow(drainSleepQueue:)``) and decides the
+/// outcome; renders the report and takes the bounded end (``BoundedEnd``):
+/// the save, once for the run (``OneShotSave``), then the console, then the
+/// exit. Each step is a part, so the tests drive the order and the waits.
+///
+/// A write of an actionable message that fails, at any point of the run,
+/// the end's banners included, and a terminal that does not take the
+/// output queued before the outcome is decided within its bound, mean that
+/// the owner may not have seen it: after the CUT prompt, the run then ends
+/// with 3 and CHECK RECOVERY FIRST, even after a confirmed restore
+/// (``ManualCutFlow/outputProblem``).
 ///
 /// The sleep queue is drained once for the run, within its bound, however
 /// many paths end (``BoundedOnce``). If that drain does not complete, the
@@ -131,18 +142,22 @@ public final class ManualCutEnding: @unchecked Sendable {
     private let parts: Parts
     private let oneSave: OneShotSave
     private let sleepDrain: BoundedOnce
+    private let consoleDrainBound: Double
 
-    /// `sleepDrainBound`: the most the end waits for the sleep queue's
-    /// drain; the tests shorten it.
+    /// `sleepDrainBound` and `consoleDrainBound`: the most the end waits
+    /// for the sleep queue's drain and for each of the console's; the tests
+    /// shorten them.
     public init(
         session: ManualCutSession,
         watchdog: EndingWatchdog = EndingWatchdog(),
         sleepDrainBound: Double = EndingWatchdog.sleepDrainBound,
+        consoleDrainBound: Double = BoundedEnd.drainBound,
         parts: Parts
     ) {
         self.session = session
         self.watchdog = watchdog
         self.parts = parts
+        self.consoleDrainBound = consoleDrainBound
         oneSave = OneShotSave(watchdog: watchdog)
         sleepDrain = BoundedOnce(within: sleepDrainBound, parts.stopSleepNotifications)
     }
@@ -160,7 +175,7 @@ public final class ManualCutEnding: @unchecked Sendable {
     public func endMainPath(refusal: ManualCutOutcome? = nil, tearDown: () -> Void) -> (status: Int32, drained: Bool) {
         watchdog.arm()
         tearDown()
-        let (flow, notices) = reconciled()
+        let (flow, notices) = settled()
         let outcome = refusal ?? ManualCutOutcome.of(flow, sleepNotices: notices ?? [])
         let text = parts.render(outcome, refusal == nil ? flow : nil, notices)
         var result = (status: outcome.exitStatus, drained: false)
@@ -173,20 +188,30 @@ public final class ManualCutEnding: @unchecked Sendable {
     /// (``ManualCutFlow/secondSignal(_:)``); `exit` ends the process.
     public func endAtSecondSignal(_ number: Int32, exit: @escaping (Int32) -> Void) {
         watchdog.arm()
-        let (flow, notices) = reconciled()
-        let second = flow.secondSignal(number)
-        if let banner = second.banner {
-            session.console.enqueue("\n\(ManualCutFlow.signalName(number)) again: quitting. " + ManualCut.text(banner))
+        // The banner comes from the flow after the sleep log's last read
+        // (a sleep may have made a confirmation not count), and is queued
+        // before the console's drain, so that its result counts.
+        let drained = sleepDrain.run()
+        if let banner = session.reconciledFlow(drainSleepQueue: { drained }).secondSignal(number).banner {
+            session.announce("\n\(ManualCutFlow.signalName(number)) again: quitting. " + ManualCut.text(banner))
         }
+        let (flow, notices) = settled()
         let text = parts.render(ManualCutOutcome.of(flow, sleepNotices: notices ?? []), flow, notices)
-        finish(text, status: second.exitStatus) { status, _ in exit(status) }
+        finish(text, status: flow.secondSignal(number).exitStatus) { status, _ in exit(status) }
     }
 
-    /// The flow after the sleep queue's drain and the sleep log's last
-    /// read; and the sleep notices, only if the drain completed: if not,
-    /// the sleep watch's lock is never taken again.
-    private func reconciled() -> (flow: ManualCutFlow, sleepNotices: [ProbeRun.SleepNotice]?) {
+    /// The flow, settled for the outcome: after the sleep queue's drain
+    /// (once for the run), then the console's, so that every result of the
+    /// output queued so far is in, a failed write's included; or, if the
+    /// terminal did not take it all within its bound, that is recorded. Then
+    /// the flow and the sleep log are read once more. And the sleep notices,
+    /// only if the sleep queue's drain completed: if not, the sleep watch's
+    /// lock is never taken again (must 2).
+    private func settled() -> (flow: ManualCutFlow, sleepNotices: [ProbeRun.SleepNotice]?) {
         let drained = sleepDrain.run()
+        if !session.console.drain(timeout: consoleDrainBound) {
+            session.outputNotTaken(within: consoleDrainBound)
+        }
         let flow = session.reconciledFlow { drained }
         return (flow, drained ? parts.sleepNotices() : nil)
     }
@@ -196,7 +221,7 @@ public final class ManualCutEnding: @unchecked Sendable {
     /// drain, then `exit`.
     private func finish(_ text: String, status: Int32, exit: @escaping (Int32, Bool) -> Void) {
         let console = session.console
-        BoundedEnd.perform(status: status, steps: BoundedEnd.Steps(
+        BoundedEnd.perform(status: status, bound: consoleDrainBound, steps: BoundedEnd.Steps(
             persist: { [oneSave, parts] in oneSave.save { parts.persist(text) } },
             print: { [parts] saved in
                 console.enqueue("\n" + text)

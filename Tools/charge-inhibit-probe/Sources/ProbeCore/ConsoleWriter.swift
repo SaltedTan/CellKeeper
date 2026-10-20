@@ -107,8 +107,9 @@ public final class ConsoleWriter: @unchecked Sendable {
     }
 
     /// Waits until message `id`, and every one before it, is written or
-    /// dropped, or `timeout` seconds pass; returns whether it was. Only the
-    /// end of the run calls this.
+    /// dropped and its result delivered (its `onWritten` has returned), or
+    /// `timeout` seconds pass; returns whether it was. Only the end of the
+    /// run calls this.
     public func waitUntilWritten(_ id: UInt64, timeout: Double) -> Bool {
         let deadline = Date(timeIntervalSinceNow: timeout)
         condition.lock()
@@ -119,8 +120,10 @@ public final class ConsoleWriter: @unchecked Sendable {
         return true
     }
 
-    /// Waits until everything queued so far is written, at most `timeout`
-    /// seconds; returns whether it was.
+    /// Waits until everything queued so far is written or dropped, with
+    /// every result delivered, at most `timeout` seconds; returns whether it
+    /// was (code review r3 of #101, should 3: the end decides the outcome
+    /// only once the results of its last output are in).
     public func drain(timeout: Double) -> Bool {
         let last = condition.withLock { lastID }
         return waitUntilWritten(last, timeout: timeout)
@@ -142,7 +145,8 @@ public final class ConsoleWriter: @unchecked Sendable {
     }
 
     /// Whether message `id` and every one before it are written or
-    /// dropped. Called with the condition's lock held.
+    /// dropped, with their results delivered. Called with the condition's
+    /// lock held.
     private func isDone(_ id: UInt64) -> Bool {
         !queue.contains { $0.id <= id } && (inFlight.map { $0 > id } ?? true)
     }
@@ -154,25 +158,25 @@ public final class ConsoleWriter: @unchecked Sendable {
                 condition.wait()
             }
             let message = queue.removeFirst()
+            // The message stays in flight until its result has been
+            // delivered, so a drain that returns has seen every result of
+            // what it waited for.
+            inFlight = message.id
             // Right before writing: an actionable message whose generation
             // is no longer current is dropped.
-            if let generation = message.generation, generation != probe_value_load(current) {
+            let isSuperseded = message.generation.map { $0 != probe_value_load(current) } ?? false
+            if isSuperseded {
                 superseded += 1
-                condition.broadcast()
-                condition.unlock()
-                message.onWritten?(.superseded)
-                continue
             }
-            inFlight = message.id
             condition.unlock()
 
-            let wrote = sink(message.text)
+            let result: Result = isSuperseded ? .superseded : sink(message.text) ? .written : .failed
+            message.onWritten?(result)
 
             condition.lock()
             inFlight = nil
             condition.broadcast()
             condition.unlock()
-            message.onWritten?(wrote ? .written : .failed)
         }
     }
 }

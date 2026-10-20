@@ -223,7 +223,8 @@ public final class ManualCutSession: @unchecked Sendable {
     }
 
     /// The console could not write an actionable message: the terminal is
-    /// unusable, and the run ends (code review r2 of #101, must E).
+    /// unusable, and the run ends (code review r2 of #101, must E); after
+    /// the end, the failure is still recorded (r3, should 3).
     private func consoleFailed() {
         send(.consoleFailed(at: clock.now()))
     }
@@ -234,6 +235,19 @@ public final class ManualCutSession: @unchecked Sendable {
         { [weak self] result in
             if result == .failed { self?.consoleFailed() }
         }
+    }
+
+    /// Queues actionable text from outside the flow, such as a second
+    /// signal's banner: a write of it that fails counts as any actionable
+    /// message's does.
+    public func announce(_ text: String) {
+        console.enqueue(text, onWritten: onActionable())
+    }
+
+    /// The end's drain of the console did not complete within `bound`
+    /// seconds (``ManualCutFlow/outputNotTaken(at:within:)``).
+    public func outputNotTaken(within bound: Double) {
+        lock.withLock { flow.outputNotTaken(at: clock.now(), within: bound) }
     }
 
     /// Whether the open question's prompt has been written and the owner's
@@ -389,10 +403,11 @@ public enum BoundedEnd {
         }
     }
 
-    public static func perform(status: Int32, steps: Steps) {
+    /// `bound`: the console's; ``drainBound`` in `watch`.
+    public static func perform(status: Int32, bound: Double = drainBound, steps: Steps) {
         let persisted = steps.persist()
         steps.print(persisted)
-        let drained = steps.drain(drainBound)
+        let drained = steps.drain(bound)
         steps.exit(status, drained)
     }
 }

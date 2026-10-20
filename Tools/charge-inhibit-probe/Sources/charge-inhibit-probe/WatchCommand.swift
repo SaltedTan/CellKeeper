@@ -24,13 +24,15 @@ import ProbeCore
 /// 5. The end (`ManualCutEnding`): arm the ending's watchdog first
 ///    (`EndingWatchdog`: SIGALRM's default action ends the process if the
 ///    end outlasts its bound); release the idle-sleep assertion; deregister
-///    from sleep notifications and drain their queue (once, at most 2 s),
+///    from sleep notifications and drain their queue (once, at most 2 s);
+///    give the console at most 2 s, so that a failed write of the end's
+///    output counts (after the CUT prompt, it makes the run end with 3);
 ///    then read the sleep log once more, so that a sleep that began before a
 ///    confirmation still makes it not count (`ManualCutFlow.reconcile`); if
-///    that drain did not complete, never touch the sleep watch again (its
-///    lock may be held) and render the report from the sleep log alone;
-///    save the report, then queue it for the console, give the console at
-///    most 2 s, and exit (`BoundedEnd`). A second signal takes the same
+///    the sleep queue's drain did not complete, never touch the sleep watch
+///    again (its lock may be held) and render the report from the sleep log
+///    alone; save the report, then queue it for the console, give the
+///    console at most 2 s, and exit (`BoundedEnd`). A second signal takes the same
 ///    bounded path at once. The report is saved once (`OneShotSave`):
 ///    whichever ending path comes first saves it, and the other waits for
 ///    that save, bounded only by the watchdog, before it exits.

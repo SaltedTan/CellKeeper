@@ -110,7 +110,9 @@ extension ManualCutTests {
 
         @Test("The watchdog's bound covers the ending's bounded steps")
         func watchdogBound() {
-            let steps = EndingWatchdog.sleepDrainBound + EndingWatchdog.saveBound + BoundedEnd.drainBound
+            // The sleep queue's drain, the console's before the outcome and
+            // after the save, and the save.
+            let steps = EndingWatchdog.sleepDrainBound + 2 * BoundedEnd.drainBound + EndingWatchdog.saveBound
             #expect(Double(EndingWatchdog.bound) >= steps + EndingWatchdog.margin)
             #expect(EndingWatchdog.saveBound == Double(EmergencyExit.deadline))
         }
@@ -256,8 +258,8 @@ extension ManualCutTests {
         /// A run whose restore was confirmed and whose last reading charges,
         /// stopped by a signal in the after readings: without a sleep, it
         /// ends with 2.
-        static func stoppedAfterAConfirmedRestore() -> SessionDriver {
-            let driver = SessionDriver(console: ConsoleWriter { _ in true })
+        static func stoppedAfterAConfirmedRestore(console: ConsoleWriter = ConsoleWriter { _ in true }) -> SessionDriver {
+            let driver = SessionDriver(console: console)
             let mark = ManualCutTests.ManualCutSessionTests.atRestoreReadBack(driver)
             driver.type("restored00", at: mark + 190)
             driver.read(.charging, at: mark + 191)
@@ -366,6 +368,135 @@ extension ManualCutTests {
             gate.signal()
             #expect(eventually { once.run() })
             #expect(runs.value == 1)
+        }
+
+        @Test("A drain returns only once each message's result has been delivered, superseded or written (should 3)")
+        func drainWaitsForResults() {
+            let console = ConsoleWriter { _ in true }
+            let delivered = EventLog()
+            console.setCurrentGeneration(2)
+            console.enqueue("a prompt the end superseded", generation: 1) { result in
+                Thread.sleep(forTimeInterval: 0.3)
+                delivered.add("\(result)")
+            }
+            console.enqueue("the end's banner") { result in
+                Thread.sleep(forTimeInterval: 0.3)
+                delivered.add("\(result)")
+            }
+            #expect(console.drain(timeout: 3))
+            #expect(delivered.values == ["superseded", "written"])
+        }
+
+        @Test("An ended run keeps an output problem: after the CUT prompt, 3 and CHECK RECOVERY FIRST, even after a confirmed restore; before it, the outcome stands (should 3)")
+        func outputProblemAfterTheEnd() {
+            var stopped = FlowDriver()
+            stopped.toAfter()
+            stopped.advance(by: 20)
+            stopped.send(.signal(SIGINT, at: stopped.now))
+            #expect(stopped.outcome.exitStatus == 2)
+            stopped.send(.consoleFailed(at: stopped.now + 1))
+            #expect(stopped.flow.stage == .ended)
+            #expect(stopped.outcome.exitStatus == 3)
+            #expect(stopped.outcome.recoveryReason?.contains("a write of the probe's output to the terminal failed after the run ended") == true)
+            #expect(stopped.flow.log.last?.text.contains("failed after the run ended") == true)
+            #expect(stopped.flow.secondSignal(SIGINT) == (.afterReadingsEndedEarly, 3))
+
+            var completed = FlowDriver()
+            completed.toAfter()
+            completed.run(until: .ended)
+            #expect(completed.flow.ending == .completed)
+            let before = completed.outcome
+            #expect(before.exitStatus != 3)
+            completed.flow.outputNotTaken(at: completed.now, within: 2)
+            #expect(completed.outcome.exitStatus == 3)
+            #expect(completed.outcome.verdict == before.verdict)
+            #expect(completed.outcome.recoveryReason?.contains("the terminal did not take the probe's last output within 2.0 s") == true)
+
+            var beforeCut = FlowDriver()
+            beforeCut.begin()
+            beforeCut.type("start00")
+            beforeCut.send(.signal(SIGINT, at: beforeCut.now))
+            #expect(beforeCut.outcome.exitStatus == 2)
+            beforeCut.send(.consoleFailed(at: beforeCut.now))
+            beforeCut.flow.outputNotTaken(at: beforeCut.now, within: 2)
+            #expect(beforeCut.flow.outputProblem != nil)
+            #expect(beforeCut.outcome.exitStatus == 2)
+            #expect(beforeCut.outcome.recoveryReason == nil)
+        }
+
+        /// A console whose terminal fails to write any message containing
+        /// `text`, after `delay` seconds; it writes the rest.
+        static func failing(_ text: String, after delay: Double) -> ConsoleWriter {
+            ConsoleWriter { message in
+                guard message.contains(text) else { return true }
+                Thread.sleep(forTimeInterval: delay)
+                return false
+            }
+        }
+
+        @Test("Review r3's case: after a confirmed restore and a charging reading, SIGINT, and the end banner's write fails late; the end waits for that result, exits 3, and the report opens with CHECK RECOVERY FIRST (should 3)")
+        func failedEndBanner() throws {
+            let path = Self.temporaryPath()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+            let events = EventLog()
+            let driver = Self.stoppedAfterAConfirmedRestore(console: Self.failing(ManualCut.text(.afterReadingsEndedEarly), after: 0.5))
+            let end = Self.ending(driver, file: file, events: events, watchdog: Self.watchdog(events), report: Self.realReport)
+                .endMainPath(tearDown: {})
+            #expect(end.status == 3)
+            let report = try String(contentsOfFile: path, encoding: .utf8)
+            #expect(report.contains("CHECK RECOVERY FIRST"))
+            #expect(report.contains("failed after the run ended"))
+        }
+
+        @Test("A second signal's banner that the terminal cannot write: exit 3 and CHECK RECOVERY FIRST, even after a confirmed restore (should 3)")
+        func failedSecondSignalBanner() throws {
+            let path = Self.temporaryPath()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+            let events = EventLog()
+            let driver = Self.stoppedAfterAConfirmedRestore(console: Self.failing("again: quitting", after: 0.3))
+            let statuses = EventLog()
+            Self.ending(driver, file: file, events: events, watchdog: Self.watchdog(events), report: Self.realReport)
+                .endAtSecondSignal(SIGINT) { statuses.add("\($0)") }
+            #expect(statuses.values == ["3"])
+            let report = try String(contentsOfFile: path, encoding: .utf8)
+            #expect(report.contains("CHECK RECOVERY FIRST"))
+            #expect(report.contains("failed after the run ended"))
+        }
+
+        @Test("A terminal that does not take the end's output within its bound: after a confirmed restore, 3 and CHECK RECOVERY FIRST; the report is saved and the end keeps to its bounds (should 3)")
+        func terminalNotTakingTheEnd() throws {
+            let path = Self.temporaryPath()
+            defer { try? FileManager.default.removeItem(atPath: path) }
+            let file = try #require(ReportFile(path: path, placeholder: "placeholder\n"))
+            let events = EventLog()
+            let blocked = BlockingSink(blocked: false)
+            defer { blocked.open() }
+            let console = ConsoleWriter(sink: blocked.sink)
+            let driver = SessionDriver(console: console)
+            let mark = ManualCutTests.ManualCutSessionTests.atRestoreReadBack(driver)
+            driver.type("restored00", at: mark + 190)
+            driver.read(.charging, at: mark + 191)
+            #expect(console.drain(timeout: 3))
+            // The terminal stops taking output; the signal's banner waits.
+            blocked.close()
+            #expect(driver.session.signal(SIGINT) == .handled)
+            driver.session.stopReminder()
+            let start = Date()
+            let end = ManualCutEnding(
+                session: driver.session, watchdog: Self.watchdog(events), consoleDrainBound: 0.3,
+                parts: ManualCutEnding.Parts(
+                    stopSleepNotifications: {}, sleepNotices: { [] }, render: Self.realReport,
+                    persist: { file.persist($0) }, savedLine: { "saved: \($0)" }
+                )
+            ).endMainPath(tearDown: {})
+            #expect(Date().timeIntervalSince(start) < 1.5)
+            #expect(end.status == 3)
+            #expect(!end.drained)
+            let report = try String(contentsOfFile: path, encoding: .utf8)
+            #expect(report.contains("CHECK RECOVERY FIRST"))
+            #expect(report.contains("the terminal did not take the probe's last output within 0.3 s"))
         }
     }
 }

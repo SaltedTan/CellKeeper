@@ -400,6 +400,13 @@ public struct ManualCutFlow: Sendable {
     /// Why the end of the run found that a confirmation of recovery does
     /// not count (``reconcile(with:drained:)``), or nil.
     public private(set) var confirmationInvalidated: String?
+    /// The first thing that kept the probe's output from the owner, if
+    /// any: a write to the terminal that failed, at any point of the run,
+    /// the run's end included, or, at the end, a terminal that did not take
+    /// the last output within its bound (code review r3 of #101, should 3).
+    /// After the CUT prompt it makes the run end with 3 and CHECK RECOVERY
+    /// FIRST (``ManualCutOutcome``).
+    public private(set) var outputProblem: String?
     /// The number of the latest question published.
     public private(set) var questionGeneration: UInt64 = 0
     /// Whether the owner's lines may answer the open question: only once
@@ -468,7 +475,14 @@ public struct ManualCutFlow: Sendable {
     /// open question before any answer, prompt or reminder of this event: an
     /// answer typed before a sleep is never accepted after it.
     public mutating func handle(_ event: Event, sleeps: SleepLog.Snapshot) -> [Action] {
-        guard stage != .ended else { return [] }
+        guard stage != .ended else {
+            // An ended run takes no more events, but a write of its output
+            // that failed still counts (code review r3 of #101, should 3).
+            if case let .consoleFailed(time) = event {
+                recordOutputProblem("a write of the probe's output to the terminal failed after the run ended", at: time)
+            }
+            return []
+        }
         var actions: [Action] = []
         let now = Self.time(of: event)
         for time in sleeps.times.dropFirst(seenSleeps) {
@@ -515,7 +529,7 @@ public struct ManualCutFlow: Sendable {
             // The question never becomes answerable; the run ends, and the
             // report is saved before the probe exits.
             let reason = "the terminal could not show the probe's output (a write to it failed)"
-            note(time, reason)
+            recordOutputProblem(reason, at: time)
             if cutPromptAt == nil {
                 return end(.endedBeforeCut(reason), at: time)
             }
@@ -969,6 +983,21 @@ public struct ManualCutFlow: Sendable {
         log.append(LogEntry(time: time, text: text))
     }
 
+    /// The end's drain of the console did not complete within `bound`
+    /// seconds: the terminal did not take the probe's last output, and the
+    /// owner may not have seen it (code review r3 of #101, should 3). It
+    /// works on an ended flow.
+    public mutating func outputNotTaken(at time: Double, within bound: Double) {
+        recordOutputProblem("the terminal did not take the probe's last output within \(seconds(bound))", at: time)
+    }
+
+    private mutating func recordOutputProblem(_ problem: String, at time: Double) {
+        note(time, problem)
+        if outputProblem == nil {
+            outputProblem = problem
+        }
+    }
+
     static func signalName(_ number: Int32) -> String {
         switch number {
         case SIGINT: "SIGINT"
@@ -1099,9 +1128,27 @@ public struct ManualCutOutcome: Sendable, Equatable {
     /// - 3: any end after the CUT prompt without a confirmed restore; and a
     ///   run with a confirmed restore whose last reading does not show
     ///   charging on adapter power (the report then opens with CHECK
-    ///   RECOVERY FIRST), including note 10's "did not resume".
+    ///   RECOVERY FIRST), including note 10's "did not resume"; and, after
+    ///   the CUT prompt, any run whose output the owner may not have seen
+    ///   (``ManualCutFlow/outputProblem``), even after a confirmed restore.
     /// - 0: a verdict reached, recovery confirmed, and charging seen again.
     public static func of(_ flow: ManualCutFlow, sleepNotices: [ProbeRun.SleepNotice]) -> ManualCutOutcome {
+        let outcome = ofRun(flow, sleepNotices: sleepNotices)
+        // After the CUT prompt, output the owner may not have seen leaves the
+        // report as the only channel: 3 and CHECK RECOVERY FIRST, even after
+        // a confirmed restore (code review r3 of #101, should 3; decision E
+        // of r2). The verdict on the readings stands.
+        guard flow.cutPromptAt != nil, let problem = flow.outputProblem,
+              outcome.exitStatus != 3 || outcome.recoveryReason == nil
+        else { return outcome }
+        return ManualCutOutcome(
+            verdict: outcome.verdict, exitStatus: 3,
+            recoveryReason: "The owner may not have seen the probe's last output: \(problem)."
+        )
+    }
+
+    /// The outcome from the run's ending, readings and confirmations.
+    private static func ofRun(_ flow: ManualCutFlow, sleepNotices: [ProbeRun.SleepNotice]) -> ManualCutOutcome {
         let criteria = flow.criteria
         let lastCharging = flow.samples.max(by: { $0.time < $1.time })
             .map { Verdict.isChargingOnAdapter($0, criteria: criteria) } ?? false
