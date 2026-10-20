@@ -83,6 +83,13 @@ public protocol NotificationPosting: Sendable {
 /// user's choice or ``shutdown()`` supersedes, so an older answer never
 /// overwrites a newer one. Posting tasks hold no reference to the notifier
 /// while they wait, and at most ``maximumPendingPosts`` wait at once.
+///
+/// The one exception is withdrawing a calibration's request that no longer
+/// holds (``NotificationPlan/withdrawals``): it removes only a request this
+/// notifier queued under an opt-in, belongs to no generation, and runs also
+/// after notifications were turned off, which withdraws every outstanding
+/// request at once. Removing CellKeeper's own notifications asks for no
+/// permission and posts nothing.
 @MainActor
 public final class ChargingNotifier {
     public private(set) var optIn: NotificationOptIn {
@@ -122,6 +129,15 @@ public final class ChargingNotifier {
     /// the time it would be handed over, so a request withdrawn while it
     /// waited is never posted.
     private var withdrawals: [String: Int] = [:]
+    /// A calibration's requests queued or handed to the system and not
+    /// withdrawn yet. Kept across generations and opt-in changes, so a
+    /// request that no longer holds is always removed: by the planner's
+    /// withdrawal, or at once when notifications are turned off.
+    private var outstanding: Set<String> = []
+    /// Removal tasks that have not finished. Not part of a generation:
+    /// turning notifications off or on never cancels one.
+    private var removalTasks: [Int: Task<Void, Never>] = [:]
+    private var nextRemovalTask = 0
 
     /// - Parameter uptime: monotonic seconds for the planner's minimum
     ///   intervals. Defaults to `ContinuousClock`, which keeps counting
@@ -161,7 +177,15 @@ public final class ChargingNotifier {
         asking.isEnabled = enabled
         asking.isRequesting = enabled
         optIn = asking
-        guard enabled else { return }
+        guard enabled else {
+            // Requests posted under the opt-in are not left behind: removing
+            // CellKeeper's own notifications asks for no permission and
+            // posts nothing.
+            if !outstanding.isEmpty {
+                withdraw(outstanding.sorted())
+            }
+            return
+        }
         let permission = await poster.requestPermission()
         guard isLatest(operation) else { return }
         var answered = optIn
@@ -201,8 +225,12 @@ public final class ChargingNotifier {
     public func observe(_ status: ControllerStatus, trigger: EvaluationTrigger) {
         guard !isShutDown else { return }
         let plan = planner.planAll(status, trigger: trigger, uptime: uptime(), isDelivering: optIn.isDelivering)
-        if !plan.withdrawals.isEmpty, optIn.isEnabled {
-            withdraw(plan.withdrawals)
+        // Only what this notifier queued, which needed the opt-in, so the
+        // system's center is still untouched before it; also while opted
+        // out now.
+        let obsolete = plan.withdrawals.filter(outstanding.contains)
+        if !obsolete.isEmpty {
+            withdraw(obsolete)
         }
         let planned = plan.notifications
         guard !planned.isEmpty else { return }
@@ -216,6 +244,9 @@ public final class ChargingNotifier {
         let number = nextPostTask
         nextPostTask += 1
         let queuedWithdrawals = withdrawals
+        for notification in planned where notification.kind.isCalibrationRequest {
+            outstanding.insert(notification.identifier)
+        }
         // Runs on the main actor, so it cannot start before it is recorded.
         // It refers to the notifier only between suspensions, so a post
         // waiting for the system never keeps it alive.
@@ -246,38 +277,31 @@ public final class ChargingNotifier {
     }
 
     /// Withdraws notifications that no longer hold: a post of one still
-    /// waiting is dropped, and the system is asked to remove them, after
-    /// every post queued before, so one being handed over is removed once
-    /// shown. Within the current generation only; never waits.
+    /// waiting is dropped, and the system is asked to remove them at once.
+    /// The poster removes again one whose hand-over it answers later. Not
+    /// tied to a generation, the post queue or the opt-in, so neither
+    /// turning notifications off or on nor a post that waits can drop it;
+    /// never waits.
     private func withdraw(_ identifiers: [String]) {
         for identifier in identifiers {
             withdrawals[identifier, default: 0] += 1
         }
-        guard postTasks.count < Self.maximumPendingPosts else {
-            CellKeeperLog.app.error("Notifications not withdrawn: too many are waiting for the system")
-            return
-        }
-        let generation = generation
-        let previous = lastPost
-        let number = nextPostTask
-        nextPostTask += 1
+        outstanding.subtract(identifiers)
+        let number = nextRemovalTask
+        nextRemovalTask += 1
         let task = Task { [weak self, poster] in
-            await previous?.value
-            if generation.isCurrent, !Task.isCancelled {
-                await poster.remove(identifiers: identifiers)
-                CellKeeperLog.app.notice("Notifications withdrawn: \(identifiers.count, privacy: .public)")
-            }
-            self?.postTasks[number] = nil
+            await poster.remove(identifiers: identifiers)
+            CellKeeperLog.app.notice("Notifications withdrawn: \(identifiers.count, privacy: .public)")
+            self?.removalTasks[number] = nil
         }
-        lastPost = task
-        postTasks[number] = task
+        removalTasks[number] = task
     }
 
-    /// Waits until every posting task has finished, whether it handed its
-    /// notifications to the system or stopped because its generation ended,
-    /// including tasks started while waiting.
+    /// Waits until every posting and removal task has finished, whether it
+    /// handed its notifications to the system or stopped because its
+    /// generation ended, including tasks started while waiting.
     func waitForPosts() async {
-        while let task = postTasks.values.first {
+        while let task = postTasks.values.first ?? removalTasks.values.first {
             await task.value
         }
     }

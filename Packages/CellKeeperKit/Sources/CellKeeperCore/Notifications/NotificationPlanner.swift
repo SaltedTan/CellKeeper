@@ -79,6 +79,15 @@ public enum NotificationKind: String, Sendable, CaseIterable {
         }
     }
 
+    /// A calibration's request: unplug, rest, plug in. Withdrawn once it no
+    /// longer holds; its end is a report and stays.
+    public var isCalibrationRequest: Bool {
+        switch self {
+        case .calibrationUnplug, .calibrationRest, .calibrationPlugIn: true
+        default: false
+        }
+    }
+
     /// The kind that posts `request`.
     static func calibration(_ request: CalibrationRequest) -> NotificationKind {
         switch request {

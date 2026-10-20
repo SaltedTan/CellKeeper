@@ -99,6 +99,80 @@ struct CalibrationWithdrawalTests {
         #expect(poster.removed.count == 1)
     }
 
+    @Test("Turning notifications off withdraws an outstanding request at once; ending the session later removes nothing more")
+    func optOutThenCancel() async throws {
+        let rig = CalibrationRig()
+        let poster = FakeNotificationPoster(permission: .shown)
+        let notifier = await makeNotifier(poster, clock: rig.clock)
+        _ = await resting(rig, notifier)
+        await settle(notifier)
+        let rest = try #require(poster.posted.last)
+        await notifier.setEnabled(false)
+        await settle(notifier)
+        #expect(poster.removed == [[rest.identifier]])
+        notifier.observe(await rig.controller.cancelCalibration(), trigger: .overrideChanged)
+        await settle(notifier)
+        #expect(poster.removed == [[rest.identifier]])
+        // Turning them on again replays and removes nothing.
+        await notifier.setEnabled(true)
+        notifier.observe(await rig.controller.evaluate(.periodic), trigger: .periodic)
+        await settle(notifier)
+        #expect(poster.removed == [[rest.identifier]])
+        #expect(poster.posted == [rest])
+    }
+
+    @Test("Ending the session withdraws its request; turning notifications off afterwards removes nothing more")
+    func cancelThenOptOut() async throws {
+        let rig = CalibrationRig()
+        let poster = FakeNotificationPoster(permission: .shown)
+        let notifier = await makeNotifier(poster, clock: rig.clock)
+        _ = await resting(rig, notifier)
+        await settle(notifier)
+        let rest = try #require(poster.posted.last)
+        notifier.observe(await rig.controller.cancelCalibration(), trigger: .overrideChanged)
+        await settle(notifier)
+        await notifier.setEnabled(false)
+        await settle(notifier)
+        #expect(poster.removed == [[rest.identifier]])
+    }
+
+    @Test("An outstanding request survives a new generation: after turning notifications on again, the request ending still removes it")
+    func outstandingAcrossGenerations() async throws {
+        let rig = CalibrationRig()
+        let poster = FakeNotificationPoster(permission: .shown)
+        let notifier = await makeNotifier(poster, clock: rig.clock)
+        notifier.observe(await rig.drive(to: .restAtTop), trigger: .periodic)
+        rig.clock.advance(by: 2 * hour)
+        notifier.observe(await rig.read(calibrationReading(100, charging: false, full: true)), trigger: .periodic)
+        await settle(notifier)
+        let unplug = try #require(poster.posted.last)
+        await notifier.setEnabled(true)
+        notifier.observe(await rig.read(calibrationReading(99, .battery), .powerSourceChanged), trigger: .powerSourceChanged)
+        await settle(notifier)
+        #expect(poster.removed == [[unplug.identifier]])
+    }
+
+    @Test("A generation change does not drop a removal queued behind a post")
+    func generationChangeKeepsRemoval() async throws {
+        let rig = CalibrationRig()
+        let poster = FakeNotificationPoster(permission: .shown)
+        let notifier = await makeNotifier(poster, clock: rig.clock)
+        notifier.observe(await rig.drive(to: .drain), trigger: .periodic)
+        rig.clock.advance(by: 4 * hour)
+        poster.reads.hold()
+        notifier.observe(await rig.read(calibrationReading(20, .battery)), trigger: .periodic)
+        await waitBounded("the post to reach its permission read") { await poster.reads.waitForArrivals(2) }
+        notifier.observe(await rig.controller.cancelCalibration(), trigger: .overrideChanged)
+        // Turning notifications on again starts a new generation, which
+        // stops the posts of the old one.
+        await notifier.setEnabled(true)
+        poster.reads.release()
+        await settle(notifier)
+        #expect(poster.posted.isEmpty)
+        #expect(poster.removed.count == 1)
+        #expect(poster.removed.first?.first?.hasSuffix(".rest") == true)
+    }
+
     @Test("Without the owner's opt-in nothing is posted and Notification Center is not touched")
     func notOptedIn() async {
         let rig = CalibrationRig()
