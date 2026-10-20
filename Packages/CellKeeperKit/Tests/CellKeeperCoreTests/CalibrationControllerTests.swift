@@ -304,6 +304,20 @@ struct CalibrationControllerTests {
         #expect(rig.system.reading == .limit(80))
     }
 
+    @Test("Sleep in step 7 keeps 100%; a charged reading after waking returns to the limit and completes the session")
+    func sleepInFinalCharge() async {
+        let rig = CalibrationRig()
+        await rig.drive(to: .finalCharge)
+        rig.clock.advance(by: 600)
+        var status = await rig.read(calibrationReading(40), .willSleep)
+        #expect(rig.system.reading == .noLimit)
+        rig.clock.advance(by: 4 * hour)
+        status = await rig.read(calibrationReading(100, charging: false, full: true), .didWake)
+        #expect(status.calibration.session == nil)
+        #expect(status.calibration.last?.end == .completed)
+        #expect(rig.system.reading == .limit(80))
+    }
+
     @Test("Step 1's bound ends the session at the first evaluation after waking, and the normal limit is asked for")
     func boundAfterWake() async {
         let rig = CalibrationRig()
