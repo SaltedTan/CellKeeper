@@ -260,6 +260,8 @@ public struct ProbeRun: Sendable, Equatable {
         }
     }
 
+    /// For the assertion probes, the assertion tested. Not used for the
+    /// manual adapter cut (``manualCut``).
     public var assertion: AssertionKind
     public var samples: [Sample]
     /// Nil when no assertion was attempted.
@@ -267,6 +269,13 @@ public struct ProbeRun: Sendable, Equatable {
     /// Nil if the probe never tried to release the assertion.
     public var release: Release?
     public var sleepNotices: [SleepNotice]
+    /// Research note 11's manual adapter cut: the creation is the owner's
+    /// cut mark, accepted (result 0) only once the owner confirmed the
+    /// read-back of `08`; the release is the owner's restore, accepted
+    /// (result 0, no longer listed) only once the owner confirmed `00`. The
+    /// probe observes neither; the verdict's reasons say "cut mark" and
+    /// "restore" (``VerdictTerms/manualCut``).
+    public var manualCut: Bool
 
     public init(assertion: AssertionKind, samples: [Sample], creation: Creation?, release: Release?, sleepNotices: [SleepNotice] = []) {
         self.assertion = assertion
@@ -274,7 +283,22 @@ public struct ProbeRun: Sendable, Equatable {
         self.creation = creation
         self.release = release
         self.sleepNotices = sleepNotices
+        manualCut = false
     }
+
+    /// A manual adapter cut's run (note 11): `cutMark` and `restore` are the
+    /// owner's marks, and only owner-confirmed ones are given.
+    public init(manualCutSamples samples: [Sample], cutMark: Creation?, restore: Release?, sleepNotices: [SleepNotice] = []) {
+        self.init(assertion: .disableInflow, samples: samples, creation: cutMark, release: restore, sleepNotices: sleepNotices)
+        manualCut = true
+    }
+
+    /// The words of the verdict's reasons.
+    public var terms: VerdictTerms { manualCut ? .manualCut : .assertion }
+
+    /// The words of the baseline's reasons, which for the manual cut are
+    /// judged at the CUT prompt.
+    public var baselineTerms: VerdictTerms { manualCut ? .manualCutPrompt : .assertion }
 }
 
 /// The result of a run.
@@ -456,31 +480,43 @@ public enum Verdict: Sendable, Equatable {
     }
 
     /// Classifies a run. Pure: depends only on its arguments.
+    ///
+    /// For research note 11's manual adapter cut (``ProbeRun/manualCut``),
+    /// the creation is the owner's cut mark and the release the owner's
+    /// restore, both owner-confirmed; the readings between the CUT prompt
+    /// and the mark (`.preCut`) are judged only for freshness at the cut
+    /// (``cutFreshnessProblem(baseline:preCut:at:unixTime:criteria:terms:)``).
+    /// The assertion probes have no such readings, and their verdict is
+    /// unchanged.
     public static func evaluate(_ run: ProbeRun, criteria: Criteria = .standard) -> Verdict {
+        let terms = run.terms
         let samples = run.samples.sorted { $0.time < $1.time }
         let baseline = samples.filter { $0.phase == .baseline }
-        if let problem = baselineProblem(baseline, criteria: criteria) {
+        if let problem = baselineProblem(baseline, criteria: criteria, terms: run.baselineTerms) {
             return .inconclusive(reason: problem)
         }
         guard let creation = run.creation else {
-            return .inconclusive(reason: "the assertion was not created")
+            return .inconclusive(reason: terms.notCreated)
         }
         guard creation.result == 0 else {
             return .refused(result: creation.result)
         }
-        if let problem = baselineFreshnessProblem(baseline, at: creation.time, unixTime: creation.unixTime, criteria: criteria) {
+        let preCut = samples.filter { $0.phase == .preCut }
+        if let problem = cutFreshnessProblem(
+            baseline: baseline, preCut: preCut, at: creation.time, unixTime: creation.unixTime, criteria: criteria, terms: terms
+        ) {
             return .inconclusive(reason: problem)
         }
         guard let release = run.release else {
-            return .inconclusive(reason: "the probe did not release the assertion itself")
+            return .inconclusive(reason: terms.notReleased)
         }
         if let problem = releaseProblem(release, creation: creation, assertion: run.assertion) {
             return .inconclusive(reason: problem)
         }
         if let notice = run.sleepNotices.first {
             return .inconclusive(reason: """
-                the system sent \(notice.message) at +\(seconds(notice.time)), and the \
-                probe ended the hold; a sleeping Mac's readings say nothing
+                the system sent \(notice.message) at +\(seconds(notice.time)), and \
+                \(terms.onSleep); a sleeping Mac's readings say nothing
                 """)
         }
         if let gap = largestGap(samples: samples, events: [creation.time, release.time]),
@@ -501,14 +537,14 @@ public enum Verdict: Sendable, Equatable {
         for sample in held {
             if let problem = holdProblem(of: sample, criteria: criteria) {
                 return .inconclusive(reason: """
-                    \(problem) \(seconds(sample.time - creation.time)) after the \
-                    assertion was created, while it was held
+                    \(problem) \(seconds(sample.time - creation.time)) after \
+                    \(terms.created), while it was held
                     """)
             }
         }
         guard let last = held.last, last.time - creation.time >= criteria.effectWindow else {
             return .inconclusive(reason: """
-                the readings while the assertion was held cover less than \
+                the readings while \(terms.held) was held cover less than \
                 \(seconds(criteria.effectWindow))
                 """)
         }
@@ -516,7 +552,7 @@ public enum Verdict: Sendable, Equatable {
         guard let effectIndex = states.firstIndex(where: { $0 == .stopped || $0 == .discharging }) else {
             guard states.allSatisfy({ $0 == .charging }) else {
                 return .inconclusive(reason: """
-                    while the assertion was held, charging never clearly stopped and \
+                    while \(terms.held) was held, charging never clearly stopped and \
                     the battery never clearly discharged, but the charging flag, the \
                     battery current and the power source disagreed in some readings
                     """)
@@ -524,9 +560,9 @@ public enum Verdict: Sendable, Equatable {
             let updates = updatesMade(after: creation.unixTime, in: held)
             guard updates >= criteria.distinctUpdates else {
                 return .inconclusive(reason: """
-                    every reading while the assertion was held showed charging, but \
+                    every reading while \(terms.held) was held showed charging, but \
                     they show only \(updates) battery \(updates == 1 ? "update" : "updates") \
-                    made after its creation (\(criteria.distinctUpdates) needed), so an \
+                    made after \(terms.itsCreation) (\(criteria.distinctUpdates) needed), so an \
                     effect the battery reports only at a later update cannot be ruled out
                     """)
             }
@@ -536,10 +572,10 @@ public enum Verdict: Sendable, Equatable {
         let firstEffect = held[effectIndex]
         let effectAfter = firstEffect.time - creation.time
         let what = effect == .stopped ? "charging stopped" : "the battery discharged"
-        let began = "\(what) \(seconds(effectAfter)) after the assertion was created"
+        let began = "\(what) \(seconds(effectAfter)) after \(terms.created)"
         guard effectAfter <= criteria.effectWindow else {
             return .inconclusive(reason: """
-                \(what) only \(seconds(effectAfter)) after the assertion was created, \
+                \(what) only \(seconds(effectAfter)) after \(terms.created), \
                 later than \(seconds(criteria.effectWindow)), so it cannot be \
                 attributed to it
                 """)
@@ -547,7 +583,7 @@ public enum Verdict: Sendable, Equatable {
         guard madeAfter(firstEffect, creation.unixTime) else {
             return .inconclusive(reason: """
                 \(began), but the battery update that first showed it was not \
-                clearly made after the creation (it was made in the same second or \
+                clearly made after \(terms.creation) (it was made in the same second or \
                 earlier), so it cannot be attributed to it
                 """)
         }
@@ -569,7 +605,7 @@ public enum Verdict: Sendable, Equatable {
         guard effectRun.isSustained(criteria: criteria) else {
             return .inconclusive(reason: """
                 \(began), but only \(effectRun.summary(criteria: criteria)) showed it \
-                before the release (\(sustainedNeeded(criteria)) needed)
+                before \(terms.release) (\(sustainedNeeded(criteria)) needed)
                 """)
         }
         let discharged = effect == .discharging
@@ -597,8 +633,8 @@ public enum Verdict: Sendable, Equatable {
             }
             guard unreported == 0 else {
                 return .inconclusive(reason: """
-                    \(began) and until the release, and charging resumed \
-                    \(seconds(resumedAfter)) after the release, but \(unreported) of the \
+                    \(began) and until \(terms.release), and charging resumed \
+                    \(seconds(resumedAfter)) after \(terms.release), but \(unreported) of the \
                     \(effectReadings.count) readings while it discharged did not report \
                     the adapter attached (AppleRawExternalConnected or the adapter \
                     details). An adapter unplugged at those moments would look the \
@@ -615,7 +651,7 @@ public enum Verdict: Sendable, Equatable {
         case let .problem(sample, problem):
             return .inconclusive(reason: """
                 \(began), but \(problem) \(seconds(sample.time - release.time)) after \
-                the release, before charging had resumed (\(sustainedNeeded(criteria)))
+                \(terms.release), before charging had resumed (\(sustainedNeeded(criteria)))
                 """)
         case let .pending(saw):
             sawCharging = saw
@@ -623,22 +659,22 @@ public enum Verdict: Sendable, Equatable {
         let watched = (after.last?.time ?? release.time) - release.time
         guard watched >= criteria.resumeWindow else {
             return .inconclusive(reason: """
-                \(began), but the readings after the release end \(seconds(watched)) \
+                \(began), but the readings after \(terms.release) end \(seconds(watched)) \
                 after it, before the \(seconds(criteria.resumeWindow)) window was over
                 """)
         }
         if sawCharging {
             return .inconclusive(reason: """
-                \(began); after the release it charged in some readings, but never in \
+                \(began); after \(terms.release) it charged in some readings, but never in \
                 \(sustainedNeeded(criteria)) in a row
                 """)
         }
         let updatesAfter = updatesMade(after: release.unixTime, in: after)
         guard updatesAfter >= criteria.distinctUpdates else {
             return .inconclusive(reason: """
-                \(began), and no reading after the release showed charging, but they \
+                \(began), and no reading after \(terms.release) showed charging, but they \
                 show only \(updatesAfter) battery \(updatesAfter == 1 ? "update" : "updates") \
-                made after the release (\(criteria.distinctUpdates) needed), so whether \
+                made after \(terms.release) (\(criteria.distinctUpdates) needed), so whether \
                 charging resumed cannot be told
                 """)
         }
@@ -703,28 +739,99 @@ public enum Verdict: Sendable, Equatable {
     /// battery update is more than `maxBaselineUpdateAge` old. The probe
     /// checks this under the holder's lock immediately before it creates the
     /// assertion, and the verdict again.
-    public static func baselineFreshnessProblem(_ baseline: [Sample], at now: Double, unixTime: Double, criteria: Criteria = .standard) -> String? {
-        guard let last = baseline.max(by: { $0.time < $1.time }) else { return "there was no baseline reading before the assertion" }
+    public static func baselineFreshnessProblem(
+        _ baseline: [Sample],
+        at now: Double,
+        unixTime: Double,
+        criteria: Criteria = .standard,
+        terms: VerdictTerms = .assertion
+    ) -> String? {
+        guard let last = baseline.max(by: { $0.time < $1.time }) else { return "there was no baseline reading before \(terms.baselineBefore)" }
         if let problem = clockProblem(samples: baseline, events: [(now, unixTime)], criteria: criteria) {
-            return "\(problem) before the assertion was to be created, so nothing was created"
+            return "\(problem) before \(terms.toBeCreated), so \(terms.nothingCreated)"
         }
         let age = now - last.time
         guard age <= criteria.maxBaselineGap else {
             return """
-                the last baseline reading was \(seconds(age)) old when the assertion \
-                was about to be created (more than \(seconds(criteria.maxBaselineGap))), \
-                so nothing was created
+                the last baseline reading was \(seconds(age)) old when \(terms.aboutToBeCreated) \
+                (more than \(seconds(criteria.maxBaselineGap))), \
+                so \(terms.nothingCreated)
                 """
         }
         guard let latest = baseline.compactMap(\.updateTime).max() else {
-            return "no baseline reading had a battery update time, so nothing was created"
+            return "no baseline reading had a battery update time, so \(terms.nothingCreated)"
         }
         let updateAge = unixTime - Double(latest)
         guard updateAge <= criteria.maxBaselineUpdateAge else {
             return """
                 the baseline's latest battery update was \(seconds(updateAge)) old when \
-                the assertion was about to be created (more than \
-                \(seconds(criteria.maxBaselineUpdateAge))), so nothing was created
+                \(terms.aboutToBeCreated) (more than \
+                \(seconds(criteria.maxBaselineUpdateAge))), so \(terms.nothingCreated)
+                """
+        }
+        return nil
+    }
+
+    /// Why the cut must not be made at `now` (run seconds; `unixTime` is the
+    /// same moment as Unix time), judged on the readings before it (research
+    /// note 11 §4.5, check b), or nil. With no `preCut` readings, as for the
+    /// assertion probes, this is exactly
+    /// ``baselineFreshnessProblem(_:at:unixTime:criteria:terms:)``. Otherwise,
+    /// with note 10's thresholds: every pre-cut reading usable and steady
+    /// charging on AC power; no gap over `maxBaselineGap` from the last
+    /// baseline reading through the pre-cut readings to `now` (so the latest
+    /// reading is at most that old); the latest battery update among the
+    /// readings before `now` at most `maxBaselineUpdateAge` old; and the
+    /// clock rules over the baseline and pre-cut readings, with `now` as an
+    /// event. The pre-cut readings never count toward the baseline, whose
+    /// own rules (``baselineProblem(_:criteria:terms:)``) end at the CUT
+    /// prompt.
+    public static func cutFreshnessProblem(
+        baseline: [Sample],
+        preCut: [Sample],
+        at now: Double,
+        unixTime: Double,
+        criteria: Criteria = .standard,
+        terms: VerdictTerms = .assertion
+    ) -> String? {
+        let preCut = preCut.sorted { $0.time < $1.time }
+        guard !preCut.isEmpty else {
+            return baselineFreshnessProblem(baseline, at: now, unixTime: unixTime, criteria: criteria, terms: terms)
+        }
+        let baseline = baseline.sorted { $0.time < $1.time }
+        for sample in preCut {
+            if let problem = problem(of: sample) {
+                return "\(problem) at +\(seconds(sample.time)), after the CUT prompt, so \(terms.nothingCreated)"
+            }
+            if state(of: sample, criteria: criteria) != .charging {
+                return """
+                    macOS was not charging steadily after the CUT prompt: at \
+                    +\(seconds(sample.time)) it reported \(chargingSummary(sample)), so \
+                    \(terms.nothingCreated)
+                    """
+            }
+        }
+        let moments = (baseline.last.map { [$0.time] } ?? []) + preCut.map(\.time) + [now]
+        for (earlier, later) in zip(moments, moments.dropFirst()) where later - earlier > criteria.maxBaselineGap {
+            return """
+                there was a gap of \(seconds(later - earlier)) between readings at \
+                +\(seconds(earlier)) before \(terms.toBeCreated) (more than \
+                \(seconds(criteria.maxBaselineGap))), so \(terms.nothingCreated)
+                """
+        }
+        let readings = baseline + preCut
+        if let problem = clockProblem(samples: readings, events: [(now, unixTime)], criteria: criteria) {
+            return "\(problem) before \(terms.toBeCreated), so \(terms.nothingCreated)"
+        }
+        guard let latest = readings.compactMap(\.updateTime).max() else {
+            return "no reading before \(terms.toBeCreated) had a battery update time, so \(terms.nothingCreated)"
+        }
+        let updateAge = unixTime - Double(latest)
+        guard updateAge <= criteria.maxBaselineUpdateAge else {
+            return """
+                the latest battery update was \(seconds(updateAge)) old when \
+                \(terms.aboutToBeCreated) (more than \
+                \(seconds(criteria.maxBaselineUpdateAge))), so \(terms.nothingCreated)
                 """
         }
         return nil
@@ -839,10 +946,10 @@ public enum Verdict: Sendable, Equatable {
     /// AC power over the whole baseline, of at least `distinctUpdates`
     /// battery updates, or nil if they do. The probe checks this before it
     /// creates the assertion, and creates none if there is a problem.
-    public static func baselineProblem(_ baseline: [Sample], criteria: Criteria = .standard) -> String? {
+    public static func baselineProblem(_ baseline: [Sample], criteria: Criteria = .standard, terms: VerdictTerms = .assertion) -> String? {
         let baseline = baseline.sorted { $0.time < $1.time }
         guard baseline.count >= criteria.minimumBaselineReadings, let first = baseline.first, let last = baseline.last else {
-            return "there were only \(baseline.count) readings before the assertion (\(criteria.minimumBaselineReadings) needed)"
+            return "there were only \(baseline.count) readings before \(terms.baselineBefore) (\(criteria.minimumBaselineReadings) needed)"
         }
         let duration = last.time - first.time
         guard criteria.baselineDuration.contains(duration) else {
@@ -869,13 +976,13 @@ public enum Verdict: Sendable, Equatable {
             }
         }
         if let problem = clockProblem(samples: baseline, events: [], criteria: criteria) {
-            return "during the baseline, \(problem), so nothing was created"
+            return "during the baseline, \(problem), so \(terms.nothingCreated)"
         }
         let updates = Set(baseline.compactMap(\.updateTime)).count
         guard updates >= criteria.distinctUpdates else {
             return """
                 the baseline showed only \(updates) battery \(updates == 1 ? "update" : "updates") \
-                in \(seconds(duration)) (\(criteria.distinctUpdates) needed), so nothing was created
+                in \(seconds(duration)) (\(criteria.distinctUpdates) needed), so \(terms.nothingCreated)
                 """
         }
         return nil

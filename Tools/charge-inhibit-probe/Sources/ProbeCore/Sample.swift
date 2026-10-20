@@ -21,6 +21,10 @@
 public struct Sample: Sendable, Equatable {
     public enum Phase: String, Sendable, Equatable {
         case baseline
+        /// Research note 11's manual adapter cut only: readings between the
+        /// CUT prompt and the owner's cut mark, judged only for freshness at
+        /// the cut (note 11 §4.5, check b). The assertion probes take none.
+        case preCut = "pre-cut"
         case held
         case after
     }

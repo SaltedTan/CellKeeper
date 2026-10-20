@@ -106,10 +106,12 @@ final class StopRequest: @unchecked Sendable {
 }
 
 /// Writes to standard output or standard error at once, unbuffered, but
-/// never from the sleep queue: such a write is dropped (`ProbeConsole`).
+/// never from the sleep queue: such a write is dropped (`ProbeConsole`). A
+/// write that fails (a terminal that has gone away) is dropped too, rather
+/// than raising, so the run still finishes and writes its report.
 enum Console {
-    static let output = ProbeConsole { FileHandle.standardOutput.write(Data(($0 + "\n").utf8)) }
-    static let errors = ProbeConsole { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }
+    static let output = ProbeConsole { try? FileHandle.standardOutput.write(contentsOf: Data(($0 + "\n").utf8)) }
+    static let errors = ProbeConsole { try? FileHandle.standardError.write(contentsOf: Data(($0 + "\n").utf8)) }
 
     static func out(_ line: String = "") {
         output.write(line)
