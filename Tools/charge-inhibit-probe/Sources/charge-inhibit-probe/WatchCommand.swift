@@ -21,10 +21,12 @@ import ProbeCore
 ///    lines, the clock and the readings; the reminder's own timer and the
 ///    signal handlers hand it events too; every event reads the sleep log
 ///    first. None of them waits on the terminal.
-/// 5. Release the idle-sleep assertion and deregister; save the report,
-///    then queue it for the console, give the console at most 2 s, and
-///    exit (`BoundedEnd`). A second signal takes the same bounded path at
-///    once.
+/// 5. Release the idle-sleep assertion; deregister from sleep
+///    notifications and drain their queue (at most 2 s), then read the sleep
+///    log once more, so that a sleep that began before a confirmation still
+///    makes it not count (`ManualCutFlow.reconcile`); save the report, then
+///    queue it for the console, give the console at most 2 s, and exit
+///    (`BoundedEnd`). A second signal takes the same bounded path at once.
 enum WatchCommand {
     static func main(hold: Int) -> Int32 {
         // 1. Not as root, from a terminal.
@@ -119,19 +121,27 @@ enum WatchCommand {
             ))
         }
 
+        /// Deregisters from sleep notifications and drains their queue, so
+        /// that a notification in flight has finished writing the sleep log;
+        /// at most 2 s. Returns whether it did.
+        @Sendable func drainSleepQueue() -> Bool {
+            runBounded(within: 2) { sleepWatch.stop() }
+        }
+
         let signalSources = installSignalHandlers { number in
-            guard case let .quit(banner, status) = session.signal(number) else { return }
+            guard case .quit = session.signal(number) else { return }
             // A second signal: the bounded path, at once, on a thread of its
-            // own, so that its waits (the save, the console's 2 s) never hold
-            // a thread of the shared dispatch pool that the reminder and the
-            // sleep queue run on.
-            if let banner {
-                console.enqueue("\n\(signalName(number)) again: quitting. " + ManualCut.text(banner))
-            }
-            let flow = session.snapshot
-            let text = render(outcome: ManualCutOutcome.of(flow, sleepNotices: sleepWatch.notices), flow: flow)
+            // own, so that its waits (the sleep queue's drain, the save, the
+            // console's 2 s) never hold a thread of the shared dispatch pool
+            // that the reminder and the sleep queue run on.
             Thread {
-                finish(text, status: status) { status, _ in
+                let flow = session.reconciledFlow(drainSleepQueue: drainSleepQueue)
+                let second = flow.secondSignal(number)
+                if let banner = second.banner {
+                    console.enqueue("\n\(signalName(number)) again: quitting. " + ManualCut.text(banner))
+                }
+                let text = render(outcome: ManualCutOutcome.of(flow, sleepNotices: sleepWatch.notices), flow: flow)
+                finish(text, status: second.exitStatus) { status, _ in
                     _exit(status)
                 }
             }.start()
@@ -142,13 +152,13 @@ enum WatchCommand {
             tornDown = true
             session.stopReminder()
             idleSleep.release()
-            sleepWatch.stop()
             if let released = idleSleep.released {
                 guardState.update { $0.released = released }
             }
         }
         defer {
             tearDown()
+            _ = drainSleepQueue()
             signalSources.forEach { $0.cancel() }
         }
 
@@ -172,6 +182,7 @@ enum WatchCommand {
         }
         if let refusal {
             tearDown()
+            _ = drainSleepQueue()
             console.enqueue("Refusing to run: \(refusal). Nothing was written, and you were asked nothing.")
             let outcome = ManualCutOutcome(verdict: nil, exitStatus: 1, recoveryReason: nil, refusal: refusal)
             return endMainPath(render(outcome: outcome, flow: nil), status: 1, finish: finish)
@@ -197,9 +208,10 @@ enum WatchCommand {
             TerminalInput.waitForInput(STDIN_FILENO, milliseconds: 50)
         }
 
-        // 5. Cleanup, then the bounded end.
+        // 5. Cleanup; the last look at the sleep log, after its queue is
+        // drained; then the bounded end.
         tearDown()
-        let flow = session.snapshot
+        let flow = session.reconciledFlow(drainSleepQueue: drainSleepQueue)
         let outcome = ManualCutOutcome.of(flow, sleepNotices: sleepWatch.notices)
         return endMainPath(render(outcome: outcome, flow: flow), status: outcome.exitStatus, finish: finish)
     }

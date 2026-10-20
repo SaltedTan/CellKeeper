@@ -391,6 +391,9 @@ public struct ManualCutFlow: Sendable {
     /// How many occurrences the flow had seen when the restore's
     /// confirmation was accepted.
     public private(set) var restoreConfirmedSleeps: Int?
+    /// Why the end of the run found that a confirmation of recovery does
+    /// not count (``reconcile(with:drained:)``), or nil.
+    public private(set) var confirmationInvalidated: String?
     /// The number of the latest question published.
     public private(set) var questionGeneration: UInt64 = 0
     /// Whether the owner's lines may answer the open question: only once
@@ -1000,6 +1003,54 @@ public struct ManualCutFlow: Sendable {
         } : nil
         return ProbeRun(manualCutSamples: samples, cutMark: cut, restore: restore, sleepNotices: sleepNotices)
     }
+
+    /// The end of the run's last look at the sleep log (code review r2 of
+    /// #101, must C), on every ending path, after the sleep queue has been
+    /// drained, so that a notification in flight has finished: `drained`
+    /// says whether that drain completed within its bound. It works on an
+    /// ended flow too, which takes no more events.
+    ///
+    /// Occurrences the flow had not seen are recorded. A confirmation of
+    /// recovery does not count, and the run ends with CHECK RECOVERY FIRST
+    /// (``ManualCutOutcome``), if a sleep it had not seen when it accepted
+    /// the confirmation began at or before that acceptance; if the log
+    /// overflowed; or if the drain did not complete, since a notification
+    /// may still be writing the log.
+    public mutating func reconcile(with sleeps: SleepLog.Snapshot, drained: Bool) {
+        let unseen = Array(sleeps.times.dropFirst(seenSleeps))
+        if !unseen.isEmpty {
+            self.sleeps += unseen
+            for time in unseen {
+                note(time, "a sleep found at the end of the run (kIOMessageSystemWillSleep at +\(seconds(time)))")
+            }
+        }
+        seenSleeps = max(seenSleeps, sleeps.times.count)
+        if sleeps.overflowed { sleepLogOverflowed = true }
+        guard let confirmed = restoreConfirmedAt else { return }
+        let seenAtAcceptance = restoreConfirmedSleeps ?? 0
+        let reason: String?
+        if !drained {
+            reason = "the sleep queue could not be drained at the end, so a sleep may have begun before the confirmation"
+        } else if sleeps.overflowed {
+            reason = "more than \(SleepLog.capacity) sleeps came, so when they began is lost"
+        } else if let time = sleeps.times.dropFirst(seenAtAcceptance).first(where: { $0 <= confirmed }) {
+            reason = """
+                a sleep began at +\(seconds(time)), before the confirmation at \
+                +\(seconds(confirmed)) was accepted, and was found only at the end
+                """
+        } else {
+            reason = nil
+        }
+        guard let reason else { return }
+        confirmationInvalidated = reason
+        answers.append(Answer(
+            time: confirmed, question: restoreConfirmedBy == "restored00" ? .restoreReadBack : restoreConfirmedBy == "00" ? .readFirst : .recheck,
+            word: nil, outcome: "the confirmation does not count: \(reason)"
+        ))
+        restoreConfirmedAt = nil
+        restoreConfirmedBy = nil
+        restoreConfirmedSleeps = nil
+    }
 }
 
 /// How a manual adapter-cut run ends: its verdict, exit status, and
@@ -1048,6 +1099,13 @@ public struct ManualCutOutcome: Sendable, Equatable {
                 recoveryReason: "\(unconfirmed) in a way that counts: \(reason)."
             )
         }
+        // The end found that a confirmation does not count (must C).
+        if let reason = flow.confirmationInvalidated {
+            return ManualCutOutcome(
+                verdict: .inconclusive(reason: "the confirmation of recovery does not count: \(reason)"), exitStatus: 3,
+                recoveryReason: "\(unconfirmed) in a way that counts: \(reason)."
+            )
+        }
         switch flow.ending {
         case let .refused(reason):
             return ManualCutOutcome(verdict: nil, exitStatus: 1, recoveryReason: nil, refusal: reason)
@@ -1075,7 +1133,9 @@ public struct ManualCutOutcome: Sendable, Equatable {
             if let reason = flow.readFirstReason {
                 verdict = .inconclusive(reason: "the restore went through the read-first steps: \(reason)")
             } else {
-                verdict = Verdict.evaluate(flow.probeRun(sleepNotices: sleepNotices), criteria: criteria)
+                // The sleep log's occurrences count as sleep notices too.
+                let logged = flow.sleeps.map { ProbeRun.SleepNotice(time: $0, message: "kIOMessageSystemWillSleep") }
+                verdict = Verdict.evaluate(flow.probeRun(sleepNotices: sleepNotices + logged), criteria: criteria)
             }
             guard lastCharging else {
                 return ManualCutOutcome(verdict: verdict, exitStatus: 3, recoveryReason: notCharging)

@@ -143,6 +143,18 @@ public final class ManualCutSession: @unchecked Sendable {
         lock.withLock { flow }
     }
 
+    /// The flow for the report, on every ending path (code review r2 of
+    /// #101, must C): `drainSleepQueue` deregisters from sleep notifications
+    /// and drains their queue, within its bound, and says whether it did;
+    /// then the sleep log is read once more and reconciled
+    /// (``ManualCutFlow/reconcile(with:drained:)``).
+    public func reconciledFlow(drainSleepQueue: () -> Bool) -> ManualCutFlow {
+        let drained = drainSleepQueue()
+        var final = snapshot
+        final.reconcile(with: sleepLog.snapshot, drained: drained)
+        return final
+    }
+
     /// The GO line's restore time, as shown.
     public var restoreByText: String? {
         lock.withLock { restoreBy }
@@ -296,6 +308,18 @@ public final class ManualCutSession: @unchecked Sendable {
         timer.resume()
         reminder = timer
     }
+}
+
+/// Runs `work` on a thread of its own and waits for it at most `seconds`;
+/// returns whether it finished. The thread is left to finish on its own if
+/// it does not.
+public func runBounded(within seconds: Double, _ work: @escaping @Sendable () -> Void) -> Bool {
+    let finished = DispatchSemaphore(value: 0)
+    Thread {
+        work()
+        finished.signal()
+    }.start()
+    return finished.wait(timeout: .now() + seconds) == .success
 }
 
 /// How `watch` ends (code review r1 of #101, must 1): the report is saved

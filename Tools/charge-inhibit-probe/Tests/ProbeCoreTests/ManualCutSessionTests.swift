@@ -274,6 +274,96 @@ extension ManualCutTests {
             driver.session.stopReminder()
         }
 
+        /// A session at the restore's read-back question, on the terminal, at
+        /// mark + 182; returns the cut mark's time.
+        static func atRestoreReadBack(_ driver: SessionDriver) -> Double {
+            driver.toHold()
+            let mark = driver.session.snapshot.cutMark?.time ?? 0
+            driver.at(mark + 180)
+            driver.session.poll()
+            driver.type("restorenow", at: mark + 182)
+            #expect(eventually { driver.session.inputEligible })
+            return mark
+        }
+
+        @Test("Review r2's sequence: a sleep notification paused after taking its time, a confirmation, a signal; the end still finds the sleep (must C)")
+        func lateSleepFoundAtTheEnd() {
+            let driver = SessionDriver(console: ConsoleWriter { _ in })
+            let mark = Self.atRestoreReadBack(driver)
+            // The real handler, on a real sleep queue, paused after it took
+            // the sleep's time and before it logged it.
+            let sleepQueue = SleepQueue(label: "test.sleep")
+            let sampled = DispatchSemaphore(value: 0)
+            let resume = DispatchSemaphore(value: 0)
+            let handler = ManualCut.willSleepHandler(log: driver.sleepLog, now: {
+                sampled.signal()
+                resume.wait()
+                return mark + 189
+            })
+            sleepQueue.queue.async { handler {} }
+            #expect(sampled.wait(timeout: .now() + 2) == .success)
+            // The log is still empty: restored00 is accepted.
+            driver.type("restored00", at: mark + 190)
+            #expect(driver.session.snapshot.restoreConfirmed)
+            #expect(driver.session.signal(SIGINT) == .handled)
+            #expect(driver.session.isEnded)
+            // The notification resumes while the end drains the sleep queue.
+            Thread {
+                usleep(200_000)
+                resume.signal()
+            }.start()
+            let flow = driver.session.reconciledFlow { runBounded(within: 2) { sleepQueue.drain() } }
+            #expect(!flow.restoreConfirmed)
+            #expect(flow.confirmationInvalidated?.contains("+\(seconds(mark + 189))") == true)
+            #expect(flow.sleeps == [mark + 189])
+            let outcome = ManualCutOutcome.of(flow, sleepNotices: [])
+            #expect(outcome.exitStatus == 3)
+            #expect(outcome.recoveryReason != nil)
+            #expect(flow.secondSignal(SIGINT) == (.restoreChieNow, 3))
+            driver.session.stopReminder()
+        }
+
+        @Test("If the sleep queue cannot be drained within its bound, the confirmation does not count")
+        func undrainedSleepQueue() {
+            let driver = SessionDriver(console: ConsoleWriter { _ in })
+            let mark = Self.atRestoreReadBack(driver)
+            let sleepQueue = SleepQueue(label: "test.sleep")
+            let sampled = DispatchSemaphore(value: 0)
+            let resume = DispatchSemaphore(value: 0)
+            let handler = ManualCut.willSleepHandler(log: driver.sleepLog, now: {
+                sampled.signal()
+                resume.wait()
+                return mark + 195
+            })
+            sleepQueue.queue.async { handler {} }
+            #expect(sampled.wait(timeout: .now() + 2) == .success)
+            driver.type("restored00", at: mark + 190)
+            #expect(driver.session.signal(SIGINT) == .handled)
+            let start = Date()
+            let flow = driver.session.reconciledFlow { runBounded(within: 0.3) { sleepQueue.drain() } }
+            #expect(Date().timeIntervalSince(start) < 1)
+            #expect(!flow.restoreConfirmed)
+            #expect(flow.confirmationInvalidated?.contains("could not be drained") == true)
+            #expect(ManualCutOutcome.of(flow, sleepNotices: []).exitStatus == 3)
+            resume.signal()
+            driver.session.stopReminder()
+        }
+
+        @Test("A sleep found at the end that began after the confirmation leaves it standing, and the run is inconclusive")
+        func laterSleepFoundAtTheEnd() {
+            let driver = SessionDriver(console: ConsoleWriter { _ in })
+            let mark = Self.atRestoreReadBack(driver)
+            driver.type("restored00", at: mark + 190)
+            #expect(driver.session.signal(SIGINT) == .handled)
+            driver.sleepLog.record(at: mark + 191)
+            let flow = driver.session.reconciledFlow { true }
+            #expect(flow.restoreConfirmed)
+            #expect(flow.confirmationInvalidated == nil)
+            #expect(flow.sleeps == [mark + 191])
+            #expect(ManualCutOutcome.of(flow, sleepNotices: []).verdict?.title == "inconclusive")
+            driver.session.stopReminder()
+        }
+
         @Test("The bounded end saves the report first, then queues it, then waits at most 2 s, then exits")
         func boundedEndOrder() {
             var steps: [String] = []
