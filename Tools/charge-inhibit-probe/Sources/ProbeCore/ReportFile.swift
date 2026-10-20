@@ -75,7 +75,8 @@ public final class ReportFile: @unchecked Sendable {
 /// goes on to the console and the exit.
 ///
 /// No save is claimed before the ending's watchdog is armed: every ending
-/// path arms it first, and ``save(_:)`` arms it if none has. So a path
+/// path arms it first, and ``save(_:)`` arms it too, which sets it if no
+/// path has and otherwise leaves it as the first arm set it. So a path
 /// never waits on a save the watchdog does not bound: if the save hangs,
 /// the watchdog ends the process.
 public final class OneShotSave: @unchecked Sendable {
@@ -93,7 +94,7 @@ public final class OneShotSave: @unchecked Sendable {
     /// until the claimed one has finished. Returns whether the report was
     /// saved.
     public func save(_ save: () -> Bool) -> Bool {
-        watchdog.armIfNeeded()
+        watchdog.arm()
         condition.lock()
         guard claimed else {
             claimed = true

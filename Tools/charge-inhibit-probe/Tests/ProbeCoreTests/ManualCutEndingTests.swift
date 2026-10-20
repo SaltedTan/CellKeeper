@@ -180,13 +180,34 @@ extension ManualCutTests {
             #expect(saved.hasPrefix("report 1: exit 3\n"))
             #expect(saved.hasSuffix("a line of the report\n"))
             #expect(events.values.filter { $0 == "persist" }.count == 1)
-            // The watchdog was armed before the save began.
+            // The watchdog was armed before the save began, and only once:
+            // the second ending's arm did not move the deadline.
             let armed = try #require(events.index(of: "arm \(EndingWatchdog.bound)"))
             let persisted = try #require(events.index(of: "persist"))
             #expect(armed < persisted)
+            #expect(events.values.filter { $0.hasPrefix("arm") }.count == 1)
         }
 
-        @Test("An ending paused just before its watchdog is armed has claimed nothing: the other ending saves the whole report itself, then exits (must 1)")
+        @Test("The first arm wins: later arms, from any path or thread, never move the deadline")
+        func firstArmWins() {
+            let events = EventLog()
+            let watchdog = Self.watchdog(events)
+            #expect(!watchdog.isArmed)
+            watchdog.arm()
+            #expect(watchdog.isArmed)
+            let returned = Counter()
+            for _ in 0..<8 {
+                Thread {
+                    watchdog.arm()
+                    returned.add()
+                }.start()
+            }
+            #expect(eventually { returned.value == 8 })
+            watchdog.arm()
+            #expect(events.values == ["arm \(EndingWatchdog.bound)"])
+        }
+
+        @Test("An ending paused just before its watchdog is armed: the other ending's arm waits for it, claims nothing and never exits on the placeholder; then one save, and both exit (must 1)")
         func pausedBeforeArmingClaimsNothing() throws {
             let path = Self.temporaryPath()
             defer { try? FileManager.default.removeItem(atPath: path) }
@@ -205,8 +226,8 @@ extension ManualCutTests {
                 mainEnded.add()
             }.start()
             #expect(pausedInArm.wait(timeout: .now() + 2) == .success)
-            // A second signal's end: it is not left waiting on a save that no
-            // watchdog bounds. It saves the whole report, then exits.
+            // A second signal's end: its arm waits for the first to set the
+            // deadline, so it neither claims the save nor exits.
             let exited = Counter()
             let savedAtExit = EventLog()
             Thread {
@@ -215,14 +236,19 @@ extension ManualCutTests {
                     exited.add()
                 }
             }.start()
-            #expect(eventually(timeout: 2) { exited.value == 1 })
-            let saved = try #require(savedAtExit.values.first)
-            #expect(saved.hasPrefix("report 1: exit 3\n"))
-            #expect(saved.hasSuffix("a line of the report\n"))
-            // The main path resumes, finds the save done, and never saves.
+            Thread.sleep(forTimeInterval: 0.5)
+            #expect(exited.value == 0)
+            #expect(!events.values.contains("persist"))
+            #expect(try String(contentsOfFile: path, encoding: .utf8) == "placeholder\n")
+            // The first arm sets the deadline: one save, and both exit.
             resumeArm.signal()
-            #expect(eventually { mainEnded.value == 1 })
+            #expect(eventually { exited.value == 1 && mainEnded.value == 1 })
+            let saved = try #require(savedAtExit.values.first)
+            #expect(saved.hasPrefix("report "))
+            #expect(saved.contains(": exit 3\n"))
+            #expect(saved.hasSuffix("a line of the report\n"))
             #expect(events.values.filter { $0 == "persist" }.count == 1)
+            #expect(events.values.filter { $0.hasPrefix("arm") }.count == 1)
             #expect(try String(contentsOfFile: path, encoding: .utf8) == saved)
         }
 

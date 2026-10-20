@@ -8,9 +8,10 @@ import Foundation
 /// emergency exit does (``EmergencyExit``). So a path that waits for
 /// another's save needs no timeout of its own (``OneShotSave``).
 ///
-/// It is never cancelled: every ending exits the process. A later ending
-/// path arms it again, which moves the same process-wide deadline and never
-/// removes it.
+/// It is never cancelled: every ending exits the process. The first arm
+/// wins: a later one, from a second signal's ending or the save, never
+/// moves the deadline, so pressing Ctrl-C again cannot postpone it; it only
+/// waits until the first arm has set it.
 public final class EndingWatchdog: @unchecked Sendable {
     public struct Hooks: Sendable {
         /// Arms the process-wide deadline, `seconds` from now.
@@ -43,30 +44,40 @@ public final class EndingWatchdog: @unchecked Sendable {
     public static let bound = UInt32((sleepDrainBound + 2 * BoundedEnd.drainBound + saveBound + margin).rounded(.up))
 
     private let hooks: Hooks
-    private let lock = NSLock()
+    private let condition = NSCondition()
+    private var claimed = false
     private var armed = false
 
     public init(hooks: Hooks = .real) {
         self.hooks = hooks
     }
 
-    /// Arms the deadline, ``bound`` seconds from now; an ending path's
-    /// first action.
+    /// An ending path's first action, and the save's before it is claimed:
+    /// the first call arms the deadline, ``bound`` seconds from now. A later
+    /// call leaves it where it is, and returns once the first has set it
+    /// (setting it never blocks: `signal(3)` and `alarm(2)`), so that the
+    /// deadline is set whenever an arm has returned.
     public func arm() {
+        condition.lock()
+        guard !claimed else {
+            while !armed {
+                condition.wait()
+            }
+            condition.unlock()
+            return
+        }
+        claimed = true
+        condition.unlock()
         hooks.arm(Self.bound)
-        lock.withLock { armed = true }
+        condition.withLock {
+            armed = true
+            condition.broadcast()
+        }
     }
 
-    /// Arms the deadline unless it is armed already: the save's own check
-    /// that no save is claimed before it is (``OneShotSave``).
-    public func armIfNeeded() {
-        guard !isArmed else { return }
-        arm()
-    }
-
-    /// Whether an arm has completed.
+    /// Whether the deadline is set.
     public var isArmed: Bool {
-        lock.withLock { armed }
+        condition.withLock { armed }
     }
 }
 
