@@ -212,21 +212,40 @@ final class SMCReaderThread: @unchecked Sendable {
 
     private let condition = NSCondition()
     private var job: (@Sendable () -> Void)?
-    private var isStarted = false
+    private var started = false
+    private var ended = false
     private var isStopped = false
 
+    /// Whether the thread was started: with the first call, never once
+    /// stopped.
+    var isStarted: Bool {
+        condition.withLock { started }
+    }
+
+    /// Whether the thread has ended, once stopped and its call returned.
+    var hasEnded: Bool {
+        condition.withLock { ended }
+    }
+
+    /// Whether a call is waiting for the thread.
+    var hasPendingCall: Bool {
+        condition.withLock { job != nil }
+    }
+
     /// Runs `job` on the thread. The coordinator hands over one at a time,
-    /// only once the last has returned.
+    /// only once the last has returned. Once stopped, `job` is dropped and
+    /// no thread starts.
     func run(_ job: @escaping @Sendable () -> Void) {
         condition.lock()
         defer { condition.unlock() }
         guard !isStopped else { return }
-        if !isStarted {
-            isStarted = true
+        if !started {
+            started = true
             let thread = Thread { [self] in
                 while let next = next() {
                     next()
                 }
+                condition.withLock { ended = true }
             }
             thread.name = Self.name
             thread.qualityOfService = .utility

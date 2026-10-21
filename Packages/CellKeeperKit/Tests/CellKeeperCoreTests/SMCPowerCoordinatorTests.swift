@@ -13,11 +13,13 @@ struct SMCPowerCoordinatorTests {
     }
 
     /// Ends what a test started: the reader's held calls return, and the
-    /// source stops, so no thread stays blocked.
+    /// source stops, so no thread stays blocked. No held call should have
+    /// needed the reader's watchdog.
     private func finish(_ coordinator: SMCPowerCoordinator, _ reader: FakeSMCReader) async {
         reader.releaseAll()
         coordinator.stop()
         await eventually { await coordinator.isStopped }
+        #expect(reader.watchdogReleases == 0, "a held read was released only by the reader's watchdog")
     }
 
     @Test("Reads on a thread of its own, never the main thread, and asks only for PSTR and PDTR")
@@ -42,7 +44,7 @@ struct SMCPowerCoordinatorTests {
         // Each pause waits for the batch it follows to return, then moves
         // the clock a second.
         let source = coordinator(reader, clock: clock) { _ in
-            await eventually { await seconds.coordinator?.current.inFlight == nil }
+            await pace { await seconds.coordinator?.current.inFlight == nil }
             clock.set(await seconds.next())
         }
         await seconds.set(source)
@@ -129,6 +131,34 @@ struct SMCPowerCoordinatorTests {
         await finish(source, reader)
     }
 
+    @Test("A read that returns 2.1 s after it began, before any tick saw it, is a stall and publishes nothing")
+    func lateReturnBeforeTick() async {
+        let reader = FakeSMCReader()
+        let clock = ManualClock()
+        let source = coordinator(reader, clock: clock)
+        await source.apply(.powerSource(.externalPower))
+        await source.apply(.shown(true))
+        for second in 1...2 {
+            await eventually { await source.isIdle(afterCalls: second, of: reader) }
+            clock.set(Double(second))
+            await source.tick()
+        }
+        await eventually { await source.isIdle(afterCalls: 3, of: reader) }
+        #expect(await source.state == .available)
+        _ = await source.publish()
+        reader.hold()
+        clock.set(3)
+        await source.tick()
+        await eventually { reader.calls == 4 }
+        // The read returns at 5.1 s; the timer has not ticked since 3 s.
+        clock.set(5.1)
+        reader.releaseAll()
+        await eventually { await source.current.inFlight == nil }
+        #expect(await source.state == .failing)
+        #expect(await source.publish() == SMCPowerPublication(state: .failing, window: nil))
+        await finish(source, reader)
+    }
+
     @Test("A reader that cannot open backs off; the placeholder's \"unavailable\" does the same")
     func openFails() async {
         let reader = FakeSMCReader([.openFails(.unavailable)])
@@ -192,5 +222,61 @@ private actor Seconds {
     func next() -> Double {
         value += 1
         return value
+    }
+}
+
+/// A flag set from any thread, with a note.
+private final class Flag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var isSet = false
+    private var text: String?
+
+    var value: Bool { lock.withLock { isSet } }
+    var note: String? { lock.withLock { text } }
+
+    func set(note: String? = nil) {
+        lock.withLock {
+            isSet = true
+            text = note
+        }
+    }
+}
+
+@Suite("SMC reader thread")
+struct SMCReaderThreadTests {
+    @Test("Once stopped, a call handed over is dropped and no thread starts")
+    func stoppedDropsCalls() async {
+        let thread = SMCReaderThread()
+        let ran = Flag()
+        thread.stop()
+        thread.run { ran.set() }
+        try? await Task.sleep(for: .milliseconds(100))
+        #expect(!ran.value)
+        #expect(!thread.isStarted)
+        #expect(!thread.hasPendingCall)
+    }
+
+    @Test("Stopped while a call runs: a call waiting at the stop is dropped, and the thread ends once the running call returns")
+    func stopWhileRunning() async {
+        let thread = SMCReaderThread()
+        let release = DispatchSemaphore(value: 0)
+        let first = Flag()
+        let second = Flag()
+        thread.run {
+            first.set(note: Thread.current.name)
+            // Bounded, should the test fail before releasing it.
+            _ = release.wait(timeout: .now() + .seconds(10))
+        }
+        await eventually { first.value }
+        #expect(first.note == SMCReaderThread.name)
+        thread.run { second.set() }
+        #expect(thread.hasPendingCall)
+        thread.stop()
+        #expect(!thread.hasPendingCall)
+        #expect(!thread.hasEnded)
+        release.signal()
+        await eventually { thread.hasEnded }
+        #expect(thread.hasEnded)
+        #expect(!second.value)
     }
 }

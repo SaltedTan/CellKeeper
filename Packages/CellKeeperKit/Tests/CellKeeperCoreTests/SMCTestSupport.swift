@@ -1,5 +1,6 @@
 @testable import CellKeeperCore
 import Foundation
+import Testing
 
 // Test doubles for the SMC source. Nothing here talks to the SMC: the fake
 // reader conforms to CellKeeper's own protocol and returns the values a test
@@ -99,27 +100,39 @@ final class ManualClock: @unchecked Sendable {
 /// again once used up), records the keys asked for and the thread it ran
 /// on, and can be held until the test releases it, as a read that hangs
 /// would be. Once released, later calls return at once, so that no test
-/// leaves a thread blocked.
+/// leaves a thread blocked. A held call also releases itself after
+/// ``watchdog`` whatever else is stuck (a regression that blocked the
+/// thread releasing it, or the actor a test is waiting on), and counts that
+/// in ``watchdogReleases``, which every test using a held call expects to
+/// stay 0: such a test fails in bounded time instead of hanging.
 final class FakeSMCReader: SMCPowerReading, @unchecked Sendable {
     enum Step: Sendable {
         case values([SMCPowerKey: Result<SMCRawValue, SMCKeyReadError>])
         case openFails(SMCOpenError)
     }
 
+    /// The longest a call is held.
+    let watchdog: Duration
     private let lock = NSLock()
     private var script: [Step]
     private var holds = false
-    private var held = 0
-    private let release = DispatchSemaphore(value: 0)
+    /// One semaphore per held call, so that a call the watchdog released
+    /// leaves nothing behind for a later one.
+    private var waiting: [DispatchSemaphore] = []
+    private var watchdogCount = 0
     private var keysAsked: [[SMCPowerKey]] = []
     private var threadNames: [String?] = []
     private var mainThreadCalls = 0
     private var inCall = 0
     private var mostInCall = 0
 
-    init(_ script: [Step] = [.values(smcValues())]) {
+    init(_ script: [Step] = [.values(smcValues())], watchdog: Duration = .seconds(10)) {
         self.script = script
+        self.watchdog = watchdog
     }
+
+    /// Held calls the watchdog had to release.
+    var watchdogReleases: Int { lock.withLock { watchdogCount } }
 
     /// Calls made so far, begun or finished.
     var calls: Int { lock.withLock { keysAsked.count } }
@@ -136,12 +149,12 @@ final class FakeSMCReader: SMCPowerReading, @unchecked Sendable {
 
     /// Lets every held call return, and every later one at once.
     func releaseAll() {
-        let count = lock.withLock {
+        let held = lock.withLock {
             holds = false
-            defer { held = 0 }
-            return held
+            defer { waiting = [] }
+            return waiting
         }
-        for _ in 0..<count { release.signal() }
+        for call in held { call.signal() }
     }
 
     /// Replaces the script.
@@ -150,17 +163,25 @@ final class FakeSMCReader: SMCPowerReading, @unchecked Sendable {
     }
 
     func read(_ keys: [SMCPowerKey]) throws -> [SMCPowerKey: Result<SMCRawValue, SMCKeyReadError>] {
-        let (step, waits) = lock.withLock {
+        let (step, gate) = lock.withLock {
             keysAsked.append(keys)
             threadNames.append(Thread.current.name)
             if Thread.isMainThread { mainThreadCalls += 1 }
             inCall += 1
             mostInCall = max(mostInCall, inCall)
-            if holds { held += 1 }
             let step = script.count > 1 ? script.removeFirst() : script[0]
-            return (step, holds)
+            guard holds else { return (step, nil as DispatchSemaphore?) }
+            let gate = DispatchSemaphore(value: 0)
+            waiting.append(gate)
+            return (step, gate)
         }
-        if waits { release.wait() }
+        if let gate {
+            let parts = watchdog.components
+            let nanoseconds = Int(parts.seconds) * 1_000_000_000 + Int(parts.attoseconds / 1_000_000_000)
+            if gate.wait(timeout: .now() + .nanoseconds(nanoseconds)) == .timedOut {
+                lock.withLock { watchdogCount += 1 }
+            }
+        }
         lock.withLock { inCall -= 1 }
         switch step {
         case .values(let values):
@@ -178,11 +199,72 @@ extension SMCPowerCoordinator {
     }
 }
 
-/// Waits, a bounded time, until `condition` holds; a test then fails on its
-/// own expectation rather than hanging.
-func eventually(_ condition: @Sendable () async -> Bool) async {
-    for _ in 0..<5_000 {
+/// Waits until `condition` holds, polling every millisecond, for at most
+/// `timeout`, and records a test failure if it never does. Bounded even
+/// when `condition` itself never returns (an actor blocked by a regression):
+/// the polling races a timer, and the wait ends with whichever finishes
+/// first, leaving a stuck poll behind.
+func eventually(
+    timeout: Duration = .seconds(5),
+    fileID: String = #fileID,
+    filePath: String = #filePath,
+    line: Int = #line,
+    column: Int = #column,
+    _ condition: @escaping @Sendable () async -> Bool
+) async {
+    let isMet = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+        let outcome = WaitOutcome(continuation)
+        let timer = Task {
+            try? await Task.sleep(for: timeout)
+            guard !Task.isCancelled else { return }
+            outcome.resume(false)
+        }
+        Task {
+            while !outcome.isResumed {
+                if await condition() {
+                    timer.cancel()
+                    outcome.resume(true)
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(1))
+            }
+        }
+    }
+    if !isMet {
+        Issue.record(
+            "Timed out after \(timeout) waiting for a condition",
+            sourceLocation: SourceLocation(fileID: fileID, filePath: filePath, line: line, column: column)
+        )
+    }
+}
+
+/// Polls `condition` for at most a second, silently: for a fake's own
+/// pacing, where no test expects anything.
+func pace(until condition: @Sendable () async -> Bool) async {
+    for _ in 0..<1_000 {
         if await condition() { return }
         try? await Task.sleep(for: .milliseconds(1))
+    }
+}
+
+/// Resumes a wait once, with the first outcome given.
+private final class WaitOutcome: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    init(_ continuation: CheckedContinuation<Bool, Never>) {
+        self.continuation = continuation
+    }
+
+    var isResumed: Bool {
+        lock.withLock { continuation == nil }
+    }
+
+    func resume(_ value: Bool) {
+        let pending = lock.withLock {
+            defer { continuation = nil }
+            return continuation
+        }
+        pending?.resume(returning: value)
     }
 }
