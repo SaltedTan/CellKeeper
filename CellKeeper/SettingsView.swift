@@ -1030,7 +1030,7 @@ private struct AppearanceTab: View {
                 if let percentageReason {
                     DisabledReason(text: percentageReason)
                 }
-                Text("To see only one battery in the menu bar, you can hide macOS's own battery icon in System Settings › Menu Bar › Battery (in System Settings › Control Center › Battery before macOS Tahoe). CellKeeper never changes that setting.")
+                Text("To see only one battery in the menu bar, you can hide macOS's own battery icon in System Settings › Menu Bar › Battery (Control Center › Battery on older macOS versions). CellKeeper never changes that setting.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
