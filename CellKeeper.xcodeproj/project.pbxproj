@@ -17,6 +17,7 @@
 		C311E0000000000000000303 /* CellKeeper.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = CellKeeper.xcconfig; sourceTree = "<group>"; };
 		C311E0000000000000000304 /* CellKeeperKit */ = {isa = PBXFileReference; lastKnownFileType = wrapper; path = CellKeeperKit; sourceTree = "<group>"; };
 		C311E0000000000000000305 /* CellKeeper.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = CellKeeper.entitlements; sourceTree = "<group>"; };
+		C311E0000000000000000306 /* CellKeeper-SMC.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = "CellKeeper-SMC.entitlements"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -56,6 +57,7 @@
 				C311E0000000000000000302 /* Shared.xcconfig */,
 				C311E0000000000000000303 /* CellKeeper.xcconfig */,
 				C311E0000000000000000305 /* CellKeeper.entitlements */,
+				C311E0000000000000000306 /* CellKeeper-SMC.entitlements */,
 			);
 			path = Config;
 			sourceTree = "<group>";

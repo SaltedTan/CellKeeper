@@ -130,8 +130,13 @@ final class AppModel {
     /// launches. Only then does the menu read the flow every few seconds.
     private(set) var isPowerFlowExpanded: Bool
     /// Where the menu reads the power flow while it is open: macOS's
-    /// battery data, read through the telemetry provider. Display only.
+    /// battery data, read through the telemetry provider, the registry
+    /// track's source. Display only.
     @ObservationIgnored let powerFlowSource: any PowerFlowReading
+    /// The power flow's SMC source (D115): the owner's reader, read about
+    /// once a second while the section is shown. Nil in a build without the
+    /// reader, the default: the source is then absent and nothing is read.
+    @ObservationIgnored private let smcPowerSource: SMCPowerCoordinator?
     /// Runs the menu's reads of the power flow, one at a time, and stops
     /// them when quitting starts.
     @ObservationIgnored private let powerFlowRefresher: PowerFlowRefresher
@@ -239,7 +244,8 @@ final class AppModel {
         weeklyStore: any WeeklyFullChargeStoring = WeeklyFullChargeStore(),
         calibrationStore: any CalibrationStoring = CalibrationStore(),
         notificationPoster: any NotificationPosting = SystemNotificationPoster(),
-        powerFlowSource: (any PowerFlowReading)? = nil
+        powerFlowSource: (any PowerFlowReading)? = nil,
+        smcPowerReader: (any SMCPowerReading)? = AppModel.makeSMCPowerReader()
     ) {
         var loaded = store.loadChargingSettings()
         // While an adoption marker exists, CellKeeper kept a Charge Limit
@@ -261,7 +267,9 @@ final class AppModel {
         self.backendChoice = choice
         let powerFlowSource = powerFlowSource ?? BatteryDataPowerFlowReading(telemetry: telemetry)
         self.powerFlowSource = powerFlowSource
-        self.powerFlowRefresher = PowerFlowRefresher(source: powerFlowSource)
+        let smcPowerSource = smcPowerReader.map { SMCPowerCoordinator(reader: $0) }
+        self.smcPowerSource = smcPowerSource
+        self.powerFlowRefresher = PowerFlowRefresher(source: powerFlowSource, smc: smcPowerSource)
         self.isPowerFlowExpanded = store.string(forKey: Self.powerFlowExpandedKey) == "on"
         // Recovery must not depend on which backend is selected: if a record
         // of the user's own Charge Limit exists, start with the backend that
@@ -361,6 +369,9 @@ final class AppModel {
     }
 
     private func didWake() {
+        // The SMC source's window resets, and the SMC track with it.
+        smcPowerSource?.send(.wake)
+        notePowerFlow { $0.clearSMCTrack() }
         forwardToInProcessHelpers { await $0.systemDidWake() }
         send(.evaluate(.didWake))
         postWakeReread?.cancel()
@@ -416,7 +427,8 @@ final class AppModel {
     /// the caller can restore defaults without involving the main actor.
     func stopForTermination() -> ChargeController {
         isTerminating = true
-        // The menu may stay open through the restore and its alert.
+        // The menu may stay open through the restore and its alert. The SMC
+        // source stops too, without waiting for a read in flight.
         powerFlowRefresher.stop()
         commandSink.finish()
         for task in tasks { task.cancel() }
@@ -758,7 +770,7 @@ final class AppModel {
     /// It contains no serial numbers or other device identifiers.
     func diagnosticsReport() -> String? {
         guard let status else { return nil }
-        return DiagnosticsReport.text(status: status, environment: diagnosticsEnvironment, generatedAt: Date())
+        return DiagnosticsReport.text(status: status, environment: diagnosticsEnvironment, powerFlow: powerFlowDiagnostics, generatedAt: Date())
     }
 
     /// Asks where to save the diagnostics report, then writes it there. Does
@@ -822,9 +834,52 @@ final class AppModel {
         store.set(expanded ? "on" : "off", forKey: Self.powerFlowExpandedKey)
     }
 
-    /// The power flow's note, from its source.
+    /// The power flow's note, from the sample on screen: where its values
+    /// came from (D115), or the registry track's source before the first.
     var powerFlowFootnote: String {
-        powerFlowSource.footnote
+        guard let provenance = powerFlow.provenance else { return powerFlowSource.footnote }
+        return PowerFlowWording.footnote(
+            provenance,
+            isOnExternalPower: powerFlow.shownSample?.powerSource == .externalPower,
+            registrySourceName: powerFlowSource.sourceName,
+            registryUpdateInterval: powerFlowSource.updateInterval
+        )
+    }
+
+    /// What Settings › Diagnostics and the diagnostics report say about the
+    /// power flow's source: where the flow on screen comes from, the SMC
+    /// source's state, and in a build with the reader, a line saying so.
+    var powerFlowDiagnostics: PowerFlowDiagnostics {
+        PowerFlowDiagnostics(
+            smcState: smcPowerSource == nil ? .absent : powerFlow.smcState ?? .probing,
+            shown: powerFlow.provenance,
+            registrySourceName: powerFlowSource.sourceName,
+            readerLine: Self.smcReaderLine
+        )
+    }
+
+    /// The power flow's SMC reader: the owner's, compiled in only with the
+    /// build switch `CELLKEEPER_SMC_READER` on (research note 13 §6.6).
+    /// Nil otherwise: the SMC source is absent, nothing is read, and the
+    /// power flow is D114's.
+    nonisolated static func makeSMCPowerReader() -> (any SMCPowerReading)? {
+        #if CELLKEEPER_SMC_READER
+        return SMCPowerReader()
+        #else
+        return nil
+        #endif
+    }
+
+    /// The diagnostics line naming the SMC reader, in a build with it
+    /// compiled in. Its text exists only inside the `#if`, in code that
+    /// runs, so the string is in the binary exactly when the reader is: CI
+    /// looks for it in both of its Release builds (note 13 §6.6).
+    static var smcReaderLine: String? {
+        #if CELLKEEPER_SMC_READER
+        return "SMC reader: compiled in"
+        #else
+        return nil
+        #endif
     }
 
     /// Where the power flow chart's lines break: the history fills from the
@@ -833,25 +888,35 @@ final class AppModel {
         PowerFlowHistory.lineBreakGap(sourceInterval: powerFlowSource.updateInterval, checkInterval: Self.periodicInterval)
     }
 
-    /// Reads the power flow's source every few seconds while the Power flow
+    /// Refreshes the power flow every few seconds while the Power flow
     /// section is expanded, until the calling task is cancelled or quitting
     /// starts: the menu runs it while it is open (the lead's decision,
-    /// 2026-10-21). Nothing is read while the section is collapsed. Display
-    /// only (``PowerFlowRefresher``): no evaluation, no log line, nothing for
-    /// the controller.
+    /// 2026-10-21). Each tick is the SMC source's window or a read of the
+    /// registry track's source (D115). Nothing is read while the section is
+    /// collapsed. Display only (``PowerFlowRefresher``): no evaluation, no
+    /// log line, nothing for the controller.
     func refreshPowerFlowWhileShown() async {
-        await powerFlowRefresher.run(while: { [weak self] in self?.isPowerFlowExpanded == true }) { [weak self] sample in
-            self?.notePowerFlow { $0.take(sample) }
+        await powerFlowRefresher.run(while: { [weak self] in self?.isPowerFlowExpanded == true }) { [weak self] tick in
+            self?.notePowerFlow { $0.take(tick) }
+        }
+        // Collapsed or closed: the SMC source reset its window, and the SMC
+        // track goes with it, so a reopened menu never shows an old window.
+        if !powerFlowRefresher.isShowing {
+            notePowerFlow { $0.clearSMCTrack() }
         }
     }
 
-    /// Gives the power flow a status's reading or failed read, or a sample
-    /// from the menu's reads; the state orders them by when their reads
-    /// began. The menu redraws only if what it shows changed.
+    /// Gives the power flow a status's reading or failed read, or a tick of
+    /// the menu's refresh; the state orders them. A change of the registry
+    /// track's power source is passed on to the SMC source, which resets
+    /// its window. The menu redraws only if what it shows changed.
     private func notePowerFlow(_ change: (inout PowerFlowState) -> Void) {
         guard !isTerminating else { return }
         var state = powerFlow
         change(&state)
+        if state.registryPowerSource != powerFlow.registryPowerSource {
+            smcPowerSource?.send(.powerSource(state.registryPowerSource))
+        }
         if state != powerFlow { powerFlow = state }
     }
 

@@ -917,9 +917,9 @@ private struct ActivityTab: View {
 }
 
 /// What CellKeeper sees and does, in the diagnostics report's sections
-/// (``DiagnosticsReport/sections(status:environment:)``), in plain words:
-/// without the identifiers and the activity log the report adds. It shows
-/// the latest status and starts no evaluation of its own.
+/// (``DiagnosticsReport/sections(status:environment:powerFlow:)``), in
+/// plain words: without the identifiers and the activity log the report
+/// adds. It shows the latest status and starts no evaluation of its own.
 private struct DiagnosticsTab: View {
     let model: AppModel
     @State private var isCopied = false
@@ -928,7 +928,7 @@ private struct DiagnosticsTab: View {
     var body: some View {
         VStack(alignment: .leading) {
             if let status = model.status {
-                let sections = DiagnosticsReport.sections(status: status, environment: model.diagnosticsEnvironment)
+                let sections = DiagnosticsReport.sections(status: status, environment: model.diagnosticsEnvironment, powerFlow: model.powerFlowDiagnostics)
                 Form {
                     ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
                         if let title = section.title {
