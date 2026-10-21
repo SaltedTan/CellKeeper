@@ -109,7 +109,7 @@ struct PowerFlowSMCWordingTests {
         #expect(section.title == "Power flow")
         #expect(section.rows.map(\.label) == ["Shown from", "SMC source"])
         #expect(section.rows.map(\.value.reportText) == ["macOS's battery data", "absent (not in this build) (absent)"])
-        #expect(section.rows.map { $0.value.plainText { _ in "" } } == ["macOS's battery data", "absent (not in this build)"])
+        #expect(section.rows.map { $0.value.plainText(formattingTime: { _ in "" }) } == ["macOS's battery data", "absent (not in this build)"])
         let text = DiagnosticsReport.text(status: status, environment: environment, powerFlow: absent, generatedAt: referenceDate)
         #expect(text.contains("== Power flow\nShown from: macOS's battery data\nSMC source: absent (not in this build) (absent)\n"))
         #expect(!text.contains("SMC reader"))
@@ -119,7 +119,7 @@ struct PowerFlowSMCWordingTests {
         let compiled = PowerFlowDiagnostics(smcState: .backingOff, shown: .registry, registrySourceName: "macOS's battery data", readerLine: line)
         let withReader = try #require(DiagnosticsReport.sections(status: status, environment: environment, powerFlow: compiled).last)
         #expect(withReader.rows.map(\.label) == ["Shown from", "SMC source", "SMC reader"])
-        #expect(withReader.rows.last?.value.plainText { _ in "" } == "compiled in")
+        #expect(withReader.rows.last?.value.plainText(formattingTime: { _ in "" }) == "compiled in")
         #expect(DiagnosticsReport.text(status: status, environment: environment, powerFlow: compiled, generatedAt: referenceDate).contains("\n\(line)\n"))
     }
 

@@ -21,11 +21,23 @@ private func littleEndian(_ bits: UInt32) -> [UInt8] {
 
 /// A read's values: each key given is read, each nil one failed.
 func smcValues(macUse: Float? = 20, adapterInput: Float? = 30, battery: Int32? = nil) -> [SMCPowerKey: Result<SMCRawValue, SMCKeyReadError>] {
-    [
-        .systemTotalPower: macUse.map { .success(rawFloat($0)) } ?? .failure(.readFailed),
-        .adapterInputPower: adapterInput.map { .success(rawFloat($0)) } ?? .failure(.readFailed),
-        .batteryPower: battery.map { .success(rawInt32($0)) } ?? .failure(.notFound),
+    func value(_ raw: SMCRawValue?, missing: SMCKeyReadError) -> Result<SMCRawValue, SMCKeyReadError> {
+        guard let raw else { return .failure(missing) }
+        return .success(raw)
+    }
+    return [
+        .systemTotalPower: value(macUse.map { rawFloat($0) }, missing: .readFailed),
+        .adapterInputPower: value(adapterInput.map { rawFloat($0) }, missing: .readFailed),
+        .batteryPower: value(battery.map { rawInt32($0) }, missing: .notFound),
     ]
+}
+
+extension PowerFlowTick {
+    /// The tick's display read, if it carries one.
+    var registrySample: PowerFlowSample? {
+        guard case .registry(let sample) = content else { return nil }
+        return sample
+    }
 }
 
 /// A window whose first batch began `began` seconds after

@@ -83,7 +83,7 @@ private final class Deliveries {
 
     /// The ticks' display reads.
     var samples: [PowerFlowSample] {
-        ticks.compactMap { if case .registry(let sample) = $0.content { sample } else { nil } }
+        ticks.compactMap(\.registrySample)
     }
 }
 
