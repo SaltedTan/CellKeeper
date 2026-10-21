@@ -168,3 +168,128 @@ jobs:
             exit 1
           fi
           lipo -archs "${app}/Contents/MacOS/CellKeeper"
+
+      # The power flow's SMC reader is off by default (research note 13
+      # §6.6, architecture D115): the default build's settings name today's
+      # entitlements file and no reader condition, and its binary lacks the
+      # reader's diagnostics line, whose text exists only when the reader is
+      # compiled in. The build below shows the same check finds it.
+      - name: Verify the SMC reader is off by default
+        run: |
+          settings="${RUNNER_TEMP}/settings-default.json"
+          xcodebuild -showBuildSettings -json \
+            -project CellKeeper.xcodeproj \
+            -target CellKeeper \
+            -configuration Release \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
+            > "${settings}"
+          entitlements_file=$(plutil -extract 0.buildSettings.CODE_SIGN_ENTITLEMENTS raw -o - "${settings}")
+          conditions=$(plutil -extract 0.buildSettings.SWIFT_ACTIVE_COMPILATION_CONDITIONS raw -o - "${settings}" 2>/dev/null || true)
+          echo "CODE_SIGN_ENTITLEMENTS = ${entitlements_file}"
+          echo "SWIFT_ACTIVE_COMPILATION_CONDITIONS = ${conditions}"
+          if [ "${entitlements_file}" != "Config/CellKeeper.entitlements" ]; then
+            echo "::error::The default build signs with ${entitlements_file}, not Config/CellKeeper.entitlements"
+            exit 1
+          fi
+          case " ${conditions} " in
+            *" CELLKEEPER_SMC_READER "*)
+              echo "::error::The default build compiles the SMC reader (CELLKEEPER_SMC_READER is among its conditions)"
+              exit 1
+              ;;
+          esac
+          binary="${RUNNER_TEMP}/DerivedData/Build/Products/Release/CellKeeper.app/Contents/MacOS/CellKeeper"
+          test -f "${binary}"
+          if LC_ALL=C grep -a -q -F 'SMC reader: compiled in' "${binary}"; then
+            echo "::error::The default Release binary contains the SMC reader's diagnostics line"
+            exit 1
+          fi
+
+      # A second Release build with the SMC reader compiled in, as the owner
+      # will build it (note 13 §6.6). Its reader is the placeholder, which
+      # reads nothing, until the owner's replaces it; the app is checked,
+      # never run. On every toolchain, like the default build: the switch
+      # changes which files compile and which entitlements are signed, which
+      # each Xcode must handle.
+      - name: Build CellKeeper with the SMC reader (Release, ad-hoc signed)
+        run: |
+          flags=()
+          if [ "${WARNINGS_AS_ERRORS}" = "true" ]; then
+            flags+=(SWIFT_TREAT_WARNINGS_AS_ERRORS=YES)
+          fi
+          xcodebuild build \
+            -quiet \
+            -project CellKeeper.xcodeproj \
+            -scheme CellKeeper \
+            -configuration Release \
+            -destination 'generic/platform=macOS' \
+            -derivedDataPath "${RUNNER_TEMP}/DerivedData-SMC" \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
+            CELLKEEPER_SMC_READER=YES \
+            ${flags[@]+"${flags[@]}"}
+
+      - name: Verify the SMC reader build's settings, entitlements and marker
+        run: |
+          settings="${RUNNER_TEMP}/settings-smc.json"
+          xcodebuild -showBuildSettings -json \
+            -project CellKeeper.xcodeproj \
+            -target CellKeeper \
+            -configuration Release \
+            CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM= \
+            CELLKEEPER_SMC_READER=YES \
+            > "${settings}"
+          entitlements_file=$(plutil -extract 0.buildSettings.CODE_SIGN_ENTITLEMENTS raw -o - "${settings}")
+          conditions=$(plutil -extract 0.buildSettings.SWIFT_ACTIVE_COMPILATION_CONDITIONS raw -o - "${settings}" 2>/dev/null || true)
+          echo "CODE_SIGN_ENTITLEMENTS = ${entitlements_file}"
+          echo "SWIFT_ACTIVE_COMPILATION_CONDITIONS = ${conditions}"
+          if [ "${entitlements_file}" != "Config/CellKeeper-SMC.entitlements" ]; then
+            echo "::error::The SMC reader build signs with ${entitlements_file}, not Config/CellKeeper-SMC.entitlements"
+            exit 1
+          fi
+          case " ${conditions} " in
+            *" CELLKEEPER_SMC_READER "*) ;;
+            *)
+              echo "::error::The SMC reader build does not compile the reader (no CELLKEEPER_SMC_READER condition)"
+              exit 1
+              ;;
+          esac
+
+          app="${RUNNER_TEMP}/DerivedData-SMC/Build/Products/Release/CellKeeper.app"
+          entitlements="${RUNNER_TEMP}/signed-entitlements-smc.plist"
+          codesign --verify --strict --verbose=2 "${app}"
+          codesign --display --entitlements - --xml "${app}" > "${entitlements}"
+          plutil -p "${entitlements}"
+          # Exactly the default build's entitlements, each true, plus the
+          # user-client exception: an array holding exactly AppleSMCClient.
+          unexpected="${RUNNER_TEMP}/unexpected-entitlements-smc.plist"
+          cp "${entitlements}" "${unexpected}"
+          for key in com.apple.security.app-sandbox com.apple.security.files.user-selected.read-write; do
+            keypath=$(printf '%s' "${key}" | sed 's/\./\\./g')
+            if [ "$(plutil -extract "${keypath}" raw -expect bool -o - "${entitlements}")" != "true" ]; then
+              echo "::error::The SMC reader build does not carry ${key} = true"
+              exit 1
+            fi
+            plutil -remove "${keypath}" "${unexpected}"
+          done
+          exception='com\.apple\.security\.temporary-exception\.iokit-user-client-class'
+          if ! plutil -extract "${exception}" raw -expect array -o - "${entitlements}" >/dev/null \
+            || [ "$(plutil -extract "${exception}.0" raw -expect string -o - "${entitlements}")" != "AppleSMCClient" ] \
+            || plutil -extract "${exception}.1" raw -o - "${entitlements}" >/dev/null 2>&1; then
+            echo "::error::The SMC reader build's user-client exception is not an array holding exactly AppleSMCClient"
+            exit 1
+          fi
+          plutil -remove "${exception}" "${unexpected}"
+          if plutil -extract 'com\.apple\.security\.get-task-allow' raw -o - "${entitlements}" >/dev/null 2>&1; then
+            echo "::error::The SMC reader build carries com.apple.security.get-task-allow"
+            exit 1
+          fi
+          if [ "$(plutil -convert json -o - "${unexpected}")" != "{}" ]; then
+            echo "::error::The SMC reader build carries unexpected entitlements:"
+            plutil -p "${unexpected}"
+            exit 1
+          fi
+
+          if ! LC_ALL=C grep -a -q -F 'SMC reader: compiled in' "${app}/Contents/MacOS/CellKeeper"; then
+            echo "::error::The SMC reader build's binary lacks the reader's diagnostics line"
+            exit 1
+          fi
+          echo "The SMC reader build carries the exception and the reader's diagnostics line."
