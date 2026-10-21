@@ -123,13 +123,33 @@ rows with a unit read their units in words, and every other row and
 every element's role are as before. A test over every diagnostics fixture
 requires words for each row whose value writes a unit's symbol (D111).
 
+### Follow-up: the battery-style menu bar icon (D113)
+
+The status item can now show a battery that CellKeeper draws, the default,
+or the status symbol as before (Settings › Appearance). In both styles it
+is one image with the same accessibility label, which already says the
+charge, the charging status and CellKeeper's state: the Battery style
+draws its percentage into the image rather than adding a `Text`, which
+the status item would show as a title, so VoiceOver has nothing more to
+read. The image is a template, so the menu bar draws it in the colour of
+its appearance; a warning or a temperature pause keeps a symbol beside the
+battery, and its meaning is in the label too, so no state depends on
+colour. The new tab follows the others: a `Label` whose title names the
+tab, with an SF Symbol (`menubar.rectangle`). Show percentage is disabled
+with the CellKeeper status style, and says why below it and as its hint
+(D110). Checked in offscreen renders in light, dark and a tinted bar, at
+1× and 2×; the status item itself was not run, because a calibration was
+running on the owner's Mac.
+
 ### For the owner's Mac
 
 With VoiceOver: the slider's value and its 1% steps (M1, M2), the
 announcements of a refused setting and of Copy Diagnostics (G2, G4), the
 weekly Start picker reading the time it shows (W6), a disabled "Charge to
-100% once" or "Discharge Now…" giving its reason as a hint (M14, G9), and
-the Diagnostics rows reading their units in words (G10). With Full
+100% once" or "Discharge Now…" giving its reason as a hint (M14, G9), the
+Diagnostics rows reading their units in words (G10), and the status item
+reading only its label in the Battery style, once, without the
+percentage a second time (D113). With Full
 Keyboard Access: Tab through the menu and Settings, and the slider with
 the arrow keys (M2). With Increase Contrast: the warning and error text
 (M6). These belong with the other owner-only checks in issue #89.
