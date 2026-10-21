@@ -1,7 +1,38 @@
 import Foundation
 
+/// Where a sample's values came from (research note 13 §6.5), so that the
+/// menu's note names the source of what is on screen.
+public struct PowerFlowProvenance: Sendable, Equatable {
+    /// The source of the adapter's input and the Mac's use.
+    public enum SystemSource: Sendable, Equatable {
+        /// The display reads' source (``PowerFlowReading``), macOS's battery
+        /// data, or a controller status's reading of it: the registry track.
+        case registry
+        /// The SMC, averaged over a span of whole seconds.
+        case smc(averagedOver: Duration)
+    }
+
+    /// The source of the battery's power.
+    public enum BatterySource: Sendable, Equatable {
+        case registry
+        case smc
+    }
+
+    public var system: SystemSource
+    public var battery: BatterySource
+
+    public init(system: SystemSource, battery: BatterySource) {
+        self.system = system
+        self.battery = battery
+    }
+
+    /// Every value from the registry track, as before the SMC source.
+    public static let registry = PowerFlowProvenance(system: .registry, battery: .registry)
+}
+
 /// The values the menu's power flow is drawn from, as one source reported
-/// them at one moment (``PowerFlowReading``). Display only, like
+/// them at one moment (``PowerFlowReading``), or an SMC window with the
+/// registry track's metadata (``PowerFlowState``). Display only, like
 /// ``PowerFlow``.
 public struct PowerFlowSample: Sendable, Equatable {
     /// When the source last updated these values, so that two reads of one
@@ -24,6 +55,8 @@ public struct PowerFlowSample: Sendable, Equatable {
     /// The battery's power, signed: positive while it charges, negative
     /// while it supplies the Mac.
     public var batteryWatts: Double?
+    /// Where the values came from.
+    public var provenance: PowerFlowProvenance
 
     public init(
         updatedAt: Date?,
@@ -33,7 +66,8 @@ public struct PowerFlowSample: Sendable, Equatable {
         chargePercent: Int? = nil,
         systemPowerInWatts: Double? = nil,
         systemLoadWatts: Double? = nil,
-        batteryWatts: Double? = nil
+        batteryWatts: Double? = nil,
+        provenance: PowerFlowProvenance = .registry
     ) {
         self.updatedAt = updatedAt
         self.readBegan = readBegan
@@ -43,6 +77,7 @@ public struct PowerFlowSample: Sendable, Equatable {
         self.systemPowerInWatts = systemPowerInWatts
         self.systemLoadWatts = systemLoadWatts
         self.batteryWatts = batteryWatts
+        self.provenance = provenance
     }
 
     /// The values of a battery reading, from macOS's undocumented registry
@@ -62,6 +97,7 @@ public struct PowerFlowSample: Sendable, Equatable {
         } else {
             batteryWatts = nil
         }
+        provenance = .registry
     }
 }
 

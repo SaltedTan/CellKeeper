@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Used only with CELLKEEPER_SMC_READER = YES (Config/Shared.xcconfig,
+	     Config/CellKeeper.xcconfig): Config/CellKeeper.entitlements, kept
+	     identical, plus the one exception the power flow's SMC reader needs
+	     (research note 13 §6.6, architecture D115). Keep both files' shared
+	     entries the same; CI checks the signed app of each build. -->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+	<!-- Lets the sandboxed app open the SMC's user client, AppleSMCClient
+	     (the class the registry shows on the test Mac, note 11 §9), and set
+	     properties on it, for the whole process. It limits neither the keys
+	     nor the operations: the reader's contract binds only CellKeeper's
+	     own code (note 13 §6.6). The minimal entry, widened only on
+	     evidence (O3). -->
+	<key>com.apple.security.temporary-exception.iokit-user-client-class</key>
+	<array>
+		<string>AppleSMCClient</string>
+	</array>
+</dict>
+</plist>

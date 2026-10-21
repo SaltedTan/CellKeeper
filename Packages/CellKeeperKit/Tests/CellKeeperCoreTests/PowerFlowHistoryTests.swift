@@ -15,7 +15,7 @@ let readClockOrigin = ContinuousClock.now
 
 /// `seconds` after ``readClockOrigin`` on the continuous clock.
 func readInstant(_ seconds: Double) -> ContinuousClock.Instant {
-    readClockOrigin.advanced(by: .milliseconds(Int(seconds * 1_000)))
+    readClockOrigin.advanced(by: .milliseconds(Int((seconds * 1_000).rounded())))
 }
 
 extension PowerFlowState {

@@ -244,10 +244,10 @@ extension [DiagnosticsValue] {
 /// report and every value replace that name.
 public enum DiagnosticsReport {
     /// The report's text: a heading with the time it was generated, then
-    /// ``sections(status:environment:)``, then the activity log.
-    public static func text(status: ControllerStatus, environment: DiagnosticsEnvironment, generatedAt: Date) -> String {
+    /// ``sections(status:environment:powerFlow:)``, then the activity log.
+    public static func text(status: ControllerStatus, environment: DiagnosticsEnvironment, powerFlow: PowerFlowDiagnostics? = nil, generatedAt: Date) -> String {
         var lines = ["CellKeeper diagnostics", "Generated: \(timestamp(generatedAt))"]
-        for section in sections(status: status, environment: environment) {
+        for section in sections(status: status, environment: environment, powerFlow: powerFlow) {
             if let title = section.title {
                 lines.append("")
                 lines.append("== \(title)")
@@ -270,8 +270,8 @@ public enum DiagnosticsReport {
     /// Everything the report says apart from when it was generated and the
     /// activity log: the app, macOS and the model, then Control, Settings,
     /// Battery, Decision, with a native-limit backend macOS Charge Limit,
-    /// and, once there has been one, Calibration.
-    public static func sections(status: ControllerStatus, environment: DiagnosticsEnvironment) -> [DiagnosticsSection] {
+    /// once there has been one Calibration, and, when given, Power flow.
+    public static func sections(status: ControllerStatus, environment: DiagnosticsEnvironment, powerFlow: PowerFlowDiagnostics? = nil) -> [DiagnosticsSection] {
         var sections: [DiagnosticsSection] = []
         var title: String?
         var rows: [DiagnosticsRow] = []
@@ -404,8 +404,31 @@ public enum DiagnosticsReport {
             section("Calibration")
             rows.append(contentsOf: calibration)
         }
+        if let powerFlow {
+            section("Power flow")
+            rows.append(contentsOf: powerFlowRows(powerFlow))
+        }
         sections.append(DiagnosticsSection(title: title, rows: rows))
         return sections
+    }
+
+    /// The power flow's rows (D115): where the flow on screen comes from and
+    /// the SMC source's state, never a value; then, in a build with the SMC
+    /// reader compiled in, the app's line saying so (research note 13
+    /// §6.6), split at its first ": " into a label and a value.
+    private static func powerFlowRows(_ powerFlow: PowerFlowDiagnostics) -> [DiagnosticsRow] {
+        var rows = [
+            DiagnosticsRow(label: "Shown from", value: "\(PowerFlowWording.diagnosticsSource(powerFlow.shown, registrySourceName: powerFlow.registrySourceName))"),
+            DiagnosticsRow(label: "SMC source", value: identified(powerFlow.smcState)),
+        ]
+        if let line = powerFlow.readerLine {
+            if let separator = line.range(of: ": ") {
+                rows.append(DiagnosticsRow(label: String(line[..<separator.lowerBound]), value: "\(String(line[separator.upperBound...]))"))
+            } else {
+                rows.append(DiagnosticsRow(label: line, value: ""))
+            }
+        }
+        return rows
     }
 
     /// The guided calibration's rows (research note 12 §7.9): the session

@@ -7,3 +7,11 @@
 // Your Apple Developer team ID and signing identity.
 // DEVELOPMENT_TEAM = ABCDE12345
 // CODE_SIGN_IDENTITY = Apple Development
+
+// The power flow's SMC reader (docs/research/13-smc-power-reads.md §6.6),
+// off by default. YES compiles CellKeeper/SMC/SMCPowerReader.swift and signs
+// the app with Config/CellKeeper-SMC.entitlements, which adds a sandbox
+// exception for the SMC's user client. Until the owner's reader replaces
+// the placeholder, it reads nothing. One-off builds can instead pass
+// CELLKEEPER_SMC_READER=YES on the xcodebuild command line.
+// CELLKEEPER_SMC_READER = YES

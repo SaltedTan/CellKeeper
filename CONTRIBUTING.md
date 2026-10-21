@@ -46,6 +46,23 @@ is a project rule, not a legal opinion or a licence-compatibility review.
 See
 [docs/research/11-smc-adapter-cut.md](docs/research/11-smc-adapter-cut.md).
 
+**Exception (owner decision, 2026-10-21):** for the menu's power flow, a
+display-only feature, contributors may use these facts from OSI-licensed
+open-source projects: the name, meaning, type, size and unit of the SMC
+power keys `PDTR`, `PSTR` and `B0AP`, read at runtime, and of `B0AC` and
+`B0AV`, for the owner's checks only. Each fact is cited in `docs/research`
+with its source and licence and checked on the test Mac. No code, comments
+or other text is copied, and no project's implementation structure (its
+files, types, functions or control flow). The reader that opens the SMC's
+user client and reads these keys is the owner's own, written against
+CellKeeper's interface; contributions add no SMC client code (note 11
+§2.2). Not covered: AlDente or any other proprietary or source-available
+tool, anything obtained from binaries, and any other key or mechanism
+(each needs its own owner decision). This is a project rule, not a legal
+opinion or a licence-compatibility review. See
+[docs/research/13-smc-power-reads.md](docs/research/13-smc-power-reads.md)
+§5.
+
 ### 2. Safety
 
 Read [docs/safety.md](docs/safety.md). In particular:

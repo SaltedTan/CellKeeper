@@ -5,7 +5,20 @@ PRODUCT_BUNDLE_IDENTIFIER = $(CELLKEEPER_BUNDLE_ID_PREFIX).CellKeeper
 MARKETING_VERSION = 0.1.0
 CURRENT_PROJECT_VERSION = 1
 
-CODE_SIGN_ENTITLEMENTS = Config/CellKeeper.entitlements
+// The power flow's SMC reader (research note 13 §6.6): both settings below
+// derive from CELLKEEPER_SMC_READER (Config/Shared.xcconfig, NO by
+// default), through the same _YES/_NO lookups, so they cannot disagree.
+// Only YES selects Config/CellKeeper-SMC.entitlements (today's file plus
+// the AppleSMCClient user-client exception) and compiles the reader;
+// anything else keeps today's file and no condition. This file never sets
+// the switch itself, so it cannot undo the owner's choice.
+CELLKEEPER_SMC_ENTITLEMENTS_SUFFIX_YES = -SMC
+CELLKEEPER_SMC_ENTITLEMENTS_SUFFIX_NO =
+CODE_SIGN_ENTITLEMENTS = Config/CellKeeper$(CELLKEEPER_SMC_ENTITLEMENTS_SUFFIX_$(CELLKEEPER_SMC_READER)).entitlements
+CELLKEEPER_SMC_CONDITION_YES = CELLKEEPER_SMC_READER
+CELLKEEPER_SMC_CONDITION_NO =
+// $(inherited) keeps the project's DEBUG in Debug builds.
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) $(CELLKEEPER_SMC_CONDITION_$(CELLKEEPER_SMC_READER))
 // Release builds must not carry the debugger entitlement (get-task-allow),
 // even when ad-hoc signed.
 CODE_SIGN_INJECT_BASE_ENTITLEMENTS[config=Release] = NO

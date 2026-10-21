@@ -26,4 +26,12 @@ ENABLE_MODULE_VERIFIER = NO
 DEAD_CODE_STRIPPING = YES
 LOCALIZATION_PREFERS_STRING_CATALOGS = YES
 
+// The power flow's SMC reader (research note 13 §6.6, architecture D115):
+// off by default. Only YES turns it on, and then it selects the SMC
+// entitlements file and compiles the reader (Config/CellKeeper.xcconfig).
+// Set it here, at project level and above the include, so that the owner's
+// Local.xcconfig can set YES after it; CI sets it on the xcodebuild command
+// line, which takes precedence over both files.
+CELLKEEPER_SMC_READER = NO
+
 #include? "Local.xcconfig"
