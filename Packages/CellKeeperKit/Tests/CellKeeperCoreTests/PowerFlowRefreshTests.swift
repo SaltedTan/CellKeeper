@@ -78,8 +78,13 @@ private final class Section {
 
 @MainActor
 private final class Deliveries {
-    var samples: [PowerFlowSample] = []
+    var ticks: [PowerFlowTick] = []
     var state = PowerFlowState()
+
+    /// The ticks' display reads.
+    var samples: [PowerFlowSample] {
+        ticks.compactMap { if case .registry(let sample) = $0.content { sample } else { nil } }
+    }
 }
 
 @Suite("Power flow refresh")
@@ -99,11 +104,12 @@ struct PowerFlowRefreshTests {
         _ source: any PowerFlowReading,
         interval: Duration = PowerFlowRefresh.interval,
         while isWanted: @escaping @MainActor @Sendable () -> Bool = { true },
+        smc: (any SMCPowerPublishing)? = nil,
         pauses: Pauses,
-        deliver: @escaping @MainActor @Sendable (PowerFlowSample) -> Void
+        deliver: @escaping @MainActor @Sendable (PowerFlowTick) -> Void
     ) async {
         await Task { @MainActor in
-            await PowerFlowRefresh.run(source: source, interval: interval, while: isWanted, pause: { await pauses.pause($0) }, deliver: deliver)
+            await PowerFlowRefresh.run(source: source, smc: smc, interval: interval, while: isWanted, pause: { await pauses.pause($0) }, deliver: deliver)
         }.value
     }
 
@@ -112,21 +118,23 @@ struct PowerFlowRefreshTests {
         let telemetry = ScriptedTelemetry([reading(0), reading(0), reading(60)])
         let pauses = Pauses(cancellingAfter: 3)
         let deliveries = Deliveries()
-        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), pauses: pauses) { deliveries.samples.append($0) }
+        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), pauses: pauses) { deliveries.ticks.append($0) }
         #expect(await telemetry.reads == 3)
         #expect(await pauses.durations == [.seconds(3), .seconds(3), .seconds(3)])
         #expect(deliveries.samples.map(\.updatedAt) == times([0, 0, 60]))
         #expect(PowerFlowRefresh.interval == .seconds(3))
     }
 
-    @Test("A failed read is skipped and the next one is made")
-    func skipsFailures() async {
+    @Test("A failed read delivers an empty tick, not silence, and the next read is made")
+    func emptyTicks() async {
         let telemetry = ScriptedTelemetry([nil, nil, reading(60)])
         let pauses = Pauses(cancellingAfter: 3)
         let deliveries = Deliveries()
-        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), interval: .seconds(2), pauses: pauses) { deliveries.samples.append($0) }
+        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), interval: .seconds(2), pauses: pauses) { deliveries.ticks.append($0) }
         #expect(await telemetry.reads == 3)
         #expect(await pauses.durations == [.seconds(2), .seconds(2), .seconds(2)])
+        #expect(deliveries.ticks.count == 3)
+        #expect(deliveries.ticks.prefix(2).allSatisfy { $0.content == .empty && $0.smcState == .absent })
         #expect(deliveries.samples.map(\.updatedAt) == times([60]))
     }
 
@@ -135,7 +143,7 @@ struct PowerFlowRefreshTests {
         let telemetry = ScriptedTelemetry([reading(0)])
         let deliveries = Deliveries()
         let task = Task { @MainActor in
-            await PowerFlowRefresh.run(source: BatteryDataPowerFlowReading(telemetry: telemetry), while: { true }, pause: { _ in }) { deliveries.samples.append($0) }
+            await PowerFlowRefresh.run(source: BatteryDataPowerFlowReading(telemetry: telemetry), while: { true }, pause: { _ in }) { deliveries.ticks.append($0) }
         }
         task.cancel()
         await task.value
@@ -148,7 +156,7 @@ struct PowerFlowRefreshTests {
         let telemetry = ScriptedTelemetry([reading(0)])
         let pauses = Pauses(cancellingAfter: 10)
         let deliveries = Deliveries()
-        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), while: { false }, pauses: pauses) { deliveries.samples.append($0) }
+        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), while: { false }, pauses: pauses) { deliveries.ticks.append($0) }
         #expect(await telemetry.reads == 0)
         #expect(await pauses.durations.isEmpty)
         #expect(deliveries.samples.isEmpty)
@@ -165,7 +173,7 @@ struct PowerFlowRefreshTests {
                 source: BatteryDataPowerFlowReading(telemetry: telemetry),
                 while: { section.isExpanded },
                 pause: { _ in await section.paused(collapsingAfter: 2) }
-            ) { deliveries.samples.append($0) }
+            ) { deliveries.ticks.append($0) }
         }.value
         #expect(await telemetry.reads == 2)
         #expect(section.pauses == 2)
@@ -177,7 +185,7 @@ struct PowerFlowRefreshTests {
         let telemetry = ScriptedTelemetry([reading(0), reading(60)], cancelsOnRead: 2)
         let pauses = Pauses(cancellingAfter: 10)
         let deliveries = Deliveries()
-        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), pauses: pauses) { deliveries.samples.append($0) }
+        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), pauses: pauses) { deliveries.ticks.append($0) }
         #expect(await telemetry.reads == 2)
         #expect(await pauses.durations.count == 1)
         #expect(deliveries.samples.map(\.updatedAt) == times([0]))
@@ -203,6 +211,44 @@ struct PowerFlowRefreshTests {
         #expect(deliveries.state.history.points.map(\.updates) == [10, 10, 5])
         #expect(deliveries.state.flow?.macUseWatts == 44)
         #expect(source.footnote == "From a fast source, updated about every second.")
+    }
+
+    @Test("With the SMC source available and a window, the tick carries it and the source is not read; otherwise the source is read")
+    func smcWindows() async {
+        let window = smcWindow(began: 0)
+        let smc = ScriptedPublications([
+            SMCPowerPublication(state: .available, window: window),
+            SMCPowerPublication(state: .available, window: nil),
+            SMCPowerPublication(state: .failing, window: nil),
+            // Defensive: a window is used only while the source is available.
+            SMCPowerPublication(state: .probing, window: window),
+        ])
+        let telemetry = ScriptedTelemetry([reading(0), nil, reading(60)])
+        let pauses = Pauses(cancellingAfter: 4)
+        let deliveries = Deliveries()
+        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), smc: smc, pauses: pauses) { deliveries.ticks.append($0) }
+        #expect(deliveries.ticks.map(\.content.kind) == ["window", "registry", "empty", "registry"])
+        #expect(deliveries.ticks.first?.content == .window(window))
+        #expect(deliveries.ticks.map(\.smcState) == [.available, .available, .failing, .probing])
+        #expect(await telemetry.reads == 3)
+        #expect(await smc.calls == 4)
+        #expect(deliveries.samples.map(\.updatedAt) == times([0, 60]))
+    }
+}
+
+/// An SMC source that hands out the publications given, then nothing new
+/// while failing.
+private actor ScriptedPublications: SMCPowerPublishing {
+    private var publications: [SMCPowerPublication]
+    private(set) var calls = 0
+
+    init(_ publications: [SMCPowerPublication]) {
+        self.publications = publications
+    }
+
+    func publish() -> SMCPowerPublication {
+        calls += 1
+        return publications.isEmpty ? SMCPowerPublication(state: .failing, window: nil) : publications.removeFirst()
     }
 }
 

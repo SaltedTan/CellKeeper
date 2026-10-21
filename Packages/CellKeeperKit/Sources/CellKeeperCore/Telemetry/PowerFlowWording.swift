@@ -13,6 +13,50 @@ public enum PowerFlowWording {
         "From \(sourceName), updated \(cadence(updateInterval))."
     }
 
+    /// The section's note for the sample on screen, from its provenance
+    /// (research note 13 §6.5); `registrySource` is the registry track's.
+    /// From the registry: as ``footnote(sourceName:updateInterval:)``. From
+    /// the SMC: "Adapter and Mac from the SMC, averaged over 3 seconds;
+    /// battery from macOS's battery data, updated about once a minute.", or
+    /// "Adapter, Mac and battery from the SMC, averaged over 3 seconds."
+    /// once the battery's power comes from it too. Off external power the
+    /// adapter has no value, so only the Mac (and the battery) are named.
+    public static func footnote(
+        _ provenance: PowerFlowProvenance,
+        isOnExternalPower: Bool,
+        registrySourceName: String,
+        registryUpdateInterval: Duration
+    ) -> String {
+        guard case .smc(let span) = provenance.system else {
+            return footnote(sourceName: registrySourceName, updateInterval: registryUpdateInterval)
+        }
+        let averaged = "averaged over \(seconds(span))"
+        switch provenance.battery {
+        case .smc:
+            return "\(isOnExternalPower ? "Adapter, Mac and battery" : "Mac and battery") from the SMC, \(averaged)."
+        case .registry:
+            return "\(isOnExternalPower ? "Adapter and Mac" : "Mac") from the SMC, \(averaged); battery from \(registrySourceName), updated \(cadence(registryUpdateInterval))."
+        }
+    }
+
+    /// Where the sample on screen came from, for the diagnostics report:
+    /// "macOS's battery data", "the SMC, averaged over 3 seconds (adapter
+    /// and Mac); macOS's battery data (battery)", or "none" without one.
+    public static func diagnosticsSource(_ provenance: PowerFlowProvenance?, registrySourceName: String) -> String {
+        guard let provenance else { return "none" }
+        guard case .smc(let span) = provenance.system else { return registrySourceName }
+        switch provenance.battery {
+        case .smc: return "the SMC, averaged over \(seconds(span))"
+        case .registry: return "the SMC, averaged over \(seconds(span)) (adapter and Mac); \(registrySourceName) (battery)"
+        }
+    }
+
+    /// A span in whole seconds, in words: "1 second", "3 seconds".
+    static func seconds(_ span: Duration) -> String {
+        let seconds = span.components.seconds
+        return seconds == 1 ? "1 second" : "\(seconds) seconds"
+    }
+
     /// How often a source updates, to the nearest second: "about every
     /// second", "about every 3 seconds", "about once a minute", "about
     /// every 2 minutes", "about every 90 seconds".
