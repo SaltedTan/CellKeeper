@@ -204,7 +204,8 @@ decoded its bytes. The file is not committed.
   or a per-key error (not found, or the read failed). If the user client
   cannot be opened, the whole call throws (refused, or unavailable).
 
-**The owner's reader, one file in its own target, conforms to it:**
+**The owner's reader, one file in the app target, compiled only with the
+build switch on (§6.6), conforms to it:**
 - **Read-only.**
   - **Allowed operations:** for each key asked for, it asks for the key's
     information and reads its bytes, nothing else.
@@ -244,121 +245,158 @@ with no replacement code. To be accepted, the file must:
 - keep no state between calls;
 - log nothing.
 
-**When the reader is absent** (§6.5), CellKeeper never calls anything and
-behaves as today.
+**When the reader is absent** (§6.3, §6.6), CellKeeper never calls
+anything and behaves as today.
 
-### 6.2 Sampling, averaging and the deadline (CellKeeper)
+### 6.2 Sampling, the deadline and threads (CellKeeper)
 
-- **Who samples.** A new sampler owns the reads. While the menu is open,
-  the Power flow section is expanded, and the SMC source is not absent or
-  backing off (§6.4), it runs one batch about once a second.
-  - **Where:** on its own serial executor, never on the main actor and
-    never on the controller's path.
-  - **One at a time:** a tick that finds the previous batch still running
-    is skipped.
-- **Who publishes.** D114's refresher still reads its source every 3 s,
-  one read at a time. With the SMC available, that read does not sample.
-  It takes the window the sampler has collected since the previous read,
-  which returns at once:
-  - the average of that window's valid samples;
-  - or "nothing new", in which case the refresher uses the registry for
-    that tick (§6.4).
-
-  A window is handed out once and then cleared.
-- **The window.** A window holds the valid batches since the last
-  hand-out, normally three.
-  - **Weights:** each batch counts equally. A window with at least one
-    valid batch is published, with its batch count.
-  - **Discarded batches:** those taken before a reset. Resets are:
-    - the section collapsing or the menu closing (the sampler also
-      stops);
-    - the Mac waking;
-    - a power-source change, as AppModel already observes it.
-
-    A batch that begins within 1 s after a power-source change is also
-    discarded, so a window never mixes plugged-in and battery readings.
-- **The deadline.** A batch not finished 2 s after it began is **stalled**.
-  - **The read itself:** it is not cancelled, which can't be done. It is
-    left to finish on its executor, and no new batch starts while it is
-    stuck, so at most one thread waits.
-  - **The display:** the source counts as failing (§6.4), and the display
-    switches to the registry.
-  - **Late results:** when the batch completes, its result is dropped.
-    Every batch carries the sampler's generation, and a stalled batch's
-    generation is retired.
+- **Two places, so a blocked read can't stall the rest.**
+  - **The reader thread:** the reader runs on one dedicated thread used for
+    nothing else, never on the main actor and never on the controller's
+    path.
+  - **The coordinator:** an actor that is never blocked by a read. It owns:
+    - the one-second timer;
+    - each batch's deadline;
+    - the windows (§6.4);
+    - the state (§6.3);
+    - lifecycle: the section shown or hidden, the menu closing, sleep and
+      wake, power-source changes.
+- **Batches.** While the menu is open, the Power flow section is expanded,
+  and the source is not **absent** or **backing off**, the coordinator asks
+  for one batch about once a second. It asks for `PSTR` and `PDTR`, plus
+  `B0AP` once O1 is settled.
+- **One read at a time, physically.** The coordinator keeps an in-flight
+  flag that is set when a batch is handed to the reader thread and cleared
+  only when that call returns.
+  - **No overlap:** while it is set, no batch starts, whatever else
+    happened: a reset, sleep and wake, the menu closed and reopened.
+  - **No pile-up:** at most one thread is ever blocked.
+- **The deadline.** A batch not returned 2 s after it began is **stalled**.
+  - **Not cancelled:** a synchronous read cannot be cancelled. The
+    coordinator counts it as a failure (§6.3) and goes on handling the
+    timer, windows and lifecycle.
+  - **Late results dropped:** every batch carries the coordinator's
+    generation. A stalled batch's generation is retired, and so is the
+    current one at every reset. When a retired batch returns, its result
+    is dropped and the in-flight flag clears. The next batch starts on
+    the following tick.
 - **Quitting** does not wait for a stuck read. The controller's
-  restore-on-quit flow does not depend on the sampler, and the process
+  restore-on-quit flow does not depend on the coordinator, and the process
   exits.
 
-### 6.3 Decoding and validity
+### 6.3 Decoding, validity and states
 
-- **`PDTR` and `PSTR`:**
-  - **Type and length:** `flt `, exactly 4 bytes, little-endian IEEE-754.
-  - **Rejected:** non-finite values (NaN, infinity) and values outside
-    0–500 W, the same bound as D114's registry values.
-- **`B0AP`:** `si32`, exactly 4 bytes, little-endian, within ±300 000 mW.
-  It is read only once O1 settles its sign.
-- **Any mismatch** in type or length makes that key invalid for that
-  batch, never a guessed value.
-- **Required keys.** A batch is valid if `PSTR` is valid and, while on
-  external power, `PDTR` is valid. On battery `PDTR` is not used, so small
-  readings there are not a fault (O2). `B0AP` is optional: when it is
-  missing or invalid, the battery's value comes from the registry, and
-  that does not invalidate the batch.
+- **Decoding and range.**
+  - **`PDTR`, `PSTR`:** `flt `, exactly 4 bytes, little-endian IEEE-754,
+    finite, within 0–500 W (D114's bound for the registry values).
+  - **`B0AP`:** `si32`, exactly 4 bytes, little-endian, within ±300 000 mW.
+  - A key with any other type, length or value is invalid for that batch,
+    never a guessed value.
+- **A valid batch** has a valid `PSTR` and, while the registry track's
+  power source (§6.4) is external power, a valid `PDTR`. On battery `PDTR`
+  is not used, so small readings there are not a fault (O2). `B0AP` never
+  makes a batch invalid.
 
-### 6.4 States, fallback and recovery
-
-| State | Meaning | Display | Leaves when |
+| State | Meaning | Display | Next |
 |---|---|---|---|
-| **absent** | The build has no reader (§6.5) | Registry, as today | Never; only another build changes it |
-| **backing off** | The user client could not be opened (for example, refused by the sandbox) | Registry | A new open attempt succeeds. Attempts are 30 s apart at first, doubling to at most 5 min, and only while the section is shown |
-| **failing** | 3 consecutive batches invalid, or one stalled | Registry | A window of 3 consecutive valid batches → **available** |
-| **available** | Valid windows are being published | SMC averages | 3 consecutive invalid batches or a stall → **failing**; a failed open → **backing off** |
+| **absent** | The build has no reader (§6.6) | Registry track | None; only another build changes it |
+| **probing** | The reader exists; not yet trusted. The start state, and the state after a successful open in **backing off** | Registry track | 3 consecutive valid batches → **available**; a failed open → **backing off** |
+| **available** | Windows are published | SMC track while fresh, else the registry track (§6.4) | 3 consecutive invalid batches, or a stall → **failing**; a failed open → **backing off** |
+| **failing** | Recently invalid or stalled | Registry track | 3 consecutive valid batches → **available**; a failed open → **backing off** |
+| **backing off** | The user client could not be opened (for example, refused by the sandbox) | Registry track | An open attempt 30 s later, doubling to at most 5 min, only while the section is shown. Success → **probing** |
 
-- **What the display shows,** in order:
-  1. while the SMC source is available and a window was published in the
-     last 6 s, the SMC average;
-  2. otherwise the registry, by D114's rules;
-  3. if the registry has nothing either, D114's "no reading".
-- **Late SMC results** never overwrite newer registry data. A late batch is
-  dropped by its generation (§6.2). A published window carries the
-  continuous-clock instant at which its first batch began. Under D114's
-  ordering, it then never replaces a reading that began later.
+**Counting.** The counts of consecutive valid and invalid batches belong
+to the coordinator. They are separate from the windows and are not reset
+when a window is handed out. Batches that take 1.5 s still reach three in
+a row, even if every window holds only one or two of them.
 
-### 6.5 Timestamps, provenance and history
+### 6.4 Windows and arbitration
 
-- **Two times per window.**
-  - **`updatedAt`:** the wall-clock time the window's last batch
-    completed. This is a collection time, not a firmware update time. It
-    gives every window a distinct time, so D114's history neither drops
-    nor merges windows by mistake.
-  - **`readBegan`:** the continuous-clock instant the window's first batch
-    began, conservatively. An average is no newer than its oldest reading.
-    A window delivered late does not look fresh, and is handed out only
-    once.
-- **Provenance travels with each sample**, not with the configured source.
-  Each sample says where its values came from:
-  - **registry:** once a minute;
-  - **SMC:** averaged over the window's seconds;
-  - **mixed:** SMC for the adapter and the Mac, the registry for the
-    battery, which is the case until O1.
+- **Windows.**
+  - **What a window holds:** the valid batches since the last hand-out,
+    in the **available** state only.
+  - **Publishing:** the coordinator publishes a window when D114's
+    refresher asks, every 3 s. If it holds at least one valid batch, it
+    is published as their average, each batch weighted equally, with its
+    batch count; otherwise "nothing new". A window is handed out once and
+    then cleared.
+  - **Resets:** a window is cleared, and the generation retired, when the
+    section collapses or the menu closes (the timer also stops), on wake,
+    and on a power-source change. A batch that begins within 1 s after a
+    power-source change is also discarded. A window never mixes
+    plugged-in and battery readings.
+- **Two tracks in `PowerFlowState`.**
+  - **The registry track** is always kept by D114's rules, whatever the
+    SMC is doing. Every controller status goes through it, with its
+    ordering and its repeat rule (same evaluation time and reading). So a
+    status that arrives while the SMC is shown is still remembered, and
+    if it is delivered again later it is still recognised as a repeat.
+    Display-only registry reads feed it too.
+  - **The SMC track** holds the last accepted SMC window and the
+    continuous-clock instant it was accepted. SMC windows are ordered
+    only among themselves, by the instant their first batch began.
+    Windows are never compared with registry readings, so a registry read
+    that began during a window cannot hide the next window.
+- **One rule decides what is shown.**
+  - **The SMC track:** while the state is **available** and its window was
+    accepted less than 6 s ago (two refresher ticks).
+  - **The registry track:** otherwise, or D114's "no reading" if it has
+    nothing.
+  - **"Accepted"** means taken into the SMC track. That is the moment the
+    window is recorded in the history, once, so a window kept on screen
+    is never recorded again.
+- **Every tick re-decides, even an empty one.**
+  - **Delivery:** every 3 s the refresher delivers to `PowerFlowState`,
+    with or without a sample. With the SMC available and a new window,
+    that window. Otherwise it reads the registry for display, as D114
+    does today, and delivers that reading, or an empty tick if the read
+    fails.
+  - **Re-evaluation:** on every delivery the state re-evaluates the rule
+    above, at the tick's continuous-clock instant. A stalled or failing
+    SMC can therefore not keep an old average on screen beyond 6 s: the
+    next tick switches the display to the registry track, or to "no
+    reading". Today `PowerFlowRefresh.run` skips a read that throws; the
+    implementation changes that so a failed read still delivers an empty
+    tick.
 
-  The footnote is built from the provenance of the sample on screen. For
-  example: "Adapter and Mac from the SMC, averaged over 3 s; battery from
-  macOS's battery data, updated about once a minute." When D114's
-  ordering puts a registry reading on screen, the footnote changes with
-  it.
-- **Statuses while the SMC source is active.** Controller statuses don't
-  replace the SMC display, and don't add registry points to the history.
-  This applies while the source is available and a window was published
-  in the last 6 s. Otherwise the history would mix minute snapshots with
-  3 s averages, and the display would flicker between them. When the
-  section is closed, D114's rules apply unchanged.
-- **The history** gets one point per published window, equally weighted.
-  Its 10 s buckets average about three of them. Partial windows count
-  like full ones, and their batch count is kept for diagnostics.
+### 6.5 Metadata, battery power, provenance and history
 
-### 6.6 The sandbox exception, its scope, and the build option
+- **Metadata comes from the registry track.** A window takes its power
+  source, adapter rating and charge percentage from the registry track's
+  latest reading at the moment it is accepted.
+  - **Why that is current:** controller statuses keep the track current,
+    including while the SMC is shown (§6.4). A power-source change
+    triggers one at once, as today.
+  - **Without a power source** in the registry track, a window is not
+    accepted.
+- **Battery power.**
+  - **Until O1:** it is the registry track's latest battery power
+    (voltage × current), updated about once a minute.
+  - **After O1:** it is the average of the window's `B0AP` values, but
+    only if every batch in the window has a valid `B0AP`. Otherwise the
+    whole window takes the registry track's battery power. One value never
+    combines the two sources.
+- **Provenance travels with each displayed value.** For each displayed
+  sample it says:
+  - which source gave the adapter and Mac values: the SMC averaged over n
+    s, or the registry;
+  - which source gave the battery value: SMC or the registry.
+
+  The footnote is built from the sample on screen, and changes when the
+  display switches tracks. For example: "Adapter and Mac from the SMC,
+  averaged over 3 s; battery from macOS's battery data, updated about once
+  a minute."
+- **The history** records:
+  - each accepted SMC window, once, at acceptance;
+  - registry readings only while the display shows the registry track.
+
+  The chart then never interleaves minute snapshots with 3 s averages.
+  `updatedAt` for a window is the wall-clock time its last batch returned
+  (a collection time, not a firmware update time), so windows never merge
+  or drop by mistake in the history. Its 10 s buckets average about three
+  windows.
+
+### 6.6 The sandbox exception, its scope, and the build switch
 
 - **Why it is needed.** CellKeeper runs in the App Sandbox, which allows
   opening only listed user-client classes; the SMC's is not among them
@@ -372,8 +410,8 @@ behaves as today.
 - **Its scope, independent of the reader.**
   - **What it grants:** in the system profile, opening the named class
     and setting properties on it, for the whole process (note 05 §1.2).
-  - **What it does not limit:** it limits neither the keys nor the
-    operations. The reader's contract binds only CellKeeper's own code.
+  - **What it does not limit:** neither the keys nor the operations. The
+    reader's contract binds only CellKeeper's own code.
   - **If CellKeeper were compromised:** the process could send any
     request the SMC driver accepts from an unprivileged client, including
     attempts to change keys. Whether the driver refuses those without
@@ -385,17 +423,39 @@ behaves as today.
 - **The App Store.** App Review "takes a very dim view" of temporary
   exceptions (note 05 §1.5), so the exception would likely not be
   granted there. CellKeeper is not distributed there.
-- **The build option.** The reader target and the entitlement are added
-  together, by one build setting, off by default.
-  - **When off:** the app has no reader, the SMC source is **absent**, and
-    the entitlements are exactly today's.
-  - **When it is turned on:** only after O3 succeeds.
+- **The build switch: one setting, in this project's xcconfig files.**
+  - **The setting:** `CELLKEEPER_SMC_READER`, `NO` by default in
+    `Config/CellKeeper.xcconfig`. The owner turns it on in their
+    git-ignored `Local.xcconfig`, which `Shared.xcconfig` already
+    includes; CI turns it on on the `xcodebuild` command line.
+  - **What it selects:** two settings derive from it, so they can't
+    disagree:
+    - `CODE_SIGN_ENTITLEMENTS` is today's `Config/CellKeeper.entitlements`
+      or a new `Config/CellKeeper-SMC.entitlements`, which is today's
+      file plus the exception;
+    - `SWIFT_ACTIVE_COMPILATION_CONDITIONS` gains `CELLKEEPER_SMC_READER`
+      only when it is on.
+  - **The reader file:** the reader lives in the app target, in one file
+    whose whole contents are inside `#if CELLKEEPER_SMC_READER`, as is the
+    one line that creates it. With the setting off, no reader code is
+    compiled or linked, the source is **absent**, and the entitlements are
+    exactly today's.
+- **Three stages, so a build with the exception always has a reader
+  compiled in.**
+  - **Agents' step (§7, step 3):** the reader file is a **placeholder**
+    that throws "unavailable" on every call. It contains no SMC code and
+    says it is to be replaced.
+  - **The owner's step (step 4):** the owner replaces the placeholder,
+    with the same type name, in the same file.
+  - **The trial (O3):** uses the owner's reader.
 - **CI.**
-  - Today's check of the signed app's exact boolean entitlements stays
-    for the default build.
-  - A second CI build with the option on checks that the exception is an
-    array holding exactly `AppleSMCClient`, and still rejects any other
-    entitlement.
+  - **The default build:** today's check of exact boolean entitlements
+    stays. CI also checks that the binary has no reader type in its
+    symbols.
+  - **The enabled build:** a second Release build with the setting on.
+    CI checks the exception is an array holding exactly `AppleSMCClient`,
+    that no other entitlement was added, and that the reader type is in
+    the binary's symbols.
 
 ### 6.7 Cost and privacy
 
@@ -411,33 +471,44 @@ behaves as today.
    are in §8.
 2. **Review.** GPT reviews this revision. The owner confirms §5 (a)–(c),
    and the decisions are recorded here.
-3. **Agents build everything above the reader,** with a fake reader, as a
-   pull request with GPT review:
-   - decoding;
-   - the sampler and the deadline;
-   - the windows;
-   - the states;
+3. **Agents build everything above the reader** as a pull request with GPT
+   review:
+   - the coordinator and the reader thread;
+   - decoding and the states;
+   - the windows and the two tracks;
    - provenance and footnotes;
-   - the build option and both CI checks;
+   - the empty-tick delivery in the refresher;
+   - the build switch, with the placeholder reader and both CI checks;
    - CONTRIBUTING's clean-room exception, D114's update and note 05.
 
-   The option stays off. Deterministic tests cover:
+   The switch stays off. Deterministic tests, with a fake reader, cover:
    - malformed values (wrong type, wrong length, non-finite, out of
      range);
-   - an absent reader, a failed open, backing off, failing and
-     recovering;
+   - each state transition, including the start in **probing**, backing
+     off and its success, and recovery with slow batches (1.5 s each);
    - a stalled batch and its late result;
-   - at most one batch at a time;
-   - window resets on collapse, close, wake and power-source changes,
-     and partial windows;
-   - provenance and the footnote;
-   - D114's races, with controller readings and failures arriving during
-     SMC windows;
+   - **one physical read at a time across resets:** a read that hangs
+     before sleep and is still stuck after wake and after the menu is
+     reopened starts no second read, and its result is dropped;
+   - window resets on collapse, close, wake and power-source changes, and
+     partial windows;
+   - the 6 s rule: a published window, then empty ticks (the display
+     moves to the registry track at the next tick after 6 s), then a
+     failed registry read (the display shows "no reading");
+   - **repeats across tracks:** a status delivered while the SMC is
+     shown, then the same status delivered again after the SMC fails,
+     is recognised as a repeat and changes nothing;
+   - metadata and battery power from the registry track, and a window
+     with one invalid `B0AP` (after O1);
+   - provenance and the footnote on every switch between tracks;
+   - the history: one point per accepted window, and no registry points
+     while the SMC is shown;
    - the controller and the calibration never receiving these values.
-4. **The owner writes the reader** against §6.1. GPT and the lead review it
+4. **The owner writes the reader** against §6.1, replacing the placeholder,
+   with the same type name, in the same file. GPT and the lead review it
    against §6.1's acceptance list.
 5. **After the calibration,** when launching a build is safe again:
-   - the owner tries a `.preview` build with the option on (O3);
+   - the owner tries a `.preview` build with the switch on (O3);
    - then they try the app itself, which also covers D114's checks still
      pending on a Mac.
 
