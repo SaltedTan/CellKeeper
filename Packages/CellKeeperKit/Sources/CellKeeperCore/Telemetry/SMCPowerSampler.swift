@@ -257,11 +257,18 @@ struct SMCPowerSampler: Sendable, Equatable {
         }
     }
 
-    /// The reader's call returned. The in-flight flag clears whatever the
-    /// batch's generation; a retired generation's result is dropped.
+    /// The reader's call returned, at `now` on the continuous clock (when the
+    /// call returned, not when the coordinator heard of it). The in-flight
+    /// flag clears whatever the batch's generation. A call that took the
+    /// deadline or longer is a stall even if no tick saw it in flight, and
+    /// its result is dropped; so is a retired generation's.
     mutating func batchReturned(generation batchGeneration: Int, outcome: Outcome, at now: ContinuousClock.Instant, collectedAt: Date) {
         guard let flight = inFlight else { return }
         inFlight = nil
+        if !flight.isStalled, now - flight.began >= configuration.deadline {
+            stall(at: now)
+            return
+        }
         guard batchGeneration == generation else { return }
         switch outcome {
         case .openFailed:

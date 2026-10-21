@@ -256,6 +256,66 @@ struct SMCPowerSamplerFlightTests {
         #expect(driver.tick(8) != nil)
     }
 
+    @Test("A read that returns past its deadline before any tick saw it is a stall: available becomes failing, and it publishes nothing")
+    func lateReturnWithoutTick() {
+        var driver = Driver()
+        driver.makeAvailable()
+        driver.publish()
+        // Begins at 3 s; the next tick is not due before it returns at
+        // 5.1 s, 2.1 s later.
+        let generation = driver.tick(3)
+        #expect(generation != nil)
+        driver.returns(5.1, .read(smcValues(macUse: 50)))
+        #expect(driver.sampler.inFlight == nil)
+        #expect(driver.sampler.state == .failing)
+        #expect(driver.sampler.window.isEmpty)
+        #expect(driver.sampler.consecutiveInvalid == 1)
+        #expect(driver.sampler.generation != generation)
+        #expect(driver.sampler.publish() == SMCPowerPublication(state: .failing, window: nil))
+    }
+
+    @Test("The deadline at return: 1.9 s is accepted, exactly 2 s is a stall")
+    func deadlineAtReturn() throws {
+        var quick = Driver()
+        quick.makeAvailable()
+        quick.publish()
+        quick.tick(3)
+        quick.returns(4.9, .read(smcValues(macUse: 12)))
+        #expect(quick.sampler.state == .available)
+        let window = try #require(quick.sampler.publish().window)
+        #expect(window.macUseWatts == Double(Float(12)))
+
+        var exact = Driver()
+        exact.makeAvailable()
+        exact.publish()
+        exact.tick(3)
+        exact.returns(5, .read(smcValues()))
+        #expect(exact.sampler.state == .failing)
+        #expect(exact.sampler.publish().window == nil)
+    }
+
+    @Test("A late return counts once: a tick that already saw the stall leaves the return to be dropped")
+    func lateReturnAfterTickStall() {
+        var driver = Driver()
+        driver.makeAvailable()
+        let generation = driver.tick(3)
+        driver.tick(5)
+        #expect(driver.sampler.consecutiveInvalid == 1)
+        driver.returns(5.5, .read(smcValues()), generation: generation)
+        #expect(driver.sampler.consecutiveInvalid == 1)
+        #expect(driver.sampler.consecutiveValid == 0)
+    }
+
+    @Test("An open attempt that returns past its deadline counts as a failed open, even when it succeeded")
+    func lateOpenWhileBackingOff() {
+        var driver = Driver()
+        driver.batch(at: 0, .openFailed)
+        #expect(driver.tick(30.2) != nil)
+        driver.returns(32.5, .read(smcValues()))
+        #expect(driver.sampler.state == .backingOff)
+        #expect(driver.sampler.backoff == .seconds(60))
+    }
+
     @Test("A stall while probing restarts its count; one while backing off counts as a failed open")
     func stallElsewhere() {
         var probing = Driver()
