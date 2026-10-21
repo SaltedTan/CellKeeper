@@ -388,6 +388,17 @@ struct PowerFlowStateTests {
         #expect(readings.history.points.count == 3)
     }
 
+    @Test("Two evaluations stamped alike that read differently are not a repeat")
+    func sameEvaluationTimeDifferentRead() {
+        var readings = PowerFlowState()
+        readings.takeStatus(snapshot: powerSnapshot(update: time(0)), evaluatedAt: time(5), readBegan: readInstant(0))
+        #expect(readings.hasSample)
+        readings.takeStatus(snapshot: nil, evaluatedAt: time(5), readBegan: readInstant(1))
+        #expect(!readings.hasSample)
+        readings.takeStatus(snapshot: powerSnapshot(load: 20_000, update: time(60)), evaluatedAt: time(5), readBegan: readInstant(2))
+        #expect(readings.flow?.macUseWatts == 20)
+    }
+
     @Test("A status whose work began before a display read, delivered after it with the same update, does not replace it, nor when delivered again")
     func delayedStatus() {
         var readings = PowerFlowState()
@@ -401,11 +412,12 @@ struct PowerFlowStateTests {
         #expect(readings.flow?.batteryToMacWatts == 12)
         #expect(readings.history.points.count == 1)
         // A later read replaces it.
-        readings.take(snapshot: powerSnapshot(source: .externalPower, update: time(0)), began: 13)
+        readings.take(snapshot: powerSnapshot(source: .externalPower, load: 20_000, update: time(0)), began: 13)
         #expect(readings.flow?.powerSource == .externalPower)
+        #expect(readings.flow?.macUseWatts == 20)
         // The same status delivered again by a later command adds nothing.
-        readings.takeStatus(snapshot: powerSnapshot(source: .battery, current: -1_000, update: time(0)), evaluatedAt: time(12), readBegan: readInstant(20))
-        #expect(readings.flow?.powerSource == .externalPower)
+        readings.takeStatus(snapshot: powerSnapshot(source: .externalPower, update: time(0)), evaluatedAt: time(12), readBegan: readInstant(20))
+        #expect(readings.flow?.macUseWatts == 20)
     }
 
     @Test("An older update that arrives late joins the history but does not replace the flow")

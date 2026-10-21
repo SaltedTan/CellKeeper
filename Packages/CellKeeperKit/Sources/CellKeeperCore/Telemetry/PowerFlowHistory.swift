@@ -284,9 +284,11 @@ public struct PowerFlowState: Sendable, Equatable {
     /// When the read shown began, on the continuous clock: a read that began
     /// earlier never replaces it, whatever the wall clock did meanwhile.
     private var shownReadBegan: ContinuousClock.Instant?
-    /// The evaluation time of the last controller status taken: one
-    /// delivered again, by a command that read nothing, adds nothing.
+    /// The evaluation time and reading of the last controller status
+    /// taken: one delivered again, by a command that read nothing, adds
+    /// nothing.
     private var lastStatusEvaluation: Date?
+    private var lastStatusSnapshot: BatterySnapshot?
 
     public init() {}
 
@@ -306,14 +308,17 @@ public struct PowerFlowState: Sendable, Equatable {
     /// Takes a controller status, for work that began at `readBegan` on the
     /// continuous clock, so that no read made for it began earlier: its
     /// reading, ordered from then, or its failed read, which clears the flow
-    /// unless the read shown began after that work did. A status evaluated
-    /// at the same time as the last one taken is that one delivered again
-    /// (a command that read nothing returns the last status), and adds
-    /// nothing, so a failure or a reading never moves forward in time.
+    /// unless the read shown began after that work did. A status with the
+    /// evaluation time and the reading (or failed read) of the last one
+    /// taken is that one delivered again (a command that read nothing
+    /// returns the last status), and adds nothing, so a failure or a reading
+    /// never moves forward in time. Two evaluations stamped alike that read
+    /// differently both count.
     public mutating func takeStatus(snapshot: BatterySnapshot?, evaluatedAt: Date?, readBegan: ContinuousClock.Instant) {
         if let evaluatedAt {
-            guard evaluatedAt != lastStatusEvaluation else { return }
+            guard evaluatedAt != lastStatusEvaluation || snapshot != lastStatusSnapshot else { return }
             lastStatusEvaluation = evaluatedAt
+            lastStatusSnapshot = snapshot
         }
         if let snapshot {
             var sample = PowerFlowSample(snapshot)
