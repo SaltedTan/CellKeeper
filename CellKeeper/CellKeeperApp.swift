@@ -9,8 +9,19 @@ struct CellKeeperApp: App {
         MenuBarExtra {
             MenuBarView(model: appDelegate.model)
         } label: {
-            Image(systemName: appDelegate.model.menuBarSymbolName)
-                .accessibilityLabel(appDelegate.model.menuBarAccessibilityLabel)
+            // One image either way, with the same label: the Battery style
+            // draws its percentage into the image rather than adding a Text,
+            // which the status item would show as a title of its own.
+            let model = appDelegate.model
+            switch model.menuBarIcon {
+            case .symbol(let name):
+                Image(systemName: name)
+                    .accessibilityLabel(model.menuBarAccessibilityLabel)
+            case .battery(let battery):
+                Image(nsImage: MenuBarIconImage.image(for: battery))
+                    .renderingMode(.template)
+                    .accessibilityLabel(model.menuBarAccessibilityLabel)
+            }
         }
         .menuBarExtraStyle(.window)
 
