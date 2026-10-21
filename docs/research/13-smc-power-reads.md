@@ -1,12 +1,13 @@
 # 13 — Faster power readings from the SMC, read-only
 
 - **Date:** 2026-10-21
-- **Status:** Design, for review; not built. On 2026-10-21 the owner found
+- **Status:** Design approved; not built. GPT approved it in design
+  review r3, and the owner confirmed §5 (a)–(c) on 2026-10-21. On 2026-10-21 the owner found
   the menu's power flow (D114), which updates once a minute, "not too
   helpful". They asked for about 3 s updates while they look at it, and to
   consider the SMC. After the read-only check in §4 they chose the SMC
   route with a reader they write themselves (§5). They paused new work,
-  then resumed it the same day. Revised after design review r1.
+  then resumed it the same day. Revised after design reviews r1–r3.
 - **Machine:** Mac16,1 (MacBook Pro, Apple M4), macOS 27.0.1 (26A434),
   system firmware mBoot-20457.1.29, as in notes 09–12.
 - **Labels:** as in [note 06](06-safety-analysis.md):
@@ -184,7 +185,7 @@ decoded its bytes. The file is not committed.
   CellKeeper code that opens the SMC's user client, reads included. The
   lead's reason for including reads is that a read client shares almost
   all its code with a write client [I].
-- **For the owner to confirm with this design:**
+- **Confirmed by the owner on 2026-10-21, with this design:**
   - **(a) The clean-room exception.** Facts only, for `PDTR`, `PSTR` and
     `B0AP` at runtime, and `B0AC` and `B0AV` for the owner's checks: name,
     meaning, type, size and unit. They come from S1–S3 and are checked on
