@@ -19,6 +19,9 @@ struct SettingsView: View {
             DiagnosticsTab(model: model)
                 .tabItem { Label("Diagnostics", systemImage: "stethoscope") }
                 .tag(SettingsTab.diagnostics)
+            AppearanceTab(model: model)
+                .tabItem { Label("Appearance", systemImage: "menubar.rectangle") }
+                .tag(SettingsTab.appearance)
             AboutTab()
                 .tabItem { Label("About", systemImage: "info.circle") }
                 .tag(SettingsTab.about)
@@ -1002,6 +1005,54 @@ private struct DiagnosticsTab: View {
             try? await Task.sleep(for: .seconds(2))
             isCopied = false
         }
+    }
+}
+
+/// Settings › Appearance: how the menu bar icon looks (``MenuBarIcon``,
+/// D113). Nothing here changes charging, and nothing here needs Manage
+/// charging.
+private struct AppearanceTab: View {
+    let model: AppModel
+
+    var body: some View {
+        let preferences = model.menuBarIconPreferences
+        let percentageReason = preferences.style == .battery ? nil : "The percentage shows only with the Battery icon."
+        Form {
+            Section {
+                Picker("Menu bar icon", selection: binding(\.style)) {
+                    Text("Battery").tag(MenuBarIconStyle.battery)
+                    Text("CellKeeper status").tag(MenuBarIconStyle.status)
+                }
+                .pickerStyle(.radioGroup)
+                Toggle("Show percentage", isOn: binding(\.showsPercentage))
+                    .disabled(percentageReason != nil)
+                    .disabledReasonHint(percentageReason)
+                if let percentageReason {
+                    DisabledReason(text: percentageReason)
+                }
+                Text("To see only one battery in the menu bar, you can hide macOS's own battery icon in System Settings › Menu Bar › Battery (Control Center › Battery on older macOS versions). CellKeeper never changes that setting.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                Text("Menu bar")
+            } footer: {
+                Text("Battery shows the charge as a fill, with a bolt while the battery charges and a plug while your Mac is on power and not charging. Beside it, a warning symbol shows a control fault or a fail-safe, and a thermometer a pause for the battery's temperature. CellKeeper status shows CellKeeper's state as one symbol, as before. Until CellKeeper has read the battery's charge, or on a Mac without a battery, both show the status symbol.")
+                    .footerParagraph()
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private func binding<Value>(_ keyPath: WritableKeyPath<MenuBarIconPreferences, Value>) -> Binding<Value> {
+        Binding(
+            get: { model.menuBarIconPreferences[keyPath: keyPath] },
+            set: { newValue in
+                var preferences = model.menuBarIconPreferences
+                preferences[keyPath: keyPath] = newValue
+                model.setMenuBarIconPreferences(preferences)
+            }
+        )
     }
 }
 

@@ -22,8 +22,8 @@ extension UserDefaults: KeyValueStorage {}
 
 /// Persists settings in `UserDefaults` as JSON. Loaded values are validated;
 /// invalid or unreadable data falls back to defaults rather than being applied.
-/// The selected backend and the notification choice are stored under keys of
-/// their own.
+/// The selected backend, the notification choice and the menu bar icon's
+/// settings are stored under keys of their own.
 public struct SettingsStore {
     public static let chargingSettingsKey = "chargingSettings.v1"
 
@@ -87,6 +87,32 @@ public struct SettingsStore {
 
     public func saveNotificationsEnabled(_ enabled: Bool) {
         defaults.set(enabled ? "on" : "off", forKey: Self.notificationsKey)
+    }
+
+    /// The menu bar icon's style and whether it shows the percentage, each
+    /// under a key of its own, apart from ``ChargingSettings`` like the
+    /// notification choice (D113).
+    public static let menuBarIconStyleKey = "menuBarIconStyle.v1"
+    public static let menuBarPercentageKey = "menuBarPercentage.v1"
+
+    /// The menu bar icon's settings: each one missing or unrecognised gets
+    /// its default (``MenuBarIconPreferences/default``), whatever the other
+    /// holds, so settings saved before these keys existed show the Battery
+    /// style with the percentage.
+    public func loadMenuBarIconPreferences() -> MenuBarIconPreferences {
+        let defaultPreferences = MenuBarIconPreferences.default
+        let style = defaults.string(forKey: Self.menuBarIconStyleKey).flatMap(MenuBarIconStyle.init(rawValue:)) ?? defaultPreferences.style
+        let showsPercentage = switch defaults.string(forKey: Self.menuBarPercentageKey) {
+        case "on": true
+        case "off": false
+        default: defaultPreferences.showsPercentage
+        }
+        return MenuBarIconPreferences(style: style, showsPercentage: showsPercentage)
+    }
+
+    public func saveMenuBarIconPreferences(_ preferences: MenuBarIconPreferences) {
+        defaults.set(preferences.style.rawValue, forKey: Self.menuBarIconStyleKey)
+        defaults.set(preferences.showsPercentage ? "on" : "off", forKey: Self.menuBarPercentageKey)
     }
 
     public func string(forKey key: String) -> String? {

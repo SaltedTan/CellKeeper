@@ -65,6 +65,7 @@ enum SettingsTab: Hashable {
     case control
     case activity
     case diagnostics
+    case appearance
     case about
 }
 
@@ -116,6 +117,9 @@ final class AppModel {
     private(set) var diagnosticsSaveFailure: String?
     /// The user's opt-in to notifications and what macOS allows.
     private(set) var notificationOptIn: NotificationOptIn
+    /// How the menu bar icon looks (D113), saved apart from the charging
+    /// settings.
+    private(set) var menuBarIconPreferences: MenuBarIconPreferences
     /// True once quitting has started; Shortcuts actions then refuse.
     private(set) var isTerminating = false
     /// Provided with the first status, for Shortcuts actions that need one.
@@ -236,6 +240,7 @@ final class AppModel {
         self.telemetry = telemetry
         self.settings = loaded.settings
         self.settingsRecoveryMessage = loaded.recoveryReason
+        self.menuBarIconPreferences = store.loadMenuBarIconPreferences()
         self.backendChoice = choice
         // Recovery must not depend on which backend is selected: if a record
         // of the user's own Charge Limit exists, start with the backend that
@@ -686,6 +691,14 @@ final class AppModel {
         Task { await notifier.setEnabled(enabled) }
     }
 
+    /// Saves how the menu bar icon looks; it changes at once. Nothing about
+    /// charging changes, so no evaluation runs.
+    func setMenuBarIconPreferences(_ preferences: MenuBarIconPreferences) {
+        guard preferences != menuBarIconPreferences else { return }
+        menuBarIconPreferences = preferences
+        store.saveMenuBarIconPreferences(preferences)
+    }
+
     /// Reads again what macOS allows for CellKeeper's notifications, if the
     /// user opted in. Asks the user nothing.
     func refreshNotificationPermission() {
@@ -946,24 +959,16 @@ final class AppModel {
 
     // MARK: - Presentation
 
-    var menuBarSymbolName: String {
-        guard let status, let decision = status.decision else { return "batteryblock" }
-        if status.isBackendFaulted { return "exclamationmark.triangle" }
-        switch decision.state {
-        case .unmanaged: return "batteryblock.slash"
-        case .failSafe: return "exclamationmark.triangle"
-        case .temperaturePause: return "thermometer.high"
-        case .discharging: return "minus.plus.batteryblock"
-        case .holding, .onBattery, .charging, .fullChargeOverride, .safetyFloor, .osEnforcedLimit, .deferringToMacOS, .calibrating:
-            // A state that allows charging does not mean the battery is
-            // charging (unplugged at the safety floor, full at a 100% limit).
-            return status.snapshot?.isCharging == true ? "bolt.batteryblock" : "batteryblock"
-        }
+    /// What the menu bar icon shows: a battery, or CellKeeper's status
+    /// symbol (``MenuBarIcon``, D113).
+    var menuBarIcon: MenuBarIcon {
+        MenuBarIcon(status: status, preferences: menuBarIconPreferences)
     }
 
     /// What the menu bar icon shows, for VoiceOver: the charge, whether the
     /// battery is charging, and CellKeeper's state. The status item exposes
-    /// only a title to accessibility, not a value, so it is all in the label.
+    /// only a title to accessibility, not a value, so it is all in the label,
+    /// whichever style the icon has.
     var menuBarAccessibilityLabel: String {
         guard let status else { return "CellKeeper, reading battery" }
         var parts = ["CellKeeper"]
