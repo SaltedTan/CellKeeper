@@ -1,4 +1,4 @@
-import CellKeeperCore
+@testable import CellKeeperCore
 import Foundation
 import Testing
 
@@ -68,14 +68,16 @@ struct PowerFlowHistoryTests {
         #expect(second.batteryWatts == -12)
     }
 
-    @Test("A reading without the driver's update time or without a flow adds nothing")
+    @Test("A reading without the driver's update time adds nothing; one without a flow is a gap")
     func needsUpdateAndFlow() {
         var history = PowerFlowHistory()
         let withoutUpdate = history.record(powerSnapshot(update: nil))
         #expect(!withoutUpdate)
-        let withoutFlow = history.record(powerSnapshot(load: nil))
-        #expect(!withoutFlow)
         #expect(history.points.isEmpty)
+        // Without a flow: a point without values, a gap.
+        let withoutFlow = history.record(powerSnapshot(load: nil, update: time(0)))
+        #expect(withoutFlow)
+        #expect(history.points == [PowerFlowHistory.Point(time: time(0), adapterInputWatts: nil, macUseWatts: nil, batteryWatts: nil, updates: 1)])
     }
 
     @Test("Points more than two hours older than the newest are dropped")
@@ -116,6 +118,62 @@ struct PowerFlowHistoryTests {
         #expect(added)
         let expected: [TimeInterval] = [299]
         #expect(times(history) == expected)
+    }
+
+    @Test("The clock set back to an update already recorded restarts the history, which then takes later updates")
+    func clockSetBackToRecordedUpdate() {
+        var history = PowerFlowHistory()
+        for minute in 0...10 {
+            history.record(powerSnapshot(update: time(TimeInterval(minute * 60))))
+        }
+        // 0 s was recorded, but it is now ten minutes before the newest.
+        let rolledBack = history.record(powerSnapshot(update: time(0)))
+        #expect(rolledBack)
+        let afterRollback: [TimeInterval] = [0]
+        #expect(times(history) == afterRollback)
+        let next = history.record(powerSnapshot(update: time(60)))
+        #expect(next)
+        let repeated = history.record(powerSnapshot(update: time(60)))
+        #expect(!repeated)
+        let expected: [TimeInterval] = [0, 60]
+        #expect(times(history) == expected)
+        #expect(history.newestTime == time(60))
+    }
+
+    @Test("An update without a flow between two with one breaks every line, within the gap allowed")
+    func unavailableBreaksLines() throws {
+        var history = PowerFlowHistory()
+        history.record(powerSnapshot(update: time(0)))
+        history.record(powerSnapshot(load: nil, update: time(60)))
+        history.record(powerSnapshot(update: time(120)))
+        let chartPoints = history.chartPoints(maximumGap: 180)
+        for series in PowerFlowHistory.Series.allCases {
+            let mine = chartPoints.filter { $0.series == series }
+            #expect(mine.map { $0.time.timeIntervalSince(referenceDate) } == [0, 120], "\(series)")
+            #expect(mine.map(\.segment) == [0, 1], "\(series)")
+        }
+        let gap = try #require(history.points.dropFirst().first)
+        #expect(gap.macUseWatts == nil)
+    }
+
+    @Test("Deduplication keeps only the last five minutes of update times, at most 1,000")
+    func boundedDeduplication() {
+        var history = PowerFlowHistory()
+        // A source updating every second for three hours.
+        for second in 0..<(3 * 60 * 60) {
+            history.record(fastSample(TimeInterval(second)))
+        }
+        #expect(history.recordedUpdateCount <= 301)
+        #expect(history.recordedUpdateCount >= 300)
+        // Ten updates a second for two minutes: the cap holds.
+        var fast = PowerFlowHistory()
+        for tenth in 0..<1_200 {
+            fast.record(fastSample(TimeInterval(tenth) / 10))
+        }
+        #expect(fast.recordedUpdateCount == PowerFlowHistory.maximumRecordedUpdates)
+        // The newest are kept: a repeat of the last update still counts once.
+        let repeated = fast.record(fastSample(119.9))
+        #expect(!repeated)
     }
 
     @Test("Updates within one 10 s bucket are averaged into one point; a second read of one counts once")
@@ -271,15 +329,15 @@ struct PowerFlowStateTests {
         #expect(readings.history.points.count == 1)
     }
 
-    @Test("A reading without the update time, or without a flow, is shown but not recorded")
+    @Test("A reading without the update time is shown but not recorded; one without a flow is recorded as a gap")
     func unrecordedReadings() {
         var readings = PowerFlowState()
         readings.take(snapshot: powerSnapshot(load: 20_000, update: nil))
         #expect(readings.flow?.macUseWatts == 20)
         #expect(readings.history.points.isEmpty)
-        readings.take(snapshot: powerSnapshot(load: nil, update: time(0)))
+        readings.take(snapshot: powerSnapshot(load: nil, update: time(0), at: time(1)))
         #expect(readings.hasSample)
         #expect(readings.flow == nil)
-        #expect(readings.history.points.isEmpty)
+        #expect(readings.history.points.map(\.macUseWatts) == [nil])
     }
 }

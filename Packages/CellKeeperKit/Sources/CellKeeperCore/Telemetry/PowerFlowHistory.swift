@@ -4,22 +4,27 @@ import Foundation
 /// update a source made, at most one point per ``bucketWidth``, the updates
 /// within one averaged. macOS's battery data, updated once a minute, gives
 /// a point per update; a source updating every second would give one per
-/// 10 s. In memory only: never written to disk, so it is gone when
-/// CellKeeper quits. Display only, like ``PowerFlow``.
+/// 10 s. An update without a power flow (macOS reported no power use) is a
+/// point without values, which breaks the chart's lines. Everything kept is
+/// bounded: at most 721 points, and the update times of the last
+/// ``reorderTolerance`` for deduplication, at most
+/// ``maximumRecordedUpdates``. In memory only: never written to disk, so it
+/// is gone when CellKeeper quits. Display only, like ``PowerFlow``.
 public struct PowerFlowHistory: Sendable, Equatable {
     /// One ``bucketWidth`` of updates, averaged.
     public struct Point: Sendable, Equatable {
         /// The newest update averaged into it.
         public let time: Date
-        /// The average of the updates that report it.
+        /// The average of the updates that report it; nil if none does.
         public let adapterInputWatts: Double?
-        public let macUseWatts: Double
+        /// Nil if no update in it had a power flow: a gap in every line.
+        public let macUseWatts: Double?
         /// Signed: positive while charging, negative while supplying.
         public let batteryWatts: Double?
-        /// How many updates it averages.
+        /// How many updates it averages, with and without a power flow.
         public let updates: Int
 
-        public init(time: Date, adapterInputWatts: Double?, macUseWatts: Double, batteryWatts: Double?, updates: Int = 1) {
+        public init(time: Date, adapterInputWatts: Double?, macUseWatts: Double?, batteryWatts: Double?, updates: Int = 1) {
             self.time = time
             self.adapterInputWatts = adapterInputWatts
             self.macUseWatts = macUseWatts
@@ -65,14 +70,25 @@ public struct PowerFlowHistory: Sendable, Equatable {
     /// update older than that means the clock was set back, and the history
     /// starts again from it.
     public static let reorderTolerance: TimeInterval = 5 * 60
+    /// The most update times kept for deduplication, the newest: a second
+    /// read of an older update can then count again in its average, but the
+    /// memory stays bounded whatever the source's cadence.
+    public static let maximumRecordedUpdates = 1_000
     /// The chart's time span, ending at the newest point.
     public static let chartWindow: TimeInterval = 60 * 60
 
     /// Oldest first, one per bucket.
     private var buckets: [Bucket] = []
     /// The updates already averaged in, so that a second read of one counts
-    /// once.
+    /// once: only those of the last ``reorderTolerance`` (an older update
+    /// restarts the history, so it needs none), at most
+    /// ``maximumRecordedUpdates``.
     private var recordedUpdates: Set<Date> = []
+
+    /// How many update times are kept for deduplication.
+    var recordedUpdateCount: Int {
+        recordedUpdates.count
+    }
 
     public init() {}
 
@@ -88,16 +104,21 @@ public struct PowerFlowHistory: Sendable, Equatable {
 
     /// Averages `sample` into its bucket if it carries an update that is not
     /// yet here, and drops points more than ``maximumAge`` older than the
-    /// newest. A sample without the source's update time, or without a power
-    /// flow, adds nothing. Returns whether the update was added.
+    /// newest. An update more than ``reorderTolerance`` older than the newest
+    /// means the clock was set back: the history, and what deduplication
+    /// remembers, start again from it, before it is checked for a repeat. A
+    /// sample without a power flow is kept as a gap; one without the
+    /// source's update time adds nothing. Returns whether the update was
+    /// added.
     @discardableResult
     public mutating func record(_ sample: PowerFlowSample) -> Bool {
-        guard let time = sample.updatedAt, let flow = PowerFlow(sample) else { return false }
-        guard !recordedUpdates.contains(time) else { return false }
+        guard let time = sample.updatedAt else { return false }
         if let newest = newestTime, newest.timeIntervalSince(time) > Self.reorderTolerance {
             buckets = []
             recordedUpdates = []
         }
+        guard !recordedUpdates.contains(time) else { return false }
+        let flow = PowerFlow(sample)
         let index = Self.bucketIndex(of: time)
         // Searched from the newest end: updates mostly arrive in order.
         if let existing = buckets.lastIndex(where: { $0.index <= index }), buckets[existing].index == index {
@@ -108,12 +129,10 @@ public struct PowerFlowHistory: Sendable, Equatable {
         }
         recordedUpdates.insert(time)
         if let newest = newestTime {
-            let count = buckets.count
             buckets.removeAll { newest.timeIntervalSince($0.time) > Self.maximumAge }
-            // Updates of dropped buckets can no longer be added: forget them.
-            if buckets.count < count, let oldest = buckets.first {
-                let start = Date(timeIntervalSinceReferenceDate: Double(oldest.index) * Self.bucketWidth)
-                recordedUpdates = recordedUpdates.filter { $0 >= start }
+            recordedUpdates = recordedUpdates.filter { newest.timeIntervalSince($0) <= Self.reorderTolerance }
+            if recordedUpdates.count > Self.maximumRecordedUpdates {
+                recordedUpdates = Set(recordedUpdates.sorted().suffix(Self.maximumRecordedUpdates))
             }
         }
         return true
@@ -175,22 +194,24 @@ public struct PowerFlowHistory: Sendable, Equatable {
         var battery = Mean()
         var updates = 0
 
-        init(index: Int, flow: PowerFlow, time: Date) {
+        /// `flow` is nil for an update without a power flow, which adds no
+        /// value.
+        init(index: Int, flow: PowerFlow?, time: Date) {
             self.index = index
             self.time = time
             add(flow, at: time)
         }
 
-        mutating func add(_ flow: PowerFlow, at time: Date) {
+        mutating func add(_ flow: PowerFlow?, at time: Date) {
             self.time = max(self.time, time)
-            adapterInput.add(flow.adapterInputWatts)
-            macUse.add(flow.macUseWatts)
-            battery.add(flow.batteryWatts)
+            adapterInput.add(flow?.adapterInputWatts)
+            macUse.add(flow?.macUseWatts)
+            battery.add(flow?.batteryWatts)
             updates += 1
         }
 
         var point: Point {
-            Point(time: time, adapterInputWatts: adapterInput.value, macUseWatts: macUse.value ?? 0, batteryWatts: battery.value, updates: updates)
+            Point(time: time, adapterInputWatts: adapterInput.value, macUseWatts: macUse.value, batteryWatts: battery.value, updates: updates)
         }
     }
 
