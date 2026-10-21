@@ -1,4 +1,4 @@
-import CellKeeperCore
+@testable import CellKeeperCore
 import Foundation
 import Testing
 
@@ -138,6 +138,31 @@ struct NativeLimitPowerTests {
         #expect(status.nativeLimit?.readDeferral == nil)
         #expect(status.currentMode == .nativeLimit(percent: 85))
         #expect(rig.system.runInputs == ["85"])
+    }
+
+    @Test("The settle window counts monotonic time only: a wall clock set forward does not end it, and one set back does not prolong it")
+    func settleWindowIgnoresWallClock() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.system.changeExternally(to: 100)
+        rig.clock.advance(by: 600)
+        var status = await rig.read(.externalPower, 70, .powerSourceChanged)
+        #expect(status.nativeLimit?.readDeferral == .settling)
+
+        // An hour forward on the wall clock, 30 s on the monotonic one.
+        rig.clock.shiftWall(by: 3600)
+        rig.clock.advance(by: 30)
+        status = await rig.read(.externalPower, 70)
+        #expect(status.nativeLimit?.readDeferral == .settling, "30 s of power, whatever the wall clock says")
+        #expect(status.adoptionCount == 0)
+
+        // Two hours back on the wall clock: 60 s of power have passed.
+        rig.clock.shiftWall(by: -7200)
+        rig.clock.advance(by: 30)
+        status = await rig.read(.externalPower, 71)
+        #expect(status.nativeLimit?.readDeferral == nil)
+        #expect(status.adoptedChange?.isNoLimit == true, "judged once 60 s have passed by the monotonic clock")
     }
 
     @Test("On power after the settle window, a genuine no-limit report is kept as today: adopted, Manage charging off")
@@ -400,6 +425,7 @@ struct NativeLimitPowerTests {
         rig.clock.advance(by: 120)
         status = await rig.read(.battery, 74)
         #expect(rig.system.runInputs == ["85", "80"], "not written again while it waits")
+        #expect(status.currentMode == nil, "the owner's limit may be in effect, not only CellKeeper's 85%")
         rig.system.isActiveLimitCleared = false
         status = await rig.read(.externalPower, 74, .powerSourceChanged)
         #expect(status.nativeLimit?.ownerLimit == nil, "the restore is confirmed by macOS showing the owner's 80%")
@@ -463,6 +489,77 @@ struct NativeLimitPowerTests {
         status = try await rig.controller.apply(settings: rig.settings(limit: 95))
         #expect(status.lastExecution?.result == .deferred(written: false))
         #expect(status.consecutiveFailures == 1)
+    }
+
+    // MARK: - A value written and not confirmed (review of PR #110)
+
+    /// Settled on power at CellKeeper's 85%, unplugged, plugged in again,
+    /// and a full charge started inside the settle window: 100% is written
+    /// and macOS's "no limit" read-back cannot confirm it yet.
+    private func fullChargeAwaitingConfirmation(sourceLocation: SourceLocation = #_sourceLocation) async -> PowerRig {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.clock.advance(by: 600)
+        _ = await rig.read(.externalPower, 74, .powerSourceChanged)
+        let status = await rig.controller.startFullCharge()
+        #expect(rig.system.runInputs == ["85", "100"], sourceLocation: sourceLocation)
+        #expect(rig.system.reading == .noLimit, "macOS is at 100%", sourceLocation: sourceLocation)
+        #expect(status.lastExecution?.result == .deferred(written: true), sourceLocation: sourceLocation)
+        #expect(status.nativeLimit?.target == 85, sourceLocation: sourceLocation)
+        #expect(status.nativeLimit?.pendingLimits == [100], sourceLocation: sourceLocation)
+        return rig
+    }
+
+    @Test("A full charge that ends on an unplug before its 100% is confirmed asks for the return at once")
+    func fullChargeEndsBeforeConfirmed() async throws {
+        let rig = await fullChargeAwaitingConfirmation()
+        rig.clock.advance(by: 61)
+        let status = await rig.read(.battery, 76, .powerSourceChanged)
+        #expect(status.activeOverride == nil)
+        #expect(rig.system.runInputs == ["85", "100", "85"], "the return, not skipped for the limit last confirmed")
+        #expect(rig.system.reading == .limit(85))
+        #expect(status.currentMode == .nativeLimit(percent: 85))
+        #expect(status.nativeLimit?.pendingLimits == [])
+        #expect(status.consecutiveFailures == 0)
+    }
+
+    @Test("A full charge cancelled before its 100% is confirmed asks for the return as soon as the rate limit allows, and an unplug does not lose it")
+    func fullChargeCancelledBeforeConfirmed() async throws {
+        let rig = await fullChargeAwaitingConfirmation()
+        rig.clock.advance(by: 20)
+        var status = await rig.controller.cancelOverride()
+        #expect(status.activeOverride == nil)
+        #expect(status.currentMode == nil, "100% may be in effect")
+        guard case .refuse(.rateLimited)? = status.decision?.action else {
+            Issue.record("the return is not asked for: \(String(describing: status.decision?.action))")
+            return
+        }
+        rig.clock.advance(by: 41)
+        status = await rig.read(.battery, 75, .powerSourceChanged)
+        #expect(rig.system.runInputs == ["85", "100", "85"])
+        #expect(rig.system.reading == .limit(85))
+    }
+
+    @Test("Nothing takes the limit last confirmed for the one in effect while another is written and not confirmed")
+    func pendingValueIsNotTakenAsConfirmed() async throws {
+        let rig = await fullChargeAwaitingConfirmation()
+        rig.system.isActiveLimitCleared = true
+        let status = await rig.read(.externalPower, 76)
+        #expect(status.nativeLimit?.readDeferral == .settling)
+        #expect(status.currentMode == nil)
+        #expect(!status.isNativeLimitSettled)
+        #expect(CalibrationWording.limitAfter(status) == .notJudged(.settling))
+        let environment = DiagnosticsEnvironment(appVersion: "0.1.0 (1)", systemVersion: "Version 27.0.1", modelIdentifier: "Mac16,1")
+        let report = DiagnosticsReport.text(status: status, environment: environment, generatedAt: rig.clock.now)
+        #expect(report.contains("Reported mode: unknown"))
+        #expect(report.contains("CellKeeper's limit: 85% confirmed; 100% written, not confirmed yet"))
+        #expect(rig.system.runInputs == ["85", "100"], "100% is not written again while it waits")
+
+        #expect(ChargeController.modeInEffect(.nativeLimit(percent: 85), native: NativeLimitStatus(ownerLimit: 80, target: 85, pendingLimits: [100], readDeferral: .onBattery)) == nil)
+        #expect(ChargeController.modeInEffect(.nativeLimit(percent: 85), native: NativeLimitStatus(ownerLimit: 80, target: 85, isRestoreUnfinished: true, readDeferral: .onBattery)) == nil)
+        #expect(ChargeController.modeInEffect(.nativeLimit(percent: 85), native: NativeLimitStatus(ownerLimit: 80, target: 85, readDeferral: .onBattery)) == .nativeLimit(percent: 85), "nothing else of CellKeeper's may be in effect")
+        #expect(ChargeController.modeInEffect(.nativeLimit(percent: 85), native: NativeLimitStatus(ownerLimit: 80, target: 85, pendingLimits: [100])) == .nativeLimit(percent: 85), "a judged read")
     }
 }
 

@@ -326,6 +326,9 @@ public struct NativeLimitStatus: Sendable, Equatable {
     public var ownerLimit: Int?
     /// The limit CellKeeper last confirmed while responsible for it.
     public var target: Int?
+    /// Limits CellKeeper wrote, or started to write, since ``target`` was
+    /// confirmed, ascending: any of them may be in effect instead.
+    public var pendingLimits: [Int]
     /// A record of the user's limit exists but cannot be read. CellKeeper
     /// may have changed the setting and cannot know what to restore.
     public var isRecordUnreadable: Bool
@@ -369,6 +372,7 @@ public struct NativeLimitStatus: Sendable, Equatable {
         readProblem: String? = nil,
         ownerLimit: Int? = nil,
         target: Int? = nil,
+        pendingLimits: [Int] = [],
         isRecordUnreadable: Bool = false,
         needsNoLimitConfirmation: Bool = false,
         isRestoreUnfinished: Bool = false,
@@ -384,6 +388,7 @@ public struct NativeLimitStatus: Sendable, Equatable {
         self.readProblem = readProblem
         self.ownerLimit = ownerLimit
         self.target = target
+        self.pendingLimits = pendingLimits
         self.isRecordUnreadable = isRecordUnreadable
         self.needsNoLimitConfirmation = needsNoLimitConfirmation
         self.isRestoreUnfinished = isRestoreUnfinished

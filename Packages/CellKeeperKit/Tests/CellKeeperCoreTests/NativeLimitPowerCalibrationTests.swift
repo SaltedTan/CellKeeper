@@ -163,6 +163,43 @@ struct NativeLimitPowerCalibrationTests {
         #expect(rig.system.reading == .limit(80))
     }
 
+    @Test("A calibration that ends on an unplug in step 7, before its 100% is confirmed, asks for the return at once")
+    func finalChargeUnpluggedBeforeConfirmed() async throws {
+        let rig = CalibrationRig.settling()
+        _ = await rig.startedSettled()
+        rig.clock.advance(by: hour)
+        _ = await rig.read(calibrationReading(100, charging: false, full: true))
+        rig.clock.advance(by: 2 * hour)
+        _ = await rig.read(calibrationReading(100, charging: false, full: true))
+        rig.clock.advance(by: 600)
+        _ = await rig.read(calibrationReading(99, .battery), .powerSourceChanged)
+        rig.clock.advance(by: 4 * hour)
+        _ = await rig.read(calibrationReading(20, .battery))
+        _ = await rig.read(calibrationReading(18, .battery), .willSleep)
+        rig.clock.advance(by: 5.1 * hour)
+        var status = await rig.read(calibrationReading(17, .battery), .didWake)
+        #expect(status.calibration.session?.step == .plugIn)
+
+        // Plugged in: step 7 writes 100%, which a no-limit read-back inside
+        // the settle window cannot confirm yet.
+        status = await rig.read(calibrationReading(17), .powerSourceChanged)
+        #expect(status.calibration.session?.step == .finalCharge)
+        #expect(rig.system.runInputs.last == "100")
+        #expect(rig.system.reading == .noLimit)
+        #expect(status.nativeLimit?.pendingLimits == [100])
+        #expect(!status.calibration.isFullLimitConfirmed)
+
+        // Unplugged again before that: the session ends, and the return to
+        // 80% is asked for at once, not skipped for the 80% last confirmed.
+        rig.clock.advance(by: 61)
+        status = await rig.read(calibrationReading(18, .battery), .powerSourceChanged)
+        #expect(status.calibration.last?.end == .unplugged(.finalCharge))
+        #expect(rig.system.runInputs.last == "80")
+        #expect(rig.system.reading == .limit(80))
+        #expect(status.currentMode == .nativeLimit(percent: 80))
+        #expect(status.consecutiveFailures == 0)
+    }
+
     @Test("Opened again on battery power after a quit in step 5: the check against the owner's own limit waits for power, and then passes or ends the session as before")
     func launchCheckWaitsForPower() async throws {
         for found in [90, 95] {

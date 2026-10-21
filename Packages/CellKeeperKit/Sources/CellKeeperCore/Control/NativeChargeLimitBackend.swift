@@ -413,7 +413,11 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     /// For a read that cannot be judged and shows no active limit the
     /// record accounts for: the record stands as it is (a first contact
     /// stays one), and the limit CellKeeper last confirmed is reported, as
-    /// CellKeeper's, until a read that is judged settles it.
+    /// CellKeeper's, until a read that is judged settles it. While a value
+    /// written since, or a restore, may be in effect instead
+    /// (``NativeLimitStatus/pendingLimits``,
+    /// ``NativeLimitStatus/isRestoreUnfinished``), that report is only the
+    /// record's: the controller then takes the mode in effect as unknown.
     private func reportDeferred(_ owned: OwnershipRecord) -> ChargeControlMode {
         lastReadDeferral = readCondition
         isLastReportedStateOwn = true
@@ -441,6 +445,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         case .owned(let owned):
             status.ownerLimit = owned.ownerLimit
             status.target = owned.target
+            status.pendingLimits = owned.pendingTargets.sorted()
             status.isRestoreUnfinished = owned.isRestoring
         case .unreadable:
             status.isRecordUnreadable = true

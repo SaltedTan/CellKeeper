@@ -57,8 +57,9 @@ import os
 ///   CellKeeper manages charging again.
 /// - With a native-limit backend, `.normal` means the user's own macOS Charge
 ///   Limit, so every path above restores exactly that value. If the backend
-///   remembers a limit it set in an earlier session (which a normal quit
-///   never leaves behind), that limit counts as CellKeeper's own, so a change
+///   remembers a limit it set in an earlier session (which a quit whose
+///   restore was confirmed never leaves behind), that limit counts as
+///   CellKeeper's own, so a change
 ///   made while CellKeeper was not running is detected like any other
 ///   external change, and the user's limit is restored before anything
 ///   else.
@@ -1577,17 +1578,21 @@ public actor ChargeController {
             isOwnedStateUnverified = holdsNonNormalState
             return
         }
-        currentMode = observed
         nativeLimit = await backend.nativeLimitStatus()
+        // The comparisons below use what the backend reported; only what is
+        // taken to be in effect may be unknown.
+        currentMode = Self.modeInEffect(observed, native: nativeLimit)
         if !hasSeededOwnership {
             hasSeededOwnership = true
             if ownedMode == nil, let target = nativeLimit?.target {
                 ownedMode = .nativeLimit(percent: target)
             }
             if let ownerLimit = nativeLimit?.ownerLimit {
-                // A normal quit restores the limit and deletes the record, so
-                // a record here means an earlier session did not finish. Its
-                // markers may be stale, so restore before anything else.
+                // A quit whose restore was confirmed deletes the record, so a
+                // record here means an earlier session did not finish giving
+                // the limit back (a crash, or a quit whose restore waited for
+                // power, D116). Its markers may be stale, so restore before
+                // anything else.
                 isRestoreOutstanding = true
                 let left = nativeLimit?.target.map { " at \($0)%" } ?? ""
                 record(.safety, "An earlier CellKeeper session left macOS's Charge Limit changed\(left); CellKeeper will finish restoring your own limit of \(ownerLimit)% first.")
@@ -1630,6 +1635,22 @@ public actor ChargeController {
                 record(.safety, "Charging mode changed outside CellKeeper (expected \(describeTarget(owned)), found \(describeTarget(observed))); another tool may be controlling charging. Backend faulted; restoring normal charging.", level: .fault)
             }
         }
+    }
+
+    /// What is taken to be in effect after a read that reported `observed`:
+    /// that mode, or nil (unknown) when a native-limit backend reported the
+    /// limit it last confirmed in place of a read it could not judge, while
+    /// another value of CellKeeper's may be in effect instead: one written
+    /// and not confirmed, or a restore (D116; review of PR #110). The policy
+    /// then asks for what it wants even if that is the confirmed limit, so a
+    /// return from 100% is never skipped (the backend does not write a value
+    /// already waiting for its read-back again), and no check counts it as
+    /// in effect or confirmed.
+    static func modeInEffect(_ observed: ChargeControlMode?, native: NativeLimitStatus?) -> ChargeControlMode? {
+        guard let native, native.readDeferral != nil, native.ownerLimit != nil,
+              !native.pendingLimits.isEmpty || native.isRestoreUnfinished
+        else { return observed }
+        return nil
     }
 
     /// Notes when external power began, for ``chargeLimitReadCondition(at:)``:

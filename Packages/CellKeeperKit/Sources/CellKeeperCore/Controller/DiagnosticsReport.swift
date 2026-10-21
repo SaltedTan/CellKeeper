@@ -388,7 +388,10 @@ public enum DiagnosticsReport {
                 field("Own limit", "\(native.ownerLimit.map { "\($0)% recorded" } ?? "not recorded (in effect)")")
             }
             if let target = native.target {
-                field("CellKeeper's limit", "\(target)%")
+                // The limit last confirmed; one written since may be in
+                // effect instead.
+                let pending = native.pendingLimits.map { "\($0)%" }.joined(separator: ", ")
+                field("CellKeeper's limit", "\(target)%\(pending.isEmpty ? "" : " confirmed; \(pending) written, not confirmed yet")")
             }
             field("Shortcut found", "\(native.isShortcutFound.map { $0 ? "yes" : "no" } ?? "not checked")")
             var flags: [String] = []
