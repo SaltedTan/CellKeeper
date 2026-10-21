@@ -159,5 +159,17 @@ struct CalibrationHoldUntilUnplugTests {
         session.drainStartPercent = 80
         try store.saveCalibration(CalibrationStored(session: session))
         #expect(store.loadCalibration() == .stored(CalibrationStored(session: session)))
+
+        var report = CalibrationReport(session, end: .cancelled, at: referenceDate, after: nil)
+        for percent in [-1, 101] {
+            report.drainStartPercent = percent
+            try store.saveCalibration(CalibrationStored(last: report))
+            #expect(store.loadCalibration() == .unusable(reason: "its report's battery readings are not valid"), "a report with a drain start of \(percent)%")
+        }
+        for percent in [0, 100, nil] as [Int?] {
+            report.drainStartPercent = percent
+            try store.saveCalibration(CalibrationStored(last: report))
+            #expect(store.loadCalibration() == .stored(CalibrationStored(last: report)), "a report with a drain start of \(percent.map(String.init) ?? "none")")
+        }
     }
 }
