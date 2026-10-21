@@ -136,9 +136,13 @@ struct PowerFlowHistoryTests {
         #expect(next)
         let repeated = history.record(powerSnapshot(update: time(60)))
         #expect(!repeated)
-        let expected: [TimeInterval] = [0, 60]
+        // An update the history had before the clock was set back is new
+        // again.
+        let seenBefore = history.record(powerSnapshot(update: time(360)))
+        #expect(seenBefore)
+        let expected: [TimeInterval] = [0, 60, 360]
         #expect(times(history) == expected)
-        #expect(history.newestTime == time(60))
+        #expect(history.newestTime == time(360))
     }
 
     @Test("An update without a flow between two with one breaks every line, within the gap allowed")

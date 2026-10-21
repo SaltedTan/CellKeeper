@@ -61,6 +61,11 @@ private final class Received {
     var samples: [PowerFlowSample] = []
 }
 
+@MainActor
+private final class Ended {
+    var value = false
+}
+
 @Suite("Power flow refresher")
 @MainActor
 struct PowerFlowRefresherTests {
@@ -122,6 +127,29 @@ struct PowerFlowRefresherTests {
         await refresher.run(while: { true }) { received.samples.append($0) }
         #expect(await source.reads == 1)
         #expect(received.samples.isEmpty)
+    }
+
+    @Test("Quitting ends a run waiting between reads at once")
+    func stopDuringPause() async {
+        let source = SuspendedSource()
+        await source.release()
+        let refresher = PowerFlowRefresher(source: source, pause: { _ in try? await Task.sleep(for: .seconds(3_600)) })
+        let received = Received()
+        let ended = Ended()
+        let run = Task {
+            await refresher.run(while: { true }) { received.samples.append($0) }
+            ended.value = true
+        }
+        for _ in 0..<100_000 where received.samples.isEmpty { await Task.yield() }
+        #expect(received.samples.count == 1)
+        refresher.stop()
+        for _ in 0..<100_000 where !ended.value { await Task.yield() }
+        #expect(ended.value)
+        // Should it not have ended, the caller's cancellation ends it, so a
+        // regression fails here instead of hanging.
+        run.cancel()
+        await run.value
+        #expect(await source.reads == 1)
     }
 
     @Test("Cancelling the calling task, as the menu closing does, ends the run")
