@@ -94,9 +94,17 @@ struct PowerFlowRefresherTests {
         let source = SuspendedSource()
         let refresher = PowerFlowRefresher(source: source, pause: { _ in try? await Task.sleep(for: .seconds(3_600)) })
         let received = Received()
-        let first = Task { await refresher.run(while: { true }) { received.samples.append($0) } }
+        let firstEnded = Ended()
+        let secondEnded = Ended()
+        let first = Task {
+            await refresher.run(while: { true }) { received.samples.append($0) }
+            firstEnded.value = true
+        }
         await source.untilReads(1)
-        let second = Task { await refresher.run(while: { true }) { received.samples.append($0) } }
+        let second = Task {
+            await refresher.run(while: { true }) { received.samples.append($0) }
+            secondEnded.value = true
+        }
         await refresher.source.untilWaiting(1)
         #expect(await refresher.source.waitingReads == 1)
         #expect(await source.reads == 1)
@@ -106,6 +114,13 @@ struct PowerFlowRefresherTests {
         #expect(await source.mostInFlight == 1)
         first.cancel()
         second.cancel()
+        await untilEnded(firstEnded)
+        await untilEnded(secondEnded)
+        #expect(firstEnded.value)
+        #expect(secondEnded.value)
+        // Should a run not have ended, quitting ends it, so a regression
+        // fails here instead of hanging.
+        refresher.stop()
         await first.value
         await second.value
     }
@@ -143,7 +158,7 @@ struct PowerFlowRefresherTests {
         for _ in 0..<100_000 where received.samples.isEmpty { await Task.yield() }
         #expect(received.samples.count == 1)
         refresher.stop()
-        for _ in 0..<100_000 where !ended.value { await Task.yield() }
+        await untilEnded(ended)
         #expect(ended.value)
         // Should it not have ended, the caller's cancellation ends it, so a
         // regression fails here instead of hanging.
@@ -157,13 +172,29 @@ struct PowerFlowRefresherTests {
         let source = SuspendedSource()
         let refresher = PowerFlowRefresher(source: source, pause: { _ in })
         let received = Received()
-        let run = Task { await refresher.run(while: { true }) { received.samples.append($0) } }
+        let ended = Ended()
+        let run = Task {
+            await refresher.run(while: { true }) { received.samples.append($0) }
+            ended.value = true
+        }
         await source.untilReads(1)
         run.cancel()
         await source.release()
-        await run.value
+        await untilEnded(ended)
+        #expect(ended.value)
         #expect(received.samples.isEmpty)
         #expect(await source.reads == 1)
         #expect(!refresher.isStopped)
+        // Should the run not have ended, quitting ends it, so a regression
+        // fails here instead of hanging.
+        refresher.stop()
+        await run.value
+    }
+
+    /// Waits a bounded time for a run to end.
+    private func untilEnded(_ ended: Ended) async {
+        for _ in 0..<100_000 where !ended.value {
+            await Task.yield()
+        }
     }
 }
