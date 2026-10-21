@@ -28,7 +28,7 @@ struct CalibrationDiagnosticsTests {
         #expect(value(section, "Session") == "step 5 of 7, rest at the bottom")
         #expect(value(section, "Plug in again after") != nil)
         #expect(value(section, "Session ends at the latest") != nil)
-        #expect(value(section, "Limits") == "your own 90%, CellKeeper's 80% when it started; 100% asked for only in steps 1, 2 and 7")
+        #expect(value(section, "Limits") == "your own 90%, CellKeeper's 80% when it started; 100% asked for only in steps 1, 2, 3 and 7")
         #expect(value(section, "Temperature") == "not readable; the owner confirmed a room at 10–35 °C")
         #expect(value(section, "Last calibration") == nil)
     }

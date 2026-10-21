@@ -349,7 +349,7 @@ struct CalibrationRunner {
         isFullLimitHeld = false
         outcome = nil
         refusal = nil
-        log.append("Calibration started: step 1 (\(CalibrationStep.chargeToFull)). CellKeeper asks for macOS's Charge Limit at 100% in steps 1, 2 and 7 only; your own limit is \(new.ownerLimit)%.")
+        log.append("Calibration started: step 1 (\(CalibrationStep.chargeToFull)). CellKeeper asks for macOS's Charge Limit at 100% in steps 1, 2, 3 and 7 only, keeping it in step 3 until you unplug; your own limit is \(new.ownerLimit)%.")
         return true
     }
 

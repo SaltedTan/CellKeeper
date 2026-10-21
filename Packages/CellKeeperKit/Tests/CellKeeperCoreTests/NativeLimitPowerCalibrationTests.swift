@@ -41,12 +41,14 @@ struct NativeLimitPowerCalibrationTests {
         rig.clock.advance(by: 2 * hour)
         status = await rig.read(calibrationReading(100, charging: false, full: true))
         #expect(status.calibration.session?.step == .unplug)
-        #expect(rig.system.runInputs == ["100", "80"])
+        #expect(rig.system.runInputs == ["100"], "100% stays until the unplug")
 
-        // 16:49:19, unplugged: step 4.
+        // 16:49:19, unplugged: step 4, and the return to 80% at once.
         rig.clock.advance(by: 2 * hour)
         status = await rig.read(calibrationReading(97, .battery), .powerSourceChanged)
         #expect(status.calibration.session?.step == .drain)
+        #expect(status.calibration.session?.drainStartPercent == 97)
+        #expect(rig.system.runInputs == ["100", "80"])
 
         // 16:54:20, PowerUIAgent clears its limit; 16:54:45, a periodic
         // check reads "no limit".

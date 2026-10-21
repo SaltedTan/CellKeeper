@@ -155,7 +155,7 @@ struct CalibrationRig {
 struct CalibrationControllerTests {
     // MARK: - The whole calibration
 
-    @Test("A calibration runs its seven steps, asks for 100% only in steps 1, 2 and 7, confirms each return, and reports")
+    @Test("A calibration runs its seven steps, asks for 100% only in steps 1, 2, 3 and 7, confirms each return, and reports")
     func wholeCalibration() async throws {
         let rig = CalibrationRig()
         var status = await rig.started()
@@ -172,12 +172,17 @@ struct CalibrationControllerTests {
 
         rig.clock.advance(by: 2 * hour)
         status = await rig.read(calibrationReading(100, charging: false, full: true))
-        #expect(status.calibration.session?.step == .unplug, "the normal limit was confirmed in the same evaluation")
-        #expect(rig.system.runInputs == ["80", "100", "80"])
-        #expect(rig.system.reading == .limit(80))
+        #expect(status.calibration.session?.step == .unplug)
+        #expect(rig.system.runInputs == ["80", "100"], "100% stays until the unplug")
+        #expect(rig.system.reading == .noLimit)
+        #expect(status.calibration.isFullLimitConfirmed)
 
         status = await rig.read(calibrationReading(99, .battery), .powerSourceChanged)
         #expect(status.calibration.session?.step == .drain)
+        #expect(rig.system.runInputs == ["80", "100", "80"], "the normal limit, asked for at once on the unplug")
+        #expect(rig.system.reading == .limit(80))
+        #expect(!status.calibration.isReturning, "confirmed in the same evaluation")
+        #expect(status.calibration.session?.drainStartPercent == 99)
         rig.clock.advance(by: 4 * hour)
         status = await rig.read(calibrationReading(20, .battery))
         #expect(status.calibration.session?.step == .restAtBottom)
@@ -257,30 +262,30 @@ struct CalibrationControllerTests {
         #expect(status.calibration.session?.step == .drain)
     }
 
-    @Test("A return the read-back does not confirm is a failed return: the session ends in step 2, never reaching step 3")
+    @Test("A return the read-back does not confirm on power is a failed return: the session ends in step 7, never complete")
     func unconfirmedReturn() async {
         let rig = CalibrationRig()
-        await rig.drive(to: .restAtTop)
+        await rig.drive(to: .finalCharge)
         rig.clock.advance(by: 2 * hour)
         // The shortcut runs but macOS still reports 100%.
         rig.system.scheduleRuns([.hasNoEffect])
         let status = await rig.read(calibrationReading(100, charging: false, full: true))
         #expect(status.calibration.session == nil)
         #expect(status.calibration.last?.end == .returnFailed)
-        #expect(status.calibration.last?.lastStep == .restAtTop)
-        #expect(status.calibration.last?.steps.map(\.step) == [.chargeToFull, .restAtTop])
+        #expect(status.calibration.last?.lastStep == .finalCharge)
         #expect(rig.system.reading == .limit(90), "the fallback gave back the owner's own limit")
     }
 
-    @Test("A return that fails ends the session; the existing failure handling gives back the owner's own limit")
+    @Test("A return that fails after the unplug ends the session; the existing failure handling gives back the owner's own limit")
     func returnFails() async {
         let rig = CalibrationRig()
-        await rig.drive(to: .restAtTop)
-        rig.clock.advance(by: 2 * hour)
+        await rig.drive(to: .unplug)
+        rig.clock.advance(by: 600)
         rig.system.scheduleRuns([.fails])
-        let status = await rig.read(calibrationReading(100, charging: false, full: true))
+        let status = await rig.read(calibrationReading(99, .battery), .powerSourceChanged)
         #expect(status.calibration.session == nil)
         #expect(status.calibration.last?.end == .returnFailed)
+        #expect(status.calibration.last?.drainStartPercent == 99)
         #expect(rig.system.reading == .limit(90), "the owner's own limit, confirmed")
         #expect(status.consecutiveFailures == 1)
     }
@@ -294,10 +299,11 @@ struct CalibrationControllerTests {
         #expect(status.calibration.session?.step == .drain)
         #expect(status.calibration.session?.shortRests == [.restAtTop])
         #expect(status.calibration.isReturning == false, "confirmed in the same evaluation")
+        #expect(status.calibration.session?.drainStartPercent == 99)
         #expect(rig.system.reading == .limit(80))
     }
 
-    @Test("Sleep in step 2 keeps 100% (macOS keeps a limit through sleep); the rest counts sleep, and the bound applies after waking")
+    @Test("Sleep in step 2 keeps 100% (macOS keeps a limit through sleep); the rest counts sleep, and step 3 keeps 100% after waking")
     func sleepAtTop() async {
         let rig = CalibrationRig()
         await rig.drive(to: .restAtTop)
@@ -307,7 +313,7 @@ struct CalibrationControllerTests {
         rig.clock.advance(by: 3 * hour)
         status = await rig.read(calibrationReading(100, charging: false, full: true), .didWake)
         #expect(status.calibration.session?.step == .unplug)
-        #expect(rig.system.reading == .limit(80))
+        #expect(rig.system.reading == .noLimit, "100% stays until the unplug")
     }
 
     @Test("Sleep in step 7 keeps 100%; a charged reading after waking returns to the limit and completes the session")
