@@ -1,7 +1,11 @@
 # 13 — Faster power readings from the SMC, read-only
 
 - **Date:** 2026-10-21
-- **Status:** Design approved; not built. GPT approved it in design
+- **Status:** Design approved. Step 3 is built (PR #109, architecture
+  D115): everything above the reader, switched off by default
+  (`CELLKEEPER_SMC_READER = NO`), with a placeholder reader that reads
+  nothing. The owner's reader (§7 step 4) is pending, and so are O1–O3.
+  GPT approved the design in design
   review r3, and the owner confirmed §5 (a)–(c) on 2026-10-21. On 2026-10-21 the owner found
   the menu's power flow (D114), which updates once a minute, "not too
   helpful". They asked for about 3 s updates while they look at it, and to
