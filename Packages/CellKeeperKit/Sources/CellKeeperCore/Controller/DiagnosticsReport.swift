@@ -525,6 +525,10 @@ public enum DiagnosticsReport {
         field("Voltage", optional(snapshot.voltageMillivolts) { "\($0, unit: .millivolts)" })
         field("Current", optional(snapshot.amperageMilliamps) { "\($0, unit: .milliamps)" })
         field("Adapter", optional(snapshot.adapterWatts) { "\($0, unit: .watts)" })
+        // macOS's own figures (undocumented, in mW), as the menu's power
+        // flow shows them; display only (D114).
+        field("System power in", optional(snapshot.systemPowerInMilliwatts) { "\(Double($0) / 1000, unit: .watts)" })
+        field("Mac use", optional(snapshot.systemLoadMilliwatts) { "\(Double($0) / 1000, unit: .watts)" })
         let health = snapshot.health
         field("Cycle count", optional(health.cycleCount) { "\($0)" })
         field("Full-charge capacity", optional(health.fullChargeCapacityMilliampHours) { "\($0, unit: .milliampHours)" })

@@ -26,6 +26,8 @@ enum DiagnosticsFixture {
             voltageMillivolts: 12_427,
             amperageMilliamps: -12,
             adapterWatts: 70,
+            systemPowerInMilliwatts: 36_250,
+            systemLoadMilliwatts: 34_848,
             health: health
         )
         let telemetry = StubTelemetry(reading, clock: clock)

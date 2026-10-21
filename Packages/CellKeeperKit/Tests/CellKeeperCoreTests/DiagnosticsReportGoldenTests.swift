@@ -77,6 +77,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: 12427 mV
             Current: -12 mA
             Adapter: 70 W
+            System power in: \(Self.number(36.25)) W
+            Mac use: \(Self.number(34.848)) W
             Cycle count: 54
             Full-charge capacity: 6131 mAh
             Design capacity: 6249 mAh
@@ -127,6 +129,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -185,6 +189,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -326,6 +332,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -376,6 +384,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -421,6 +431,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -472,6 +484,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -522,6 +536,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -572,6 +588,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -623,6 +641,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -681,6 +701,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -742,6 +764,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -791,6 +815,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -835,6 +861,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -923,6 +951,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -973,6 +1003,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1024,6 +1056,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1082,6 +1116,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1141,6 +1177,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1197,6 +1235,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1254,6 +1294,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1313,6 +1355,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1371,6 +1415,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1428,6 +1474,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1486,6 +1534,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1537,6 +1587,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1588,6 +1640,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1639,6 +1693,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1689,6 +1745,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1738,6 +1796,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1788,6 +1848,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1840,6 +1902,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1893,6 +1957,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1945,6 +2011,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
@@ -1994,6 +2062,8 @@ struct DiagnosticsReportGoldenTests {
             Voltage: not available
             Current: not available
             Adapter: not available
+            System power in: not available
+            Mac use: not available
             Cycle count: not available
             Full-charge capacity: not available
             Design capacity: not available
