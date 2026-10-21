@@ -59,6 +59,8 @@ public actor SMCPowerCoordinator: SMCPowerPublishing {
     private let pause: @Sendable (Duration) async -> Void
     private let messages: AsyncStream<Message>.Continuation
     private var timer: Task<Void, Never>?
+    /// The number of the last timer started.
+    private(set) var timerNumber = 0
     /// True once ``stop()`` took effect: nothing begins or is published.
     private(set) var isStopped = false
 
@@ -165,15 +167,26 @@ public actor SMCPowerCoordinator: SMCPowerPublishing {
     }
 
     /// Ticks at once and then every ``batchInterval`` until hidden or
-    /// stopped.
+    /// stopped. Each timer carries its own number: a timer cancelled while
+    /// its tick was on its way to the actor (the section hidden, perhaps
+    /// shown again) finds a different number there and does nothing.
     private func startTimer() {
         guard timer == nil else { return }
+        timerNumber += 1
+        let number = timerNumber
         timer = Task { [weak self, pause, interval] in
             while !Task.isCancelled {
-                guard await self?.tick() != nil else { return }
+                guard await self?.tick(timer: number) != nil else { return }
                 await pause(interval)
             }
         }
+    }
+
+    /// Timer `number`'s tick: a tick only while that timer is the one
+    /// running.
+    func tick(timer number: Int) {
+        guard timer != nil, number == timerNumber else { return }
+        tick()
     }
 
     /// The timer's tick: checks the deadline of the batch in flight, and
