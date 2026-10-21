@@ -503,7 +503,7 @@ struct NativeLimitPowerWordingTests {
         #expect(CalibrationWording.limitAfter(status) == .notJudged(.onBattery))
         let sentence = CalibrationWording.limitSentence(.notJudged(.onBattery), ownerLimit: 80)
         #expect(sentence == "macOS has not confirmed CellKeeper's limit back yet. macOS applies its Charge Limit only on power. CellKeeper checks macOS's Charge Limit once your Mac has been on power for a minute.")
-        #expect(!status.isNativeLimitSettled)
+        #expect(status.isNativeLimitSettled, "the menu's summary, which says why, says all there is to say")
     }
 
     @Test("A request waiting for power, and one set but not confirmed, are described as such")

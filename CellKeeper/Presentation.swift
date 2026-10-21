@@ -189,7 +189,7 @@ extension ExecutionRecord.Result {
         case .unchanged: "Already in effect — nothing changed"
         case .simulated: "Simulated — hardware unchanged"
         case .adoptedOutsideChange: "Kept your change made outside CellKeeper — nothing changed"
-        case .deferred(let written): written ? "Set — confirmed once your Mac has been on power for a minute" : "Waiting — macOS applies its Charge Limit only on power"
+        case .deferred(let written): written ? "Set — confirmed once your Mac has been on power for a minute" : "Waiting until your Mac has been on power for a minute"
         case .failed(let message): "Failed: \(message)"
         case .refused(let reason): "Refused: \(reason)"
         }

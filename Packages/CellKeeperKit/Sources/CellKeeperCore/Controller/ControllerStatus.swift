@@ -230,9 +230,10 @@ extension ControllerStatus {
     }
 
     /// With macOS's Charge Limit: CellKeeper's limit is in effect and
-    /// confirmed, nothing failed, was refused, or is pending, and the last
-    /// read was judged, so a summary of the Charge Limit says all there is
-    /// to say.
+    /// confirmed, and nothing failed, was refused, or is pending, so a
+    /// summary of the Charge Limit says all there is to say. On battery
+    /// power that is the limit last confirmed, which the summary says
+    /// macOS applies only on power (``NativeLimitStatus/readDeferral``).
     public var isNativeLimitSettled: Bool {
         guard capabilities.isEnforcedByMacOS, capabilities.availability.acceptsRequests,
               !isBackendFaulted, pendingBackend == nil,
@@ -241,7 +242,7 @@ extension ControllerStatus {
         else { return false }
         switch lastExecution?.result {
         case .failed?, .refused?: return false
-        default: return nativeLimit?.readDeferral == nil
+        default: return true
         }
     }
 }
