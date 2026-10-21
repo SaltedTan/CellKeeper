@@ -23,13 +23,25 @@ public struct PowerFlowHistory: Sendable, Equatable {
         public let batteryWatts: Double?
         /// How many updates it averages, with and without a power flow.
         public let updates: Int
+        /// The series that have a value here although an update averaged in
+        /// had none: the average hides a gap, so the chart's line breaks
+        /// on both sides of this point.
+        public let brokenSeries: Set<Series>
 
-        public init(time: Date, adapterInputWatts: Double?, macUseWatts: Double?, batteryWatts: Double?, updates: Int = 1) {
+        public init(
+            time: Date,
+            adapterInputWatts: Double?,
+            macUseWatts: Double?,
+            batteryWatts: Double?,
+            updates: Int = 1,
+            brokenSeries: Set<Series> = []
+        ) {
             self.time = time
             self.adapterInputWatts = adapterInputWatts
             self.macUseWatts = macUseWatts
             self.batteryWatts = batteryWatts
             self.updates = updates
+            self.brokenSeries = brokenSeries
         }
 
         /// The point's value for `series`.
@@ -153,7 +165,7 @@ public struct PowerFlowHistory: Sendable, Equatable {
     /// chart draws them: for each series, its values in time order, numbered
     /// by segment. A segment ends where the series has no value or two
     /// points are more than `maximumGap` apart (the Mac slept, or nothing
-    /// was read).
+    /// was read); a point whose average hides a gap stands alone.
     public func chartPoints(window: TimeInterval = chartWindow, maximumGap: TimeInterval) -> [ChartPoint] {
         guard let newest = newestTime else { return [] }
         let shown = points.filter { newest.timeIntervalSince($0.time) <= window }
@@ -167,11 +179,15 @@ public struct PowerFlowHistory: Sendable, Equatable {
                     previous = nil
                     continue
                 }
-                if let previous, point.time.timeIntervalSince(previous) > maximumGap {
+                if let previous, point.time.timeIntervalSince(previous) > maximumGap || point.brokenSeries.contains(series) {
                     segment += 1
                 }
                 chartPoints.append(ChartPoint(series: series, segment: segment, time: point.time, watts: watts))
                 previous = point.time
+                if point.brokenSeries.contains(series) {
+                    segment += 1
+                    previous = nil
+                }
             }
         }
         return chartPoints
@@ -211,23 +227,44 @@ public struct PowerFlowHistory: Sendable, Equatable {
         }
 
         var point: Point {
-            Point(time: time, adapterInputWatts: adapterInput.value, macUseWatts: macUse.value, batteryWatts: battery.value, updates: updates)
+            var broken: Set<Series> = []
+            if adapterInput.isBroken { broken.insert(.adapterInput) }
+            if macUse.isBroken { broken.insert(.macUse) }
+            if battery.isBroken { broken.insert(.battery) }
+            return Point(
+                time: time,
+                adapterInputWatts: adapterInput.value,
+                macUseWatts: macUse.value,
+                batteryWatts: battery.value,
+                updates: updates,
+                brokenSeries: broken
+            )
         }
     }
 
-    /// An average of the values known, ignoring those that are not.
+    /// An average of the values known, ignoring those that are not, and
+    /// whether any was not.
     private struct Mean: Sendable, Equatable {
         var sum = 0.0
         var count = 0
+        var missing = 0
 
         mutating func add(_ value: Double?) {
-            guard let value else { return }
+            guard let value else {
+                missing += 1
+                return
+            }
             sum += value
             count += 1
         }
 
         var value: Double? {
             count > 0 ? sum / Double(count) : nil
+        }
+
+        /// A value averaged together with an update that had none.
+        var isBroken: Bool {
+            count > 0 && missing > 0
         }
     }
 }

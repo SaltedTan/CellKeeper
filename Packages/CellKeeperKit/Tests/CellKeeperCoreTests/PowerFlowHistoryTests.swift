@@ -161,6 +161,42 @@ struct PowerFlowHistoryTests {
         #expect(gap.macUseWatts == nil)
     }
 
+    @Test("An update without a value averaged with ones that have it still breaks the line on both sides")
+    func gapInsideBucket() {
+        // A source faster than the buckets: one update in the first 10 s
+        // has no flow.
+        var history = PowerFlowHistory()
+        history.record(powerSnapshot(update: time(0)))
+        history.record(powerSnapshot(load: nil, update: time(3)))
+        history.record(powerSnapshot(update: time(6)))
+        history.record(powerSnapshot(update: time(10)))
+        history.record(powerSnapshot(update: time(20)))
+        let chartPoints = history.chartPoints(maximumGap: 180)
+        for series in PowerFlowHistory.Series.allCases {
+            let mine = chartPoints.filter { $0.series == series }
+            #expect(mine.map { $0.time.timeIntervalSince(referenceDate) } == [6, 10, 20], "\(series)")
+            #expect(mine.map(\.segment) == [0, 1, 1], "\(series)")
+        }
+        // Unplugged within a bucket: only the adapter's line breaks.
+        var unplugged = PowerFlowHistory()
+        unplugged.record(powerSnapshot(update: time(0)))
+        unplugged.record(powerSnapshot(powerIn: nil, update: time(5)))
+        unplugged.record(powerSnapshot(update: time(10)))
+        let points = unplugged.chartPoints(maximumGap: 180)
+        #expect(points.filter { $0.series == .adapterInput }.map(\.segment) == [0, 1])
+        #expect(points.filter { $0.series == .macUse }.map(\.segment) == [0, 0])
+        #expect(unplugged.points.first?.brokenSeries == [.adapterInput])
+        // A point hiding a gap between two others stands alone.
+        var between = PowerFlowHistory()
+        between.record(powerSnapshot(update: time(0)))
+        between.record(powerSnapshot(update: time(10)))
+        between.record(powerSnapshot(load: nil, update: time(13)))
+        between.record(powerSnapshot(update: time(20)))
+        let middle = between.chartPoints(maximumGap: 180).filter { $0.series == .macUse }
+        #expect(middle.map { $0.time.timeIntervalSince(referenceDate) } == [0, 13, 20])
+        #expect(middle.map(\.segment) == [0, 1, 2])
+    }
+
     @Test("Deduplication keeps only the last five minutes of update times, at most 1,000")
     func boundedDeduplication() {
         var history = PowerFlowHistory()
