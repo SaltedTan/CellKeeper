@@ -55,6 +55,9 @@ struct CalibrationRig {
     let storage: any KeyValueStorage & Sendable
     let telemetry: StubTelemetry
     let controller: ChargeController
+    /// The controller's ``ChargeController/chargeLimitSettleTime``: none
+    /// by default, so tests not about it start with power settled.
+    let settleTime: TimeInterval
 
     init(
         clock: TestClock = TestClock(),
@@ -64,8 +67,10 @@ struct CalibrationRig {
         storage: (any KeyValueStorage & Sendable)? = nil,
         reading: BatterySnapshot = calibrationReading(70),
         settings: ChargingSettings = ChargingSettings.default.withChargeLimit(80),
-        timeZone: TimeZone = TimeZone(identifier: "UTC")!
+        timeZone: TimeZone = TimeZone(identifier: "UTC")!,
+        settleTime: TimeInterval = 0
     ) {
+        self.settleTime = settleTime
         self.clock = clock
         self.boot = boot ?? TestBoot(clock: clock)
         self.system = system
@@ -86,13 +91,13 @@ struct CalibrationRig {
             timeZone: { timeZone },
             uptime: { clock.uptime },
             calibrationClock: self.boot.calibrationClock,
-            chargeLimitSettleTime: 0
+            chargeLimitSettleTime: settleTime
         )
     }
 
     /// A second controller on the same Mac and storage: a relaunch.
     func relaunched(reading: BatterySnapshot, settings: ChargingSettings = ChargingSettings.default.withChargeLimit(80)) -> CalibrationRig {
-        CalibrationRig(clock: clock, boot: boot, system: system, records: records, storage: storage, reading: reading, settings: settings)
+        CalibrationRig(clock: clock, boot: boot, system: system, records: records, storage: storage, reading: reading, settings: settings, settleTime: settleTime)
     }
 
     var stored: CalibrationLoad { CalibrationStore(defaults: storage).loadCalibration() }

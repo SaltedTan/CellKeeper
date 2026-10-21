@@ -240,7 +240,7 @@ public enum NativeLimitWording {
     public static func deferralTitle(_ condition: ChargeLimitReadCondition) -> String {
         switch condition {
         case .onBattery, .settled: "macOS applies its Charge Limit only on power"
-        case .settling: "Power has just come back"
+        case .settling: "Waiting for power to settle"
         case .powerUnknown: "CellKeeper cannot tell whether your Mac is on power"
         }
     }

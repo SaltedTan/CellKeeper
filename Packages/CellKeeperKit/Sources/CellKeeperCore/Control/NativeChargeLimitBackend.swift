@@ -459,7 +459,9 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         return adoptedChange
     }
 
-    public func noteChargeLimitReadCondition(_ condition: ChargeLimitReadCondition) {
+    // `async`, as the requirement is: a synchronous one would lose to the
+    // protocol's default in direct calls from asynchronous code.
+    public func noteChargeLimitReadCondition(_ condition: ChargeLimitReadCondition) async {
         readCondition = condition
     }
 
@@ -587,10 +589,13 @@ public actor NativeChargeLimitBackend: ChargingBackend {
                 lastReadDeferral = readCondition
                 return .deferred
             }
+            // A value already written and waiting for its confirmation is
+            // not written again on "no limit": that would only run the
+            // shortcut at every check until power returns.
             switch Self.unjudgedMatch(current, existing) {
             case .active:
                 break
-            case .noLimitConsistent where percent != 100:
+            case .noLimitConsistent where percent != 100 && !existing.pendingTargets.contains(percent):
                 isRecordUnconfirmed = true
             case .noLimitConsistent, .none:
                 lastReadDeferral = readCondition
@@ -663,14 +668,14 @@ public actor NativeChargeLimitBackend: ChargingBackend {
                 // As in `currentMode()`: an active limit the record accounts
                 // for, or the user's own at first contact, is evidence now;
                 // "no limit" while the record accounts for 100% lets the
-                // restore go ahead, but cannot confirm a restore to 100%.
-                // Anything else may be an outside change, which no restore
-                // must overwrite before it is judged.
+                // restore go ahead, once, but cannot confirm a restore to
+                // 100%. Anything else may be an outside change, which no
+                // restore must overwrite before it is judged.
                 let isOwnAtFirstContact = current == .limit(owned.ownerLimit) && !hasReconciledRecord
                 switch Self.unjudgedMatch(current, owned) {
                 case .active:
                     break
-                case .noLimitConsistent where owned.ownerLimit != 100:
+                case .noLimitConsistent where owned.ownerLimit != 100 && !owned.isRestoring:
                     break
                 case .noLimitConsistent, .none:
                     guard isOwnAtFirstContact else {

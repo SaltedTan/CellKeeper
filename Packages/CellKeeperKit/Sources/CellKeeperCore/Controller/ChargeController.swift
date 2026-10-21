@@ -264,6 +264,9 @@ public actor ChargeController {
     /// without, and every wake or launch on it. Nil while the latest reading
     /// is not a usable one on external power.
     private var externalPowerSinceUptime: TimeInterval?
+    /// Whether macOS's Charge Limit can be judged in the current
+    /// evaluation, as the backend was told.
+    private var chargeLimitCondition = ChargeLimitReadCondition.powerUnknown
     private var events: [ControlEvent] = []
     private var nextEventID = 0
     private var lastEvaluation: Date?
@@ -1120,13 +1123,15 @@ public actor ChargeController {
             }
             return
         }
-        // Only a read that is judged: on battery power "no limit" is not
-        // the setting (note 08, O20).
-        guard let reported = nativeLimit?.reportedLimit, nativeLimit?.readDeferral == nil else { return }
-        if reported == retained.ownerLimit {
+        guard let reported = nativeLimit?.reportedLimit else { return }
+        // The owner's own limit shown as an active limit settles it on any
+        // power; anything else only once judged: on battery power "no
+        // limit" is not the setting (note 08, O20).
+        if reported == retained.ownerLimit, reported < 100 || chargeLimitCondition.isJudged {
             calibration.releaseEvidence()
             return
         }
+        guard chargeLimitCondition.isJudged else { return }
         let kept = await native.keepOutsideLimit(reported, previousOwnerLimit: retained.ownerLimit)
         // Manage charging is already off; the change is only recorded.
         _ = await native.takeAdoptedLimitChange()
@@ -1413,7 +1418,8 @@ public actor ChargeController {
             lastFailureUptime = nil
         }
         notePowerSource(trigger, at: evaluationUptime)
-        await backend.noteChargeLimitReadCondition(chargeLimitReadCondition(at: evaluationUptime))
+        chargeLimitCondition = chargeLimitReadCondition(at: evaluationUptime)
+        await backend.noteChargeLimitReadCondition(chargeLimitCondition)
 
         capabilities = await backend.capabilities()
         await observeBackendMode()
@@ -1467,7 +1473,7 @@ public actor ChargeController {
             event: Self.calibrationEvent(trigger),
             observedMode: currentMode,
             context: calibrationContext(at: evaluationNow, adoptionsBefore: adoptionsBefore),
-            startup: calibrationHadRecord.map { CalibrationStartupEvidence(hadRecord: $0, limitRead: nativeLimit?.reportedLimit, isLimitJudged: nativeLimit?.readDeferral == nil) },
+            startup: calibrationHadRecord.map { CalibrationStartupEvidence(hadRecord: $0, limitRead: nativeLimit?.reportedLimit, isLimitJudged: chargeLimitCondition.isJudged) },
             at: calibrationStamp
         )
         recordCalibrationLog()
@@ -1807,7 +1813,10 @@ public actor ChargeController {
         let before = (current: currentMode, responsible: responsibleMode, isOwn: reportedModeIsOwn)
         // A request that waited for macOS's Charge Limit to be judged, asked
         // again at every check until it can be, is logged once.
-        let isWaitingAgain = lastExecution?.action == action && lastExecution?.result == .deferred(written: false)
+        let isWaitingAgain: Bool = switch lastExecution?.result {
+        case .deferred?: lastExecution?.action == action
+        default: false
+        }
         if mode != .normal {
             // From here on the request may take effect, whatever its reply:
             // no read taken before it can show what is in effect.
@@ -2196,7 +2205,8 @@ public actor ChargeController {
     private func restoreNormal(reason: String) async -> Bool {
         // Outside an evaluation too (quitting, a backend switch), from the
         // latest reading and the monotonic clock now.
-        await backend.noteChargeLimitReadCondition(chargeLimitReadCondition(at: uptime()))
+        chargeLimitCondition = chargeLimitReadCondition(at: uptime())
+        await backend.noteChargeLimitReadCondition(chargeLimitCondition)
         // Never waits for anything `.normal` does not depend on, such as a
         // read of macOS's Charge Limit.
         let capabilities = await backend.capabilitiesForRelease()

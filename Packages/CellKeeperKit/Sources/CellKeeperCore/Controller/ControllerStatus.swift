@@ -240,7 +240,7 @@ extension ControllerStatus {
               currentMode == decision.desiredMode
         else { return false }
         switch lastExecution?.result {
-        case .failed?, .refused?, .deferred?: return false
+        case .failed?, .refused?: return false
         default: return nativeLimit?.readDeferral == nil
         }
     }

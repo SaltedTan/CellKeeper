@@ -120,8 +120,9 @@ struct CalibrationStartupEvidence {
     var limitRead: Int?
     /// The read can be judged: it was not taken on battery power, before
     /// power settled, or with the power source unknown (note 08, O20).
-    /// Otherwise "no limit" says nothing about the setting, and the check
-    /// waits for a read that can be.
+    /// Otherwise only the owner's own limit, shown as an active limit,
+    /// accounts for the limit; anything else, "no limit" included, waits
+    /// for a read that can be judged.
     var isLimitJudged: Bool
 }
 
@@ -488,7 +489,10 @@ struct CalibrationRunner {
         let wasPending = isLimitCheckPending
         isLimitCheckPending = false
         if let startup, !startup.hadRecord {
-            if startup.isLimitJudged {
+            // Below 100% the owner's own limit can only have been read as
+            // an active limit, which is evidence on any power.
+            let isOwnShown = startup.limitRead == current.ownerLimit && current.ownerLimit < 100
+            if startup.isLimitJudged || isOwnShown {
                 if startup.limitRead != current.ownerLimit {
                     return .unaccountedLimit(found: startup.limitRead, expected: current.ownerLimit)
                 }
@@ -551,16 +555,17 @@ struct CalibrationRunner {
         outcome = report
         endedCount += 1
         refreshDisplay(at: stamp)
+        // No line promises a read-back: none follows when nothing is asked
+        // (Manage charging off with nothing held, or the limit already in
+        // effect). Each request logs its own.
         if end.isCompleted {
             log.append("Calibration finished. CellKeeper asks for its normal limit again. \(CalibrationWording.reportSummary(report))")
         } else if end.keepsLimitAsItIs {
-            // Manage charging is off and nothing is held: no request, and so
-            // no read-back, follows.
             log.append("Calibration ended in step \(ended.step.rawValue) (\(ended.step)): \(end). Manage charging is off, so CellKeeper asks macOS for nothing and leaves its Charge Limit as it is. \(CalibrationWording.reportSummary(report))")
         } else if end == .managementOff {
-            log.append("Calibration ended in step \(ended.step.rawValue) (\(ended.step)): \(end). CellKeeper gives your own Charge Limit back; the lines that follow say what macOS confirmed. \(CalibrationWording.reportSummary(report))")
+            log.append("Calibration ended in step \(ended.step.rawValue) (\(ended.step)): \(end). CellKeeper gives your own Charge Limit back. \(CalibrationWording.reportSummary(report))")
         } else {
-            log.append("Calibration ended in step \(ended.step.rawValue) (\(ended.step)): \(end). CellKeeper asks for its normal limit again; the lines that follow say what macOS confirmed. \(CalibrationWording.reportSummary(report))")
+            log.append("Calibration ended in step \(ended.step.rawValue) (\(ended.step)): \(end). CellKeeper asks for its normal limit again. \(CalibrationWording.reportSummary(report))")
         }
         return report
     }
