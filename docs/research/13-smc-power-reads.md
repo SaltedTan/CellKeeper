@@ -61,9 +61,11 @@
 ## 1. Why
 
 The power flow (D114) shows the adapter's input, the Mac's use and the
-battery's charge or discharge. Its data comes from two undocumented
-AppleSmartBattery values (`PowerTelemetryData.SystemPowerIn`,
-`.SystemLoad`) and the battery's voltage × current. On this Mac those
+battery's charge or discharge. Its data comes from:
+- two undocumented AppleSmartBattery values
+  (`PowerTelemetryData.SystemPowerIn`, `.SystemLoad`);
+- the battery's voltage × current;
+- the adapter's negotiated `Watts`. On this Mac those
 values change only when the driver's `UpdateTime` changes, every 60 s
 `[VERIFIED-EXPERIMENTALLY]` (note 01, observation 13).
 
@@ -82,8 +84,8 @@ often otherwise.
     negotiated power.
   - **What that shows:** only what changed between those two dumps. It
     does not rule out every faster registry value [I].
-- **`powermetrics`** needs root. CellKeeper has none, and agents never run
-  `sudo` (note 04).
+- **`powermetrics`** needs root ([note 01](01-battery-telemetry.md)).
+  CellKeeper has none, and agents never run `sudo` (note 11 §2.2).
 - **IOReport** is a private framework. As far as is known, its energy
   channels cover the chip's own parts, not the adapter or the battery
   [I]. It was not explored further.
@@ -102,9 +104,12 @@ Mac.
 | `B0AC` | Battery current | signed 16-bit [S2] | S2; S3 lists both signed and unsigned entries, labelled A and mA | `si16`; 0 throughout | No: the owner's checks only (O1) |
 | `B0AV` | Battery voltage | unsigned 16-bit, mV [S2] | S2; S3 lists unsigned integer entries, labelled mV and V | `ui16`; 13 190 mV read low byte first | No: the owner's checks only (O1) |
 
-- **Types.** S2, the Apple-silicon driver, gives the types above. S3's
-  Intel-era tables give 2-byte fixed point for `PDTR` and `PSTR`, and
-  conflicting entries for the battery keys. On this Mac the tool reported
+- **Types.** S2, the Apple-silicon driver, gives the types above.
+  - **`PDTR` and `PSTR`:** S3's Intel-era tables disagree, listing 2-byte
+    fixed point.
+  - **The battery keys:** S3 agrees, listing `B0AV` as an unsigned 16-bit
+    integer and `B0AC` as a signed 16-bit one. It also has an unsigned
+    entry for `B0AC`, and its unit labels conflict (A and mA, mV and V). On this Mac the tool reported
   the types S2 gives. CellKeeper checks each key's reported type and exact
   length before decoding, and refuses anything else (§6.3).
 - **Not used:**
@@ -119,15 +124,15 @@ Mac.
 ## 4. The owner's read-only check (2026-10-21) `[VERIFIED-EXPERIMENTALLY]`
 
 **How.** The owner ran the open-source `smc` tool from smcFanControl
-(GPL-2.0-or-later, the build used for note 11) by hand.
+(GPL-2.0-or-later) by hand, from the build pinned in note 11 §4.1.
 - **What it read:** `PDTR PSTR B0AP B0AC B0AV`, plus a read-only `ioreg`
   of the registry values.
 - **When:** about once a second, 30 samples, 14:03:47 to 14:04:18 AEDT.
 - **State:** on the adapter, at 100%, not charging, in the calibration's
   rest at the top (note 12).
 
-No agent ran the tool. The lead decoded the saved output, which stays on
-the owner's Mac.
+No agent ran the tool. The lead read the saved text file read-only and
+decoded its bytes. The file is not committed.
 
 | Quantity | What it read |
 |---|---|
@@ -146,10 +151,11 @@ the owner's Mac.
    apparent one-second lag in this run [I]. It is not shown to hold while
    charging, or to mean `PSTR` is derived from `PDTR`. S3's "Delayed 1
    Second" is an Intel-era description.
-3. **[I] The registry value looks like a snapshot of `PDTR`.** At the
-   update stamped 14:04:03 it read 8 560 mW, while `PDTR` read 8.56 W at
-   14:04:02 and 8.57 W at 14:04:03. That is one update; the other came
-   before the samples began.
+3. **[I] The registry value looks like a snapshot of the SMC's reading.**
+   At the update stamped 14:04:03 it read 8 560 mW. `PDTR` read 8.56 W at
+   14:04:02 and 8.57 W at 14:04:03. `PSTR` read 8.56 W at 14:04:03 too, so
+   the data cannot tell which key it follows. That is one update; the
+   other came before the samples began.
 4. **Byte order.**
    - **`B0AV`:** read low byte first, it gives 13 190 mV. That is close to
      the registry's 13 225 mV, read earlier that day rather than at the
@@ -174,8 +180,10 @@ the owner's Mac.
     keys.
 
   The reason: agents stopped writing SMC client code on 2026-10-20, when
-  a safety check stopped an agent's write client, and the lead extended
-  that to read clients, which share almost all their code (note 11 §2.2).
+  a safety check stopped an agent's write client. Note 11 §2.2 covers any
+  CellKeeper code that opens the SMC's user client, reads included. The
+  lead's reason for including reads is that a read client shares almost
+  all its code with a write client [I].
 - **For the owner to confirm with this design:**
   - **(a) The clean-room exception.** Facts only, for `PDTR`, `PSTR` and
     `B0AP` at runtime, and `B0AC` and `B0AV` for the owner's checks: name,
