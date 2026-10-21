@@ -111,12 +111,18 @@ struct CalibrationContext {
 }
 
 /// What the first evaluation after a session was found at launch reads
-/// before anything is written (§7.6 step 1).
+/// before anything is written (§7.6 step 1), and each later one while the
+/// limit read could not be judged.
 struct CalibrationStartupEvidence {
     /// The native backend held a record of the owner's limit (a crash).
     var hadRecord: Bool
     /// macOS's Charge Limit as read in that evaluation, before any write.
     var limitRead: Int?
+    /// The read can be judged: it was not taken on battery power, before
+    /// power settled, or with the power source unknown (note 08, O20).
+    /// Otherwise "no limit" says nothing about the setting, and the check
+    /// waits for a read that can be.
+    var isLimitJudged: Bool
 }
 
 /// The controller's guided calibration (note 12 §7): the session, its
@@ -150,6 +156,12 @@ struct CalibrationRunner {
     private(set) var isPaused = false
     /// A session found at launch waits for the first evaluation's checks.
     private(set) var needsStartupCheck = false
+    /// A session found at launch, with no record held, whose limit read
+    /// could not be judged yet: the comparison with the owner's own limit
+    /// (§7.6 step 3) waits for a read that can be, at a later evaluation.
+    /// Nothing is recorded or written meanwhile, so it is still the limit
+    /// CellKeeper left.
+    private(set) var isLimitCheckPending = false
     /// 100% was confirmed for the session at the end of the last
     /// evaluation.
     private(set) var isFullLimitHeld = false
@@ -332,6 +344,7 @@ struct CalibrationRunner {
         }
         isPaused = false
         needsStartupCheck = false
+        isLimitCheckPending = false
         isFullLimitHeld = false
         outcome = nil
         refusal = nil
@@ -387,9 +400,10 @@ struct CalibrationRunner {
             write(CalibrationStored(last: last))
         }
         guard let current = session else { return }
-        if needsStartupCheck {
+        if needsStartupCheck || isLimitCheckPending {
+            let isFirst = needsStartupCheck
             needsStartupCheck = false
-            if let end = startupEnd(current, startup: startup, context: context) {
+            if let end = startupEnd(current, startup: startup, context: context, isFirst: isFirst) {
                 if case .unaccountedLimit(let found, let expected) = end {
                     // Ended by the controller once it has kept the change,
                     // so the evidence is not consumed first.
@@ -463,13 +477,29 @@ struct CalibrationRunner {
         }
     }
 
-    /// §7.6 step 3: what the first evaluation after a launch found.
-    private func startupEnd(_ current: CalibrationSession, startup: CalibrationStartupEvidence?, context: CalibrationContext) -> CalibrationEnd? {
-        if context.hasAdoptedChange { return .outsideChange }
-        if let startup, !startup.hadRecord, startup.limitRead != current.ownerLimit {
-            return .unaccountedLimit(found: startup.limitRead, expected: current.ownerLimit)
+    /// §7.6 step 3: what the first evaluation after a launch found, and
+    /// (not `isFirst`) a limit check that waited for a read that can be
+    /// judged. With no record held, the limit must be the owner's own
+    /// recorded in the session; a read that cannot be judged shows only
+    /// whether macOS's limit is active, so the comparison waits for one
+    /// that can (note 08, O20), however long that takes.
+    private mutating func startupEnd(_ current: CalibrationSession, startup: CalibrationStartupEvidence?, context: CalibrationContext, isFirst: Bool) -> CalibrationEnd? {
+        if isFirst, context.hasAdoptedChange { return .outsideChange }
+        let wasPending = isLimitCheckPending
+        isLimitCheckPending = false
+        if let startup, !startup.hadRecord {
+            if startup.isLimitJudged {
+                if startup.limitRead != current.ownerLimit {
+                    return .unaccountedLimit(found: startup.limitRead, expected: current.ownerLimit)
+                }
+            } else {
+                isLimitCheckPending = true
+                if !wasPending {
+                    log.append("CellKeeper checks that macOS's Charge Limit is still your own \(current.ownerLimit)% once your Mac has been on power for a minute; until then macOS may not show its limit.")
+                }
+            }
         }
-        if context.hasSchedule { return .scheduleFound }
+        if isFirst, context.hasSchedule { return .scheduleFound }
         return nil
     }
 
@@ -515,6 +545,7 @@ struct CalibrationRunner {
         session = nil
         isPaused = false
         needsStartupCheck = false
+        isLimitCheckPending = false
         isFullLimitHeld = false
         last = report
         outcome = report
@@ -522,6 +553,12 @@ struct CalibrationRunner {
         refreshDisplay(at: stamp)
         if end.isCompleted {
             log.append("Calibration finished. CellKeeper asks for its normal limit again. \(CalibrationWording.reportSummary(report))")
+        } else if end.keepsLimitAsItIs {
+            // Manage charging is off and nothing is held: no request, and so
+            // no read-back, follows.
+            log.append("Calibration ended in step \(ended.step.rawValue) (\(ended.step)): \(end). Manage charging is off, so CellKeeper asks macOS for nothing and leaves its Charge Limit as it is. \(CalibrationWording.reportSummary(report))")
+        } else if end == .managementOff {
+            log.append("Calibration ended in step \(ended.step.rawValue) (\(ended.step)): \(end). CellKeeper gives your own Charge Limit back; the lines that follow say what macOS confirmed. \(CalibrationWording.reportSummary(report))")
         } else {
             log.append("Calibration ended in step \(ended.step.rawValue) (\(ended.step)): \(end). CellKeeper asks for its normal limit again; the lines that follow say what macOS confirmed. \(CalibrationWording.reportSummary(report))")
         }

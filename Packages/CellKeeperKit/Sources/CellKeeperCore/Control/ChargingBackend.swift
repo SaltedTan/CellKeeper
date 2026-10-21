@@ -189,6 +189,51 @@ public enum ControlOutcome: String, Sendable, Equatable {
     /// limit. Nothing was changed, and the request was not carried out;
     /// ``ChargingBackend/takeAdoptedLimitChange()`` describes the change.
     case adoptedOutsideChange
+    /// Native-limit backends: macOS's report could not be judged now
+    /// (``ChargeLimitReadCondition``) and did not show a value CellKeeper's
+    /// record accounts for, so nothing was recorded or written. Not a
+    /// failure: the request waits until a read can be judged.
+    case deferred
+    /// Native-limit backends: the change was written, but its read-back
+    /// could not be judged now and did not show it. Not a failure: the
+    /// record still counts the value as CellKeeper's, and a later read that
+    /// can be judged confirms it, or finds otherwise by the usual rules.
+    case awaitingConfirmation
+}
+
+/// Whether what macOS reports about its Charge Limit can be judged now
+/// (research note 08, O20). `pmset -g battlimit` shows macOS's *active*
+/// limit, not the user's setting: about 300 s after the Mac is unplugged
+/// macOS clears it, and reports "no limit" while the setting stays as it
+/// was; on plug-in it creates it again within a moment. The controller
+/// decides the condition from the power source and from when it last saw
+/// external power begin.
+public enum ChargeLimitReadCondition: String, Sendable, Equatable, CaseIterable, CustomStringConvertible {
+    /// On external power for at least the settle time: the report is
+    /// judged by the usual rules.
+    case settled
+    /// On battery power: macOS's limit may not be active.
+    case onBattery
+    /// On external power, but less than the settle time since CellKeeper saw
+    /// it begin (a plug-in, a wake, or CellKeeper's own start).
+    case settling
+    /// CellKeeper has no usable reading of the power source.
+    case powerUnknown
+
+    /// True if a reading may be judged: recorded as the user's own limit,
+    /// taken for an outside change, or counted as a failed read-back.
+    /// Otherwise only an active limit that CellKeeper's record accounts for
+    /// is evidence, and everything else waits.
+    public var isJudged: Bool { self == .settled }
+
+    public var description: String {
+        switch self {
+        case .settled: "on power, settled"
+        case .onBattery: "on battery power"
+        case .settling: "power just returned"
+        case .powerUnknown: "power source unknown"
+        }
+    }
 }
 
 /// A change to macOS's Charge Limit made outside CellKeeper (for example in
@@ -310,6 +355,13 @@ public struct NativeLimitStatus: Sendable, Equatable {
     /// How many unreadable records this backend discarded at the user's
     /// request. Only grows.
     public var recordsDiscarded: Int
+    /// Why the last read was not judged (``ChargeLimitReadCondition``):
+    /// it was taken on battery power, before power settled, or with the
+    /// power source unknown, and did not show an active limit that
+    /// CellKeeper's record accounts for (with no record, any active limit).
+    /// Then ``reportedLimit`` is only what macOS showed: 100 means its limit
+    /// was not active, not that the setting is 100%. Nil if it was judged.
+    public var readDeferral: ChargeLimitReadCondition?
 
     public init(
         reportedLimit: Int? = nil,
@@ -324,7 +376,8 @@ public struct NativeLimitStatus: Sendable, Equatable {
         isShortcutFound: Bool? = nil,
         restoresConfirmed: Int = 0,
         lastRestoredLimit: Int? = nil,
-        recordsDiscarded: Int = 0
+        recordsDiscarded: Int = 0,
+        readDeferral: ChargeLimitReadCondition? = nil
     ) {
         self.reportedLimit = reportedLimit
         self.readAt = readAt
@@ -339,6 +392,7 @@ public struct NativeLimitStatus: Sendable, Equatable {
         self.restoresConfirmed = restoresConfirmed
         self.lastRestoredLimit = lastRestoredLimit
         self.recordsDiscarded = recordsDiscarded
+        self.readDeferral = readDeferral
     }
 
     /// True while CellKeeper has changed the setting and must restore it.
@@ -427,7 +481,7 @@ public enum ReportedModeOrigin: Sendable, Equatable {
 ///
 /// Contract:
 /// - `setMode` must throw rather than return when the requested state was not
-///   reached.
+///   reached (a native-limit backend's deferral aside, below).
 /// - Simulated implementations must return ``ControlOutcome/simulated``.
 /// - `.normal` must always be accepted when the backend accepts requests.
 ///
@@ -450,6 +504,15 @@ public enum ReportedModeOrigin: Sendable, Equatable {
 ///   reported once by ``takeAdoptedLimitChange()``.
 /// - Only a fresh read of the setting from macOS confirms a change. A
 ///   shortcut or command finishing successfully does not.
+/// - A read is judged only under ``ChargeLimitReadCondition/settled``, which
+///   the controller passes before every operation
+///   (``noteChargeLimitReadCondition(_:)``). Under any other condition only
+///   an active limit that the backend's record accounts for is evidence:
+///   nothing is recorded or adopted, and a read-back that does not show the
+///   value requested is not a failure. `setMode` then returns
+///   ``ControlOutcome/deferred`` or ``ControlOutcome/awaitingConfirmation``
+///   instead of throwing, the only times it returns without the requested
+///   state confirmed; `currentMode()` reports the limit last confirmed.
 ///
 /// Additional contract for backends whose holds lapse unless renewed (a
 /// helper's leases):
@@ -535,6 +598,11 @@ public protocol ChargingBackend: Sendable {
     /// Native-limit backends: the outside change adopted as the user's own
     /// limit since the last call, if any. Each adoption is returned once.
     func takeAdoptedLimitChange() async -> AdoptedLimitChange?
+
+    /// Native-limit backends: whether macOS's Charge Limit report can be
+    /// judged from now on, until the next call. The controller calls it
+    /// before every evaluation and every restore. Default: nothing.
+    func noteChargeLimitReadCondition(_ condition: ChargeLimitReadCondition) async
 }
 
 extension ChargingBackend {
@@ -547,4 +615,5 @@ extension ChargingBackend {
     public func recheckAvailability() async {}
     public func nativeLimitStatus() async -> NativeLimitStatus? { nil }
     public func takeAdoptedLimitChange() async -> AdoptedLimitChange? { nil }
+    public func noteChargeLimitReadCondition(_ condition: ChargeLimitReadCondition) async {}
 }

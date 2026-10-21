@@ -265,6 +265,16 @@ public enum CalibrationEnd: Sendable, Equatable, Codable, CustomStringConvertibl
         return false
     }
 
+    /// True when CellKeeper kept a Charge Limit it did not set as the
+    /// owner's own and Manage charging is off: it asks macOS for nothing
+    /// more, so no read-back follows the end.
+    public var keepsLimitAsItIs: Bool {
+        switch self {
+        case .outsideChange, .unaccountedLimit: true
+        default: false
+        }
+    }
+
     public var description: String {
         switch self {
         case .completed: "it finished"
@@ -789,6 +799,13 @@ public struct CalibrationSession: Sendable, Equatable, Codable {
     // MARK: - Moving between steps
 
     private mutating func enter(_ next: CalibrationStep, at now: CalibrationStamp, changes: inout [CalibrationChange]) {
+        if next == .finalCharge {
+            // A return still pending from an early unplug, which macOS may
+            // confirm only on power (note 08, O20), is moot: step 7 asks for
+            // 100% again, and confirming the return now would end the
+            // session as if the final charge were done.
+            isReturning = false
+        }
         step = next
         stepStartedAt = now
         steps.append(CalibrationStepEntry(step: next, enteredAt: now.wall))

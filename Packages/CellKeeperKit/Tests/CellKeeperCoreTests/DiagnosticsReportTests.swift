@@ -140,7 +140,7 @@ struct DiagnosticsReportTests {
         let telemetry = StubTelemetry(snapshot(percent: 78, charging: true), clock: clock)
         var settings = ChargingSettings.default
         settings = settings.withChargeLimit(85)
-        let controller = ChargeController(telemetry: telemetry, backend: backend, settings: settings, now: { clock.now }, uptime: { clock.uptime })
+        let controller = ChargeController(telemetry: telemetry, backend: backend, settings: settings, now: { clock.now }, uptime: { clock.uptime }, chargeLimitSettleTime: 0)
         let status = await controller.evaluate(.launch)
         #expect(status.nativeLimit?.ownerLimit == 80)
         let report = DiagnosticsReport.text(status: status, environment: environment, generatedAt: referenceDate)
@@ -165,7 +165,7 @@ struct DiagnosticsReportTests {
         let store = InMemoryRecordStore()
         let backend = makeNativeBackend(system: system, store: store, clock: clock)
         let telemetry = StubTelemetry(snapshot(percent: 78, charging: true), clock: clock)
-        let controller = ChargeController(telemetry: telemetry, backend: backend, settings: ChargingSettings.default.withChargeLimit(90), now: { clock.now }, uptime: { clock.uptime })
+        let controller = ChargeController(telemetry: telemetry, backend: backend, settings: ChargingSettings.default.withChargeLimit(90), now: { clock.now }, uptime: { clock.uptime }, chargeLimitSettleTime: 0)
         await controller.evaluate(.launch)
         system.changeExternally(to: 95)
         await controller.evaluate(.periodic)

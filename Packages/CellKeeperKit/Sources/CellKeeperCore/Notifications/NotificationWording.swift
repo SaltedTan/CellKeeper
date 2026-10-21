@@ -227,6 +227,48 @@ public enum NativeLimitWording {
         value >= 100 ? "100% (no limit)" : "\(value)%"
     }
 
+    /// Why CellKeeper has not judged macOS's latest report of its Charge
+    /// Limit (``NativeLimitStatus/readDeferral``), as sentences. Never that
+    /// the limit changed: macOS clears its active limit on battery power and
+    /// creates it again on power (research note 08, O20).
+    public static func deferral(_ condition: ChargeLimitReadCondition) -> String {
+        "\(deferralTitle(condition)). \(deferralDetail(condition))"
+    }
+
+    /// The first part of ``deferral(_:)``, without a full stop, for the
+    /// menu's line about macOS's Charge Limit.
+    public static func deferralTitle(_ condition: ChargeLimitReadCondition) -> String {
+        switch condition {
+        case .onBattery, .settled: "macOS applies its Charge Limit only on power"
+        case .settling: "Power has just come back"
+        case .powerUnknown: "CellKeeper cannot tell whether your Mac is on power"
+        }
+    }
+
+    /// The rest of ``deferral(_:)``: when CellKeeper checks again.
+    public static func deferralDetail(_ condition: ChargeLimitReadCondition) -> String {
+        switch condition {
+        case .onBattery, .settled, .settling: "CellKeeper checks macOS's Charge Limit once your Mac has been on power for a minute."
+        case .powerUnknown: "CellKeeper checks macOS's Charge Limit once it can."
+        }
+    }
+
+    /// ``deferral(_:)`` for the last read in `native`, or nil if it was
+    /// judged.
+    public static func deferral(_ native: NativeLimitStatus?) -> String? {
+        native?.readDeferral.map(deferral)
+    }
+
+    /// What Settings and Diagnostics show for the limit macOS reports,
+    /// shortly, when its report was not judged.
+    public static func deferralValue(_ condition: ChargeLimitReadCondition) -> String {
+        switch condition {
+        case .onBattery, .settled: "Not active on battery"
+        case .settling: "Checked a minute after power returns"
+        case .powerUnknown: "Not checked: power source unknown"
+        }
+    }
+
     /// Why the user's own Charge Limit is not confirmed back, and what to do;
     /// nil if CellKeeper owes nothing, or nothing it cannot confirm.
     public static func restoreProblem(_ status: ControllerStatus) -> String? {

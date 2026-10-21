@@ -374,7 +374,8 @@ public enum DiagnosticsReport {
 
         if let native = status.nativeLimit {
             section("macOS Charge Limit")
-            field("Reported by macOS", "\(native.reportedLimit.map { "\($0)%" } ?? "unknown")")
+            let judged: String = native.readDeferral.map { " (not judged: \($0))" } ?? ""
+            field("Reported by macOS", "\(native.reportedLimit.map { "\($0)%" } ?? "unknown")\(judged)")
             if let readAt = native.readAt {
                 field("Read at", "\(time: readAt)")
             }
@@ -581,6 +582,7 @@ public enum DiagnosticsReport {
         case .unchanged: "already in effect"
         case .simulated: "simulated"
         case .adoptedOutsideChange: "kept a change made outside CellKeeper"
+        case .deferred(let written): written ? "set, not confirmed yet: macOS's Charge Limit not judged" : "waiting: macOS's Charge Limit not judged, nothing changed"
         case .failed(let message): "failed: \(message)"
         case .refused(let reason): "refused: \(reason)"
         }

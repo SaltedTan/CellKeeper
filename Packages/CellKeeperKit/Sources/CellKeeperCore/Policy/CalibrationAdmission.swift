@@ -46,7 +46,8 @@ public enum CalibrationAdmission {
     /// order: calibration available and not running; control by macOS's
     /// Charge Limit, settled (no switch pending, available, not faulted, no
     /// restore owed, readable); Manage charging on; CellKeeper's limit one
-    /// macOS's Charge Limit can take; a usable reading on external power; no
+    /// macOS's Charge Limit can take; a usable reading on external power,
+    /// and macOS's Charge Limit read after power settled (note 08, O20); no
     /// full charge or discharge running and no one-shot full charge
     /// scheduled; and, where the temperature is read, 10–40 °C (R23).
     public static func stateRefusal(status: ControllerStatus, settings: ChargingSettings, now: Date) -> String? {
@@ -79,6 +80,10 @@ public enum CalibrationAdmission {
             return "CellKeeper has no current battery reading."
         }
         guard reading.isOnExternalPower else { return "The Mac is on battery. Connect power first." }
+        // The session records the owner's own limit from this read.
+        guard native?.readDeferral == nil else {
+            return "CellKeeper checks macOS's Charge Limit once your Mac has been on power for a minute. Try again then."
+        }
         if let running = status.activeOverride {
             return running.kind == .fullCharge
                 ? "A temporary full charge is running. Let it end, or cancel it, first."

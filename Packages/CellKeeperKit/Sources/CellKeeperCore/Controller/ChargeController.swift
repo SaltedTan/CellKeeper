@@ -85,8 +85,22 @@ import os
 ///   confirms the normal limit. A session found at launch is checked
 ///   against what the first evaluation read before writing, and stays
 ///   paused, with the normal policy, until the owner continues it.
+/// - macOS's Charge Limit report shows its *active* limit, which macOS
+///   clears on battery power and creates again on plug-in (research note
+///   08, O20). Before every evaluation and restore the controller tells the
+///   backend whether it can be judged (``ChargeLimitReadCondition``): only
+///   on external power, ``chargeLimitSettleTime`` after it last saw external
+///   power begin, a wake, or its own start. Until then no outside change is
+///   adopted, nothing is recorded as the user's own limit, a read-back is
+///   not a failure, and no calibration ends because of a read.
 public actor ChargeController {
     public static let maximumConsecutiveFailures = 3
+    /// How long after CellKeeper sees external power begin (a plug-in, a
+    /// wake on external power, or its own start) it waits before judging
+    /// macOS's Charge Limit report. macOS created its limit again within
+    /// about 0.1 s of a plug-in (note 08, O20); a minute leaves a wide
+    /// margin, and costs at most one more periodic check.
+    public static let chargeLimitSettleTime: TimeInterval = 60
     /// A failure-free period of this length resets the failure count.
     public static let failureMemory: TimeInterval = 60 * 60
     /// How long a will-sleep announcement keeps sleep precautions active if
@@ -243,6 +257,13 @@ public actor ChargeController {
     /// after a failed read or a request that may have changed it.
     private var reportedModeIsOwn: Bool?
     private var managementRefusal: String?
+    /// ``chargeLimitSettleTime``, or a test's.
+    private let chargeLimitSettleTime: TimeInterval
+    /// When, on ``uptime``, CellKeeper last saw external power begin: the
+    /// first evaluation with a usable reading on external power after one
+    /// without, and every wake or launch on it. Nil while the latest reading
+    /// is not a usable one on external power.
+    private var externalPowerSinceUptime: TimeInterval?
     private var events: [ControlEvent] = []
     private var nextEventID = 0
     private var lastEvaluation: Date?
@@ -267,6 +288,8 @@ public actor ChargeController {
     ///   - calibrationClock: the boot-wide monotonic clock and boot identity
     ///     a calibration is timed with. Defaults to `uptime`, with no boot
     ///     identity: then only this run counts as the same boot.
+    ///   - chargeLimitSettleTime: ``chargeLimitSettleTime``; tests that are
+    ///     not about it may start with power settled.
     public init(
         telemetry: any TelemetryProvider,
         backend: any ChargingBackend,
@@ -278,7 +301,8 @@ public actor ChargeController {
         now: @escaping @Sendable () -> Date = { Date() },
         timeZone: @escaping @Sendable () -> TimeZone = { TimeZone.current },
         uptime: (@Sendable () -> TimeInterval)? = nil,
-        calibrationClock: CalibrationClock? = nil
+        calibrationClock: CalibrationClock? = nil,
+        chargeLimitSettleTime: TimeInterval = ChargeController.chargeLimitSettleTime
     ) {
         self.telemetry = telemetry
         self.backend = backend
@@ -286,6 +310,7 @@ public actor ChargeController {
         self.scheduleStore = scheduleStore
         self.weeklyStore = weeklyStore
         self.settings = settings
+        self.chargeLimitSettleTime = chargeLimitSettleTime
         self.now = now
         self.timeZone = timeZone
         let uptime = uptime ?? Self.continuousUptime()
@@ -1095,7 +1120,9 @@ public actor ChargeController {
             }
             return
         }
-        guard let reported = nativeLimit?.reportedLimit else { return }
+        // Only a read that is judged: on battery power "no limit" is not
+        // the setting (note 08, O20).
+        guard let reported = nativeLimit?.reportedLimit, nativeLimit?.readDeferral == nil else { return }
         if reported == retained.ownerLimit {
             calibration.releaseEvidence()
             return
@@ -1344,9 +1371,11 @@ public actor ChargeController {
         recordCalibrationLog()
         // Note 12 §7.6 step 1: before anything is written, whether the
         // backend holds a record of the owner's limit (what it loaded; no
-        // new I/O). Its own recovery then runs first, as always.
+        // new I/O). Its own recovery then runs first, as always. Again at
+        // each later evaluation while the limit read at launch could not be
+        // judged: nothing can be recorded before it is.
         var calibrationHadRecord: Bool?
-        if calibration.needsStartupCheck {
+        if calibration.needsStartupCheck || calibration.isLimitCheckPending {
             calibrationHadRecord = await backend.nativeLimitStatus()?.hasUnresolvedOwnership ?? false
         }
         let adoptionsBefore = adoptionCount
@@ -1383,6 +1412,8 @@ public actor ChargeController {
             consecutiveFailures = 0
             lastFailureUptime = nil
         }
+        notePowerSource(trigger, at: evaluationUptime)
+        await backend.noteChargeLimitReadCondition(chargeLimitReadCondition(at: evaluationUptime))
 
         capabilities = await backend.capabilities()
         await observeBackendMode()
@@ -1436,7 +1467,7 @@ public actor ChargeController {
             event: Self.calibrationEvent(trigger),
             observedMode: currentMode,
             context: calibrationContext(at: evaluationNow, adoptionsBefore: adoptionsBefore),
-            startup: calibrationHadRecord.map { CalibrationStartupEvidence(hadRecord: $0, limitRead: nativeLimit?.reportedLimit) },
+            startup: calibrationHadRecord.map { CalibrationStartupEvidence(hadRecord: $0, limitRead: nativeLimit?.reportedLimit, isLimitJudged: nativeLimit?.readDeferral == nil) },
             at: calibrationStamp
         )
         recordCalibrationLog()
@@ -1595,6 +1626,35 @@ public actor ChargeController {
         }
     }
 
+    /// Notes when external power began, for ``chargeLimitReadCondition(at:)``:
+    /// at the first usable reading on external power after one that was
+    /// not, and again at a wake or launch on it, since macOS may have
+    /// cleared and created its limit again meanwhile (note 08, O20).
+    private func notePowerSource(_ trigger: EvaluationTrigger, at uptimeNow: TimeInterval) {
+        guard ChargingPolicy.usableSnapshot(snapshot, now: now())?.powerSource == .externalPower else {
+            externalPowerSinceUptime = nil
+            return
+        }
+        if externalPowerSinceUptime == nil || trigger == .didWake || trigger == .launch {
+            externalPowerSinceUptime = uptimeNow
+        }
+    }
+
+    /// Whether macOS's Charge Limit report can be judged now, from the
+    /// latest reading: only on external power, once it has lasted
+    /// ``chargeLimitSettleTime`` by the monotonic clock.
+    private func chargeLimitReadCondition(at uptimeNow: TimeInterval) -> ChargeLimitReadCondition {
+        switch ChargingPolicy.usableSnapshot(snapshot, now: now())?.powerSource {
+        case .battery?:
+            return .onBattery
+        case .externalPower?:
+            guard let since = externalPowerSinceUptime, uptimeNow - since >= chargeLimitSettleTime else { return .settling }
+            return .settled
+        case .unknown?, nil:
+            return .powerUnknown
+        }
+    }
+
     /// macOS's own Charge Limit, as a backend that switches charging itself
     /// reports it.
     private enum MacOSLimitGate: Equatable {
@@ -1744,6 +1804,10 @@ public actor ChargeController {
         }
         let target = describeTarget(mode)
         let ownerLimitBefore = nativeLimit?.ownerLimit
+        let before = (current: currentMode, responsible: responsibleMode, isOwn: reportedModeIsOwn)
+        // A request that waited for macOS's Charge Limit to be judged, asked
+        // again at every check until it can be, is logged once.
+        let isWaitingAgain = lastExecution?.action == action && lastExecution?.result == .deferred(written: false)
         if mode != .normal {
             // From here on the request may take effect, whatever its reply:
             // no read taken before it can show what is in effect.
@@ -1751,7 +1815,9 @@ public actor ChargeController {
             currentMode = nil
             reportedModeIsOwn = nil
         }
-        record(.request, "Requesting \(target) from \(backend.descriptor.displayName) backend.")
+        if !isWaitingAgain {
+            record(.request, "Requesting \(target) from \(backend.descriptor.displayName) backend.")
+        }
         do {
             let result = try await setAndConfirm(mode)
             var outcome = result.outcome
@@ -1759,8 +1825,9 @@ public actor ChargeController {
                 record(.safety, "Recorded your own macOS Charge Limit of \(ownerLimit)%; it will be restored when CellKeeper stops managing the limit.")
             }
             // A fault persists until the user clears it, even if restoring
-            // normal charging succeeds.
-            if !isBackendFaulted {
+            // normal charging succeeds. A request waiting for macOS's Charge
+            // Limit to be judged has not succeeded either.
+            if !isBackendFaulted, outcome != .deferred, outcome != .awaitingConfirmation {
                 consecutiveFailures = 0
                 lastFailureUptime = nil
             }
@@ -1789,6 +1856,20 @@ public actor ChargeController {
                     restrictingRequests.removeLast()
                 }
                 lastExecution = ExecutionRecord(date: now(), action: action, result: .adoptedOutsideChange)
+            case .deferred:
+                // Nothing was written: it does not count toward the limit,
+                // and what this evaluation read still stands.
+                if isRestricting, !restrictingRequests.isEmpty {
+                    restrictingRequests.removeLast()
+                }
+                (currentMode, responsibleMode, reportedModeIsOwn) = before
+                lastExecution = ExecutionRecord(date: now(), action: action, result: .deferred(written: false))
+                if !isWaitingAgain {
+                    record(.result, "Waiting to set \(target). \(deferralText)")
+                }
+            case .awaitingConfirmation:
+                lastExecution = ExecutionRecord(date: now(), action: action, result: .deferred(written: true))
+                record(.result, "Set \(target), not confirmed yet. \(deferralText)")
             }
         } catch {
             let message = String(describing: error)
@@ -1816,6 +1897,12 @@ public actor ChargeController {
     private func describeTarget(_ mode: ChargeControlMode) -> String {
         guard capabilities.isEnforcedByMacOS, mode == .normal else { return mode.description }
         return "your own macOS Charge Limit" + (nativeLimit?.ownerLimit.map { " of \($0)%" } ?? "")
+    }
+
+    /// Why macOS's Charge Limit was not judged at the last read, for the
+    /// activity log.
+    private var deferralText: String {
+        NativeLimitWording.deferral(nativeLimit) ?? "macOS's Charge Limit could not be judged yet."
     }
 
     /// For native limits, the value macOS reported when confirming.
@@ -2042,6 +2129,21 @@ public actor ChargeController {
                 adopt(await backend.takeAdoptedLimitChange())
                 return RequestResult(outcome: outcome)
             }
+            if outcome == .deferred || outcome == .awaitingConfirmation {
+                // macOS's Charge Limit could not be judged: nothing is
+                // confirmed and nothing failed. A value written may be in
+                // effect, so a later read showing it is CellKeeper's own; a
+                // restore not confirmed is still owed.
+                nativeLimit = await backend.nativeLimitStatus()
+                if outcome == .awaitingConfirmation {
+                    unconfirmedRequests.insert(mode)
+                    currentMode = nil
+                }
+                if mode == .normal {
+                    isRestoreOutstanding = true
+                }
+                return RequestResult(outcome: outcome)
+            }
             let readBack: ChargeControlMode?
             do {
                 readBack = try await readBackendMode()
@@ -2092,6 +2194,9 @@ public actor ChargeController {
     /// confirmed to be in `.normal`, or cannot control anything and reports no
     /// other mode. Caller must hold the lock.
     private func restoreNormal(reason: String) async -> Bool {
+        // Outside an evaluation too (quitting, a backend switch), from the
+        // latest reading and the monotonic clock now.
+        await backend.noteChargeLimitReadCondition(chargeLimitReadCondition(at: uptime()))
         // Never waits for anything `.normal` does not depend on, such as a
         // read of macOS's Charge Limit.
         let capabilities = await backend.capabilitiesForRelease()
@@ -2126,6 +2231,15 @@ public actor ChargeController {
                 // The limit now in effect is the user's own; `adopt(_:)` has
                 // logged it.
                 return true
+            }
+            if outcome == .deferred || outcome == .awaitingConfirmation {
+                // Not confirmed, and not a failure: the record stays until
+                // a read that can be judged shows the user's limit.
+                let owner = ownerLimit.map { " of \($0)%" } ?? ""
+                record(.safety, outcome == .awaitingConfirmation
+                       ? "Restored your own macOS Charge Limit\(owner) (\(reason)), not confirmed yet. \(deferralText)"
+                       : "Restoring your own macOS Charge Limit\(owner) (\(reason)) waits; nothing was changed. \(deferralText)")
+                return false
             }
             if isNative {
                 let reported = nativeLimit?.reportedLimit.map { "; macOS reports \($0)%" } ?? ""

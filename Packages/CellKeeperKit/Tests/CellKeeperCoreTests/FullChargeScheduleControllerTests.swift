@@ -24,7 +24,8 @@ struct FullChargeScheduleControllerTests {
             settings: settings,
             scheduleStore: FullChargeScheduleStore(defaults: storage),
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
         return (controller, telemetry)
     }
@@ -583,7 +584,8 @@ struct FullChargeScheduleControllerTests {
                 settings: loaded.settings,
                 scheduleStore: FullChargeScheduleStore(defaults: storage),
                 now: { clock.now },
-                uptime: { clock.uptime }
+                uptime: { clock.uptime },
+                chargeLimitSettleTime: 0
             )
             let status = await controller.evaluate(.launch)
             #expect(status.fullChargeScheduleOutcome == .discarded(reason: "it is not a schedule record"))
@@ -668,7 +670,8 @@ struct FullChargeScheduleNativeTests {
             adoptionMarkerStore: store,
             scheduleStore: FullChargeScheduleStore(defaults: storage),
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
         return (controller, telemetry)
     }

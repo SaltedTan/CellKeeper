@@ -53,7 +53,8 @@ enum DiagnosticsFixture {
             settings: ChargingSettings.default.withChargeLimit(85),
             adoptionMarkerStore: store,
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
         return await controller.evaluate(.launch)
     }
@@ -71,7 +72,8 @@ enum DiagnosticsFixture {
             settings: ChargingSettings.default.withChargeLimit(90),
             adoptionMarkerStore: store,
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
         await controller.evaluate(.launch)
         clock.advance(by: 60)
@@ -126,7 +128,8 @@ enum DiagnosticsFixture {
             settings: .default,
             scheduleStore: FullChargeScheduleStore(defaults: InMemoryStorage()),
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
         await controller.evaluate(.launch)
         await controller.startFullCharge()
@@ -145,7 +148,7 @@ enum DiagnosticsFixture {
         let backend = MockChargingBackend()
         await backend.failNextRequests(10)
         let telemetry = StubTelemetry(snapshot(percent: 85), clock: clock)
-        let controller = ChargeController(telemetry: telemetry, backend: backend, settings: .default, now: { clock.now }, uptime: { clock.uptime })
+        let controller = ChargeController(telemetry: telemetry, backend: backend, settings: .default, now: { clock.now }, uptime: { clock.uptime }, chargeLimitSettleTime: 0)
         var status = await controller.evaluate(.launch)
         for _ in 0..<10 where !status.isBackendFaulted {
             clock.advance(by: 120)
@@ -196,7 +199,8 @@ enum DiagnosticsFixture {
             settings: ChargingSettings.default.withChargeLimit(85),
             adoptionMarkerStore: store,
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
         return await controller.evaluate(.launch)
     }
@@ -215,7 +219,8 @@ enum DiagnosticsFixture {
             settings: ChargingSettings.default.withChargeLimit(90),
             adoptionMarkerStore: store,
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
         await controller.evaluate(.launch)
         clock.advance(by: 60)
@@ -245,7 +250,8 @@ enum DiagnosticsFixture {
             settings: .default,
             scheduleStore: FullChargeScheduleStore(defaults: InMemoryStorage()),
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
         let start = clock.now.addingTimeInterval(3600)
         try await controller.setFullChargeSchedule(FullChargeSchedule(startsAt: start, endsAt: start.addingTimeInterval(3600)))
@@ -311,7 +317,7 @@ enum DiagnosticsFixture {
     static func nativeLimitNotRead() async -> ControllerStatus {
         let clock = TestClock()
         let telemetry = StubTelemetry(snapshot(percent: 78, charging: true), clock: clock)
-        let controller = ChargeController(telemetry: telemetry, backend: UnreadNativeLimitBackend(), settings: ChargingSettings.default.withChargeLimit(85), now: { clock.now }, uptime: { clock.uptime })
+        let controller = ChargeController(telemetry: telemetry, backend: UnreadNativeLimitBackend(), settings: ChargingSettings.default.withChargeLimit(85), now: { clock.now }, uptime: { clock.uptime }, chargeLimitSettleTime: 0)
         return await controller.evaluate(.launch)
     }
 
@@ -565,7 +571,8 @@ enum DiagnosticsFixture {
             weeklyStore: WeeklyFullChargeStore(defaults: storage),
             now: { clock.now },
             timeZone: { zone.current },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
         return (controller, telemetry)
     }
@@ -580,7 +587,8 @@ enum DiagnosticsFixture {
             settings: ChargingSettings.default.withChargeLimit(limit),
             adoptionMarkerStore: store,
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
     }
 
@@ -593,7 +601,8 @@ enum DiagnosticsFixture {
             settings: .default,
             scheduleStore: FullChargeScheduleStore(defaults: storage),
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
         return (controller, telemetry)
     }

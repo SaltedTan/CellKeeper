@@ -194,7 +194,11 @@ private struct NativeLimitSummary: View {
         let native = status.nativeLimit
         VStack(alignment: .leading, spacing: 4) {
             Label {
-                if let reported = native?.reportedLimit {
+                if let deferral = native?.readDeferral {
+                    // Not "no limit": macOS clears its active limit on
+                    // battery power (note 08, O20).
+                    Text(NativeLimitWording.deferralTitle(deferral))
+                } else if let reported = native?.reportedLimit {
                     Text("macOS is enforcing its Charge Limit: \(Format.chargeLimit(reported))")
                 } else {
                     Text("macOS enforces its own Charge Limit; its current value could not be read.")
@@ -204,6 +208,9 @@ private struct NativeLimitSummary: View {
             }
             .font(.callout)
             Group {
+                if let deferral = native?.readDeferral {
+                    Text(NativeLimitWording.deferralDetail(deferral))
+                }
                 // Shared with the restore notification.
                 if let problem = NativeLimitWording.restoreProblem(status) {
                     Text(problem)
