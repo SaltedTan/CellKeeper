@@ -178,6 +178,9 @@ struct MenuBarBatteryFillTests {
             #expect((0...19).contains(fill), "\(percent)%")
             previous = fill
         }
+        // A battery made with a charge out of range still fills 0–1.
+        #expect(MenuBarBattery(percent: 130, glyph: .none, percentageText: nil, attentionSymbol: nil).fillFraction == 1)
+        #expect(MenuBarBattery(percent: -5, glyph: .none, percentageText: nil, attentionSymbol: nil).fillFraction == 0)
         // A minimum wider than the battery still fits.
         #expect(width(1, in: 1.5, minimum: 2) == 1.5)
         #expect(width(50, in: 0, minimum: 2) == 0)
