@@ -26,6 +26,42 @@ private final class Toggle {
     }
 }
 
+/// Counts the pauses that began and ended.
+private actor PauseLog {
+    private(set) var started = 0
+    private(set) var finished = 0
+
+    func began() {
+        started += 1
+    }
+
+    func ended() {
+        finished += 1
+    }
+}
+
+/// An action run once, from whichever thread fires it first.
+private final class Hook: @unchecked Sendable {
+    private let lock = NSLock()
+    private var action: (@Sendable () -> Void)?
+    private var fired = false
+
+    var hasFired: Bool { lock.withLock { fired } }
+
+    func arm(_ action: @escaping @Sendable () -> Void) {
+        lock.withLock { self.action = action }
+    }
+
+    func fire() {
+        let pending = lock.withLock {
+            defer { action = nil }
+            if action != nil { fired = true }
+            return action
+        }
+        pending?()
+    }
+}
+
 /// A display source whose reads are held until the test releases them, as
 /// a registry read stuck in flight would be, and at most 10 s (its
 /// watchdog, counted), so that no test can hang on one.
@@ -95,7 +131,17 @@ struct PowerFlowSMCTests {
         #expect(!refresher.isShowing)
         await eventually { await smc.current.isShown == false }
         #expect(await smc.current.isShown == false)
-        await refresher.run(while: { false }) { ticks.values.append($0) }
+        // A run started collapsed ends at once by itself; should it not,
+        // cancelling it ends it, so a regression fails rather than hangs.
+        let collapsedEnded = Toggle(false)
+        let collapsed = Task {
+            await refresher.run(while: { false }) { ticks.values.append($0) }
+            collapsedEnded.value = true
+        }
+        await eventually { await MainActor.run { collapsedEnded.value } }
+        #expect(collapsedEnded.value)
+        collapsed.cancel()
+        await collapsed.value
         try? await Task.sleep(for: .milliseconds(20))
         #expect(await smc.current.isShown == false)
         // Every tick carried the source's state.
@@ -210,6 +256,56 @@ struct PowerFlowSMCTests {
         #expect(await smc.isStopped)
         await finish(refresher, source, reader)
         #expect(ticks.values.isEmpty)
+    }
+
+    @Test("Ending the runs cancels each run's task: a pause between reads ends at once")
+    func endRunsCancelsTheTask() async {
+        let pauses = PauseLog()
+        let refresher = PowerFlowRefresher(source: ImmediateSource(), pause: { _ in
+            await pauses.began()
+            try? await Task.sleep(for: .seconds(3_600))
+            await pauses.ended()
+        })
+        let ticks = Ticks()
+        let run = Task { await refresher.run(while: { true }) { ticks.values.append($0) } }
+        await eventually { await pauses.started == 1 }
+        refresher.endRuns()
+        await eventually { await pauses.finished == 1 }
+        #expect(await pauses.finished == 1)
+        await run.value
+        #expect(ticks.values.count == 1)
+        refresher.stop()
+    }
+
+    @Test("A tick read before its run ended and delivered after is dropped")
+    func tickOfEndedRun() async {
+        let hook = Hook()
+        // The tick's moment is taken after its read and before it reaches
+        // the main actor: the run ends right there, once.
+        let refresher = PowerFlowRefresher(source: ImmediateSource(), pause: hour, now: {
+            hook.fire()
+            return ContinuousClock.now
+        })
+        hook.arm {
+            if Thread.isMainThread {
+                MainActor.assumeIsolated { refresher.endRuns() }
+            } else {
+                DispatchQueue.main.sync { MainActor.assumeIsolated { refresher.endRuns() } }
+            }
+        }
+        let ticks = Ticks()
+        let ended = Toggle(false)
+        let run = Task {
+            await refresher.run(while: { true }) { ticks.values.append($0) }
+            ended.value = true
+        }
+        await eventually { hook.hasFired }
+        await eventually { await MainActor.run { ended.value } }
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(hook.hasFired)
+        #expect(ticks.values.isEmpty)
+        run.cancel()
+        refresher.stop()
     }
 
     @Test("A run started while an ended run's read is still in flight shares that read, gets its sample, and shows the SMC source again")

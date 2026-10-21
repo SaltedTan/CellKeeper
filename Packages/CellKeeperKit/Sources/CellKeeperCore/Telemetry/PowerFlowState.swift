@@ -92,17 +92,15 @@ public struct PowerFlowState: Sendable, Equatable {
     private var smc: SMCTrack?
     /// When the first batch of the last accepted window began.
     private var lastWindowBegan: ContinuousClock.Instant?
-    /// When the SMC track was last cleared (the section hidden, a wake, a
-    /// power-source change): a window whose first batch began before then
-    /// holds readings from before that reset and is never accepted, even if
-    /// it was published before the reset and arrives after it.
+    /// When the SMC track was last cleared (the section hidden, a wake, the
+    /// read that showed a new power source): a window whose first batch
+    /// began before then holds readings from before that reset and is never
+    /// accepted, even if it was published before the reset and arrives after
+    /// it.
     private var smcCutoff: ContinuousClock.Instant?
     private var lastRecordedWindow: RecordedWindow?
-    /// The registry track's power source, kept after a failed read, and when
-    /// the read that first showed it began: a window that began before that
-    /// read may hold readings from before the change.
+    /// The registry track's power source, kept after a failed read.
     public private(set) var registryPowerSource: PowerSource?
-    private var registryPowerSourceSince: ContinuousClock.Instant?
     /// The SMC source's state at the last tick; nil before the first.
     public private(set) var smcState: SMCSourceState?
     public private(set) var shownTrack: Track = .registry
@@ -166,9 +164,9 @@ public struct PowerFlowState: Sendable, Equatable {
     /// power source, adapter rating and charge, and its battery power unless
     /// every batch had a valid `B0AP`. Not accepted while the source is not
     /// available, without a known power source in the registry track, when
-    /// it began no later than the last window, before the last reset of the
-    /// SMC track, or before the read that showed the current power source.
-    /// Recorded in the history once, here.
+    /// it began no later than the last window, or before the last reset of
+    /// the SMC track, which includes the read that showed the current power
+    /// source. Recorded in the history once, here.
     private mutating func accept(_ window: SMCPowerWindow, at now: ContinuousClock.Instant) {
         guard smcState == .available,
               let reading = registry.sample,
@@ -176,7 +174,6 @@ public struct PowerFlowState: Sendable, Equatable {
         else { return }
         if let lastWindowBegan, window.firstBatchBegan <= lastWindowBegan { return }
         if let smcCutoff, window.firstBatchBegan < smcCutoff { return }
-        if let registryPowerSourceSince, window.firstBatchBegan < registryPowerSourceSince { return }
         lastWindowBegan = window.firstBatchBegan
         let sample = PowerFlowSample(
             updatedAt: window.collectedAt,
@@ -268,17 +265,15 @@ public struct PowerFlowState: Sendable, Equatable {
         registry.sample = nil
     }
 
-    /// Notes the registry track's power source. A change from a known one
-    /// clears the SMC track, from when the read that showed it began (the
-    /// app also resets the SMC source).
+    /// Notes the registry track's power source. A new one, the first
+    /// included, clears the SMC track from when the read that showed it
+    /// began: a window whose batches began earlier may hold readings from
+    /// another power source, or ones judged before any was known (the app
+    /// also resets the SMC source on a change).
     private mutating func notePowerSource(_ source: PowerSource, since began: ContinuousClock.Instant?) {
         guard source != registryPowerSource else { return }
-        let isChange = registryPowerSource != nil
         registryPowerSource = source
-        registryPowerSourceSince = began
-        if isChange {
-            clearSMCTrack(cutoff: began)
-        }
+        clearSMCTrack(cutoff: began)
     }
 
     /// Whether `sample` was updated no later than the last SMC window

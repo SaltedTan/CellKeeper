@@ -250,6 +250,15 @@ struct PowerFlowTracksTests {
         unknown.tick(.window(smcWindow(began: 2)), at: 5)
         #expect(unknown.shownTrack == .registry)
 
+        // Batches that began before the first registry reading were judged
+        // without a known power source.
+        var beforeFirst = PowerFlowState()
+        beforeFirst.status(powerSnapshot(update: time(0)), at: 5)
+        beforeFirst.tick(.window(smcWindow(began: 3)), at: 8)
+        #expect(beforeFirst.shownTrack == .registry)
+        beforeFirst.tick(.window(smcWindow(began: 5)), at: 11)
+        #expect(beforeFirst.shownTrack == .smc)
+
         var failed = PowerFlowState()
         failed.status(powerSnapshot(update: time(0)), at: 1)
         failed.status(nil, at: 2)

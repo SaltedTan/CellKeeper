@@ -75,12 +75,14 @@ public final class PowerFlowRefresher {
             if readingRuns == 1 { smc?.send(.shown(true)) }
         }
         let end = RunEnd()
+        // Every way a run ends cancels its task, which ends the loop; a tick
+        // read before that and delivered after is dropped here.
         let task = Task { [source, smc, interval, pause, now] in
             await PowerFlowRefresh.run(
                 source: source,
                 smc: smc,
                 interval: interval,
-                while: { [weak self] in self?.isRunning(id) == true && isWanted() },
+                while: isWanted,
                 pause: pause,
                 now: now
             ) { [weak self] tick in

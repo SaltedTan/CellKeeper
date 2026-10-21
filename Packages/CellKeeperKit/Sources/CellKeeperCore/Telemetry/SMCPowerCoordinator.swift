@@ -263,14 +263,15 @@ final class SMCReaderThread: @unchecked Sendable {
         condition.signal()
     }
 
-    /// The next call to make, or nil once stopped: the thread then ends.
+    /// The next call to make, or nil once stopped: the thread then ends. A
+    /// stop clears the call waiting, and no call is handed over after it.
     private func next() -> (@Sendable () -> Void)? {
         condition.lock()
         defer { condition.unlock() }
         while job == nil, !isStopped {
             condition.wait()
         }
-        guard !isStopped, let job else { return nil }
+        guard let job else { return nil }
         self.job = nil
         return job
     }
