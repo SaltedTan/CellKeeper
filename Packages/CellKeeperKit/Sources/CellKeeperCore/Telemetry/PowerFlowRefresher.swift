@@ -96,7 +96,16 @@ actor SingleFlightPowerFlowReading: PowerFlowReading {
             defer { waitingReads -= 1 }
             return try await inFlight.value
         }
-        let read = Task { [base] in try await base.currentSample() }
+        let read = Task { [base] in
+            let began = ContinuousClock.now
+            var sample = try await base.currentSample()
+            // Every display read is ordered by when it began, whatever the
+            // source (``PowerFlowState``).
+            if sample.readBegan == nil {
+                sample.readBegan = began
+            }
+            return sample
+        }
         inFlight = read
         defer { inFlight = nil }
         return try await read.value

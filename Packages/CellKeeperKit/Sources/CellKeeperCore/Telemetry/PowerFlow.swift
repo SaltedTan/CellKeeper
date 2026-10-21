@@ -7,11 +7,12 @@ public struct PowerFlowSample: Sendable, Equatable {
     /// When the source last updated these values, so that two reads of one
     /// update count once in the history; nil if the source does not say.
     public var updatedAt: Date?
-    /// When CellKeeper read them. Readings can arrive out of order (a
-    /// controller's read delivered after its backend work, behind a later
-    /// display read of the same update), so the flow shown follows this, not
-    /// the order of arrival.
-    public var observedAt: Date
+    /// When the read that gave them began, on the continuous clock, which
+    /// the wall clock's changes do not move; nil if unknown. Readings can
+    /// arrive out of order (a controller's read delivered after its backend
+    /// work, behind a later display read of the same update), so the flow
+    /// shown follows this, not the order of arrival (``PowerFlowState``).
+    public var readBegan: ContinuousClock.Instant?
     public var powerSource: PowerSource
     /// The adapter's negotiated power ("68 W adapter").
     public var adapterRatingWatts: Int?
@@ -26,7 +27,7 @@ public struct PowerFlowSample: Sendable, Equatable {
 
     public init(
         updatedAt: Date?,
-        observedAt: Date,
+        readBegan: ContinuousClock.Instant? = nil,
         powerSource: PowerSource,
         adapterRatingWatts: Int? = nil,
         chargePercent: Int? = nil,
@@ -35,7 +36,7 @@ public struct PowerFlowSample: Sendable, Equatable {
         batteryWatts: Double? = nil
     ) {
         self.updatedAt = updatedAt
-        self.observedAt = observedAt
+        self.readBegan = readBegan
         self.powerSource = powerSource
         self.adapterRatingWatts = adapterRatingWatts
         self.chargePercent = chargePercent
@@ -47,11 +48,10 @@ public struct PowerFlowSample: Sendable, Equatable {
     /// The values of a battery reading, from macOS's undocumented registry
     /// data (research note 01): `SystemPowerIn` and `SystemLoad` (mW), and
     /// the battery's `Voltage` × `Amperage`, negative while it supplies the
-    /// Mac. The driver's update time dedupes them; the snapshot's read time
-    /// orders them.
+    /// Mac. The driver's update time dedupes them; when the read began is
+    /// left for the reader to set.
     public init(_ snapshot: BatterySnapshot) {
         updatedAt = snapshot.sourceTimestamp
-        observedAt = snapshot.timestamp
         powerSource = snapshot.powerSource
         adapterRatingWatts = snapshot.adapterWatts
         chargePercent = snapshot.isBatteryPresent ? snapshot.chargePercent : nil

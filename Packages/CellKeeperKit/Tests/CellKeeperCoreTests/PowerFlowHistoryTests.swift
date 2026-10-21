@@ -10,10 +10,21 @@ extension PowerFlowHistory {
     }
 }
 
+/// A fixed instant of the continuous clock, from which tests order reads.
+let readClockOrigin = ContinuousClock.now
+
+/// `seconds` after ``readClockOrigin`` on the continuous clock.
+func readInstant(_ seconds: Double) -> ContinuousClock.Instant {
+    readClockOrigin.advanced(by: .milliseconds(Int(seconds * 1_000)))
+}
+
 extension PowerFlowState {
-    /// Takes a battery reading's registry values.
-    mutating func take(snapshot: BatterySnapshot) {
-        take(PowerFlowSample(snapshot))
+    /// Takes a battery reading's registry values, from a read that began
+    /// `began` seconds after ``readClockOrigin`` (unknown when nil).
+    mutating func take(snapshot: BatterySnapshot, began: Double? = nil) {
+        var sample = PowerFlowSample(snapshot)
+        sample.readBegan = began.map(readInstant)
+        take(sample)
     }
 }
 
@@ -22,7 +33,6 @@ extension PowerFlowState {
 func fastSample(_ seconds: TimeInterval, load: Double = 30, powerIn: Double? = 45, battery: Double? = 15) -> PowerFlowSample {
     PowerFlowSample(
         updatedAt: referenceDate.addingTimeInterval(seconds),
-        observedAt: referenceDate.addingTimeInterval(seconds),
         powerSource: .externalPower,
         adapterRatingWatts: 68,
         chargePercent: 81,
@@ -338,78 +348,83 @@ struct PowerFlowStateTests {
     @Test("A status whose read failed clears the flow and keeps the history")
     func failedRead() {
         var readings = PowerFlowState()
-        readings.take(snapshot: powerSnapshot(update: time(0)))
-        readings.takeFailedRead(at: time(1))
+        readings.take(snapshot: powerSnapshot(update: time(0)), began: 0)
+        readings.takeStatus(snapshot: nil, evaluatedAt: time(1), readBegan: readInstant(1))
         #expect(!readings.hasSample)
         #expect(readings.flow == nil)
         #expect(readings.history.points.count == 1)
         // The same update read again shows again.
-        readings.take(snapshot: powerSnapshot(update: time(0), at: time(5)))
-        #expect(readings.hasSample)
-        #expect(readings.flow != nil)
-        // A failure evaluated before that reading, arriving late, keeps it.
-        readings.takeFailedRead(at: time(3))
+        readings.take(snapshot: powerSnapshot(update: time(0)), began: 5)
         #expect(readings.hasSample)
         #expect(readings.flow != nil)
     }
 
-    @Test("A status whose read failed never clears a display read that succeeded while the controller worked")
+    @Test("A status whose read failed never clears a read that began after its work, however often it comes and whatever the wall clock did")
     func failedStatusOrdering() {
         // The controller's work began at 0 s and its read failed; a display
-        // read succeeded at 3 s; the status, evaluated after the backend's
-        // work, arrives stamped 5 s. The display read is newer: kept.
+        // read began at 3 s and succeeded; the status arrives evaluated at
+        // 5 s, after the backend's work.
         var readings = PowerFlowState()
-        readings.take(snapshot: powerSnapshot(update: time(0), at: time(3)))
-        readings.takeStatus(snapshot: nil, evaluatedAt: time(5), readNotBefore: time(0))
+        readings.take(snapshot: powerSnapshot(update: time(0)), began: 3)
+        readings.takeStatus(snapshot: nil, evaluatedAt: time(5), readBegan: readInstant(0))
+        #expect(readings.hasSample)
+        // A command at 6 s that read nothing delivers the same status again.
+        readings.takeStatus(snapshot: nil, evaluatedAt: time(5), readBegan: readInstant(6))
         #expect(readings.hasSample)
         #expect(readings.flow != nil)
-        // A status repeating an earlier failure (evaluated at 1 s) for work
-        // begun at 6 s keeps it too.
-        readings.takeStatus(snapshot: nil, evaluatedAt: time(1), readNotBefore: time(6))
+        // The wall clock jumped an hour ahead: work began at 9 s on the
+        // continuous clock and failed, a display read began at 10 s, and the
+        // status's evaluation reads an hour later. The display read is newer.
+        readings.take(snapshot: powerSnapshot(update: time(3_600)), began: 10)
+        readings.takeStatus(snapshot: nil, evaluatedAt: time(3_605), readBegan: readInstant(9))
         #expect(readings.hasSample)
-        // A failure in work begun after the display read clears it.
-        readings.takeStatus(snapshot: nil, evaluatedAt: time(9), readNotBefore: time(4))
+        // A failure in work that began after the read shown clears it.
+        readings.takeStatus(snapshot: nil, evaluatedAt: time(3_610), readBegan: readInstant(11))
         #expect(!readings.hasSample)
         #expect(readings.flow == nil)
         // A status with a reading takes it.
-        readings.takeStatus(snapshot: powerSnapshot(update: time(60), at: time(60)), evaluatedAt: time(61), readNotBefore: time(59))
+        readings.takeStatus(snapshot: powerSnapshot(update: time(3_660)), evaluatedAt: time(3_661), readBegan: readInstant(12))
         #expect(readings.hasSample)
-        #expect(readings.history.points.count == 2)
+        #expect(readings.history.points.count == 3)
     }
 
-    @Test("A status read before a display read, delivered after it with the same update, does not replace it")
+    @Test("A status whose work began before a display read, delivered after it with the same update, does not replace it, nor when delivered again")
     func delayedStatus() {
         var readings = PowerFlowState()
-        // The display read saw the Mac unplugged at 10 s; the controller's
-        // read at 5 s, still on external power, finishes its backend work
-        // later. macOS had not updated its battery data in between.
-        readings.take(snapshot: powerSnapshot(source: .battery, current: -1_000, update: time(0), at: time(10)))
-        readings.take(snapshot: powerSnapshot(source: .externalPower, update: time(0), at: time(5)))
+        // The display read began at 10 s and saw the Mac unplugged; the
+        // controller's work began at 5 s, still on external power, and
+        // finished its backend work later. macOS had not updated its battery
+        // data in between.
+        readings.take(snapshot: powerSnapshot(source: .battery, current: -1_000, update: time(0)), began: 10)
+        readings.takeStatus(snapshot: powerSnapshot(source: .externalPower, update: time(0)), evaluatedAt: time(12), readBegan: readInstant(5))
         #expect(readings.flow?.powerSource == .battery)
         #expect(readings.flow?.batteryToMacWatts == 12)
         #expect(readings.history.points.count == 1)
         // A later read replaces it.
-        readings.take(snapshot: powerSnapshot(source: .externalPower, update: time(0), at: time(13)))
+        readings.take(snapshot: powerSnapshot(source: .externalPower, update: time(0)), began: 13)
+        #expect(readings.flow?.powerSource == .externalPower)
+        // The same status delivered again by a later command adds nothing.
+        readings.takeStatus(snapshot: powerSnapshot(source: .battery, current: -1_000, update: time(0)), evaluatedAt: time(12), readBegan: readInstant(20))
         #expect(readings.flow?.powerSource == .externalPower)
     }
 
     @Test("An older update that arrives late joins the history but does not replace the flow")
     func lateUpdate() {
         var readings = PowerFlowState()
-        readings.take(snapshot: powerSnapshot(load: 30_000, update: time(60), at: time(62)))
-        readings.take(snapshot: powerSnapshot(load: 20_000, update: time(0), at: time(30)))
+        readings.take(snapshot: powerSnapshot(load: 30_000, update: time(60)), began: 62)
+        readings.take(snapshot: powerSnapshot(load: 20_000, update: time(0)), began: 30)
         #expect(readings.flow?.macUseWatts == 30)
         #expect(readings.history.points.count == 2)
-        // A newer read of the update shown replaces it.
-        readings.take(snapshot: powerSnapshot(load: 30_000, adapter: 96, update: time(60), at: time(65)))
+        // A later read of the update shown replaces it.
+        readings.take(snapshot: powerSnapshot(load: 30_000, adapter: 96, update: time(60)), began: 65)
         #expect(readings.flow?.adapterRatingWatts == 96)
     }
 
-    @Test("After the clock is set back, the flow shows the new readings")
+    @Test("After the clock is set back, the flow shows the reads that began later")
     func clockSetBack() {
         var readings = PowerFlowState()
-        readings.take(snapshot: powerSnapshot(load: 30_000, update: time(600), at: time(600)))
-        readings.take(snapshot: powerSnapshot(load: 20_000, update: time(299), at: time(299)))
+        readings.take(snapshot: powerSnapshot(load: 30_000, update: time(600)), began: 0)
+        readings.take(snapshot: powerSnapshot(load: 20_000, update: time(299)), began: 1)
         #expect(readings.flow?.macUseWatts == 20)
         #expect(readings.history.points.count == 1)
     }

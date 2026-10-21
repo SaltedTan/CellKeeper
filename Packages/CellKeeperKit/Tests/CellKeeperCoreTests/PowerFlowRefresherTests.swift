@@ -82,6 +82,8 @@ struct PowerFlowRefresherTests {
         await source.release()
         let samples = try await [first.value, second.value]
         #expect(samples[0] == samples[1])
+        // The shared read is ordered by when it began.
+        #expect(samples[0].readBegan != nil)
         #expect(await source.mostInFlight == 1)
         #expect(await reading.waitingReads == 0)
         // The next read is a new one.

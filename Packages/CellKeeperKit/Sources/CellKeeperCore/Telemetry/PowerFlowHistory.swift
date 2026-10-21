@@ -281,54 +281,49 @@ public struct PowerFlowState: Sendable, Equatable {
     /// controller's read failed until the next sample.
     public private(set) var hasSample = false
     public private(set) var history = PowerFlowHistory()
-    /// When what the flow shows was observed, so that an older observation
-    /// that arrives late does not replace it.
-    private var shownObservation: Date?
+    /// When the read shown began, on the continuous clock: a read that began
+    /// earlier never replaces it, whatever the wall clock did meanwhile.
+    private var shownReadBegan: ContinuousClock.Instant?
+    /// The evaluation time of the last controller status taken: one
+    /// delivered again, by a command that read nothing, adds nothing.
+    private var lastStatusEvaluation: Date?
 
     public init() {}
 
-    /// Takes a sample. The flow shows the newest observation: a sample
-    /// observed before the one shown, by up to
-    /// ``PowerFlowHistory/reorderTolerance``, only joins the history, even
-    /// when both carry the same update. One observed earlier still means the
-    /// clock was set back, and is shown.
+    /// Takes a sample. The flow shows the read that began last: a sample
+    /// whose read began before the one shown only joins the history, even
+    /// when both carry the same update. One whose start is unknown is shown.
     public mutating func take(_ sample: PowerFlowSample) {
         history.record(sample)
-        guard !isOutrun(sample.observedAt) else { return }
-        shownObservation = sample.observedAt
+        if let began = sample.readBegan {
+            if let shownReadBegan, began < shownReadBegan { return }
+            shownReadBegan = began
+        }
         flow = PowerFlow(sample)
         hasSample = true
     }
 
-    /// Takes a controller status: its sample, or its failed read.
-    /// `readNotBefore` is when CellKeeper began the work that produced the
-    /// status, so a read made for it is no older. `evaluatedAt` is the
-    /// status's evaluation time, stamped after the controller's other work,
-    /// or an earlier evaluation's when the status is not a new one. A failed
-    /// read is placed at the earlier of the two, so it never clears a
-    /// display read that succeeded while the controller worked, nor one
-    /// newer than the status's own failure.
-    public mutating func takeStatus(snapshot: BatterySnapshot?, evaluatedAt: Date?, readNotBefore: Date) {
-        if let snapshot {
-            take(PowerFlowSample(snapshot))
-        } else {
-            takeFailedRead(at: min(evaluatedAt ?? readNotBefore, readNotBefore))
+    /// Takes a controller status, for work that began at `readBegan` on the
+    /// continuous clock, so that no read made for it began earlier: its
+    /// reading, ordered from then, or its failed read, which clears the flow
+    /// unless the read shown began after that work did. A status evaluated
+    /// at the same time as the last one taken is that one delivered again
+    /// (a command that read nothing returns the last status), and adds
+    /// nothing, so a failure or a reading never moves forward in time.
+    public mutating func takeStatus(snapshot: BatterySnapshot?, evaluatedAt: Date?, readBegan: ContinuousClock.Instant) {
+        if let evaluatedAt {
+            guard evaluatedAt != lastStatusEvaluation else { return }
+            lastStatusEvaluation = evaluatedAt
         }
-    }
-
-    /// A status whose read failed, observed at `time`: clears the flow,
-    /// unless what it shows was observed later.
-    public mutating func takeFailedRead(at time: Date) {
-        guard !isOutrun(time) else { return }
-        shownObservation = time
+        if let snapshot {
+            var sample = PowerFlowSample(snapshot)
+            sample.readBegan = readBegan
+            take(sample)
+            return
+        }
+        if let shownReadBegan, readBegan < shownReadBegan { return }
+        shownReadBegan = readBegan
         flow = nil
         hasSample = false
-    }
-
-    /// Whether something observed at `time` is older than what is shown,
-    /// within ``PowerFlowHistory/reorderTolerance``.
-    private func isOutrun(_ time: Date) -> Bool {
-        guard let shownObservation else { return false }
-        return time < shownObservation && shownObservation.timeIntervalSince(time) <= PowerFlowHistory.reorderTolerance
     }
 }

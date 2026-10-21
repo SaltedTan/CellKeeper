@@ -846,8 +846,8 @@ final class AppModel {
     }
 
     /// Gives the power flow a status's reading or failed read, or a sample
-    /// from the menu's reads; the state orders them by when they were
-    /// observed. The menu redraws only if what it shows changed.
+    /// from the menu's reads; the state orders them by when their reads
+    /// began. The menu redraws only if what it shows changed.
     private func notePowerFlow(_ change: (inout PowerFlowState) -> Void) {
         guard !isTerminating else { return }
         var state = powerFlow
@@ -889,9 +889,9 @@ final class AppModel {
     }
 
     private func perform(_ command: Command) async {
-        // No telemetry read made for this command is older
-        // (``PowerFlowState/takeStatus(snapshot:evaluatedAt:readNotBefore:)``).
-        let readNotBefore = Date()
+        // No telemetry read made for this command began earlier
+        // (``PowerFlowState/takeStatus(snapshot:evaluatedAt:readBegan:)``).
+        let readBegan = ContinuousClock.now
         switch command {
         case .evaluate(let trigger):
             status = await controller.evaluate(trigger)
@@ -1003,7 +1003,7 @@ final class AppModel {
             notifier.observe(status, trigger: command.trigger)
             firstStatus.provide(true)
             notePowerFlow {
-                $0.takeStatus(snapshot: status.snapshot, evaluatedAt: status.lastEvaluation, readNotBefore: readNotBefore)
+                $0.takeStatus(snapshot: status.snapshot, evaluatedAt: status.lastEvaluation, readBegan: readBegan)
             }
         }
         noteAdoptedChanges()
