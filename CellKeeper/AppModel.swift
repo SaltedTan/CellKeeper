@@ -132,6 +132,9 @@ final class AppModel {
     /// Where the menu reads the power flow while it is open: macOS's
     /// battery data, read through the telemetry provider. Display only.
     @ObservationIgnored let powerFlowSource: any PowerFlowReading
+    /// Runs the menu's reads of the power flow, one at a time, and stops
+    /// them when quitting starts.
+    @ObservationIgnored private let powerFlowRefresher: PowerFlowRefresher
     /// Provided with the first status, for Shortcuts actions that need one.
     @ObservationIgnored let firstStatus = FirstValue<Bool>()
     /// The app's version, macOS and the model, read once: none of them
@@ -256,7 +259,9 @@ final class AppModel {
         self.settingsRecoveryMessage = loaded.recoveryReason
         self.menuBarIconPreferences = store.loadMenuBarIconPreferences()
         self.backendChoice = choice
-        self.powerFlowSource = powerFlowSource ?? BatteryDataPowerFlowReading(telemetry: telemetry)
+        let powerFlowSource = powerFlowSource ?? BatteryDataPowerFlowReading(telemetry: telemetry)
+        self.powerFlowSource = powerFlowSource
+        self.powerFlowRefresher = PowerFlowRefresher(source: powerFlowSource)
         self.isPowerFlowExpanded = store.string(forKey: Self.powerFlowExpandedKey) == "on"
         // Recovery must not depend on which backend is selected: if a record
         // of the user's own Charge Limit exists, start with the backend that
@@ -411,6 +416,8 @@ final class AppModel {
     /// the caller can restore defaults without involving the main actor.
     func stopForTermination() -> ChargeController {
         isTerminating = true
+        // The menu may stay open through the restore and its alert.
+        powerFlowRefresher.stop()
         commandSink.finish()
         for task in tasks { task.cancel() }
         tasks.removeAll()
@@ -827,13 +834,13 @@ final class AppModel {
     }
 
     /// Reads the power flow's source every few seconds while the Power flow
-    /// section is expanded, until the calling task is cancelled: the menu
-    /// runs it while it is open (the lead's decision, 2026-10-21). Nothing is
-    /// read while the section is collapsed. Display only
-    /// (``PowerFlowRefresh``): no evaluation, no log line, nothing for the
-    /// controller.
+    /// section is expanded, until the calling task is cancelled or quitting
+    /// starts: the menu runs it while it is open (the lead's decision,
+    /// 2026-10-21). Nothing is read while the section is collapsed. Display
+    /// only (``PowerFlowRefresher``): no evaluation, no log line, nothing for
+    /// the controller.
     func refreshPowerFlowWhileShown() async {
-        await PowerFlowRefresh.run(source: powerFlowSource, while: { [weak self] in self?.isPowerFlowExpanded == true }) { [weak self] sample in
+        await powerFlowRefresher.run(while: { [weak self] in self?.isPowerFlowExpanded == true }) { [weak self] sample in
             self?.notePowerFlow { $0.take(sample) }
         }
     }
@@ -842,6 +849,7 @@ final class AppModel {
     /// from the menu's reads; the state orders them by when they were
     /// observed. The menu redraws only if what it shows changed.
     private func notePowerFlow(_ change: (inout PowerFlowState) -> Void) {
+        guard !isTerminating else { return }
         var state = powerFlow
         change(&state)
         if state != powerFlow { powerFlow = state }

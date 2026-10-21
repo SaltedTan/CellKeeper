@@ -24,7 +24,9 @@ public enum SystemTelemetryError: Error, Sendable, CustomStringConvertible {
 ///    `BatteryData` and `PowerTelemetryData` dictionaries only their own
 ///    allowlists.
 ///
-/// This type never opens an IOUserClient and never writes anything.
+/// This type never opens an IOUserClient and never writes anything. It holds
+/// no state, and every read gets its own objects from IOKit, so reads may
+/// overlap (the menu's power flow and the controller both read through it).
 public struct SystemTelemetryProvider: TelemetryProvider {
     public init() {}
 
