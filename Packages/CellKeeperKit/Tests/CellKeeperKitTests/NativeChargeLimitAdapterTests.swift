@@ -35,9 +35,50 @@ struct ChargeLimitReportParserTests {
         """
     }
 
+    /// `pmset -g battlimit` on the owner's Mac at 20:54 on 2026-10-21,
+    /// verbatim, after macOS created its limit again at a plug-in (note 08,
+    /// O20): two entries agreeing on 80%, one owned by PowerUIAgent's PID,
+    /// one by 0 (unexplained).
+    static let twoEntriesAfterPlugIn = """
+        Battery level limits:
+        (
+                {
+                Terminated = 0;
+                chargeSocLimitDrain = 1;
+                chargeSocLimitIsEOC = 1;
+                chargeSocLimitNoChargeToFull = 0;
+                chargeSocLimitOwner = 34175;
+                chargeSocLimitReason = manualChargeLimit;
+                chargeSocLimitSoc = 80;
+            },
+                {
+                Terminated = 0;
+                chargeSocLimitDrain = 1;
+                chargeSocLimitIsEOC = 1;
+                chargeSocLimitNoChargeToFull = 0;
+                chargeSocLimitOwner = 0;
+                chargeSocLimitReason = manualChargeLimit;
+                chargeSocLimitSoc = 80;
+            }
+        )
+
+        """
+
     @Test("Observed limits of 80–95% are read", arguments: [80, 85, 90, 95])
     func observedLimits(limit: Int) {
         #expect(ChargeLimitReportParser.parse(Self.report(limit)) == .limit(limit))
+    }
+
+    @Test("The report seen after a plug-in on 2026-10-21, with two entries, is 80%")
+    func twoEntriesAfterPlugIn() {
+        #expect(ChargeLimitReportParser.parse(Self.twoEntriesAfterPlugIn) == .limit(80))
+    }
+
+    @Test("The same report with its two entries disagreeing is unrecognised")
+    func twoEntriesDisagreeing() {
+        let text = Self.twoEntriesAfterPlugIn.replacingOne("chargeSocLimitSoc = 80;", with: "chargeSocLimitSoc = 85;", options: .backwards)
+        #expect(text.contains("chargeSocLimitSoc = 85;"))
+        #expect(ChargeLimitReportParser.parse(text) == .unrecognized("active limits disagree"))
     }
 
     @Test("The observed report for a 100% limit means no limit")

@@ -18,7 +18,8 @@ struct StatusPredicateTests {
             settings: ChargingSettings.default.withChargeLimit(limit),
             adoptionMarkerStore: store,
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
         return (controller, telemetry)
     }

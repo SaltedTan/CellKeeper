@@ -479,7 +479,8 @@ private struct CalibrationSection: View {
     @ViewBuilder
     private func start(status: ControllerStatus?) -> some View {
         let refusal = model.calibrationRefusal(confirmations)
-        let ownerLimit = status?.nativeLimit?.ownerLimit ?? status?.nativeLimit?.reportedLimit
+        // A report that was not judged is not the owner's setting.
+        let ownerLimit = status?.nativeLimit?.ownerLimit ?? (status?.nativeLimit?.readDeferral == nil ? status?.nativeLimit?.reportedLimit : nil)
         let isTemperatureReadable = status.map { CalibrationAdmission.isTemperatureReadable(status: $0, now: Date()) } ?? false
         Text(CalibrationWording.explanation)
             .font(.caption)
@@ -775,7 +776,13 @@ private struct NativeLimitSetupSection: View {
                     Text("Shortcut setup")
                 }
             }
-            LabeledContent("Charge Limit reported by macOS", value: native?.reportedLimit.map(Format.chargeLimit) ?? "Unknown")
+            LabeledContent("Charge Limit reported by macOS", value: native?.readDeferral.map(NativeLimitWording.deferralValue) ?? native?.reportedLimit.map(Format.chargeLimit) ?? "Unknown")
+            if let deferral = native?.readDeferral {
+                Text(NativeLimitWording.deferral(deferral))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if let problem = native?.readProblem {
                 Label("Could not read the Charge Limit: \(problem)", systemImage: "exclamationmark.triangle")
                     .font(.caption)

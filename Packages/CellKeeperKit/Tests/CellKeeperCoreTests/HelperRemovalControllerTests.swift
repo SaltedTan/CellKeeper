@@ -13,7 +13,7 @@ struct HelperRemovalControllerTests {
     private static let steps: Set<String> = ["backend.normal", "helper.restoreDefaultsAndExit", "registration.unregister"]
 
     private func controller(backend: any ChargingBackend) -> ChargeController {
-        ChargeController(telemetry: StubTelemetry(snapshot(percent: 70)), backend: backend, settings: .default)
+        ChargeController(telemetry: StubTelemetry(snapshot(percent: 70)), backend: backend, settings: .default, chargeLimitSettleTime: 0)
     }
 
     @Test("Normal charging first, then the helper's restore and exit, then unregistering")
@@ -111,7 +111,8 @@ struct HelperRemovalControllerTests {
             settings: settings,
             adoptionMarkerStore: store,
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
         await controller.evaluate(.launch)
         #expect(system.reading == .limit(90))
@@ -144,7 +145,8 @@ struct HelperRemovalControllerTests {
             settings: settings,
             adoptionMarkerStore: store,
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
         await controller.evaluate(.launch)
         system.runBehaviour = .fails

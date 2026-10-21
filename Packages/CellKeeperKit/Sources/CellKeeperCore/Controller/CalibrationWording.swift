@@ -25,6 +25,10 @@ public enum CalibrationLimitAfter: Sendable, Equatable {
     /// Neither is confirmed: macOS's limit may still be at 100%. The value
     /// macOS last reported, if read.
     case unconfirmed(reported: Int?)
+    /// Neither is confirmed yet, because macOS's last report could not be
+    /// judged (``NativeLimitStatus/readDeferral``): on battery power, for
+    /// example, macOS does not show its limit.
+    case notJudged(ChargeLimitReadCondition)
 }
 
 /// The words of a guided calibration: the requests (§7.5), the menu's and
@@ -67,7 +71,7 @@ public enum CalibrationWording {
     /// after a relaunch, such as the rest's time to plug in again, though
     /// the menu asks to continue first.
     public static func request(_ status: CalibrationStatus, reading: BatterySnapshot?, includingPaused: Bool) -> CalibrationRequest? {
-        guard let session = status.session, includingPaused || !status.isPaused, !session.isReturning else { return nil }
+        guard let session = status.session, includingPaused || !status.isPaused, !holdsRequests(session) else { return nil }
         switch session.step {
         case .unplug:
             return .unplug
@@ -80,6 +84,14 @@ public enum CalibrationWording {
         case .chargeToFull, .restAtTop, .drain, .finalCharge:
             return nil
         }
+    }
+
+    /// A pending return holds back the owner's requests, except the rest's
+    /// and the plug-in's: a return from an early unplug may stay pending
+    /// until the Mac is on power, where macOS confirms its Charge Limit
+    /// (note 08, O20), and on battery power the limit changes nothing.
+    static func holdsRequests(_ session: CalibrationSession) -> Bool {
+        session.isReturning && session.step != .restAtBottom && session.step != .plugIn
     }
 
     /// A request's words. `atRequest` is true for a notification posted
@@ -143,8 +155,9 @@ public enum CalibrationWording {
             }
             return "Calibration paused in \(step.lowercased()) (\(session.step)): CellKeeper was not running. Continue to go on, or cancel it. Meanwhile CellKeeper asks for its own \(NativeLimitWording.limit(cellKeeperLimit)) limit."
         }
-        if session.isReturning {
-            return "Calibration, \(step.lowercased()): returning to your limit. CellKeeper asks macOS for its \(NativeLimitWording.limit(cellKeeperLimit)) limit again and waits for macOS to confirm it."
+        if holdsRequests(session) {
+            let onPower = reading?.powerSource == .battery ? " macOS confirms it once your Mac has been on power for a minute." : ""
+            return "Calibration, \(step.lowercased()): returning to your limit. CellKeeper asks macOS for its \(NativeLimitWording.limit(cellKeeperLimit)) limit again and waits for macOS to confirm it.\(onPower)"
         }
         if let request = request(status, reading: reading) {
             let words = text(request, atRequest: false, now: now, timeZone: timeZone, locale: locale)
@@ -226,6 +239,11 @@ public enum CalibrationWording {
     public static func limitAfter(_ status: ControllerStatus) -> CalibrationLimitAfter {
         let native = status.nativeLimit
         let reported = native?.reportedLimit
+        // A read that was not judged (on battery power, before power
+        // settled) confirms neither: macOS may not show its limit then.
+        if let deferral = native?.readDeferral {
+            return .notJudged(deferral)
+        }
         guard let current = status.currentMode, let reported, native?.readProblem == nil,
               !status.isOwnLimitRestorePending, native?.isRecordUnreadable != true
         else {
@@ -256,6 +274,8 @@ public enum CalibrationWording {
             case nil: ", so its Charge Limit may still be at 100%"
             }
             return "macOS has not confirmed CellKeeper's limit back yet\(report). CellKeeper keeps asking; if it does not change, set your own limit, \(NativeLimitWording.limit(ownerLimit)), in System Settings › Battery › Charging."
+        case .notJudged(let condition):
+            return "macOS has not confirmed CellKeeper's limit back yet. \(NativeLimitWording.deferral(condition))"
         }
     }
 

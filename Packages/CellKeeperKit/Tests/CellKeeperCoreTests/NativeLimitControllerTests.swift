@@ -22,7 +22,8 @@ struct NativeLimitControllerTests {
             settings: settings,
             adoptionMarkerStore: store,
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
         return (controller, telemetry)
     }
@@ -842,7 +843,7 @@ struct NativeLimitControllerTests {
         let backend = ChangedOutsideBackend()
         let clock = clock
         let telemetry = StubTelemetry(snapshot(percent: 75), clock: clock)
-        let controller = ChargeController(telemetry: telemetry, backend: backend, settings: settings(limit: 90), now: { clock.now }, uptime: { clock.uptime })
+        let controller = ChargeController(telemetry: telemetry, backend: backend, settings: settings(limit: 90), now: { clock.now }, uptime: { clock.uptime }, chargeLimitSettleTime: 0)
         let status = await controller.evaluate(.launch)
         #expect(status.isBackendFaulted)
         #expect(await backend.requests == [.nativeLimit(percent: 90), .normal])
@@ -1016,7 +1017,8 @@ struct NativeLimitControllerTests {
             backend: MockChargingBackend(),
             settings: settings(limit: 90),
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
         // The second reading at 92% confirms the limit and makes the request.
         await controller.evaluate(.launch)

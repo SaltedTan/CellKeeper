@@ -215,7 +215,8 @@ public struct ShortcutsStatus: Sendable, Equatable {
             parts.append("CellKeeper (\(control)): \(state); its limit is \(settings.chargeLimit)%.")
             parts += ShortcutsActionWording.qualifiers(ShortcutsActionWording.controlQualifiers, in: context)
             if capabilities.isEnforcedByMacOS, capabilities.availability.acceptsRequests {
-                parts.append(context.status.nativeLimit?.reportedLimit.map { "macOS reports its Charge Limit at \(NativeLimitWording.limit($0))." }
+                parts.append(NativeLimitWording.deferral(context.status.nativeLimit)
+                    ?? context.status.nativeLimit?.reportedLimit.map { "macOS reports its Charge Limit at \(NativeLimitWording.limit($0))." }
                     ?? "macOS's Charge Limit could not be read.")
             }
         } else {

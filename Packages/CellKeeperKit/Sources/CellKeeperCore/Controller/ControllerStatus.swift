@@ -63,6 +63,12 @@ public struct ExecutionRecord: Sendable, Equatable {
         /// macOS's Charge Limit had been changed outside CellKeeper; the new
         /// value was kept as the user's own and nothing was changed.
         case adoptedOutsideChange
+        /// macOS's Charge Limit could not be judged (on battery power, or
+        /// before power settled), so nothing is confirmed yet and nothing
+        /// failed: `written` says whether the change was made
+        /// (``ControlOutcome/awaitingConfirmation``) or waits
+        /// (``ControlOutcome/deferred``).
+        case deferred(written: Bool)
         case failed(String)
         case refused(RefusalReason)
     }
@@ -225,7 +231,9 @@ extension ControllerStatus {
 
     /// With macOS's Charge Limit: CellKeeper's limit is in effect and
     /// confirmed, and nothing failed, was refused, or is pending, so a
-    /// summary of the Charge Limit says all there is to say.
+    /// summary of the Charge Limit says all there is to say. On battery
+    /// power that is the limit last confirmed, which the summary says
+    /// macOS applies only on power (``NativeLimitStatus/readDeferral``).
     public var isNativeLimitSettled: Bool {
         guard capabilities.isEnforcedByMacOS, capabilities.availability.acceptsRequests,
               !isBackendFaulted, pendingBackend == nil,

@@ -13,6 +13,12 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
         case fails
         /// The shortcut sets the limit, but the next read fails.
         case appliesButNextReadFails
+        /// The shortcut sets the limit, but macOS shows no active limit for
+        /// it, as it may on battery power (note 08, O20).
+        case appliesWithoutActiveLimit
+        /// The shortcut changes nothing, and macOS shows no active limit
+        /// from then on.
+        case hasNoEffectWithoutActiveLimit
     }
 
     struct FakeError: Error, CustomStringConvertible {
@@ -31,16 +37,26 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
     private var _listCalls = 0
     private var _delayedChange: (remainingReads: Int, reading: NativeChargeLimitReading)?
     private var _delayedFailure: Int?
+    private var _isActiveLimitCleared = false
 
     init(reading: NativeChargeLimitReading = .limit(80), shortcutNames: [String] = [NativeChargeLimitBackend.defaultShortcutName]) {
         _reading = reading
         _names = shortcutNames
     }
 
-    /// What macOS currently reports.
+    /// What macOS currently reports, or, while ``isActiveLimitCleared``,
+    /// the setting it keeps.
     var reading: NativeChargeLimitReading {
         get { lock.withLock { _reading } }
         set { lock.withLock { _reading = newValue } }
+    }
+
+    /// macOS has cleared its active limit, as about 300 s after an unplug
+    /// (note 08, O20): reads show "no limit" and the setting is kept. Set it
+    /// false again for a plug-in, where macOS creates the limit at once.
+    var isActiveLimitCleared: Bool {
+        get { lock.withLock { _isActiveLimitCleared } }
+        set { lock.withLock { _isActiveLimitCleared = newValue } }
     }
 
     var runBehaviour: RunBehaviour {
@@ -107,14 +123,19 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
             _runInputs.append(input)
             let behaviour = _nextRuns.isEmpty ? _runBehaviour : _nextRuns.removeFirst()
             switch behaviour {
-            case .applies, .appliesButNextReadFails:
+            case .applies, .appliesButNextReadFails, .appliesWithoutActiveLimit:
                 guard let percent = Int(input) else { throw FakeError(description: "not a number") }
                 _reading = percent >= 100 ? .noLimit : .limit(percent)
                 if behaviour == .appliesButNextReadFails {
                     _failingReads += 1
                 }
+                if behaviour == .appliesWithoutActiveLimit {
+                    _isActiveLimitCleared = true
+                }
             case .hasNoEffect:
                 break
+            case .hasNoEffectWithoutActiveLimit:
+                _isActiveLimitCleared = true
             case .fails:
                 throw FakeError(description: "shortcut failed")
             }
@@ -143,7 +164,7 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
                     _delayedChange = (delayed.remainingReads - 1, delayed.reading)
                 }
             }
-            return _reading
+            return _isActiveLimitCleared ? .noLimit : _reading
         }
     }
 }

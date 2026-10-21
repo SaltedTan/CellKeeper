@@ -308,7 +308,8 @@ final class PlannerScenario {
             adoptionMarkerStore: adoptionMarkerStore,
             scheduleStore: FullChargeScheduleStore(defaults: InMemoryStorage()),
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
         )
     }
 
@@ -374,7 +375,7 @@ struct ControllerDriver: Sendable {
         let clock = TestClock()
         self.clock = clock
         telemetry = StubTelemetry(snapshot(percent: percent), clock: clock)
-        controller = ChargeController(telemetry: telemetry, backend: backend, settings: .default, now: { clock.now }, uptime: { clock.uptime })
+        controller = ChargeController(telemetry: telemetry, backend: backend, settings: .default, now: { clock.now }, uptime: { clock.uptime }, chargeLimitSettleTime: 0)
     }
 
     /// Reads `percent` (and `temperature`) a minute later and evaluates.

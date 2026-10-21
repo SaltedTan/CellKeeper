@@ -70,6 +70,13 @@ public enum NativeChargeLimitReading: Sendable, Equatable {
 /// own limit. The record is forgotten and nothing is written, so a
 /// deliberate change is never overwritten, not even by a restore.
 ///
+/// Judging: macOS reports its *active* limit, which it clears on battery
+/// power and creates again on plug-in (research note 08, O20). Only a read
+/// taken under ``ChargeLimitReadCondition/settled`` is judged as above.
+/// Otherwise only an active limit that the record accounts for is evidence;
+/// anything else, "no limit" included, records nothing, adopts nothing,
+/// fails nothing and writes nothing, and waits for a read that is judged.
+///
 /// The backend is an actor, but its operations contain suspension points.
 /// The controller serialises all calls into it, which the record logic
 /// relies on.
@@ -187,6 +194,16 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     private var lastRestoredLimit: Int?
     /// Unreadable records discarded at the user's request.
     private var recordsDiscarded = 0
+    /// Whether reads can be judged now, as the controller last said
+    /// (``noteChargeLimitReadCondition(_:)``). Settled until it says
+    /// otherwise, so a backend used on its own keeps the usual rules.
+    private var readCondition = ChargeLimitReadCondition.settled
+    /// Why the last read was not judged (``NativeLimitStatus/readDeferral``).
+    private var lastReadDeferral: ChargeLimitReadCondition?
+
+    /// Thrown by ``confirm(_:expected:owned:)`` when a read-back that cannot
+    /// be judged does not show the value written.
+    private struct ReadBackDeferred: Error {}
 
     /// - Parameters:
     ///   - store: where the user's own limit is recorded.
@@ -286,18 +303,23 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         // user's limit before it may change it; otherwise `setLimit` would
         // refuse at every evaluation, and those refusals would count as
         // backend failures. Checked every time: the limit can change at any
-        // moment, unlike the shortcut.
+        // moment, unlike the shortcut. A report that cannot be judged now
+        // leaves the backend available: requests then wait (`setLimit`)
+        // instead of the backend asking about "no limit", or failing, for
+        // what may be only macOS's limit being inactive (note 08, O20).
         switch try? await read() {
         case .limit(let percent):
             guard Self.supportedLimits.contains(percent) else {
                 return .unavailable("macOS's Charge Limit is \(percent)%, which CellKeeper cannot record as your own: it works with 80–100% in 5% steps. Set your limit in System Settings › Battery › Charging to use this backend.", style: style)
             }
         case .noLimit:
-            if !isNoLimitConfirmed {
+            if !isNoLimitConfirmed, readCondition.isJudged {
                 return .unavailable("macOS reports no Charge Limit. That usually means 100%, but could be a temporary full charge. If your limit is 100%, confirm it in Settings › Control.", style: style)
             }
         case .unrecognized(let detail):
-            return .unavailable("macOS reported its Charge Limit in a form CellKeeper does not recognise (\(detail)).", style: style)
+            if readCondition.isJudged {
+                return .unavailable("macOS reported its Charge Limit in a form CellKeeper does not recognise (\(detail)).", style: style)
+            }
         case nil:
             return .unavailable("Could not read macOS's current Charge Limit\(lastReadProblem.map { ": \($0)" } ?? ".")", style: style)
         }
@@ -318,7 +340,23 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             return .normal
         case .owned(var owned):
             let reading = try await read()
-            guard let percent = reading.percent else { return nil }
+            let percent: Int
+            if readCondition.isJudged {
+                guard let judged = reading.percent else { return nil }
+                percent = judged
+            } else {
+                // Only an active limit is evidence now: one the record
+                // accounts for (a restore's included), or the user's own at
+                // first contact, both handled below. Anything else, "no
+                // limit" included, is judged later; no value reaches the
+                // adoption below.
+                guard case .limit(let active) = reading,
+                      owned.accepts(active) || (active == owned.ownerLimit && !hasReconciledRecord)
+                else {
+                    return reportDeferred(owned)
+                }
+                percent = active
+            }
             if !hasReconciledRecord {
                 hasReconciledRecord = true
                 if percent == owned.ownerLimit {
@@ -350,6 +388,42 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         }
     }
 
+    /// What a read that cannot be judged shows against `owned` (note 08,
+    /// O20).
+    private enum UnjudgedMatch {
+        /// An active limit the record accounts for: evidence, as when
+        /// judged.
+        case active(Int)
+        /// "No limit" while the record accounts for 100%: nothing
+        /// contradicts the record, but on battery power macOS shows "no
+        /// limit" whatever the setting, so it confirms nothing.
+        case noLimitConsistent
+        /// Anything else: judged once a read can be.
+        case none
+    }
+
+    private static func unjudgedMatch(_ reading: NativeChargeLimitReading, _ owned: OwnershipRecord) -> UnjudgedMatch {
+        switch reading {
+        case .limit(let percent) where owned.accepts(percent): .active(percent)
+        case .noLimit where owned.accepts(100): .noLimitConsistent
+        default: .none
+        }
+    }
+
+    /// For a read that cannot be judged and shows no active limit the
+    /// record accounts for: the record stands as it is (a first contact
+    /// stays one), and the limit CellKeeper last confirmed is reported, as
+    /// CellKeeper's, until a read that is judged settles it. While a value
+    /// written since, or a restore, may be in effect instead
+    /// (``NativeLimitStatus/pendingLimits``,
+    /// ``NativeLimitStatus/isRestoreUnfinished``), that report is only the
+    /// record's: the controller then takes the mode in effect as unknown.
+    private func reportDeferred(_ owned: OwnershipRecord) -> ChargeControlMode {
+        lastReadDeferral = readCondition
+        isLastReportedStateOwn = true
+        return .nativeLimit(percent: owned.target)
+    }
+
     public func setMode(_ mode: ChargeControlMode) async throws -> ControlOutcome {
         switch mode {
         case .normal:
@@ -365,10 +439,13 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         var status = NativeLimitStatus(reportedLimit: lastReading?.percent, readAt: lastReadAt, readProblem: lastReadProblem)
         switch record {
         case .none:
-            status.needsNoLimitConfirmation = lastReading == .noLimit && !isNoLimitConfirmed
+            // Asked only of a "no limit" that was judged: on battery power
+            // it is what macOS shows whatever the setting (note 08, O20).
+            status.needsNoLimitConfirmation = lastReading == .noLimit && !isNoLimitConfirmed && lastReadDeferral == nil
         case .owned(let owned):
             status.ownerLimit = owned.ownerLimit
             status.target = owned.target
+            status.pendingLimits = owned.pendingTargets.sorted()
             status.isRestoreUnfinished = owned.isRestoring
         case .unreadable:
             status.isRecordUnreadable = true
@@ -378,12 +455,19 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         status.restoresConfirmed = restoresConfirmed
         status.lastRestoredLimit = lastRestoredLimit
         status.recordsDiscarded = recordsDiscarded
+        status.readDeferral = lastReadDeferral
         return status
     }
 
     public func takeAdoptedLimitChange() async -> AdoptedLimitChange? {
         defer { adoptedChange = nil }
         return adoptedChange
+    }
+
+    // `async`, as the requirement is: a synchronous one would lose to the
+    // protocol's default in direct calls from asynchronous code.
+    public func noteChargeLimitReadCondition(_ condition: ChargeLimitReadCondition) async {
+        readCondition = condition
     }
 
     /// ``ReportedModeOrigin/cellKeeper`` when the value last reported is one
@@ -497,6 +581,32 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             throw BackendError.unavailable("CellKeeper's record of your own Charge Limit cannot be read.")
         }
         let current = try await read()
+        // "No limit" that cannot be judged, while the record accounts for
+        // 100%: nothing contradicts the record, but nothing is confirmed.
+        var isRecordUnconfirmed = false
+        if !readCondition.isJudged {
+            // The user's own limit is recorded only from a read that is
+            // judged, and nothing is written over a value that cannot be
+            // judged: it may be an outside change, noticed once on power.
+            // Only CellKeeper's own limit goes ahead (a return from 100%
+            // just after unplugging, for example).
+            guard case .owned(let existing) = record else {
+                lastReadDeferral = readCondition
+                return .deferred
+            }
+            // A value already written and waiting for its confirmation is
+            // not written again on "no limit": that would only run the
+            // shortcut at every check until power returns.
+            switch Self.unjudgedMatch(current, existing) {
+            case .active:
+                break
+            case .noLimitConsistent where percent != 100 && !existing.pendingTargets.contains(percent):
+                isRecordUnconfirmed = true
+            case .noLimitConsistent, .none:
+                lastReadDeferral = readCondition
+                return .deferred
+            }
+        }
         guard let currentPercent = current.percent else {
             throw BackendError.operationFailed("macOS's current Charge Limit could not be recognised, so CellKeeper will not change it.")
         }
@@ -521,7 +631,11 @@ public actor NativeChargeLimitBackend: ChargingBackend {
                 return .adoptedOutsideChange
             }
             owned = existing
-            owned.confirm(currentPercent)
+            // An unconfirmed "no limit" keeps every value the record
+            // accounts for: any of them may be the setting.
+            if !isRecordUnconfirmed {
+                owned.confirm(currentPercent)
+            }
         }
 
         if currentPercent == percent {
@@ -533,7 +647,13 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         owned.pendingTargets.insert(percent)
         try saveRecord(owned)
         try await runShortcut(percent)
-        try await confirm(percent, expected: .nativeLimit(percent: percent), owned: owned)
+        do {
+            try await confirm(percent, expected: .nativeLimit(percent: percent), owned: owned)
+        } catch is ReadBackDeferred {
+            // The stored record lists the value as pending: a later read
+            // showing it confirms it.
+            return .awaitingConfirmation
+        }
         owned.confirm(percent)
         // The stored record still lists this value as pending, which counts as
         // CellKeeper's own, so a failed save loses nothing.
@@ -548,7 +668,28 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         case .unreadable:
             throw BackendError.unavailable("CellKeeper's record of your own Charge Limit cannot be read, so it does not know what to restore.")
         case .owned(var owned):
-            if let current = try? await read(), let percent = current.percent {
+            let current = try? await read()
+            if let current, !readCondition.isJudged {
+                // As in `currentMode()`: an active limit the record accounts
+                // for, or the user's own at first contact, is evidence now;
+                // "no limit" while the record accounts for 100% lets the
+                // restore go ahead, once, but cannot confirm a restore to
+                // 100%. Anything else may be an outside change, which no
+                // restore must overwrite before it is judged.
+                let isOwnAtFirstContact = current == .limit(owned.ownerLimit) && !hasReconciledRecord
+                switch Self.unjudgedMatch(current, owned) {
+                case .active:
+                    break
+                case .noLimitConsistent where owned.ownerLimit != 100 && !owned.isRestoring:
+                    break
+                case .noLimitConsistent, .none:
+                    guard isOwnAtFirstContact else {
+                        lastReadDeferral = readCondition
+                        return .deferred
+                    }
+                }
+            }
+            if let current, let percent = current.percent {
                 // At first contact with a record from an earlier session, the
                 // user's limit may be back because a restore finished after
                 // that session stopped waiting.
@@ -581,7 +722,13 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             try await runShortcut(owned.ownerLimit)
             // A mismatch names the user's own limit, the value the read-back
             // should show, rather than normal charging.
-            try await confirm(owned.ownerLimit, expected: .nativeLimit(percent: owned.ownerLimit), owned: owned)
+            do {
+                try await confirm(owned.ownerLimit, expected: .nativeLimit(percent: owned.ownerLimit), owned: owned)
+            } catch is ReadBackDeferred {
+                // The record says a restore is in progress: a later read
+                // showing the user's limit completes it.
+                return .awaitingConfirmation
+            }
             clearRecord(owned, reason: "restored \(owned.ownerLimit)%")
             return .applied
         }
@@ -606,8 +753,17 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     /// value that `owned` does not account for was set by someone else after
     /// CellKeeper's write: it is adopted at once, so no later restore (which
     /// might not manage to read first) can overwrite it.
+    ///
+    /// A read-back that cannot be judged confirms only by showing the value
+    /// as an active limit; anything else throws ``ReadBackDeferred``, which
+    /// is not a failure: macOS may not create its limit until power returns.
     private func confirm(_ percent: Int, expected: ChargeControlMode, owned: OwnershipRecord) async throws {
         let reading = try await read()
+        if !readCondition.isJudged, reading != .limit(percent) {
+            lastReadDeferral = readCondition
+            CellKeeperLog.backend.notice("Read-back after setting \(percent)%: \(String(describing: reading), privacy: .public), \(self.readCondition.description, privacy: .public); confirmed once it can be judged")
+            throw ReadBackDeferred()
+        }
         guard reading.percent == percent else {
             CellKeeperLog.backend.error("Read-back after setting \(percent)%: \(String(describing: reading), privacy: .public)")
             if let found = reading.percent, !owned.accepts(found) {
@@ -627,9 +783,17 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             } else {
                 lastReadProblem = nil
             }
+            // An active limit is shown for what it is; callers mark one
+            // that their record does not account for.
+            if case .limit = reading {
+                lastReadDeferral = nil
+            } else {
+                lastReadDeferral = readCondition.isJudged ? nil : readCondition
+            }
             return reading
         } catch {
             lastReading = nil
+            lastReadDeferral = nil
             lastReadProblem = String(describing: error)
             throw BackendError.operationFailed("Could not read macOS's Charge Limit: \(error)")
         }
