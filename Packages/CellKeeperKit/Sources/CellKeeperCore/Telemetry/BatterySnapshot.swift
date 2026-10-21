@@ -110,6 +110,14 @@ public struct BatterySnapshot: Sendable, Equatable {
     public var timeToEmptyMinutes: Int?
     public var timeToFullMinutes: Int?
     public var adapterWatts: Int?
+    /// Power into the Mac from the adapter, in milliwatts, as macOS reports
+    /// it (undocumented registry data, research note 01), or nil if it does
+    /// not. For display only: the policy and the controller never use it.
+    public var systemPowerInMilliwatts: Int?
+    /// The power the Mac uses, in milliwatts, as macOS reports it
+    /// (undocumented registry data, research note 01), or nil if it does
+    /// not. For display only: the policy and the controller never use it.
+    public var systemLoadMilliwatts: Int?
     public var health: BatteryHealth
 
     public init(
@@ -126,6 +134,8 @@ public struct BatterySnapshot: Sendable, Equatable {
         timeToEmptyMinutes: Int? = nil,
         timeToFullMinutes: Int? = nil,
         adapterWatts: Int? = nil,
+        systemPowerInMilliwatts: Int? = nil,
+        systemLoadMilliwatts: Int? = nil,
         health: BatteryHealth = BatteryHealth()
     ) {
         self.timestamp = timestamp
@@ -141,6 +151,8 @@ public struct BatterySnapshot: Sendable, Equatable {
         self.timeToEmptyMinutes = timeToEmptyMinutes
         self.timeToFullMinutes = timeToFullMinutes
         self.adapterWatts = adapterWatts
+        self.systemPowerInMilliwatts = systemPowerInMilliwatts
+        self.systemLoadMilliwatts = systemLoadMilliwatts
         self.health = health
     }
 

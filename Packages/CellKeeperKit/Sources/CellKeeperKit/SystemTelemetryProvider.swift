@@ -20,7 +20,9 @@ public enum SystemTelemetryError: Error, Sendable, CustomStringConvertible {
 /// 2. The `AppleSmartBattery` IORegistry entry — readable without privileges
 ///    via public IOKit registry calls, but its property names are
 ///    undocumented and vary across macOS versions. Only an allowlist of keys
-///    is read (``BatteryTelemetryParser/registryKeys``).
+///    is read (``BatteryTelemetryParser/registryKeys``), and of the nested
+///    `BatteryData` and `PowerTelemetryData` dictionaries only their own
+///    allowlists.
 ///
 /// This type never opens an IOUserClient and never writes anything.
 public struct SystemTelemetryProvider: TelemetryProvider {
@@ -83,9 +85,6 @@ public struct SystemTelemetryProvider: TelemetryProvider {
                 properties[key] = value
             }
         }
-        if let batteryData = properties["BatteryData"] as? [String: Any] {
-            properties["BatteryData"] = batteryData.filter { BatteryTelemetryParser.batteryDataKeys.contains($0.key) }
-        }
-        return properties
+        return BatteryTelemetryParser.allowlistingNestedKeys(of: properties)
     }
 }
