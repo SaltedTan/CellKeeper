@@ -219,12 +219,47 @@ struct NativeLimitPowerCalibrationTests {
     func launchCheckPassesOnShownLimit() async {
         let rig = CalibrationRig.settling()
         _ = await rig.startedSettled()
+        rig.clock.advance(by: hour)
+        _ = await rig.read(calibrationReading(100, charging: false, full: true))
+        rig.clock.advance(by: 2 * hour)
+        _ = await rig.read(calibrationReading(100, charging: false, full: true))
+        rig.clock.advance(by: 600)
+        _ = await rig.read(calibrationReading(99, .battery), .powerSourceChanged)
+        rig.clock.advance(by: 600)
         await rig.controller.shutdown(reason: "quit")
-        let second = rig.relaunched(reading: calibrationReading(70, .battery))
+        #expect(rig.system.reading == .limit(90))
+        // Within 300 s of the unplug macOS still shows the owner's 90%.
+        let second = rig.relaunched(reading: calibrationReading(95, .battery))
         let status = await second.controller.evaluate(.launch)
-        #expect(status.calibration.last?.end == .unplugged(.chargeToFull), "the session's own rule, not the limit")
+        #expect(status.calibration.isPaused)
+        #expect(status.calibration.session?.step == .drain)
+        #expect(!status.events.contains { $0.message.contains("is still your own 90%") }, "nothing left to check")
         #expect(status.settings.isManagementEnabled)
         #expect(status.adoptionCount == 0)
+    }
+
+    @Test("A limit that could not be read at launch is not kept from a no-limit report on battery power; on power it is judged as before")
+    func retainedEvidenceWaitsForPower() async throws {
+        let rig = CalibrationRig()
+        _ = await rig.started()
+        await rig.controller.shutdown(reason: "quit")
+        rig.system.readFails = true
+        let second = rig.relaunched(reading: calibrationReading(85))
+        var status = await second.controller.evaluate(.launch)
+        #expect(status.calibration.last?.end == .unaccountedLimit(found: nil, expected: 90))
+        #expect(status.calibration.isEvidenceRetained)
+
+        second.system.readFails = false
+        second.system.isActiveLimitCleared = true
+        second.clock.advance(by: 600)
+        status = await second.read(calibrationReading(80, .battery), .powerSourceChanged)
+        #expect(status.calibration.isEvidenceRetained, "kept until a read that can be judged")
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: second.records) == nil, "no limit is not kept as the owner's")
+
+        second.system.isActiveLimitCleared = false
+        status = await second.read(calibrationReading(80), .powerSourceChanged)
+        #expect(!status.calibration.isEvidenceRetained, "the owner's own 90%, shown")
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: second.records) == nil)
     }
 
     @Test("A calibration does not start until macOS's Charge Limit has been read once power settled")

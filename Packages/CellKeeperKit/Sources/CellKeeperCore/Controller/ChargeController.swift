@@ -261,8 +261,8 @@ public actor ChargeController {
     private let chargeLimitSettleTime: TimeInterval
     /// When, on ``uptime``, CellKeeper last saw external power begin: the
     /// first evaluation with a usable reading on external power after one
-    /// without, and every wake or launch on it. Nil while the latest reading
-    /// is not a usable one on external power.
+    /// without, or after none (so a launch begins it), and every wake on it.
+    /// Nil while the latest reading is not a usable one on external power.
     private var externalPowerSinceUptime: TimeInterval?
     /// Whether macOS's Charge Limit can be judged in the current
     /// evaluation, as the backend was told.
@@ -1634,14 +1634,15 @@ public actor ChargeController {
 
     /// Notes when external power began, for ``chargeLimitReadCondition(at:)``:
     /// at the first usable reading on external power after one that was
-    /// not, and again at a wake or launch on it, since macOS may have
-    /// cleared and created its limit again meanwhile (note 08, O20).
+    /// not, or after none (CellKeeper's start), and again at a wake on it,
+    /// since macOS may have cleared and created its limit again meanwhile
+    /// (note 08, O20).
     private func notePowerSource(_ trigger: EvaluationTrigger, at uptimeNow: TimeInterval) {
         guard ChargingPolicy.usableSnapshot(snapshot, now: now())?.powerSource == .externalPower else {
             externalPowerSinceUptime = nil
             return
         }
-        if externalPowerSinceUptime == nil || trigger == .didWake || trigger == .launch {
+        if externalPowerSinceUptime == nil || trigger == .didWake {
             externalPowerSinceUptime = uptimeNow
         }
     }
@@ -2141,15 +2142,17 @@ public actor ChargeController {
             if outcome == .deferred || outcome == .awaitingConfirmation {
                 // macOS's Charge Limit could not be judged: nothing is
                 // confirmed and nothing failed. A value written may be in
-                // effect, so a later read showing it is CellKeeper's own; a
-                // restore not confirmed is still owed.
+                // effect, so a later read showing it is CellKeeper's own,
+                // and a restore written is owed until confirmed, as one
+                // that failed. One that waits wrote nothing: the record
+                // still owes it, and the policy decides as before.
                 nativeLimit = await backend.nativeLimitStatus()
                 if outcome == .awaitingConfirmation {
                     unconfirmedRequests.insert(mode)
                     currentMode = nil
-                }
-                if mode == .normal {
-                    isRestoreOutstanding = true
+                    if mode == .normal {
+                        isRestoreOutstanding = true
+                    }
                 }
                 return RequestResult(outcome: outcome)
             }

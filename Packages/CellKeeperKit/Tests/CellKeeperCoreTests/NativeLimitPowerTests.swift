@@ -126,13 +126,13 @@ struct NativeLimitPowerTests {
         #expect(status.adoptionCount == 0)
         #expect(status.settings.isManagementEnabled)
         #expect(status.nativeLimit?.readDeferral == .settling)
-        rig.clock.advance(by: ChargeController.chargeLimitSettleTime - 1)
+        rig.clock.advance(by: ChargeController.chargeLimitSettleTime - 0.5)
         status = await rig.read(.externalPower, 70)
         #expect(status.adoptionCount == 0, "still inside the window")
         #expect(status.nativeLimit?.readDeferral == .settling)
 
         rig.system.isActiveLimitCleared = false
-        rig.clock.advance(by: 1)
+        rig.clock.advance(by: 0.5)
         status = await rig.read(.externalPower, 71)
         #expect(status.adoptionCount == 0)
         #expect(status.nativeLimit?.readDeferral == nil)
@@ -395,6 +395,7 @@ struct NativeLimitPowerTests {
         #expect(rig.system.runInputs == ["85", "80"])
         #expect(status.lastExecution?.result == .deferred(written: true))
         #expect(status.nativeLimit?.isRestoreUnfinished == true)
+        #expect(status.currentMode == nil, "either may be in effect")
         #expect(status.consecutiveFailures == 0)
         rig.clock.advance(by: 120)
         status = await rig.read(.battery, 74)
@@ -403,6 +404,65 @@ struct NativeLimitPowerTests {
         status = await rig.read(.externalPower, 74, .powerSourceChanged)
         #expect(status.nativeLimit?.ownerLimit == nil, "the restore is confirmed by macOS showing the owner's 80%")
         #expect(rig.system.runInputs == ["85", "80"])
+    }
+
+    @Test("A restore written on battery power is owed until confirmed, so turning management on again finishes it first; one that wrote nothing is not owed")
+    func restoreOwedOnlyWhenWritten() async throws {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.system.scheduleRuns([.appliesWithoutActiveLimit])
+        _ = try await rig.controller.apply(settings: rig.settings(limit: 85, managed: false))
+        var status = try await rig.controller.apply(settings: rig.settings(limit: 85))
+        #expect(status.decision?.reason == .releaseRequired(.restoreUnfinished))
+        #expect(rig.system.runInputs == ["85", "80"])
+
+        let other = PowerRig(limit: 85)
+        await other.settledOnPower()
+        _ = await other.read(.battery, 75, .powerSourceChanged)
+        other.system.isActiveLimitCleared = true
+        other.clock.advance(by: 600)
+        _ = try await other.controller.apply(settings: other.settings(limit: 85, managed: false))
+        status = try await other.controller.apply(settings: other.settings(limit: 85))
+        #expect(status.decision?.state == .osEnforcedLimit)
+        #expect(status.decision?.action == .noAction)
+        #expect(status.nativeLimit?.ownerLimit == 80)
+        #expect(other.system.runInputs == ["85"])
+    }
+
+    @Test("A restore outside an evaluation, such as quitting, judges by the time it runs, not by the last evaluation's")
+    func quitJudgesByItsOwnTime() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        var status = await rig.read(.externalPower, 75, .powerSourceChanged)
+        #expect(status.nativeLimit?.readDeferral == nil)
+        // Set to 100% on power; CellKeeper quits a minute later, with no
+        // check in between.
+        rig.system.changeExternally(to: 100)
+        rig.clock.advance(by: ChargeController.chargeLimitSettleTime)
+        status = await rig.controller.shutdown(reason: "quit")
+        #expect(status.adoptedChange?.isNoLimit == true, "judged: kept as the owner's change")
+        #expect(NativeChargeLimitBackend.pendingAdoption(in: rig.store)?.isNoLimit == true)
+        #expect(rig.system.runInputs == ["85"])
+    }
+
+    @Test("A request that waits for power neither counts as a failure nor clears earlier ones")
+    func waitKeepsFailureCount() async throws {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        // A change whose shortcut fails: one failure; the fallback gives
+        // back the owner's own limit.
+        rig.system.scheduleRuns([.fails])
+        rig.clock.advance(by: 61)
+        var status = try await rig.controller.apply(settings: rig.settings(limit: 90))
+        #expect(status.consecutiveFailures == 1)
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.system.isActiveLimitCleared = true
+        rig.clock.advance(by: 600)
+        status = try await rig.controller.apply(settings: rig.settings(limit: 95))
+        #expect(status.lastExecution?.result == .deferred(written: false))
+        #expect(status.consecutiveFailures == 1)
     }
 }
 

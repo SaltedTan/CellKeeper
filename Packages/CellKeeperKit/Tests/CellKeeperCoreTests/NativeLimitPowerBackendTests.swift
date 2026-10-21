@@ -185,6 +185,32 @@ struct NativeLimitPowerBackendTests {
         #expect(NativeChargeLimitBackend.outstandingRecord(in: store) == nil)
     }
 
+    @Test("The owner's own limit shown on battery power after the first read is no adoption until it can be judged")
+    func ownLimitShownAfterFirstContact() async throws {
+        storeOwnershipRecord(owner: 80, target: 85, in: store)
+        system.reading = .limit(85)
+        let backend = await makeBackend(.onBattery)
+        #expect(try await backend.currentMode() == .nativeLimit(percent: 85))
+        system.reading = .limit(80)
+        #expect(try await backend.currentMode() == .nativeLimit(percent: 85))
+        #expect(await backend.takeAdoptedLimitChange() == nil)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store)?.ownerLimit == 80)
+
+        await backend.noteChargeLimitReadCondition(.settled)
+        #expect(try await backend.currentMode() == .normal)
+        #expect(await backend.takeAdoptedLimitChange()?.limit == 80, "chosen outside CellKeeper, even if it is the one recorded")
+    }
+
+    @Test("With 100% pending as CellKeeper's, a no-limit report on battery power does not end the record of the owner's own 100%")
+    func ownerHundredPendingNotEnded() async throws {
+        storeOwnershipRecord(owner: 100, target: 80, pending: 100, in: store)
+        system.isActiveLimitCleared = true
+        let backend = await makeBackend(.onBattery)
+        #expect(try await backend.setMode(.normal) == .deferred)
+        #expect(system.runInputs.isEmpty)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: store)?.ownerLimit == 100)
+    }
+
     @Test("A read that fails is still a failure, whatever the condition")
     func failedReadStillFails() async {
         storeOwnershipRecord(owner: 80, target: 85, in: store)
