@@ -99,6 +99,21 @@ struct PowerFlowWordingTests {
         #expect(PowerFlowWording.adapterSpoken(try flow(powerSnapshot(adapter: 1_000)), locale: german) == "45 watts in, 1.000-watt adapter")
     }
 
+    @Test("The footnote names the source and how often it updates")
+    func footnotes() {
+        func footnote(_ interval: Duration) -> String {
+            PowerFlowWording.footnote(sourceName: "macOS's battery data", updateInterval: interval)
+        }
+        #expect(footnote(.seconds(60)) == "From macOS's battery data, updated about once a minute.")
+        #expect(footnote(.seconds(1)) == "From macOS's battery data, updated about every second.")
+        #expect(footnote(.milliseconds(400)) == "From macOS's battery data, updated about every second.")
+        #expect(footnote(.milliseconds(2_500)) == "From macOS's battery data, updated about every 3 seconds.")
+        #expect(footnote(.milliseconds(2_499)) == "From macOS's battery data, updated about every 2 seconds.")
+        #expect(footnote(.seconds(90)) == "From macOS's battery data, updated about every 90 seconds.")
+        #expect(footnote(.seconds(120)) == "From macOS's battery data, updated about every 2 minutes.")
+        #expect(footnote(.seconds(Int64.max)).hasPrefix("From macOS's battery data, updated about every "))
+    }
+
     @Test("The chart's series have names")
     func seriesTitles() {
         #expect(PowerFlowHistory.Series.allCases.map(PowerFlowWording.title(of:)) == ["Mac use", "Adapter input", "Battery"])

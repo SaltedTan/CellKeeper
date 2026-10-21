@@ -6,8 +6,27 @@ import Foundation
 /// words with at most one ("45 watts", "14.6 watts"), in the user's number
 /// format. Like the rest of the app's text, the words are English.
 public enum PowerFlowWording {
-    /// The section's note under the diagram and the chart.
-    public static let footnote = "From macOS's battery data, updated about once a minute."
+    /// The section's note under the diagram and the chart, from its source
+    /// (``PowerFlowReading/footnote``): "From macOS's battery data, updated
+    /// about once a minute."
+    public static func footnote(sourceName: String, updateInterval: Duration) -> String {
+        "From \(sourceName), updated \(cadence(updateInterval))."
+    }
+
+    /// How often a source updates, to the nearest second: "about every
+    /// second", "about every 3 seconds", "about once a minute", "about
+    /// every 2 minutes", "about every 90 seconds".
+    static func cadence(_ interval: Duration) -> String {
+        let parts = interval.components
+        let roundsUp = parts.attoseconds >= 500_000_000_000_000_000 && parts.seconds < .max
+        let seconds = roundsUp ? parts.seconds + 1 : parts.seconds
+        switch seconds {
+        case ...1: return "about every second"
+        case 60: return "about once a minute"
+        case 61... where seconds.isMultiple(of: 60): return "about every \(seconds / 60) minutes"
+        default: return "about every \(seconds) seconds"
+        }
+    }
 
     /// Shown instead of the diagram when macOS reports no power use for the
     /// Mac.

@@ -30,6 +30,20 @@ private actor ScriptedTelemetry: TelemetryProvider {
     }
 }
 
+/// A faster source than macOS's battery data, as one could later take its
+/// place: a new update at every read, a second apart.
+private actor FastSource: PowerFlowReading {
+    private var second: TimeInterval = 0
+
+    nonisolated var sourceName: String { "a fast source" }
+    nonisolated var updateInterval: Duration { .seconds(1) }
+
+    func currentSample() -> PowerFlowSample {
+        defer { second += 1 }
+        return fastSample(second, load: 20 + second)
+    }
+}
+
 /// The pauses the refresh asked for; cancels the task after `limit`.
 private actor Pauses {
     private(set) var durations: [Duration] = []
@@ -49,7 +63,8 @@ private actor Pauses {
 
 @MainActor
 private final class Deliveries {
-    var snapshots: [BatterySnapshot] = []
+    var samples: [PowerFlowSample] = []
+    var state = PowerFlowState()
 }
 
 @Suite("Power flow refresh")
@@ -59,29 +74,33 @@ struct PowerFlowRefreshTests {
         powerSnapshot(update: referenceDate.addingTimeInterval(seconds))
     }
 
+    private func times(_ seconds: [TimeInterval]) -> [Date?] {
+        seconds.map { referenceDate.addingTimeInterval($0) }
+    }
+
     /// Runs the refresh in a task of its own, which the fakes cancel as the
     /// menu closing would, leaving the test's task alone.
     private func refresh(
-        _ telemetry: ScriptedTelemetry,
+        _ source: any PowerFlowReading,
         interval: Duration = PowerFlowRefresh.interval,
         pauses: Pauses,
-        deliver: @escaping @MainActor @Sendable (BatterySnapshot) -> Void
+        deliver: @escaping @MainActor @Sendable (PowerFlowSample) -> Void
     ) async {
         await Task { @MainActor in
-            await PowerFlowRefresh.run(telemetry: telemetry, interval: interval, pause: { await pauses.pause($0) }, deliver: deliver)
+            await PowerFlowRefresh.run(source: source, interval: interval, pause: { await pauses.pause($0) }, deliver: deliver)
         }.value
     }
 
-    @Test("Reads at once and after every pause, delivering each reading, until the task is cancelled")
+    @Test("Reads at once and every 3 s, delivering each sample, until the task is cancelled")
     func readsUntilCancelled() async {
         let telemetry = ScriptedTelemetry([reading(0), reading(0), reading(60)])
         let pauses = Pauses(cancellingAfter: 3)
         let deliveries = Deliveries()
-        await refresh(telemetry, pauses: pauses) { deliveries.snapshots.append($0) }
+        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), pauses: pauses) { deliveries.samples.append($0) }
         #expect(await telemetry.reads == 3)
-        #expect(await pauses.durations == [.seconds(5), .seconds(5), .seconds(5)])
-        #expect(deliveries.snapshots.map(\.sourceTimestamp) == [0, 0, 60].map { referenceDate.addingTimeInterval($0) })
-        #expect(PowerFlowRefresh.interval == .seconds(5))
+        #expect(await pauses.durations == [.seconds(3), .seconds(3), .seconds(3)])
+        #expect(deliveries.samples.map(\.updatedAt) == times([0, 0, 60]))
+        #expect(PowerFlowRefresh.interval == .seconds(3))
     }
 
     @Test("A failed read is skipped and the next one is made")
@@ -89,10 +108,10 @@ struct PowerFlowRefreshTests {
         let telemetry = ScriptedTelemetry([nil, nil, reading(60)])
         let pauses = Pauses(cancellingAfter: 3)
         let deliveries = Deliveries()
-        await refresh(telemetry, interval: .seconds(2), pauses: pauses) { deliveries.snapshots.append($0) }
+        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), interval: .seconds(2), pauses: pauses) { deliveries.samples.append($0) }
         #expect(await telemetry.reads == 3)
         #expect(await pauses.durations == [.seconds(2), .seconds(2), .seconds(2)])
-        #expect(deliveries.snapshots.map(\.sourceTimestamp) == [referenceDate.addingTimeInterval(60)])
+        #expect(deliveries.samples.map(\.updatedAt) == times([60]))
     }
 
     @Test("Nothing is read once the task is cancelled")
@@ -100,12 +119,12 @@ struct PowerFlowRefreshTests {
         let telemetry = ScriptedTelemetry([reading(0)])
         let deliveries = Deliveries()
         let task = Task { @MainActor in
-            await PowerFlowRefresh.run(telemetry: telemetry, pause: { _ in }) { deliveries.snapshots.append($0) }
+            await PowerFlowRefresh.run(source: BatteryDataPowerFlowReading(telemetry: telemetry), pause: { _ in }) { deliveries.samples.append($0) }
         }
         task.cancel()
         await task.value
         #expect(await telemetry.reads == 0)
-        #expect(deliveries.snapshots.isEmpty)
+        #expect(deliveries.samples.isEmpty)
     }
 
     @Test("A read that ends after the task was cancelled is not delivered")
@@ -113,24 +132,55 @@ struct PowerFlowRefreshTests {
         let telemetry = ScriptedTelemetry([reading(0), reading(60)], cancelsOnRead: 2)
         let pauses = Pauses(cancellingAfter: 10)
         let deliveries = Deliveries()
-        await refresh(telemetry, pauses: pauses) { deliveries.snapshots.append($0) }
+        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), pauses: pauses) { deliveries.samples.append($0) }
         #expect(await telemetry.reads == 2)
         #expect(await pauses.durations.count == 1)
-        #expect(deliveries.snapshots.map(\.sourceTimestamp) == [referenceDate])
+        #expect(deliveries.samples.map(\.updatedAt) == times([0]))
     }
 
-    @Test("Delivered readings feed the power flow without touching anything else")
-    func feedsReadings() async {
+    @Test("Delivered samples feed the power flow, one point per update")
+    func feedsState() async {
         let telemetry = ScriptedTelemetry([reading(0), reading(0), reading(60)])
         let pauses = Pauses(cancellingAfter: 3)
-        let box = ReadingsBox()
-        await refresh(telemetry, pauses: pauses) { box.readings.take($0) }
-        #expect(box.readings.history.points.count == 2)
-        #expect(box.readings.flow?.macUseWatts == 30)
+        let deliveries = Deliveries()
+        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), pauses: pauses) { deliveries.state.take($0) }
+        #expect(deliveries.state.history.points.count == 2)
+        #expect(deliveries.state.flow?.macUseWatts == 30)
+    }
+
+    @Test("Another source takes the place of macOS's battery data unchanged, and its history is averaged per 10 s")
+    func pluggableSource() async {
+        let source = FastSource()
+        let pauses = Pauses(cancellingAfter: 25)
+        let deliveries = Deliveries()
+        await refresh(source, pauses: pauses) { deliveries.state.take($0) }
+        // 25 updates, a second apart (0 to 24 s): three buckets.
+        #expect(deliveries.state.history.points.map(\.updates) == [10, 10, 5])
+        #expect(deliveries.state.flow?.macUseWatts == 44)
+        #expect(source.footnote == "From a fast source, updated about every second.")
     }
 }
 
-@MainActor
-private final class ReadingsBox {
-    var readings = PowerFlowReadings()
+@Suite("Power flow sources")
+struct PowerFlowReadingTests {
+    @Test("macOS's battery data: its registry values, updated about once a minute")
+    func batteryData() async throws {
+        let telemetry = StubTelemetry(powerSnapshot(powerIn: 37_304, load: 17_363, voltage: 12_000, current: -500))
+        let source = BatteryDataPowerFlowReading(telemetry: telemetry)
+        #expect(source.updateInterval == .seconds(60))
+        #expect(source.footnote == "From macOS's battery data, updated about once a minute.")
+        let sample = try await source.currentSample()
+        #expect(sample == PowerFlowSample(
+            updatedAt: referenceDate, powerSource: .externalPower, adapterRatingWatts: 68, chargePercent: 81,
+            systemPowerInWatts: 37.304, systemLoadWatts: 17.363, batteryWatts: -6
+        ))
+    }
+
+    @Test("A failed telemetry read fails the sample")
+    func failure() async {
+        let telemetry = StubTelemetry(powerSnapshot())
+        await telemetry.fail(with: TelemetryTestError())
+        let source = BatteryDataPowerFlowReading(telemetry: telemetry)
+        await #expect(throws: TelemetryTestError.self) { try await source.currentSample() }
+    }
 }

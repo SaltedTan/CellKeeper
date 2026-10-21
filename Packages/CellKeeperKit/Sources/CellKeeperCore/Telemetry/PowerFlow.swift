@@ -1,15 +1,71 @@
 import Foundation
 
-/// Where the Mac's power comes from and goes, from one battery reading, for
-/// the menu's power flow (D114). Display only: the charging policy, the
+/// The values the menu's power flow is drawn from, as one source reported
+/// them at one moment (``PowerFlowReading``). Display only, like
+/// ``PowerFlow``.
+public struct PowerFlowSample: Sendable, Equatable {
+    /// When the source last updated these values, so that two reads of one
+    /// update count once; nil if the source does not say.
+    public var updatedAt: Date?
+    public var powerSource: PowerSource
+    /// The adapter's negotiated power ("68 W adapter").
+    public var adapterRatingWatts: Int?
+    public var chargePercent: Int?
+    /// The power into the Mac from the adapter.
+    public var systemPowerInWatts: Double?
+    /// The power the Mac uses.
+    public var systemLoadWatts: Double?
+    /// The battery's power, signed: positive while it charges, negative
+    /// while it supplies the Mac.
+    public var batteryWatts: Double?
+
+    public init(
+        updatedAt: Date?,
+        powerSource: PowerSource,
+        adapterRatingWatts: Int? = nil,
+        chargePercent: Int? = nil,
+        systemPowerInWatts: Double? = nil,
+        systemLoadWatts: Double? = nil,
+        batteryWatts: Double? = nil
+    ) {
+        self.updatedAt = updatedAt
+        self.powerSource = powerSource
+        self.adapterRatingWatts = adapterRatingWatts
+        self.chargePercent = chargePercent
+        self.systemPowerInWatts = systemPowerInWatts
+        self.systemLoadWatts = systemLoadWatts
+        self.batteryWatts = batteryWatts
+    }
+
+    /// The values of a battery reading, from macOS's undocumented registry
+    /// data (research note 01): `SystemPowerIn` and `SystemLoad` (mW), and
+    /// the battery's `Voltage` × `Amperage`, negative while it supplies the
+    /// Mac. The driver's update time dedupes them.
+    public init(_ snapshot: BatterySnapshot) {
+        updatedAt = snapshot.sourceTimestamp
+        powerSource = snapshot.powerSource
+        adapterRatingWatts = snapshot.adapterWatts
+        chargePercent = snapshot.isBatteryPresent ? snapshot.chargePercent : nil
+        systemPowerInWatts = snapshot.systemPowerInMilliwatts.map { Double($0) / 1000 }
+        systemLoadWatts = snapshot.systemLoadMilliwatts.map { Double($0) / 1000 }
+        if let voltage = snapshot.voltageMillivolts, let current = snapshot.amperageMilliamps {
+            batteryWatts = Double(voltage) * Double(current) / 1_000_000
+        } else {
+            batteryWatts = nil
+        }
+    }
+}
+
+/// Where the Mac's power comes from and goes, from one sample, for the
+/// menu's power flow (D114). Display only: the charging policy, the
 /// controller and the safety rules never use it.
 ///
-/// Every value is one macOS reports, from undocumented registry data
-/// (research note 01): the adapter's input (`SystemPowerIn`), the Mac's use
-/// (`SystemLoad`), and the battery's power (`Voltage` × `Amperage`, negative
-/// while it supplies the Mac). Nothing is made to add up: conversion losses
-/// and values updated at slightly different moments mean they may not, and
-/// each is shown as reported, with no "other" flow for a difference.
+/// Every value is one the source reports; from macOS's registry data
+/// (``PowerFlowSample/init(_:)``) those are the adapter's input
+/// (`SystemPowerIn`), the Mac's use (`SystemLoad`), and the battery's power.
+/// Nothing is made to add up: conversion losses and values updated at
+/// slightly different moments mean they may not, and each is shown as
+/// reported, with no "other" flow for a difference.
 public struct PowerFlow: Sendable, Equatable {
     /// What the battery is doing.
     public enum Battery: Sendable, Equatable {
@@ -39,22 +95,24 @@ public struct PowerFlow: Sendable, Equatable {
     /// The power the Mac uses.
     public let macUseWatts: Double
 
-    /// The flow of `snapshot`, or nil if macOS reports no power use for the
-    /// Mac (older macOS versions, Intel Macs, desktops): without it there is
-    /// no flow to show, and none is guessed.
+    /// The flow of `sample`, or nil if it has no power use for the Mac
+    /// (macOS's registry data lacks it on older macOS versions, Intel Macs
+    /// and desktops): without it there is no flow to show, and none is
+    /// guessed.
+    public init?(_ sample: PowerFlowSample) {
+        guard let load = sample.systemLoadWatts else { return nil }
+        let isOnExternalPower = sample.powerSource == .externalPower
+        powerSource = sample.powerSource
+        adapterRatingWatts = isOnExternalPower ? sample.adapterRatingWatts : nil
+        adapterInputWatts = isOnExternalPower ? sample.systemPowerInWatts : nil
+        chargePercent = sample.chargePercent
+        batteryWatts = sample.batteryWatts
+        macUseWatts = load
+    }
+
+    /// The flow of a battery reading's registry values.
     public init?(_ snapshot: BatterySnapshot) {
-        guard let load = snapshot.systemLoadMilliwatts else { return nil }
-        let isOnExternalPower = snapshot.powerSource == .externalPower
-        powerSource = snapshot.powerSource
-        adapterRatingWatts = isOnExternalPower ? snapshot.adapterWatts : nil
-        adapterInputWatts = isOnExternalPower ? snapshot.systemPowerInMilliwatts.map(Self.watts(fromMilliwatts:)) : nil
-        chargePercent = snapshot.isBatteryPresent ? snapshot.chargePercent : nil
-        if let voltage = snapshot.voltageMillivolts, let current = snapshot.amperageMilliamps {
-            batteryWatts = Double(voltage) * Double(current) / 1_000_000
-        } else {
-            batteryWatts = nil
-        }
-        macUseWatts = Self.watts(fromMilliwatts: load)
+        self.init(PowerFlowSample(snapshot))
     }
 
     /// What the battery is doing, or nil without its power.
@@ -93,9 +151,5 @@ public struct PowerFlow: Sendable, Equatable {
     public static func isActive(_ watts: Double?) -> Bool {
         guard let watts else { return false }
         return watts >= idleThresholdWatts
-    }
-
-    static func watts(fromMilliwatts value: Int) -> Double {
-        Double(value) / 1000
     }
 }

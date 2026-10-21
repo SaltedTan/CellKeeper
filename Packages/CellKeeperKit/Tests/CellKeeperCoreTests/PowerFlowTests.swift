@@ -149,6 +149,31 @@ struct PowerFlowTests {
         #expect(flow.chargePercent == nil)
     }
 
+    @Test("A battery reading's sample: watts from mW, the battery's signed power, the driver's update time")
+    func sampleFromSnapshot() {
+        let sample = PowerFlowSample(powerSnapshot(powerIn: 37_304, load: 17_363, voltage: 12_427, current: -845, update: referenceDate))
+        #expect(sample.updatedAt == referenceDate)
+        #expect(sample.systemPowerInWatts == 37.304)
+        #expect(sample.systemLoadWatts == 17.363)
+        #expect(sample.batteryWatts == 12_427.0 * -845 / 1_000_000)
+        #expect(sample.adapterRatingWatts == 68)
+        #expect(sample.chargePercent == 81)
+        let bare = PowerFlowSample(powerSnapshot(powerIn: nil, load: nil, voltage: nil, present: false, update: nil))
+        #expect(bare == PowerFlowSample(updatedAt: nil, powerSource: .externalPower, adapterRatingWatts: 68))
+    }
+
+    @Test("A sample from another source gives the same flow, whatever its precision")
+    func sampleFromAnotherSource() throws {
+        let flow = try #require(PowerFlow(fastSample(0, load: 31.25, powerIn: 46.5, battery: 14.75)))
+        #expect(flow.adapterToMacWatts == 31.25)
+        #expect(flow.adapterToBatteryWatts == 14.75)
+        #expect(flow.adapterRatingWatts == 68)
+        #expect(PowerFlow(fastSample(0, battery: nil))?.battery == nil)
+        let unplugged = PowerFlowSample(updatedAt: nil, powerSource: .battery, adapterRatingWatts: 68, systemPowerInWatts: 1, systemLoadWatts: 10, batteryWatts: -10)
+        #expect(PowerFlow(unplugged)?.adapterRatingWatts == nil)
+        #expect(PowerFlow(unplugged)?.adapterInputWatts == nil)
+    }
+
     @Test("A flow is active from 0.3 W")
     func activeFlows() {
         #expect(!PowerFlow.isActive(nil))
