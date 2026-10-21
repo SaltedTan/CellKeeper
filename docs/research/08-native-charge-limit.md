@@ -1,6 +1,6 @@
 # 08 — macOS's native Charge Limit through Shortcuts (milestone 2 spike)
 
-- **Date:** 2026-10-06
+- **Date:** 2026-10-06; O20 and O21 added on 2026-10-21, from the owner's first guided calibration (note 12).
 - **Machine:** Mac16,1 (MacBook Pro 14-inch, M4, 2024), macOS 27.0.1 (build 26A434), System Firmware / OS Loader 20457.1.29, Shortcuts 10.0 (5037.0.19), Xcode 27.0.
 - **Owner's setting:** Charge Limit 80%, set by the owner in System Settings. It was recorded before every experiment, and 80% was restored and read back after every change.
 - **Method:**
@@ -24,7 +24,7 @@ Tags follow the [classification legend](README.md#classification-legend). Each f
 |---|---|---|
 | Can the shortcut take the limit as input? | **Yes, as a text file** (`shortcuts run "<name>" -i <file containing 85>`). The same value piped through standard input ran without error and **changed nothing**. | `[PUBLIC-API]` (CLI) `[VERIFIED-EXPERIMENTALLY]` |
 | Can a sandboxed app launch `/usr/bin/shortcuts`? | **Yes.** An App-Sandboxed probe with no other entitlement listed shortcuts and changed the limit 80 → 85 → 80. **No entitlement or design change is needed.** | `[PUBLIC-API]` `[VERIFIED-EXPERIMENTALLY]` (ad-hoc-signed probe) |
-| How can the current limit be read back? | With `pmset -g battlimit`, which CellKeeper uses now. It works unprivileged and inside the sandbox, and it reflected each change as soon as `shortcuts run` exited. It is undocumented, so CellKeeper uses it read-only and refuses to act on anything it does not recognise. Shortcuts also has a "Get charge limit" action (O16). Run from Terminal, it returned the same value as `pmset` for 80, 85 and 100%, and plain `100` for no limit (O18), but from the App Sandbox it exits 0 and returns nothing (O19), so it cannot replace `pmset` while CellKeeper is sandboxed. | `[PRIVATE/UNDOCUMENTED][VERIFIED-EXPERIMENTALLY]` (pmset read); getter `[PUBLIC-API][VERIFIED-EXPERIMENTALLY]` (works from Terminal, returns nothing in the sandbox) |
+| How can the current limit be read back? | With `pmset -g battlimit`, which CellKeeper uses now. It works unprivileged and inside the sandbox, and it reflected each change as soon as `shortcuts run` exited. It is undocumented, so CellKeeper uses it read-only and refuses to act on anything it does not recognise. It shows macOS's *active* limit, not the setting: about 300 s after an unplug macOS clears it and the report says "no limit" whatever the setting (O20), so CellKeeper judges it only on AC power, once power has settled (decision 2). Shortcuts also has a "Get charge limit" action (O16). Run from Terminal, it returned the same value as `pmset` for 80, 85 and 100%, and plain `100` for no limit (O18), but from the App Sandbox it exits 0 and returns nothing (O19), so it cannot replace `pmset` while CellKeeper is sandboxed. | `[PRIVATE/UNDOCUMENTED][VERIFIED-EXPERIMENTALLY]` (pmset read); getter `[PUBLIC-API][VERIFIED-EXPERIMENTALLY]` (works from Terminal, returns nothing in the sandbox) |
 | Is a shortcut finishing a confirmation? | **No.** A run exited 0 and changed nothing (O2). | `[VERIFIED-EXPERIMENTALLY]` |
 | Does the limit hold through sleep and restart? | **Sleep: yes, in one owner-performed run.** An 85% limit set by CellKeeper was still in effect after about 12 minutes of clamshell sleep on AC, with five maintenance wakes and a full wake, and was not re-applied (O10). **Restart: yes, in one owner-performed run.** The owner's own 80% was still in effect after a restart, both in `pmset -g battlimit` and in System Settings (O17). See "Sleep and restart" below. | `[VERIFIED-EXPERIMENTALLY]` (one run each) |
 
@@ -87,7 +87,7 @@ The shortcut's actions run in `BackgroundShortcutRunner`, not in the calling pro
 **The two entries:**
 - One is owned by the PID of `/usr/libexec/PowerUIAgent`.
 - One is owned by `0`.
-- They always agreed.
+- They always agreed. They did again after a plug-in on 2026-10-21 (O20, verbatim there).
 
 **At 100%:** the single line `No battery level limits set`.
 
@@ -322,14 +322,78 @@ The other denials were the ones already seen in O3 and O7: `BackgroundShortcutRu
 - A sandboxed CellKeeper therefore cannot read the limit with the getter as it is. Exit 0 with no output must count as a failure, as O18 already requires.
 - Possible ways around it, none tried: a sandbox exception for that group-container path (a new entitlement, against decision 3, inside another app's container); a getter shortcut that saves its result to a file CellKeeper can read; or the non-sandboxed app that a privileged helper needs anyway (roadmap milestone 4).
 
+### O20 — On battery power macOS clears its active limit, and the report shows that, not the setting `[PRIVATE/UNDOCUMENTED][VERIFIED-EXPERIMENTALLY]`
+
+**Setup (2026-10-21):**
+- The owner's first guided calibration (note 12), run by the owner's own build of CellKeeper on the native backend: Manage charging on, CellKeeper's limit 80%, the owner's own limit 80%.
+- The evidence was collected read-only afterwards by the lead: PowerUIAgent's and CellKeeper's unified log, and `pmset -g battlimit`. Times are local.
+
+| Time | What happened |
+|---|---|
+| 11:15 | The calibration started. Step 1: 100% was requested through the shortcut and read back. |
+| 12:18–14:18 | Step 2, the rest at the top. At 14:18 CellKeeper asked for its own 80% again, confirmed by read-back, and step 3 began ("unplug"). |
+| 16:49:19 | The owner unplugged; step 4, the drain, began. |
+| 16:54:20 | PowerUIAgent logged, in order: `Device not reconnected to power within 300.000000 seconds, treat as unplugged`; `Clearing current charge limit token for (<private>)`; `Called for MCL battery level=80, externalConnected=0`; `… MCL target: 80%`. From then on `pmset -g battlimit` reported `No battery level limits set`. |
+| 16:54:45 | CellKeeper's periodic check read that and logged, in order: `[backend] Released the Charge Limit: adopted 100%, set outside CellKeeper, as the user's own limit (CellKeeper had set 80%; the recorded limit was 80%)`; a `[safety]` notice that the limit "was changed outside CellKeeper to no limit (100%)", which turned off Manage charging; `Calibration ended in step 4 (drain): macOS's Charge Limit was changed outside CellKeeper`. |
+| 20:05:14.927 | The owner plugged in at 35%. Within the same 0.1 s as `Plug-in detected`, PowerUIAgent logged: `Did not get string value for key chargeTokenMCL`; `Created new charge limit token: <private> for reason: manualChargeLimit`; `Limited charging to 80% for reason 'manualChargeLimit'`. |
+| 20:54 | `pmset -g battlimit` printed the report below. |
+
+The owner did not touch the Charge Limit, and System Settings still showed 80% (owner's report). Only the active token was cleared; the setting stayed at 80%.
+
+**The report at 20:54, verbatim** (two entries, which agree on 80%):
+
+```
+Battery level limits:
+(
+        {
+        Terminated = 0;
+        chargeSocLimitDrain = 1;
+        chargeSocLimitIsEOC = 1;
+        chargeSocLimitNoChargeToFull = 0;
+        chargeSocLimitOwner = 34175;
+        chargeSocLimitReason = manualChargeLimit;
+        chargeSocLimitSoc = 80;
+    },
+        {
+        Terminated = 0;
+        chargeSocLimitDrain = 1;
+        chargeSocLimitIsEOC = 1;
+        chargeSocLimitNoChargeToFull = 0;
+        chargeSocLimitOwner = 0;
+        chargeSocLimitReason = manualChargeLimit;
+        chargeSocLimitSoc = 80;
+    }
+)
+```
+
+- Owner 34175 is PowerUIAgent's PID; PowerUIAgent had restarted at 16:42:38.
+- **Owner 0 is unexplained**, as in O4.
+
+**Observed:**
+- `pmset -g battlimit` shows macOS's *active* limit, the token, not the user's setting.
+- On battery power, about 300 s after the unplug, PowerUIAgent clears the token. "No battery level limits set" is then macOS's normal state on battery, not a change of the setting.
+- On plug-in it creates the token again at once, by its log within about 0.1 s, at the setting.
+- CellKeeper took the cleared token for an outside change: the record of its own 80% did not account for "no limit", so it adopted 100% as the owner's own limit, turned Manage charging off, and the calibration ended. That was a bug, fixed by decision 2's rule on judging.
+
+**Inferred, not observed** `[INFERRED/UNVERIFIED]`:
+- No earlier observation here records a read on battery power more than 300 s after an unplug; O10's sleep was on AC power.
+- Not known, and not to be tested on the owner's Mac without the owner: whether changing the Charge Limit while on battery creates a token on battery; what happens at a wake from sleep; and whether a token can lag on AC power by more than a moment. CellKeeper does not depend on the answers (decision 2).
+
+### O21 — macOS drained the battery to its limit while plugged in `[VERIFIED-EXPERIMENTALLY]`
+
+In the same run (O20), after CellKeeper's return to 80% at 14:18, macOS drained the battery from 99% to 80% **while plugged in**, between 14:36 and 15:14 (PowerUIAgent logged `externalConnected=1`). This is what `chargeSocLimitDrain = 1` suggested (I4), now seen on this Mac. What it means for the calibration's step 3 is an owner decision (note 12).
+
 ---
 
 ## Inferences `[INFERRED/UNVERIFIED]`
 
 - **I1:** Standard input probably reaches the shortcut as untyped data that "Set Battery Charge Limit" cannot use as a number, while a `.txt` file is coerced to text and then to a number. Only the outcome (O1, O2) was observed.
-- **I2:** "No battery level limits set" probably means the Charge Limit is at 100%: that is what the report showed after setting 100%. It might also appear in other states, such as a temporary "Charge to Full Now" (open question 3). CellKeeper therefore records it as the user's 100% limit only after the user confirms that their limit is 100%. It never maps "no limit" or an unknown state to 100% by itself.
+- **I2:** On AC power, "No battery level limits set" probably means the Charge Limit is at 100%: that is what the report showed after setting 100%. It might also appear in other states, such as a temporary "Charge to Full Now" (open question 3). On battery power it is **not** the setting: about 300 s after an unplug macOS clears its active limit and shows "no limit" whatever the setting (O20, observed). After a plug-in the token is missing for a moment (about 0.1 s, O20); after a wake that is not known. So:
+  - CellKeeper judges the report only on AC power, settled (decision 2). On battery power, or before power has settled, "no limit" is never evidence of anything: not of an outside change, not of the user's own limit, not of a failed change.
+  - It records "no limit" as the user's 100% limit, the limit to restore, only after the user confirms that their limit is 100%, and only from a judged read. It never maps "no limit" or an unknown state to 100% by itself.
+  - One path did, and still does, keep a judged "no limit" as 100% without that confirmation: adopting an outside change (decision 5). It writes nothing, records nothing to restore, keeps Manage charging off, and names the earlier limit in case it was a temporary state. Before O20 this inference and the code disagreed there in wording; it is now stated.
 - **I3:** Entries with a reason other than `manualChargeLimit` (for example from Optimized Battery Charging), with flags other than those in O4, or with disagreeing values may exist. CellKeeper treats them as unrecognised and changes nothing.
-- **I4:** `chargeSocLimitDrain = 1` is consistent with third-party reports that macOS drains a battery above the limit down to it (02 §3.7, unverified).
+- **I4 (observed since, O21):** `chargeSocLimitDrain = 1` is consistent with third-party reports that macOS drains a battery above the limit down to it (02 §3.7). On this Mac it did so while plugged in, from 99% to 80% over about 40 minutes (O21). That the flag causes it is still an inference.
 - **I5:** The 80% limit observed throughout was the owner's own setting. The owner confirmed this; the observations are consistent with it.
 
 ---
@@ -338,7 +402,7 @@ The other denials were the ones already seen in O3 and O7: `BackgroundShortcutRu
 
 **Status:** sleep observed once (O10–O12) and restart once (O17); shutdown not tested. The design does not depend on the outcome:
 - CellKeeper re-reads the limit after every wake and at launch.
-- It treats any value it did not set as an outside change.
+- It treats any value it did not set as an outside change, once the read can be judged: on AC power, a minute after the wake or launch (decision 2).
 - It keeps the user's own limit in a persisted record until it has been restored and read back.
 
 Planned procedure:
@@ -362,11 +426,15 @@ Planned procedure:
    - Every active entry must be a manual Charge Limit with the flags seen in O4 (`chargeSocLimitDrain = 1`, `chargeSocLimitIsEOC = 1`, `chargeSocLimitNoChargeToFull = 0`), and they must agree.
    - Other keys, such as the owner PID, are not checked, so a key added by a macOS update does not stop the backend (owner decision, 2026-10-07, #14). A temporary state that differs only in its flags (open questions 2–4) is therefore unrecognised rather than recorded as the user's own limit.
    - Anything else is "unrecognised": CellKeeper then records nothing and sets no new limit. It still attempts to restore a limit it already recorded, and treats that restore as unconfirmed until it reads it back.
+   - **Judged only on AC power, once settled (2026-10-21, after O20).** The report shows macOS's active limit, not the setting. CellKeeper judges a report (records the user's own limit from it, takes it for an outside change, or counts a read-back as failed) only when it was read on AC power at least 60 s after CellKeeper last saw AC power begin, a wake, or its own start, by a clock that wall-clock changes do not affect. macOS created its limit again about 0.1 s after a plug-in (O20); 60 s is a wide margin and costs at most one more periodic check.
+   - On battery power, before that, or with the power source unknown, only an active limit that CellKeeper's record accounts for is evidence, as it is when judged. "No limit" while the record expects 100% lets CellKeeper's own change go ahead (a return from 100% just after an unplug) but confirms nothing. Anything else, "no limit" included, waits: nothing is recorded, adopted or written over it, a read-back that does not show the value written is not a failure, and the value stays CellKeeper's until a judged read confirms it or finds otherwise by the rules above.
+   - A change made outside CellKeeper on battery power is therefore noticed after the plug-in. On battery power the limit does not affect charging, so nothing is lost.
 3. **Sandbox:** stays on, with no new entitlements (O3). Keeping it also blocks pmset's SMC user-client attempt (O7).
 4. **Confirmation:** only a read-back equal to the requested value. The exit status never confirms (O2).
 5. **Outside changes (owner decision, 2026-10-06):** a recognised limit that CellKeeper did not set is adopted as the owner's own limit, and nothing is written. CellKeeper then turns off "Manage charging", so it does not override the change later. This replaces the first design, which restored the recorded limit and faulted.
    - CellKeeper cannot tell who made a change, so a change by another tool or by macOS is adopted too.
    - A "no limit" report might be a temporary full charge (open question 3), so the earlier limit is named in the log and the menu.
+   - Only a judged report can be an outside change (decision 2). On 2026-10-21 a "no limit" read on battery power was adopted, ending a calibration (O20); that was a bug.
    - The owner's longer-term direction is that CellKeeper itself controls charging, with macOS's own Charge Limit turned off. That needs a different backend and is not part of milestone 2.
 
 ---
@@ -379,6 +447,7 @@ Planned procedure:
 4. Does Optimized Battery Charging add entries with another `chargeSocLimitReason`?
 5. Shutdown behaviour, longer sleeps, and a restart with a CellKeeper-set value (above); one sleep run (O10) and one restart (O17) are recorded. Apple Community users report that the limit is not enforced while the Mac is shut down (02 §4).
 6. Is the `battlimit` report stable across macOS 27.x and on macOS 26.4–26.x?
+7. From O20: does changing the Charge Limit while on battery power create a token on battery? What does the report show at a wake from sleep? Can a token lag on AC power by more than a moment? Who owns the entry with owner 0? None of these is needed by decision 2, which waits for a judged read.
 
 ---
 
