@@ -325,6 +325,10 @@ a row, even if every window holds only one or two of them.
     and on a power-source change. A batch that begins within 1 s after a
     power-source change is also discarded. A window never mixes
     plugged-in and battery readings.
+  - **A reset also clears the accepted SMC track.** The display moves to
+    the registry track at once, which the power-source change's status
+    updates promptly. An adapter diagram accepted just before an unplug
+    never stays on screen after it.
 - **Two tracks in `PowerFlowState`.**
   - **The registry track** is always kept by D114's rules, whatever the
     SMC is doing. Every controller status goes through it, with its
@@ -424,17 +428,23 @@ a row, even if every window holds only one or two of them.
   exceptions (note 05 §1.5), so the exception would likely not be
   granted there. CellKeeper is not distributed there.
 - **The build switch: one setting, in this project's xcconfig files.**
-  - **The setting:** `CELLKEEPER_SMC_READER`, `NO` by default in
-    `Config/CellKeeper.xcconfig`. The owner turns it on in their
-    git-ignored `Local.xcconfig`, which `Shared.xcconfig` already
-    includes; CI turns it on on the `xcodebuild` command line.
-  - **What it selects:** two settings derive from it, so they can't
-    disagree:
+  - **The setting:** `CELLKEEPER_SMC_READER`.
+    - **Its default:** `NO` in `Config/Shared.xcconfig`, at project
+      level, above that file's existing `#include? "Local.xcconfig"`. The
+      owner's git-ignored `Local.xcconfig` can then set `YES` after it.
+      The target-level `Config/CellKeeper.xcconfig` does not set it, so it
+      cannot undo the owner's choice.
+    - **CI:** turns it on on the `xcodebuild` command line, which takes
+      precedence over both files.
+  - **What it selects:** two settings derive from it in
+    `Config/CellKeeper.xcconfig`, through `_YES`/`_NO` lookup settings, so
+    they can't disagree:
     - `CODE_SIGN_ENTITLEMENTS` is today's `Config/CellKeeper.entitlements`
       or a new `Config/CellKeeper-SMC.entitlements`, which is today's
       file plus the exception;
-    - `SWIFT_ACTIVE_COMPILATION_CONDITIONS` gains `CELLKEEPER_SMC_READER`
-      only when it is on.
+    - `SWIFT_ACTIVE_COMPILATION_CONDITIONS` keeps `$(inherited)`, including
+      the project's `DEBUG`, and gains `CELLKEEPER_SMC_READER` only when
+      the switch is on.
   - **The reader file:** the reader lives in the app target, in one file
     whose whole contents are inside `#if CELLKEEPER_SMC_READER`, as is the
     one line that creates it. With the setting off, no reader code is
@@ -448,14 +458,25 @@ a row, even if every window holds only one or two of them.
   - **The owner's step (step 4):** the owner replaces the placeholder,
     with the same type name, in the same file.
   - **The trial (O3):** uses the owner's reader.
+- **A marker for inclusion.** A symbol name is not a reliable sign that
+  the reader is compiled in: whole-module optimisation and dead-code
+  stripping may remove or rename it. Instead, Settings › Diagnostics and
+  the diagnostics report show a line naming the power flow's SMC reader
+  ("SMC reader: compiled in"). That line's text exists only inside
+  `#if CELLKEEPER_SMC_READER`, in code that runs, so its string stays in
+  the binary exactly when the reader is compiled in.
 - **CI.**
   - **The default build:** today's check of exact boolean entitlements
-    stays. CI also checks that the binary has no reader type in its
-    symbols.
-  - **The enabled build:** a second Release build with the setting on.
-    CI checks the exception is an array holding exactly `AppleSMCClient`,
-    that no other entitlement was added, and that the reader type is in
-    the binary's symbols.
+    stays. CI also checks that `xcodebuild -showBuildSettings` reports
+    the default entitlements file and no `CELLKEEPER_SMC_READER`
+    condition, and that the marker string is absent from the binary.
+  - **The enabled build:** a second Release build with the switch on. CI
+    checks:
+    - the build settings report the SMC entitlements file and the
+      condition;
+    - the exception is an array holding exactly `AppleSMCClient`, and no
+      other entitlement was added;
+    - the marker string is in the binary.
 
 ### 6.7 Cost and privacy
 
@@ -492,9 +513,13 @@ a row, even if every window holds only one or two of them.
      reopened starts no second read, and its result is dropped;
    - window resets on collapse, close, wake and power-source changes, and
      partial windows;
-   - the 6 s rule: a published window, then empty ticks (the display
-     moves to the registry track at the next tick after 6 s), then a
-     failed registry read (the display shows "no reading");
+   - the 6 s rule: a published window, then empty ticks, after which the
+     display moves to the registry track at the next tick after 6 s. Then
+     a failed registry read, which keeps the registry track's cached
+     reading if it has one, or shows "no reading" if the track is empty;
+   - a reset clearing the accepted SMC track: an external-power window
+     accepted, then an unplug, so the display shows the registry track at
+     once, never the old adapter diagram;
    - **repeats across tracks:** a status delivered while the SMC is
      shown, then the same status delivered again after the SMC fails,
      is recognised as a repeat and changes nothing;
