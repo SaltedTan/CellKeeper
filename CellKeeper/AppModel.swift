@@ -126,8 +126,8 @@ final class AppModel {
     /// hours, from every status and from the menu's display-only reads. In
     /// memory only; the policy and the controller never see it (D114).
     private(set) var powerFlow = PowerFlowState()
-    /// Whether the menu's Power flow section is open, remembered across
-    /// launches.
+    /// Whether the menu's Power flow section is expanded, remembered across
+    /// launches. Only then does the menu read the flow every few seconds.
     private(set) var isPowerFlowExpanded: Bool
     /// Where the menu reads the power flow while it is open: macOS's
     /// battery data, read through the telemetry provider. Display only.
@@ -191,8 +191,8 @@ final class AppModel {
     }
 
     static let backendChoiceKey = "controlBackend"
-    /// "on" while the menu's Power flow section is open; anything else is
-    /// closed, the default.
+    /// "on" while the menu's Power flow section is expanded; anything else
+    /// is collapsed, the default.
     static let powerFlowExpandedKey = "menu.powerFlowExpanded"
     static let periodicInterval: Duration = .seconds(60)
     /// macOS reports battery estimates as invalid for 30 s after wake
@@ -821,17 +821,19 @@ final class AppModel {
     }
 
     /// Where the power flow chart's lines break: the history fills from the
-    /// source while the menu is open and from the statuses while it is not.
+    /// source while the section is shown and from the statuses otherwise.
     var powerFlowLineBreakGap: TimeInterval {
         PowerFlowHistory.lineBreakGap(sourceInterval: powerFlowSource.updateInterval, checkInterval: Self.periodicInterval)
     }
 
-    /// Reads the power flow's source every few seconds until the calling
-    /// task is cancelled: the menu runs it while it is open. Display only
+    /// Reads the power flow's source every few seconds while the Power flow
+    /// section is expanded, until the calling task is cancelled: the menu
+    /// runs it while it is open (the lead's decision, 2026-10-21). Nothing is
+    /// read while the section is collapsed. Display only
     /// (``PowerFlowRefresh``): no evaluation, no log line, nothing for the
     /// controller.
     func refreshPowerFlowWhileShown() async {
-        await PowerFlowRefresh.run(source: powerFlowSource) { [weak self] sample in
+        await PowerFlowRefresh.run(source: powerFlowSource, while: { [weak self] in self?.isPowerFlowExpanded == true }) { [weak self] sample in
             self?.notePowerFlow(sample)
         }
     }

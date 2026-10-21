@@ -121,7 +121,7 @@ public struct PowerFlowHistory: Sendable, Equatable {
 
     /// Where the chart's lines break: three times the slowest way points
     /// arrive, the source's cadence or CellKeeper's own check (the history
-    /// fills from the statuses while the menu is closed), and never less
+    /// fills from the statuses unless the section is shown), and never less
     /// than three buckets.
     public static func lineBreakGap(sourceInterval: Duration, checkInterval: Duration) -> TimeInterval {
         let slowest = max(sourceInterval, checkInterval)
@@ -213,8 +213,8 @@ public struct PowerFlowHistory: Sendable, Equatable {
 
 /// What the menu's power flow shows: the latest sample's flow and the
 /// history. The controller's statuses and the display-only reads made while
-/// the menu is open (``PowerFlowRefresh``) both feed it, in whatever order
-/// they finish. In memory only.
+/// the menu shows the expanded section (``PowerFlowRefresh``) both feed it,
+/// in whatever order they finish. In memory only.
 public struct PowerFlowState: Sendable, Equatable {
     /// The latest sample's flow; nil before the first sample, after the
     /// controller's read failed, or when it has no power use for the Mac.

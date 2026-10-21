@@ -6,8 +6,9 @@ import SwiftUI
 /// The menu's "Power flow" section (D114): where the Mac's power comes from
 /// and goes, as a diagram of the adapter, the battery and the Mac, and a
 /// chart of the last hour. Display only: it changes nothing, and the policy
-/// and the controller never see what it shows. While the menu is open, its
-/// source is read every few seconds; the wording is `PowerFlowWording`'s.
+/// and the controller never see what it shows. While the menu is open and
+/// the section expanded, its source is read every few seconds; the wording
+/// is `PowerFlowWording`'s.
 struct PowerFlowSection: View {
     let model: AppModel
 
@@ -19,9 +20,11 @@ struct PowerFlowSection: View {
             PowerFlowContent(state: model.powerFlow, footnote: model.powerFlowFootnote, lineBreakGap: model.powerFlowLineBreakGap)
                 .padding(.top, 4)
         }
-        // Runs while the menu is open; SwiftUI cancels it when the menu
-        // closes, which ends the reads.
-        .task {
+        // Reads while the menu is open and the section expanded. SwiftUI
+        // cancels the task when the menu closes, and starts it again when
+        // the section is expanded or collapsed; collapsed, it reads nothing
+        // and ends at once.
+        .task(id: model.isPowerFlowExpanded) {
             await model.refreshPowerFlowWhileShown()
         }
     }

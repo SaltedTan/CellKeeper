@@ -1,7 +1,7 @@
 import Foundation
 
-/// Where the menu's power flow reads its values while the menu is open
-/// (D114). One source exists, macOS's battery data
+/// Where the menu's power flow reads its values while the menu is open and
+/// its Power flow section expanded (D114). One source exists, macOS's battery data
 /// (``BatteryDataPowerFlowReading``); a faster one could take its place
 /// without the flow, the history or the menu changing, since none of them
 /// assumes a cadence.

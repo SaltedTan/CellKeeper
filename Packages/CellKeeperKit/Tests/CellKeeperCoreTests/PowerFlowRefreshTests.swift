@@ -61,6 +61,21 @@ private actor Pauses {
     }
 }
 
+/// The menu's Power flow section, expanded until it is collapsed after a
+/// number of pauses. Should reads go on regardless, it cancels the task a
+/// few pauses later, so that the test fails rather than hangs.
+@MainActor
+private final class Section {
+    var isExpanded = true
+    private(set) var pauses = 0
+
+    func paused(collapsingAfter count: Int) {
+        pauses += 1
+        if pauses >= count { isExpanded = false }
+        if pauses >= count + 3 { withUnsafeCurrentTask { $0?.cancel() } }
+    }
+}
+
 @MainActor
 private final class Deliveries {
     var samples: [PowerFlowSample] = []
@@ -83,11 +98,12 @@ struct PowerFlowRefreshTests {
     private func refresh(
         _ source: any PowerFlowReading,
         interval: Duration = PowerFlowRefresh.interval,
+        while isWanted: @escaping @MainActor @Sendable () -> Bool = { true },
         pauses: Pauses,
         deliver: @escaping @MainActor @Sendable (PowerFlowSample) -> Void
     ) async {
         await Task { @MainActor in
-            await PowerFlowRefresh.run(source: source, interval: interval, pause: { await pauses.pause($0) }, deliver: deliver)
+            await PowerFlowRefresh.run(source: source, interval: interval, while: isWanted, pause: { await pauses.pause($0) }, deliver: deliver)
         }.value
     }
 
@@ -119,12 +135,41 @@ struct PowerFlowRefreshTests {
         let telemetry = ScriptedTelemetry([reading(0)])
         let deliveries = Deliveries()
         let task = Task { @MainActor in
-            await PowerFlowRefresh.run(source: BatteryDataPowerFlowReading(telemetry: telemetry), pause: { _ in }) { deliveries.samples.append($0) }
+            await PowerFlowRefresh.run(source: BatteryDataPowerFlowReading(telemetry: telemetry), while: { true }, pause: { _ in }) { deliveries.samples.append($0) }
         }
         task.cancel()
         await task.value
         #expect(await telemetry.reads == 0)
         #expect(deliveries.samples.isEmpty)
+    }
+
+    @Test("Nothing is read while the section is collapsed")
+    func collapsed() async {
+        let telemetry = ScriptedTelemetry([reading(0)])
+        let pauses = Pauses(cancellingAfter: 10)
+        let deliveries = Deliveries()
+        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), while: { false }, pauses: pauses) { deliveries.samples.append($0) }
+        #expect(await telemetry.reads == 0)
+        #expect(await pauses.durations.isEmpty)
+        #expect(deliveries.samples.isEmpty)
+    }
+
+    @Test("Reads stop when the section collapses, without the task being cancelled")
+    func stopsWhenCollapsed() async {
+        let telemetry = ScriptedTelemetry([reading(0), reading(60)])
+        let section = Section()
+        let deliveries = Deliveries()
+        // Collapsed during the second pause; never cancelled.
+        await Task { @MainActor in
+            await PowerFlowRefresh.run(
+                source: BatteryDataPowerFlowReading(telemetry: telemetry),
+                while: { section.isExpanded },
+                pause: { _ in await section.paused(collapsingAfter: 2) }
+            ) { deliveries.samples.append($0) }
+        }.value
+        #expect(await telemetry.reads == 2)
+        #expect(section.pauses == 2)
+        #expect(deliveries.samples.map(\.updatedAt) == times([0, 60]))
     }
 
     @Test("A read that ends after the task was cancelled is not delivered")
