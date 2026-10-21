@@ -140,6 +140,11 @@ Source: `/System/Library/Sandbox/Profiles/application.sb` and `appsandbox-common
 - **In the sandbox.** Opening the AppleSMC user client from a sandboxed process is not on the allow-list. It would need `temporary-exception.iokit-user-client-class`, which works outside the App Store. [Local-SPI + Doc]
 - **In the App Store.** DTS: "App Review takes a very dim view of folks using temporary exception entitlements". An App Review rejection quoted in that thread reads: "…temporary entitlement exceptions requested for this app are not appropriate and will not be granted". [DTS 663311]
 - **Root is required anyway.** Workstream 02 reports that SMC writes need root, and that on macOS 27 firmware most charge keys return `kIOReturnNotPrivileged` even to root. A sandboxed GUI app therefore cannot do SMC control even with the exception. Any SMC control belongs in a root daemon. [Inference, citing 02]
+- **Later (2026-10-21): a read-only exception, in opt-in builds only.** For the menu's power flow, the owner chose to read three SMC power keys with a read-only reader they write ([note 13](13-smc-power-reads.md) §5). The exception it needs, `com.apple.security.temporary-exception.iokit-user-client-class` with an array holding exactly `AppleSMCClient`, is in a second entitlements file, `Config/CellKeeper-SMC.entitlements`, used only when the build setting `CELLKEEPER_SMC_READER` is `YES` (note 13 §6.6; architecture D115).
+  - **The switch.** `NO` at project level in `Config/Shared.xcconfig`, above the `#include? "Local.xcconfig"` line, so a maintainer's git-ignored `Local.xcconfig` can set `YES` after it; the `xcodebuild` command line overrides both. `Config/CellKeeper.xcconfig` derives `CODE_SIGN_ENTITLEMENTS` and the Swift compilation condition from it through the same `_YES`/`_NO` lookups, so the exception and the reader's code come and go together, and any value but `YES` keeps today's file.
+  - **Its scope.** It allows opening that class and setting properties on it for the whole process; it limits neither the keys nor the operations, which only CellKeeper's own reader contract does. App Review's view of temporary exceptions (above) is moot: CellKeeper is not distributed through the App Store.
+  - **CI** checks both builds: the default has today's two entitlements, no condition and no reader; a second Release build switched on has exactly the two plus this exception, and the reader.
+  - **Not yet verified:** whether the minimal exception lets a sandboxed build open the user client without root (note 13 O3, after the owner's calibration).
 
 ### 1.6 Reaching a privileged daemon's Mach service from a sandboxed app
 
@@ -387,7 +392,7 @@ codesign -vvv --deep --strict dist/CellKeeper.app
 | `com.apple.security.network.client` | Only if sandboxed and checking for updates | Yes | Yes | Not needed in phase 1. |
 | `SMAppService.mainApp` (launch at login) | 1–2 (opt-in) | Yes | Yes, with consent (2.4.5(iii)) | No entitlement. User notified; may need approval. |
 | `SMAppService.daemon` (root helper) | 3+ (only if a privileged backend is required) | Only if the daemon is also sandboxed (macOS 14.2+) | **No** (2.4.5(v)) | Needs admin approval. Header: app must be notarized. Re-register after updates. |
-| `com.apple.security.temporary-exception.iokit-user-client-class` | Only if a *sandboxed* process opens AppleSMC | Yes (it is a sandbox exception) | Practically no | Value is an array of class names. Doesn't grant root. |
+| `com.apple.security.temporary-exception.iokit-user-client-class` | Only if a *sandboxed* process opens AppleSMC. Since 2026-10-21, only in builds with `CELLKEEPER_SMC_READER = YES`, as an array holding exactly `AppleSMCClient`, for the power flow's read-only SMC reader (note 13 §6.6); off by default | Yes (it is a sandbox exception) | Practically no | Value is an array of class names. Doesn't grant root. CI checks the default build lacks it and the switched-on build carries exactly it. |
 | `com.apple.security.temporary-exception.mach-lookup.global-name` | 3, only if sandboxed app → unsandboxed daemon name | Yes [Exp] | "tricky" [DTS] | Prefer to scope it to an XPC service [DTS]. |
 | `com.apple.security.application-groups` (`<TEAMID>.…`) | 3, only if sandboxed app ↔ daemon | Yes | Yes | Mach-name prefix works ad hoc [Exp]. Group *container* needs a Team ID on macOS 15+/27 [Exp/Doc]. |
 | `com.apple.security.cs.disable-library-validation` | Never in Release | Yes | Avoid | Only as a Debug crutch if ad-hoc builds embed dynamic frameworks [Exp]. |
@@ -400,7 +405,7 @@ codesign -vvv --deep --strict dist/CellKeeper.app
 
 ### Phase 1 (telemetry + mock control)
 
-- **Sandbox:** App Sandbox ON (`ENABLE_APP_SANDBOX = YES`). No other sandbox entitlements: no network, no file access, no temporary exceptions. Later (2026-10-18): access to files the user picks in a save panel was added for saving the diagnostics report (architecture D76); there is still no network access and no temporary exception.
+- **Sandbox:** App Sandbox ON (`ENABLE_APP_SANDBOX = YES`). No other sandbox entitlements: no network, no file access, no temporary exceptions. Later (2026-10-18): access to files the user picks in a save panel was added for saving the diagnostics report (architecture D76); there is still no network access and no temporary exception. Later (2026-10-21): builds that opt in with `CELLKEEPER_SMC_READER = YES` add one, the `AppleSMCClient` user-client exception for the power flow's SMC reader (§1.5, note 13 §6.6); default builds are unchanged.
   - Rationale: verified to work; zero cost; limits damage if the GUI is compromised; keeps a possible sandboxed or App Store edition open while workstream 02's control path settles.
   - Store settings behind a small abstraction so a later container migration is easy if the sandbox is dropped.
 - **Hardened Runtime:** ON, with no exceptions.
