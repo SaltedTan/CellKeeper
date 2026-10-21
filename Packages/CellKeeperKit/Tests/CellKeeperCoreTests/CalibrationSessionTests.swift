@@ -55,9 +55,10 @@ private func session(in target: CalibrationStep) -> CalibrationSession {
     s = step(s, at(1), reading(100, charging: false, full: true))
     if target == .restAtTop { return s }
     s = step(s, at(3.25), reading(100, charging: false, full: true))
-    s = s.returnConfirmed(at: at(3.25)).session
     if target == .unplug { return s }
     s = step(s, at(4), reading(99, .battery))
+    // The return asked for at the unplug, confirmed.
+    s = s.returnConfirmed(at: at(4)).session
     if target == .drain { return s }
     s = step(s, at(10), reading(20, .battery))
     if target == .restAtBottom { return s }
@@ -81,14 +82,15 @@ struct CalibrationSessionTests {
         #expect(newSession(check: .measured).hasSeenTemperature)
     }
 
-    @Test("Only steps 1, 2 and 7 ask for 100%, and none while returning")
+    @Test("Only steps 1, 2, 3 and 7 ask for 100%, and none while returning")
     func fullLimitSteps() {
-        #expect(CalibrationStep.allCases.filter(\.asksForFullLimit) == [.chargeToFull, .restAtTop, .finalCharge])
+        #expect(CalibrationStep.allCases.filter(\.asksForFullLimit) == [.chargeToFull, .restAtTop, .unplug, .finalCharge])
         var s = session(in: .restAtTop)
         #expect(s.asksForFullLimit)
         s.isReturning = true
         #expect(!s.asksForFullLimit)
-        for target in [CalibrationStep.unplug, .drain, .restAtBottom, .plugIn] {
+        #expect(session(in: .unplug).asksForFullLimit, "100% stays until the unplug (owner, 2026-10-21)")
+        for target in [CalibrationStep.drain, .restAtBottom, .plugIn] {
             #expect(!session(in: target).asksForFullLimit)
         }
         #expect(session(in: .finalCharge).asksForFullLimit)
@@ -128,34 +130,48 @@ struct CalibrationSessionTests {
         #expect(observe(s, at(6), nil).end == .stepBound(.chargeToFull))
     }
 
-    @Test("Step 2 rests 2 hours on the monotonic clock, then asks for the normal limit and waits for its confirmation")
+    @Test("Step 2 rests 2 hours on the monotonic clock, then moves to step 3 keeping 100%, asking for nothing else")
     func topRest() {
         let s = session(in: .restAtTop)
         let early = observe(s, at(3 - 1 / hour), reading(100, charging: false, full: true))
-        #expect(!early.session.isReturning)
+        #expect(early.session.step == .restAtTop)
         // A clock moved forward does not shorten it.
-        #expect(!observe(s, at(2, wallShift: 5 * hour), reading(100, charging: false, full: true)).session.isReturning)
+        #expect(observe(s, at(2, wallShift: 5 * hour), reading(100, charging: false, full: true)).session.step == .restAtTop)
         let done = observe(s, at(3), reading(100, charging: false, full: true))
-        #expect(done.session.isReturning)
-        #expect(done.session.step == .restAtTop)
-        #expect(!done.session.asksForFullLimit)
-        #expect(done.changes == [.returning(from: .restAtTop)])
+        #expect(done.session.step == .unplug)
+        #expect(done.session.stepStartedAt == at(3))
+        #expect(!done.session.isReturning, "no return is asked for: 100% stays until the unplug")
+        #expect(done.session.asksForFullLimit)
+        #expect(done.changes == [.entered(.unplug)])
+        #expect(done.end == nil)
         // Paused: no progress.
-        #expect(!observe(s, at(3), reading(100, charging: false, full: true), paused: true).session.isReturning)
+        #expect(observe(s, at(3), reading(100, charging: false, full: true), paused: true).session.step == .restAtTop)
+    }
 
-        let confirmed = done.session.returnConfirmed(at: at(3.2))
+    @Test("A step 2 left returning by an earlier version moves on to step 3 once the normal limit is confirmed")
+    func legacyReturnFromTopRest() {
+        var s = session(in: .restAtTop)
+        s.isReturning = true
+        #expect(observe(s, at(3), reading(100, charging: false, full: true)).session.step == .restAtTop)
+        let confirmed = s.returnConfirmed(at: at(3.2))
         #expect(confirmed.session.step == .unplug)
         #expect(confirmed.session.stepStartedAt == at(3.2))
         #expect(confirmed.changes == [.returnConfirmed, .entered(.unplug)])
         #expect(confirmed.end == nil)
     }
 
-    @Test("Step 2 has no bound of its own: the return may wait as long as the policy's rate limits make it")
-    func returnWaits() {
-        var s = session(in: .restAtTop)
-        s = step(s, at(3), reading(100, charging: false, full: true))
-        #expect(observe(s, at(9), reading(100, charging: false, full: true)).end == nil)
-        #expect(observe(s, at(9), reading(100, charging: false, full: true)).session.isReturning)
+    @Test("Step 3 keeps 100% while it waits for the unplug, at most 4 hours, with no return asked for")
+    func unplugWaitsAtFull() {
+        let s = session(in: .restAtTop)
+        let waiting = step(s, at(3), reading(100, charging: false, full: true))
+        let later = observe(waiting, at(7 - 1 / hour), reading(100, charging: false, full: true))
+        #expect(later.end == nil)
+        #expect(later.session.step == .unplug)
+        #expect(later.session.asksForFullLimit)
+        #expect(!later.session.isReturning)
+        #expect(observe(waiting, at(7), reading(100, charging: false, full: true)).end == .stepBound(.unplug))
+        // Without a reading the cap still applies.
+        #expect(observe(waiting, at(7), nil).end == .stepBound(.unplug))
     }
 
     @Test("Unplugging during step 2 moves to the drain at once, the top rest short and the return requested")
@@ -166,15 +182,8 @@ struct CalibrationSessionTests {
         #expect(early.session.step == .drain)
         #expect(early.session.isReturning)
         #expect(early.session.shortRests == [.restAtTop])
-        #expect(early.changes == [.earlyUnplug(restShort: true), .returning(from: .restAtTop), .entered(.drain)])
-
-        // After the 2 hours, waiting for the return: not short.
-        let rested = step(s, at(3), reading(100, charging: false, full: true))
-        let late = observe(rested, at(3.05), reading(99, .battery))
-        #expect(late.session.step == .drain)
-        #expect(late.session.isReturning)
-        #expect(late.session.shortRests.isEmpty)
-        #expect(late.changes == [.earlyUnplug(restShort: false), .entered(.drain)])
+        #expect(early.session.drainStartPercent == 99)
+        #expect(early.changes == [.earlyUnplug(restShort: true), .returning(from: .restAtTop), .entered(.drain), .drainBegan(atPercent: 99)])
 
         // The return confirmed in the drain only clears it.
         let returned = early.session.returnConfirmed(at: at(2.1))
@@ -183,25 +192,36 @@ struct CalibrationSessionTests {
         #expect(returned.end == nil)
     }
 
-    @Test("An unplug first seen after the rest's 2 hours, before any check asked for the return, is not short")
+    @Test("An unplug first seen after the rest's 2 hours, before any check moved to step 3, is not short")
     func unplugAfterRestDeadline() {
         let s = session(in: .restAtTop)
         let late = observe(s, at(3.05), reading(99, .battery))
         #expect(late.session.step == .drain)
         #expect(late.session.isReturning, "the return is asked for at once")
         #expect(late.session.shortRests.isEmpty)
-        #expect(late.changes == [.earlyUnplug(restShort: false), .returning(from: .restAtTop), .entered(.drain)])
+        #expect(late.changes == [.earlyUnplug(restShort: false), .returning(from: .restAtTop), .entered(.drain), .drainBegan(atPercent: 99)])
         // A clock set forward within the boot does not make it count.
         #expect(observe(s, at(2.5, wallShift: hour), reading(99, .battery)).session.shortRests == [.restAtTop])
     }
 
     // MARK: - Unplug and drain
 
-    @Test("Step 3 ends when the Mac is on battery power, or ends the session after 4 hours")
+    @Test("Step 3 ends on the unplug, asking for the normal limit at once as the drain begins from the charge then, or ends the session after 4 hours")
     func unplugStep() {
         let s = session(in: .unplug)
         #expect(observe(s, at(3.5), reading(100)).session.step == .unplug)
-        #expect(observe(s, at(3.5), reading(100, .battery)).session.step == .drain)
+        let unplugged = observe(s, at(3.5), reading(100, .battery))
+        #expect(unplugged.end == nil)
+        #expect(unplugged.session.step == .drain)
+        #expect(unplugged.session.isReturning)
+        #expect(!unplugged.session.asksForFullLimit)
+        #expect(unplugged.session.drainStartPercent == 100)
+        #expect(unplugged.session.shortRests.isEmpty)
+        #expect(unplugged.changes == [.returning(from: .unplug), .entered(.drain), .drainBegan(atPercent: 100)])
+        let returned = unplugged.session.returnConfirmed(at: at(3.6))
+        #expect(returned.session.step == .drain)
+        #expect(!returned.session.isReturning)
+        #expect(returned.end == nil)
         #expect(observe(s, at(3.5), reading(100, .battery), paused: true).session.step == .unplug)
         #expect(observe(s, at(7.25 - 1 / hour), reading(100)).end == nil)
         #expect(observe(s, at(7.25), reading(100)).end == .stepBound(.unplug))
@@ -589,8 +609,8 @@ struct CalibrationSessionTests {
         #expect(!resumed.session.isReturning)
         #expect(resumed.session.resumedAt == [at(5).wall])
         #expect(resumed.changes == [.continued, .topRestRestarted])
-        #expect(!observe(resumed.session, at(6.9), reading(100, charging: false, full: true)).session.isReturning)
-        #expect(observe(resumed.session, at(7), reading(100, charging: false, full: true)).session.isReturning)
+        #expect(observe(resumed.session, at(6.9), reading(100, charging: false, full: true)).session.step == .restAtTop)
+        #expect(observe(resumed.session, at(7), reading(100, charging: false, full: true)).session.step == .unplug)
 
         guard case .progress(let unplugged) = session(in: .restAtTop).continued(at: at(2), reading: reading(95, .battery), run: run, restAnswer: nil, bootTime: nil) else {
             Issue.record("refused")

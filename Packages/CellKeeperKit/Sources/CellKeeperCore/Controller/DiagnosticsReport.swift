@@ -461,7 +461,7 @@ public enum DiagnosticsReport {
             if session.step == .restAtBottom {
                 field("Rest", "\(session.isRestAgainRequested ? "asked once to rest again" : "requested")\(session.restSleep.map { "; sleep announced at \($0.percent.map { "\($0)%" } ?? "an unknown charge")" } ?? "")")
             }
-            field("Limits", "your own \(session.ownerLimit)%, CellKeeper's \(session.cellKeeperLimit)% when it started; 100% asked for only in steps 1, 2 and 7")
+            field("Limits", "your own \(session.ownerLimit)%, CellKeeper's \(session.cellKeeperLimit)% when it started; 100% asked for only in steps 1, 2, 3 and 7")
             field("Temperature", "\(temperatureText(session.temperatureCheck))")
         }
         if calibration.isEndUnsaved {
@@ -474,6 +474,9 @@ public enum DiagnosticsReport {
             field("Continued after a relaunch", report.resumedAt.map { date -> DiagnosticsValue in "\(time: date)" }.joined(separator: ", "))
         }
         field("Steps done", "\(CalibrationWording.stepsDone(report))")
+        if let percent = report.drainStartPercent {
+            field("Drain began at", "\(percent)%")
+        }
         field("Before", capacities(report.before))
         field("After", report.after.map(capacities) ?? "no reading when it ended")
         field("Rest at the bottom", report.restResult.map(restText) ?? "not reached")

@@ -136,7 +136,7 @@ extension CalibrationSession {
         guard step != .restAtBottom || plugInAfter != nil else {
             return "its rest has no time to plug in again"
         }
-        let percents = [restSleep?.percent, lastRestReading?.percent].compactMap { $0 }
+        let percents = [restSleep?.percent, lastRestReading?.percent, drainStartPercent].compactMap { $0 }
         guard percents.allSatisfy((0...100).contains) else {
             return "its battery readings are not valid"
         }
@@ -150,6 +150,9 @@ extension CalibrationReport {
         let dates = [startedAt, endedAt] + steps.map(\.enteredAt) + resumedAt
         guard dates.allSatisfy({ $0.timeIntervalSinceReferenceDate.isFinite }) else {
             return "its report's times are not valid"
+        }
+        guard drainStartPercent.map((0...100).contains) ?? true else {
+            return "its report's battery readings are not valid"
         }
         return nil
     }

@@ -18,7 +18,7 @@ struct CalibrationEndMessageTests {
     func failedFallback() async throws {
         let rig = CalibrationRig()
         var planner = NotificationPlanner()
-        _ = planner.plan(await rig.drive(to: .restAtTop), trigger: .periodic, uptime: 1, isDelivering: true)
+        _ = planner.plan(await rig.drive(to: .finalCharge), trigger: .periodic, uptime: 1, isDelivering: true)
         rig.clock.advance(by: 2 * hour)
         rig.system.scheduleRuns([.fails, .fails])
         var status = await rig.read(calibrationReading(100, charging: false, full: true))

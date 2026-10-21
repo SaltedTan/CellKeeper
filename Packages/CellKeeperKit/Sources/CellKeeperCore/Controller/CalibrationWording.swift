@@ -44,10 +44,10 @@ public enum CalibrationWording {
     public static let gaugeNote = "The battery's gauge decides what it relearns. “Maximum Capacity” can go up or down afterwards, and on macOS 27 CellKeeper cannot check what the gauge learnt."
 
     /// What a calibration is and does, for Settings.
-    public static let explanation = "A guided calibration helps the battery's gauge relearn how much charge the battery holds, when the percentage misbehaves: your Mac shuts down early, or the percentage jumps. It does not make the battery healthier. It takes about one to two days, three at most, mostly unattended: CellKeeper charges to 100% and rests there for 2 hours, asks you to unplug, watches the battery drain to 20% while you use your Mac, asks you to shut it down unplugged for at least 5 hours, then charges to 100% once more and returns to your limit."
+    public static let explanation = "A guided calibration helps the battery's gauge relearn how much charge the battery holds, when the percentage misbehaves: your Mac shuts down early, or the percentage jumps. It does not make the battery healthier. It takes about one to two days, three at most, mostly unattended: CellKeeper charges to 100% and rests there for 2 hours, keeps 100% until you unplug, watches the battery drain from full to 20% while you use your Mac, asks you to shut it down unplugged for at least 5 hours, then charges to 100% once more and returns to your limit."
 
     /// When 100% applies, and when it can last longer (§7.2), for Settings.
-    public static let fullLimitDisclosure = "CellKeeper sets macOS's Charge Limit to 100% only in the two charges and the rest at the top, which begin while your Mac is plugged in and CellKeeper is running. It stays at 100% longer if your Mac sleeps in those steps, if returning to your limit is delayed or fails, or if CellKeeper is killed or crashes in them, until CellKeeper runs again or you set the limit yourself."
+    public static let fullLimitDisclosure = "CellKeeper sets macOS's Charge Limit to 100% only in the two charges, the rest at the top and the wait for you to unplug, which begin while your Mac is plugged in and CellKeeper is running. Once the battery is full, 100% lasts up to 2 hours of rest plus up to 4 hours until you unplug; when you unplug, CellKeeper returns to your limit. It stays at 100% longer if your Mac sleeps in those steps, if returning to your limit is delayed or fails, or if CellKeeper is killed or crashes in them, until CellKeeper runs again or you set the limit yourself."
 
     /// How often, for Settings (§7.8).
     public static let frequency = "Calibrate only when the percentage misbehaves, or every few months for a battery that rarely leaves a narrow range. macOS already charges to 100% now and then to keep its estimate accurate."
@@ -100,7 +100,7 @@ public enum CalibrationWording {
     public static func text(_ request: CalibrationRequest, atRequest: Bool, now: Date, timeZone: TimeZone = .current, locale: Locale = .current) -> String {
         switch request {
         case .unplug:
-            return "Unplug your Mac now; CellKeeper will watch the battery drain to \(CalibrationSession.targetPercent)%."
+            return "Unplug your Mac now. CellKeeper keeps macOS's Charge Limit at 100% until you do, then returns to your limit and watches the battery drain to \(CalibrationSession.targetPercent)%."
         case .rest(let after):
             let time = clockTime(after, now: now, timeZone: timeZone, locale: locale)
             let since = atRequest ? "at least 5 hours from now" : "5 hours after the battery reached \(CalibrationSession.targetPercent)%"
@@ -211,6 +211,10 @@ public enum CalibrationWording {
             "Plug in your Mac now: the battery is at \(percent)%. The calibration has ended. \(sentence)"
         case .cancelled:
             "Calibration cancelled. \(sentence) The report is in Settings › Charging."
+        case .stepBound(.unplug):
+            // Still plugged in at 100%: macOS then runs the Mac from the
+            // battery down to the limit (note 08, O21).
+            "Calibration ended: \(report.end). \(sentence) While your Mac stays plugged in, macOS may run it from the battery until the charge is down to the limit. The report is in Settings › Charging."
         default:
             "Calibration ended: \(report.end). \(sentence) The report is in Settings › Charging."
         }
@@ -302,6 +306,9 @@ public enum CalibrationWording {
             lines.append(("Continued after a relaunch", report.resumedAt.map(moment).joined(separator: ", ")))
         }
         lines.append(("Steps done", stepsDone(report)))
+        if let percent = report.drainStartPercent {
+            lines.append(("Drain began at", "\(percent)%"))
+        }
         lines.append(("Before", capacities(report.before)))
         lines.append(("After", report.after.map(capacities) ?? "no reading when it ended"))
         lines.append(("Rest at the bottom", report.restResult.map { restResult($0, now: now, timeZone: timeZone, locale: locale) } ?? "not reached"))
@@ -314,6 +321,9 @@ public enum CalibrationWording {
     /// The report in one paragraph, for the activity log.
     public static func reportSummary(_ report: CalibrationReport) -> String {
         var parts = ["Steps done: \(stepsDone(report))."]
+        if let percent = report.drainStartPercent {
+            parts.append("The drain began at \(percent)%.")
+        }
         parts.append("Before: \(capacities(report.before)).")
         parts.append("After: \(report.after.map(capacities) ?? "no reading when it ended").")
         if let rest = report.restResult {
@@ -373,9 +383,11 @@ public enum CalibrationWording {
         case .entered(.restAtTop):
             return "Calibration: macOS reports the battery charged. Step 2 (rest at the top) began: 2 hours at 100%."
         case .entered(.unplug):
-            return "Calibration: step 3 (unplug) began; CellKeeper asks you to unplug your Mac."
+            return "Calibration: the rest at 100% is done. Step 3 (unplug) began: CellKeeper keeps macOS's Charge Limit at 100% and asks you to unplug your Mac; once you do, it returns to its own limit."
         case .entered(.drain):
-            return "Calibration: step 4 (drain) began: the battery drains to \(CalibrationSession.targetPercent)% while you use your Mac on battery power."
+            return nil
+        case .drainBegan(let percent):
+            return "Calibration: step 4 (drain) began at \(percent)%: the battery drains to \(CalibrationSession.targetPercent)% while you use your Mac on battery power."
         case .entered(.restAtBottom):
             return "Calibration: the battery reached \(CalibrationSession.targetPercent)%. Step 5 (rest at the bottom) began: CellKeeper asks you to shut down your Mac, or put it to sleep, unplugged, and to plug it in again after the time shown."
         case .entered(.plugIn):

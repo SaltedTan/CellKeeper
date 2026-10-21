@@ -48,11 +48,14 @@ public enum CalibrationStep: Int, Sendable, Equatable, Codable, CaseIterable, Co
     case finalCharge = 7
 
     /// True for the steps in which the session asks for macOS's Charge
-    /// Limit at 100%: 1, 2 and 7 only (§7.2).
+    /// Limit at 100%: 1, 2, 3 and 7 only (§7.2). Step 3 keeps 100% until the
+    /// owner unplugs, so the drain starts from full (owner decision,
+    /// 2026-10-21: on AC power macOS drains the battery down to a lower
+    /// limit, note 08 O21).
     public var asksForFullLimit: Bool {
         switch self {
-        case .chargeToFull, .restAtTop, .finalCharge: true
-        case .unplug, .drain, .restAtBottom, .plugIn: false
+        case .chargeToFull, .restAtTop, .unplug, .finalCharge: true
+        case .drain, .restAtBottom, .plugIn: false
         }
     }
 
@@ -308,6 +311,8 @@ public enum CalibrationChange: Sendable, Equatable {
     /// The Mac was unplugged during the rest at the top: the session moved
     /// to the drain, the rest short if it had not lasted 2 hours.
     case earlyUnplug(restShort: Bool)
+    /// The drain began, at this charge: the reading that showed the unplug.
+    case drainBegan(atPercent: Int)
     /// The Mac was plugged in during the rest at the bottom before the time
     /// shown.
     case earlyPlugIn
@@ -378,11 +383,14 @@ public enum CalibrationContinuation: Sendable, Equatable {
 /// with the times and readings it needs to know when each ends. Pure: every
 /// clock and reading comes from the caller.
 ///
-/// The session asks for macOS's Charge Limit at 100% only in steps 1, 2 and
-/// 7 (``asksForFullLimit``), and leaves step 2 and step 7 only once the
-/// normal limit is confirmed (``isReturning``, ``returnConfirmed(at:)``). It
-/// never discharges anything. Every step but the drain and the rests has a
-/// bound, and the session ends after 72 hours, whatever its step.
+/// The session asks for macOS's Charge Limit at 100% only in steps 1, 2, 3
+/// and 7 (``asksForFullLimit``). Step 2 moves to step 3 keeping 100%; step
+/// 3 leaves it on the unplug, asking for the normal limit at once as the
+/// drain begins, whose confirmation may wait for power (D116); step 7 is
+/// left only once the normal limit is confirmed (``isReturning``,
+/// ``returnConfirmed(at:)``). It never discharges anything. Every step but
+/// the drain and the rests has a bound, and the session ends after 72
+/// hours, whatever its step.
 public struct CalibrationSession: Sendable, Equatable, Codable {
     /// The longest charge to full, steps 1 and 7.
     public static let chargeBound: TimeInterval = 6 * 3600
@@ -434,6 +442,9 @@ public struct CalibrationSession: Sendable, Equatable, Codable {
     public var optimizedCharging: OptimizedChargingConfirmation
     /// The rests recorded as short, in the order they were.
     public var shortRests: [CalibrationStep]
+    /// The charge when the owner unplugged and the drain began, by the
+    /// reading that showed the unplug; nil before the drain.
+    public var drainStartPercent: Int? = nil
     /// Step 5: the time shown to plug in again, at least
     /// ``bottomRest`` after the step began. Never moved later.
     public var plugInAfter: Date?
@@ -477,6 +488,7 @@ public struct CalibrationSession: Sendable, Equatable, Codable {
             hasSeenTemperature: temperatureCheck == .measured,
             optimizedCharging: optimizedCharging,
             shortRests: [],
+            drainStartPercent: nil,
             plugInAfter: nil,
             isRestAgainRequested: false,
             restSleep: nil,
@@ -489,7 +501,7 @@ public struct CalibrationSession: Sendable, Equatable, Codable {
     }
 
     /// True while the session asks for macOS's Charge Limit at 100%: in
-    /// steps 1, 2 and 7, and not once it is returning to the normal limit.
+    /// steps 1, 2, 3 and 7, and not once it is returning to the normal limit.
     /// A paused session asks for nothing; the caller checks that.
     public var asksForFullLimit: Bool {
         step.asksForFullLimit && !isReturning
@@ -554,14 +566,15 @@ public struct CalibrationSession: Sendable, Equatable, Codable {
         case .restAtTop:
             guard !isPaused else { break }
             if isOnBattery {
-                session.leaveTopRestEarly(at: now, isRestComplete: isReturning || now.elapsed(since: stepStartedAt) >= Self.topRest, changes: &changes)
+                session.leaveTopRestEarly(at: now, isRestComplete: isReturning || now.elapsed(since: stepStartedAt) >= Self.topRest, percent: percent, changes: &changes)
             } else if !isReturning, now.elapsed(since: stepStartedAt) >= Self.topRest {
-                session.isReturning = true
-                changes.append(.returning(from: .restAtTop))
+                // The rest is done; 100% stays until the owner unplugs, so
+                // the drain starts from full (owner decision, 2026-10-21).
+                session.enter(.unplug, at: now, changes: &changes)
             }
         case .unplug:
             if !isPaused, isOnBattery {
-                session.enter(.drain, at: now, changes: &changes)
+                session.beginDrain(from: .unplug, at: now, percent: percent, changes: &changes)
             }
         case .drain:
             if !isOnBattery { return ended(.pluggedInDuringDrain) }
@@ -710,7 +723,7 @@ public struct CalibrationSession: Sendable, Equatable, Codable {
                 // Only a rest already complete before the relaunch counts:
                 // CellKeeper cannot know whether the Mac stayed plugged in
                 // while it was not running.
-                session.leaveTopRestEarly(at: now, isRestComplete: isReturning, changes: &changes)
+                session.leaveTopRestEarly(at: now, isRestComplete: isReturning, percent: percent, changes: &changes)
             } else {
                 session.stepStartedAt = now
                 session.isReturning = false
@@ -751,9 +764,11 @@ public struct CalibrationSession: Sendable, Equatable, Codable {
         return .progress(CalibrationProgress(session: session, changes: changes))
     }
 
-    /// The normal limit is confirmed by read-back while returning: step 2
-    /// moves on to step 3, step 7 completes the session, and an early
-    /// unplug's return in step 4 is done.
+    /// The normal limit is confirmed by read-back while returning: step 7
+    /// completes the session, and the return requested at the unplug (in
+    /// step 3, or early in step 2) is done in step 4. A step 2 still
+    /// returning, as a session saved before 100% was kept until the unplug
+    /// may be, moves on to step 3.
     public func returnConfirmed(at now: CalibrationStamp) -> CalibrationProgress {
         guard isReturning else { return CalibrationProgress(session: self) }
         var session = self
@@ -823,20 +838,31 @@ public struct CalibrationSession: Sendable, Equatable, Codable {
 
     /// An unplug in step 2, accepted (owner, 2026-10-21): on to the drain,
     /// the rest short unless it had already lasted its 2 hours
-    /// (`isRestComplete`, judged by the caller on the monotonic clock), and
-    /// the return to the normal limit requested at once if it was not
-    /// already.
-    private mutating func leaveTopRestEarly(at now: CalibrationStamp, isRestComplete: Bool, changes: inout [CalibrationChange]) {
+    /// (`isRestComplete`, judged by the caller on the monotonic clock), as
+    /// an unplug in step 3 does.
+    private mutating func leaveTopRestEarly(at now: CalibrationStamp, isRestComplete: Bool, percent: Int, changes: inout [CalibrationChange]) {
         let isShort = !isRestComplete
         if isShort, !shortRests.contains(.restAtTop) {
             shortRests.append(.restAtTop)
         }
         changes.append(.earlyUnplug(restShort: isShort))
+        beginDrain(from: .restAtTop, at: now, percent: percent, changes: &changes)
+    }
+
+    /// The owner unplugged, in step 3 or early in step 2: the 100% step is
+    /// done, the return to the normal limit is requested at once if it was
+    /// not already, and the drain begins at `percent`, the charge of the
+    /// reading that showed the unplug. On battery power the return's
+    /// confirmation may wait for power (D116); the drain does not wait for
+    /// it, and step 7 drops it.
+    private mutating func beginDrain(from step: CalibrationStep, at now: CalibrationStamp, percent: Int, changes: inout [CalibrationChange]) {
         if !isReturning {
-            changes.append(.returning(from: .restAtTop))
+            changes.append(.returning(from: step))
         }
         isReturning = true
+        drainStartPercent = percent
         enter(.drain, at: now, changes: &changes)
+        changes.append(.drainBegan(atPercent: percent))
     }
 
     private mutating func leaveRest(to next: CalibrationStep, result: CalibrationRestResult, isShort: Bool, at now: CalibrationStamp, changes: inout [CalibrationChange]) {
@@ -879,6 +905,8 @@ public struct CalibrationReport: Sendable, Equatable, Codable {
     public var after: CalibrationCapacities?
     public var restResult: CalibrationRestResult?
     public var shortRests: [CalibrationStep]
+    /// The charge when the drain began (the unplug); nil if it did not.
+    public var drainStartPercent: Int? = nil
     public var temperatureCheck: CalibrationTemperatureCheck
     public var optimizedCharging: OptimizedChargingConfirmation
     public var ownerLimit: Int
@@ -896,6 +924,7 @@ public struct CalibrationReport: Sendable, Equatable, Codable {
         self.after = after
         restResult = session.restResult
         shortRests = session.shortRests
+        drainStartPercent = session.drainStartPercent
         temperatureCheck = session.temperatureCheck
         optimizedCharging = session.optimizedCharging
         ownerLimit = session.ownerLimit

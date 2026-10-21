@@ -82,8 +82,10 @@ import os
 ///   full charge starts, from the menu, Settings, a Shortcuts action or a
 ///   schedule, and a weekly occurrence that falls due is recorded as
 ///   skipped. The session asks for macOS's Charge Limit at 100% only in
-///   steps 1, 2 and 7, and leaves those steps only once a read-back
-///   confirms the normal limit. A session found at launch is checked
+///   steps 1, 2, 3 and 7. Step 3 keeps it until the owner unplugs, then
+///   asks for the normal limit at once as the drain begins, its
+///   confirmation possibly waiting for power; step 7 is left only once a
+///   read-back confirms the normal limit. A session found at launch is checked
 ///   against what the first evaluation read before writing, and stays
 ///   paused, with the normal policy, until the owner continues it.
 /// - macOS's Charge Limit report shows its *active* limit, which macOS

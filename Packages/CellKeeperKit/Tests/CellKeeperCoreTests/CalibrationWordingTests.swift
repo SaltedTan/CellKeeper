@@ -58,7 +58,7 @@ struct CalibrationWordingTests {
         #expect(notification == "Shut down your Mac now and leave it unplugged. Plug it in again after 1:40 PM (at least 5 hours from now), even before you open CellKeeper. CellKeeper continues when you open it again. If you cannot shut it down, put it to sleep instead.")
         let menu = CalibrationWording.text(.rest(plugInAfter: shown), atRequest: false, now: start, timeZone: utc, locale: english)
         #expect(menu.contains("after 1:40 PM (5 hours after the battery reached 20%), even before you open CellKeeper"))
-        #expect(CalibrationWording.text(.unplug, atRequest: true, now: start) == "Unplug your Mac now; CellKeeper will watch the battery drain to 20%.")
+        #expect(CalibrationWording.text(.unplug, atRequest: true, now: start) == "Unplug your Mac now. CellKeeper keeps macOS's Charge Limit at 100% until you do, then returns to your limit and watches the battery drain to 20%.")
         #expect(CalibrationWording.text(.restAgain(plugInAfter: shown), atRequest: true, now: start, timeZone: utc, locale: english).hasPrefix("Your Mac woke before 1:40 PM."))
     }
 
@@ -75,7 +75,7 @@ struct CalibrationWordingTests {
         #expect(line(status(session(.chargeToFull), stepEndsAt: end)) == "Calibration, step 1 of 7: charging to 100%. Leave your Mac plugged in; this step ends when macOS reports the battery charged, at the latest at 2:00 PM.")
         #expect(line(status(session(.chargeToFull), confirmed: false))?.hasSuffix("CellKeeper has asked for 100%; macOS has not confirmed it yet.") == true)
         #expect(line(status(session(.restAtTop), stepEndsAt: end)) == "Calibration, step 2 of 7: resting at 100% until about 2:00 PM. Leave your Mac plugged in.")
-        #expect(line(status(session(.unplug), stepEndsAt: end)) == "Calibration, step 3 of 7: unplug your Mac now; CellKeeper will watch the battery drain to 20%. If your Mac is still plugged in at 2:00 PM, the calibration ends.")
+        #expect(line(status(session(.unplug), stepEndsAt: end)) == "Calibration, step 3 of 7: unplug your Mac now. CellKeeper keeps macOS's Charge Limit at 100% until you do, then returns to your limit and watches the battery drain to 20%. If your Mac is still plugged in at 2:00 PM, the calibration ends.")
         #expect(line(status(session(.drain)), reading: snapshot(percent: 54, source: .battery)) == "Calibration, step 4 of 7: draining to 20% (now 54%). Use your Mac on battery power as usual.")
         #expect(line(status(session(.plugIn))) == "Calibration, step 6 of 7: plug in your Mac now; CellKeeper will charge it to 100% once more, then return to your limit.")
         var returning = session(.restAtTop)
@@ -124,11 +124,11 @@ struct CalibrationWordingTests {
     @Test("Every change of the session has a log line or is said by another")
     func logLines() {
         let changes: [CalibrationChange] = CalibrationStep.allCases.map { .entered($0) } + [
-            .returning(from: .restAtTop), .returnConfirmed, .earlyUnplug(restShort: true), .earlyPlugIn, .restShort(.restAtBottom),
+            .returning(from: .restAtTop), .returning(from: .unplug), .returnConfirmed, .earlyUnplug(restShort: true), .drainBegan(atPercent: 100), .earlyPlugIn, .restShort(.restAtBottom),
             .restAgainRequested, .sleepRecorded(percent: 18, isOnBattery: true), .wakeRecorded,
             .restResult(.notConfirmed(.sleptTooShort)), .continued, .topRestRestarted,
         ]
-        let silent: [CalibrationChange] = [.entered(.chargeToFull), .restShort(.restAtBottom)]
+        let silent: [CalibrationChange] = [.entered(.chargeToFull), .entered(.drain), .restShort(.restAtBottom)]
         for change in changes {
             #expect((CalibrationWording.logLine(change) == nil) == silent.contains(change), "\(change)")
         }
