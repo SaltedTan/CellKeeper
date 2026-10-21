@@ -342,6 +342,12 @@ struct SMCPowerSamplerWindowTests {
         #expect(window.averagedOver == .seconds(1))
     }
 
+    @Test("A window's span is rounded up to whole seconds, at least one: each reading stands for the second until the next")
+    func averagedOver() {
+        let spans: [Double] = [0.2, 1, 2.01, 3, 3.5]
+        #expect(spans.map { smcWindow(began: 0, span: $0).averagedOver } == [.seconds(1), .seconds(1), .seconds(3), .seconds(3), .seconds(4)])
+    }
+
     @Test("On battery, PDTR's average is given only if every batch had one")
     func adapterOnBattery() throws {
         var driver = Driver(source: .battery)

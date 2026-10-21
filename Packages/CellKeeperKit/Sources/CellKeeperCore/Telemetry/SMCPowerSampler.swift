@@ -68,11 +68,13 @@ public struct SMCPowerWindow: Sendable, Equatable {
     }
 
     /// The span it averages, from the first batch's start to the last one's
-    /// return, in whole seconds and at least one.
+    /// return, rounded up to whole seconds and at least one: each reading
+    /// stands for the second until the next, so three batches a second
+    /// apart average about 3 s.
     public var averagedOver: Duration {
         let span = lastBatchReturned - firstBatchBegan
         let parts = span.components
-        let seconds = (Double(parts.seconds) + Double(parts.attoseconds) / 1e18).rounded()
+        let seconds = (Double(parts.seconds) + Double(parts.attoseconds) / 1e18).rounded(.up)
         return .seconds(max(1, Int(seconds.isFinite ? seconds : 1)))
     }
 }
