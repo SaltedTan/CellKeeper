@@ -834,16 +834,16 @@ final class AppModel {
     /// controller.
     func refreshPowerFlowWhileShown() async {
         await PowerFlowRefresh.run(source: powerFlowSource, while: { [weak self] in self?.isPowerFlowExpanded == true }) { [weak self] sample in
-            self?.notePowerFlow(sample)
+            self?.notePowerFlow { $0.take(sample) }
         }
     }
 
-    /// Gives the power flow a sample, from a status (nil when its read
-    /// failed) or from the menu's reads. The menu redraws only if what it
-    /// shows changed.
-    private func notePowerFlow(_ sample: PowerFlowSample?) {
+    /// Gives the power flow a status's reading or failed read, or a sample
+    /// from the menu's reads; the state orders them by when they were
+    /// observed. The menu redraws only if what it shows changed.
+    private func notePowerFlow(_ change: (inout PowerFlowState) -> Void) {
         var state = powerFlow
-        state.take(sample)
+        change(&state)
         if state != powerFlow { powerFlow = state }
     }
 
@@ -991,7 +991,11 @@ final class AppModel {
         if let status {
             notifier.observe(status, trigger: command.trigger)
             firstStatus.provide(true)
-            notePowerFlow(status.snapshot.map(PowerFlowSample.init))
+            if let snapshot = status.snapshot {
+                notePowerFlow { $0.take(PowerFlowSample(snapshot)) }
+            } else {
+                notePowerFlow { $0.takeFailedRead(at: status.lastEvaluation ?? Date()) }
+            }
         }
         noteAdoptedChanges()
     }

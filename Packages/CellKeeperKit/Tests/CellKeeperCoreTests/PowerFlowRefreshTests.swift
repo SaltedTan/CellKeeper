@@ -216,7 +216,7 @@ struct PowerFlowReadingTests {
         #expect(source.footnote == "From macOS's battery data, updated about once a minute.")
         let sample = try await source.currentSample()
         #expect(sample == PowerFlowSample(
-            updatedAt: referenceDate, powerSource: .externalPower, adapterRatingWatts: 68, chargePercent: 81,
+            updatedAt: referenceDate, observedAt: referenceDate, powerSource: .externalPower, adapterRatingWatts: 68, chargePercent: 81,
             systemPowerInWatts: 37.304, systemLoadWatts: 17.363, batteryWatts: -6
         ))
     }

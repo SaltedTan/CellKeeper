@@ -159,7 +159,7 @@ struct PowerFlowTests {
         #expect(sample.adapterRatingWatts == 68)
         #expect(sample.chargePercent == 81)
         let bare = PowerFlowSample(powerSnapshot(powerIn: nil, load: nil, voltage: nil, present: false, update: nil))
-        #expect(bare == PowerFlowSample(updatedAt: nil, powerSource: .externalPower, adapterRatingWatts: 68))
+        #expect(bare == PowerFlowSample(updatedAt: nil, observedAt: referenceDate, powerSource: .externalPower, adapterRatingWatts: 68))
     }
 
     @Test("A sample from another source gives the same flow, whatever its precision")
@@ -169,7 +169,7 @@ struct PowerFlowTests {
         #expect(flow.adapterToBatteryWatts == 14.75)
         #expect(flow.adapterRatingWatts == 68)
         #expect(PowerFlow(fastSample(0, battery: nil))?.battery == nil)
-        let unplugged = PowerFlowSample(updatedAt: nil, powerSource: .battery, adapterRatingWatts: 68, systemPowerInWatts: 1, systemLoadWatts: 10, batteryWatts: -10)
+        let unplugged = PowerFlowSample(updatedAt: nil, observedAt: referenceDate, powerSource: .battery, adapterRatingWatts: 68, systemPowerInWatts: 1, systemLoadWatts: 10, batteryWatts: -10)
         #expect(PowerFlow(unplugged)?.adapterRatingWatts == nil)
         #expect(PowerFlow(unplugged)?.adapterInputWatts == nil)
     }

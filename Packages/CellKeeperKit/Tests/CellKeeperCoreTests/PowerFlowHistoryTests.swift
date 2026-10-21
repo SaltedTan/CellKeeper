@@ -22,6 +22,7 @@ extension PowerFlowState {
 func fastSample(_ seconds: TimeInterval, load: Double = 30, powerIn: Double? = 45, battery: Double? = 15) -> PowerFlowSample {
     PowerFlowSample(
         updatedAt: referenceDate.addingTimeInterval(seconds),
+        observedAt: referenceDate.addingTimeInterval(seconds),
         powerSource: .externalPower,
         adapterRatingWatts: 68,
         chargePercent: 81,
@@ -294,11 +295,11 @@ struct PowerFlowStateTests {
         #expect(readings.history.points.count == 2)
     }
 
-    @Test("A status without a reading clears the flow and keeps the history")
+    @Test("A status whose read failed clears the flow and keeps the history")
     func failedRead() {
         var readings = PowerFlowState()
         readings.take(snapshot: powerSnapshot(update: time(0)))
-        readings.take(nil)
+        readings.takeFailedRead(at: time(1))
         #expect(!readings.hasSample)
         #expect(readings.flow == nil)
         #expect(readings.history.points.count == 1)
@@ -306,13 +307,33 @@ struct PowerFlowStateTests {
         readings.take(snapshot: powerSnapshot(update: time(0), at: time(5)))
         #expect(readings.hasSample)
         #expect(readings.flow != nil)
+        // A failure evaluated before that reading, arriving late, keeps it.
+        readings.takeFailedRead(at: time(3))
+        #expect(readings.hasSample)
+        #expect(readings.flow != nil)
+    }
+
+    @Test("A status read before a display read, delivered after it with the same update, does not replace it")
+    func delayedStatus() {
+        var readings = PowerFlowState()
+        // The display read saw the Mac unplugged at 10 s; the controller's
+        // read at 5 s, still on external power, finishes its backend work
+        // later. macOS had not updated its battery data in between.
+        readings.take(snapshot: powerSnapshot(source: .battery, current: -1_000, update: time(0), at: time(10)))
+        readings.take(snapshot: powerSnapshot(source: .externalPower, update: time(0), at: time(5)))
+        #expect(readings.flow?.powerSource == .battery)
+        #expect(readings.flow?.batteryToMacWatts == 12)
+        #expect(readings.history.points.count == 1)
+        // A later read replaces it.
+        readings.take(snapshot: powerSnapshot(source: .externalPower, update: time(0), at: time(13)))
+        #expect(readings.flow?.powerSource == .externalPower)
     }
 
     @Test("An older update that arrives late joins the history but does not replace the flow")
     func lateUpdate() {
         var readings = PowerFlowState()
-        readings.take(snapshot: powerSnapshot(load: 30_000, update: time(60)))
-        readings.take(snapshot: powerSnapshot(load: 20_000, update: time(0)))
+        readings.take(snapshot: powerSnapshot(load: 30_000, update: time(60), at: time(62)))
+        readings.take(snapshot: powerSnapshot(load: 20_000, update: time(0), at: time(30)))
         #expect(readings.flow?.macUseWatts == 30)
         #expect(readings.history.points.count == 2)
         // A newer read of the update shown replaces it.
@@ -323,8 +344,8 @@ struct PowerFlowStateTests {
     @Test("After the clock is set back, the flow shows the new readings")
     func clockSetBack() {
         var readings = PowerFlowState()
-        readings.take(snapshot: powerSnapshot(load: 30_000, update: time(600)))
-        readings.take(snapshot: powerSnapshot(load: 20_000, update: time(299)))
+        readings.take(snapshot: powerSnapshot(load: 30_000, update: time(600), at: time(600)))
+        readings.take(snapshot: powerSnapshot(load: 20_000, update: time(299), at: time(299)))
         #expect(readings.flow?.macUseWatts == 20)
         #expect(readings.history.points.count == 1)
     }

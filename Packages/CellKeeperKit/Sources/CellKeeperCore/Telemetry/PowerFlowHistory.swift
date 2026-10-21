@@ -244,29 +244,38 @@ public struct PowerFlowState: Sendable, Equatable {
     /// controller's read failed until the next sample.
     public private(set) var hasSample = false
     public private(set) var history = PowerFlowHistory()
-    /// The update the flow shows, so that an older one that arrives late
-    /// does not replace it.
-    private var shownUpdate: Date?
+    /// When what the flow shows was observed, so that an older observation
+    /// that arrives late does not replace it.
+    private var shownObservation: Date?
 
     public init() {}
 
-    /// Takes a sample: `nil` for a status without a reading (its read
-    /// failed). The flow shows the newest update; one up to
-    /// ``PowerFlowHistory/reorderTolerance`` older than it only joins the
-    /// history.
-    public mutating func take(_ sample: PowerFlowSample?) {
-        guard let sample else {
-            flow = nil
-            hasSample = false
-            return
-        }
+    /// Takes a sample. The flow shows the newest observation: a sample
+    /// observed before the one shown, by up to
+    /// ``PowerFlowHistory/reorderTolerance``, only joins the history, even
+    /// when both carry the same update. One observed earlier still means the
+    /// clock was set back, and is shown.
+    public mutating func take(_ sample: PowerFlowSample) {
         history.record(sample)
-        if let update = sample.updatedAt, let shownUpdate, update < shownUpdate,
-           shownUpdate.timeIntervalSince(update) <= PowerFlowHistory.reorderTolerance {
-            return
-        }
-        shownUpdate = sample.updatedAt
+        guard !isOutrun(sample.observedAt) else { return }
+        shownObservation = sample.observedAt
         flow = PowerFlow(sample)
         hasSample = true
+    }
+
+    /// A status whose read failed, evaluated at `time`: clears the flow,
+    /// unless what it shows was observed later.
+    public mutating func takeFailedRead(at time: Date) {
+        guard !isOutrun(time) else { return }
+        shownObservation = time
+        flow = nil
+        hasSample = false
+    }
+
+    /// Whether something observed at `time` is older than what is shown,
+    /// within ``PowerFlowHistory/reorderTolerance``.
+    private func isOutrun(_ time: Date) -> Bool {
+        guard let shownObservation else { return false }
+        return time < shownObservation && shownObservation.timeIntervalSince(time) <= PowerFlowHistory.reorderTolerance
     }
 }
