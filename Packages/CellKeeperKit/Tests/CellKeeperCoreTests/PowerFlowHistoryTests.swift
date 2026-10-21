@@ -353,6 +353,30 @@ struct PowerFlowStateTests {
         #expect(readings.flow != nil)
     }
 
+    @Test("A status whose read failed never clears a display read that succeeded while the controller worked")
+    func failedStatusOrdering() {
+        // The controller's work began at 0 s and its read failed; a display
+        // read succeeded at 3 s; the status, evaluated after the backend's
+        // work, arrives stamped 5 s. The display read is newer: kept.
+        var readings = PowerFlowState()
+        readings.take(snapshot: powerSnapshot(update: time(0), at: time(3)))
+        readings.takeStatus(snapshot: nil, evaluatedAt: time(5), readNotBefore: time(0))
+        #expect(readings.hasSample)
+        #expect(readings.flow != nil)
+        // A status repeating an earlier failure (evaluated at 1 s) for work
+        // begun at 6 s keeps it too.
+        readings.takeStatus(snapshot: nil, evaluatedAt: time(1), readNotBefore: time(6))
+        #expect(readings.hasSample)
+        // A failure in work begun after the display read clears it.
+        readings.takeStatus(snapshot: nil, evaluatedAt: time(9), readNotBefore: time(4))
+        #expect(!readings.hasSample)
+        #expect(readings.flow == nil)
+        // A status with a reading takes it.
+        readings.takeStatus(snapshot: powerSnapshot(update: time(60), at: time(60)), evaluatedAt: time(61), readNotBefore: time(59))
+        #expect(readings.hasSample)
+        #expect(readings.history.points.count == 2)
+    }
+
     @Test("A status read before a display read, delivered after it with the same update, does not replace it")
     func delayedStatus() {
         var readings = PowerFlowState()

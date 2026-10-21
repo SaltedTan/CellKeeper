@@ -300,7 +300,23 @@ public struct PowerFlowState: Sendable, Equatable {
         hasSample = true
     }
 
-    /// A status whose read failed, evaluated at `time`: clears the flow,
+    /// Takes a controller status: its sample, or its failed read.
+    /// `readNotBefore` is when CellKeeper began the work that produced the
+    /// status, so a read made for it is no older. `evaluatedAt` is the
+    /// status's evaluation time, stamped after the controller's other work,
+    /// or an earlier evaluation's when the status is not a new one. A failed
+    /// read is placed at the earlier of the two, so it never clears a
+    /// display read that succeeded while the controller worked, nor one
+    /// newer than the status's own failure.
+    public mutating func takeStatus(snapshot: BatterySnapshot?, evaluatedAt: Date?, readNotBefore: Date) {
+        if let snapshot {
+            take(PowerFlowSample(snapshot))
+        } else {
+            takeFailedRead(at: min(evaluatedAt ?? readNotBefore, readNotBefore))
+        }
+    }
+
+    /// A status whose read failed, observed at `time`: clears the flow,
     /// unless what it shows was observed later.
     public mutating func takeFailedRead(at time: Date) {
         guard !isOutrun(time) else { return }

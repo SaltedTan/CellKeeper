@@ -889,6 +889,9 @@ final class AppModel {
     }
 
     private func perform(_ command: Command) async {
+        // No telemetry read made for this command is older
+        // (``PowerFlowState/takeStatus(snapshot:evaluatedAt:readNotBefore:)``).
+        let readNotBefore = Date()
         switch command {
         case .evaluate(let trigger):
             status = await controller.evaluate(trigger)
@@ -999,10 +1002,8 @@ final class AppModel {
         if let status {
             notifier.observe(status, trigger: command.trigger)
             firstStatus.provide(true)
-            if let snapshot = status.snapshot {
-                notePowerFlow { $0.take(PowerFlowSample(snapshot)) }
-            } else {
-                notePowerFlow { $0.takeFailedRead(at: status.lastEvaluation ?? Date()) }
+            notePowerFlow {
+                $0.takeStatus(snapshot: status.snapshot, evaluatedAt: status.lastEvaluation, readNotBefore: readNotBefore)
             }
         }
         noteAdoptedChanges()
