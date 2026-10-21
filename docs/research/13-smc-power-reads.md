@@ -51,7 +51,7 @@
     - a deadline for a hung read;
     - a fallback to macOS's once-a-minute data, and a way back;
     - a label on every displayed value saying where it came from.
-  - **A build option.** All of it is off until the sandbox exception is
+  - **A build switch.** All of it is off until the sandbox exception is
     shown to work.
 - **Display only, as before (D114).** The values never steer charging,
   and nothing here touches the controller or the calibration.
@@ -532,7 +532,7 @@ a row, even if every window holds only one or two of them.
   not a fault.
 - **O3. Does the minimal exception work?** It is settled after the
   calibration, with a `.preview` build signed as CI signs it and the
-  option on. All of these must hold:
+  switch on. All of these must hold:
   - the signed app shows exactly the expected entitlements;
   - the reader opens `AppleSMCClient` and reads the keys without root;
   - the menu stays responsive;
