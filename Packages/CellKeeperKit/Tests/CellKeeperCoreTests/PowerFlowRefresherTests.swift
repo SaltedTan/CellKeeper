@@ -128,8 +128,8 @@ struct PowerFlowRefresherTests {
         // Should a run not have ended, quitting ends it, so a regression
         // fails here instead of hanging.
         refresher.stop()
-        await first.value
-        await second.value
+        _ = await first.value
+        _ = await second.value
     }
 
     @Test("Quitting stops a run whose read is in flight: its sample is dropped and nothing more is read")
@@ -142,7 +142,7 @@ struct PowerFlowRefresherTests {
         refresher.stop()
         #expect(refresher.isStopped)
         await source.release()
-        await run.value
+        _ = await run.value
         #expect(received.samples.isEmpty)
         #expect(await source.reads == 1)
         // Any later run returns at once, reading nothing.
@@ -170,7 +170,7 @@ struct PowerFlowRefresherTests {
         // Should it not have ended, the caller's cancellation ends it, so a
         // regression fails here instead of hanging.
         run.cancel()
-        await run.value
+        _ = await run.value
         #expect(await source.reads == 1)
     }
 
@@ -195,7 +195,7 @@ struct PowerFlowRefresherTests {
         // Should the run not have ended, quitting ends it, so a regression
         // fails here instead of hanging.
         refresher.stop()
-        await run.value
+        _ = await run.value
     }
 
     /// Waits a bounded time for a run to end.

@@ -836,7 +836,10 @@ final class AppModel {
         isPowerFlowExpanded = expanded
         store.set(expanded ? "on" : "off", forKey: Self.powerFlowExpandedKey)
         if !expanded {
-            powerFlowRefresher.endRuns()
+            // The hide event itself: the runs end and the SMC source is told
+            // now, and the SMC track is cleared from now, whenever the runs'
+            // callers resume.
+            notePowerFlow { powerFlowRefresher.collapse(&$0) }
         }
     }
 
@@ -902,14 +905,13 @@ final class AppModel {
     /// collapsed. Display only (``PowerFlowRefresher``): no evaluation, no
     /// log line, nothing for the controller.
     func refreshPowerFlowWhileShown() async {
-        await powerFlowRefresher.run(while: { [weak self] in self?.isPowerFlowExpanded == true }) { [weak self] tick in
+        let outcome = await powerFlowRefresher.run(while: { [weak self] in self?.isPowerFlowExpanded == true }) { [weak self] tick in
             self?.notePowerFlow { $0.take(tick) }
         }
-        // Collapsed or closed: the SMC source reset its window, and the SMC
-        // track goes with it, so a reopened menu never shows an old window.
-        if !powerFlowRefresher.isShowing {
-            notePowerFlow { $0.clearSMCTrack(at: .now) }
-        }
+        // The menu closed and this run's end hid the section, at that
+        // moment: the SMC track is cleared from then, so a menu reopened
+        // since keeps its new windows and never shows an old one.
+        notePowerFlow { outcome.clearSMCTrackIfHidden(&$0) }
     }
 
     /// Gives the power flow a status's reading or failed read, or a tick of

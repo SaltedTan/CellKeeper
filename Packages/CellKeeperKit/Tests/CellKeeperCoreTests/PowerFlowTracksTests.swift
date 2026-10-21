@@ -173,6 +173,34 @@ struct PowerFlowTracksTests {
         }
     }
 
+    @Test("A clear that arrives late keeps a window read after its moment, and still refuses older ones")
+    func lateClearKeepsNewerWindow() {
+        var state = PowerFlowState()
+        state.status(powerSnapshot(load: 30_000, update: time(0)), at: 1)
+        // The menu closed at 10 s and was reopened; a window read at 12 s is
+        // shown before the close's clear arrives.
+        state.tick(.window(smcWindow(began: 12, macUse: 21)), at: 15)
+        state.clearSMCTrack(at: readInstant(10))
+        #expect(state.shownTrack == .smc)
+        #expect(state.flow?.macUseWatts == 21)
+        // A clear from after it drops it.
+        state.clearSMCTrack(at: readInstant(16))
+        #expect(state.shownTrack == .registry)
+    }
+
+    @Test("A new power source drops the accepted window even if it was read after the read that showed the change")
+    func powerSourceDropsNewerWindow() {
+        var state = PowerFlowState()
+        state.status(powerSnapshot(source: .externalPower, update: time(0)), at: 1)
+        // A window read from 7 s is accepted with external power's metadata;
+        // the unplug's status, whose read began at 6 s, arrives after it.
+        state.tick(.window(smcWindow(began: 7, adapterInput: 30)), at: 9)
+        #expect(state.flow?.adapterInputWatts == 30)
+        state.status(powerSnapshot(source: .battery, current: -900, update: time(6)), at: 6)
+        #expect(state.shownTrack == .registry)
+        #expect(state.flow?.powerSource == .battery)
+    }
+
     @Test("A later clear never moves the cutoff back")
     func cutoffOnlyMovesForward() {
         var state = PowerFlowState()

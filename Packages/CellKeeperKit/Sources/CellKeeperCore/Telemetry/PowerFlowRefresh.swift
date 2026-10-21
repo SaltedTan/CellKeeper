@@ -25,6 +25,11 @@ public enum PowerFlowRefresh {
     /// read is not reported: the controller's own reads report telemetry
     /// problems. Nothing is read once `isWanted` is false, also at the
     /// start, and a tick that ends after cancellation is not delivered.
+    ///
+    /// Cancellation is checked after every wait, since the task can be
+    /// cancelled during any of them: after `isWanted` (asked on the main
+    /// actor), so that nothing is published for an ended run, and after the
+    /// publication, so that no read begins for one.
     public static func run(
         source: any PowerFlowReading,
         smc: (any SMCPowerPublishing)? = nil,
@@ -34,8 +39,9 @@ public enum PowerFlowRefresh {
         now: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
         deliver: @MainActor @Sendable (PowerFlowTick) -> Void
     ) async {
-        while !Task.isCancelled, await isWanted() {
+        while await isWanted(), !Task.isCancelled {
             let publication = await smc?.publish() ?? .absent
+            guard !Task.isCancelled else { return }
             let content: PowerFlowTick.Content
             if publication.state == .available, let window = publication.window {
                 content = .window(window)

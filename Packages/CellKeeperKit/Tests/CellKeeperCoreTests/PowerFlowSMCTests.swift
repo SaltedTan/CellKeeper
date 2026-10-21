@@ -122,12 +122,12 @@ struct PowerFlowSMCTests {
         let second = Task { await refresher.run(while: { true }) { ticks.values.append($0) } }
         await eventually { await MainActor.run { refresher.readingRuns == 2 } }
         first.cancel()
-        await first.value
+        _ = await first.value
         #expect(refresher.isShowing)
         try? await Task.sleep(for: .milliseconds(20))
         #expect(await smc.current.isShown)
         second.cancel()
-        await second.value
+        _ = await second.value
         #expect(!refresher.isShowing)
         await eventually { await smc.current.isShown == false }
         #expect(await smc.current.isShown == false)
@@ -141,7 +141,7 @@ struct PowerFlowSMCTests {
         await eventually { await MainActor.run { collapsedEnded.value } }
         #expect(collapsedEnded.value)
         collapsed.cancel()
-        await collapsed.value
+        _ = await collapsed.value
         try? await Task.sleep(for: .milliseconds(20))
         #expect(await smc.current.isShown == false)
         // Every tick carried the source's state.
@@ -272,7 +272,7 @@ struct PowerFlowSMCTests {
         refresher.endRuns()
         await eventually { await pauses.finished == 1 }
         #expect(await pauses.finished == 1)
-        await run.value
+        _ = await run.value
         #expect(ticks.values.count == 1)
         refresher.stop()
     }
@@ -317,7 +317,7 @@ struct PowerFlowSMCTests {
         let first = Task { await refresher.run(while: { true }) { ticks.values.append($0) } }
         await eventually { await source.reads == 1 }
         first.cancel()
-        await first.value
+        _ = await first.value
         await eventually { await smc.current.isShown == false }
         // The menu is opened again before the old read returns.
         let second = Task { await refresher.run(while: { true }) { ticks.values.append($0) } }
@@ -330,7 +330,7 @@ struct PowerFlowSMCTests {
         #expect(ticks.values.map(\.content.kind) == ["registry"])
         #expect(await source.reads == 1)
         second.cancel()
-        await second.value
+        _ = await second.value
         #expect(!refresher.isShowing)
         await finish(refresher, source, reader)
     }

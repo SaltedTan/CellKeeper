@@ -199,17 +199,21 @@ public struct PowerFlowState: Sendable, Equatable {
     /// section hidden, a wake) and a power-source change, so that a diagram
     /// accepted just before an unplug never stays on screen after it. A
     /// window whose first batch began before `now` is not accepted later
-    /// either: one published before the reset may still be on its way.
+    /// either: one published before the reset may still be on its way. A
+    /// window read after `now` (the menu reopened before a late clear) stays.
     public mutating func clearSMCTrack(at now: ContinuousClock.Instant) {
-        clearSMCTrack(cutoff: now)
+        raiseCutoff(to: now)
+        if let began = smc?.sample.readBegan, began >= now { return }
+        dropSMCTrack()
     }
 
-    private mutating func clearSMCTrack(cutoff: ContinuousClock.Instant?) {
+    private mutating func raiseCutoff(to cutoff: ContinuousClock.Instant) {
+        smcCutoff = max(smcCutoff ?? cutoff, cutoff)
+    }
+
+    private mutating func dropSMCTrack() {
         smc = nil
         shownTrack = .registry
-        if let cutoff {
-            smcCutoff = max(smcCutoff ?? cutoff, cutoff)
-        }
     }
 
     // MARK: - The registry track
@@ -269,11 +273,15 @@ public struct PowerFlowState: Sendable, Equatable {
     /// included, clears the SMC track from when the read that showed it
     /// began: a window whose batches began earlier may hold readings from
     /// another power source, or ones judged before any was known (the app
-    /// also resets the SMC source on a change).
+    /// also resets the SMC source on a change). The accepted window goes
+    /// whenever it was read: its metadata is from the old power source.
     private mutating func notePowerSource(_ source: PowerSource, since began: ContinuousClock.Instant?) {
         guard source != registryPowerSource else { return }
         registryPowerSource = source
-        clearSMCTrack(cutoff: began)
+        if let began {
+            raiseCutoff(to: began)
+        }
+        dropSMCTrack()
     }
 
     /// Whether `sample` was updated no later than the last SMC window
