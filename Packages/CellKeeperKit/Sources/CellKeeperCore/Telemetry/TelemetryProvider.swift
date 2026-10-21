@@ -4,6 +4,12 @@
 /// job of a ``ChargingBackend``, which is deliberately a separate protocol.
 public protocol TelemetryProvider: Sendable {
     /// Reads a fresh snapshot from the system.
+    ///
+    /// Conformers must tolerate concurrent calls: the menu's power flow
+    /// reads through the same provider for display (``PowerFlowRefresher``,
+    /// one read of its own at a time), and its read may overlap the
+    /// controller's (D114). `SystemTelemetryProvider` holds no state, and
+    /// each read gets its own Core Foundation objects from IOKit.
     func currentSnapshot() async throws -> BatterySnapshot
 
     /// A stream that yields whenever the system signals that power-source

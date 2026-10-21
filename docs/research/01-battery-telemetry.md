@@ -396,6 +396,7 @@ No sandbox denials appeared in the unified log.
 10. Every API above behaves identically inside App Sandbox.
 11. On AC at 80% with `IsCharging` false: `ChargerData.NotChargingReason` = 0x01000000 and `PowerDistribution.IPDChargingAllowed` = 0. **The cause is not attributed** because of the third-party helper confound.
 12. The macOS 27 SDK has no header mentioning charge limit or optimized charging.
+13. **Power telemetry cadence and idle balance (2026-10-21, the lead, macOS 27, on AC at 100%, not charging).** `PowerTelemetryData.SystemPowerIn` and `SystemLoad` changed only when `UpdateTime` changed, every **60 s**. `SystemPowerIn` equalled `SystemLoad`, and the two moved together from 37 304 to 17 363 between two updates; `PowerTelemetryData.BatteryPower` was 0 and `Amperage` 0. An agent's read-only `ioreg -rn AppleSmartBattery` the same day in the same state gave `SystemPowerIn` = `SystemLoad` = 34 848 with `SystemVoltageIn` 20 289 and `SystemCurrentIn` 1 717 (20.289 V × 1.717 A = 34.84 W, consistent with inference 5). Charging and discharging were not observed, so nothing is known yet about how the values relate then; the menu's power flow (D114) shows each as reported and assumes no identity between them.
 
 ## Inferences (unverified)
 
@@ -428,7 +429,7 @@ No sandbox denials appeared in the unified log.
 4. **Power:**
    - `watts = Voltage(mV) × Amperage(mA) / 1e6`, signed (negative = discharging).
    - Show adapter `Watts` and name.
-   - `PowerTelemetryData.SystemPowerIn` (mW) can drive an optional "system draw" readout, labelled experimental.
+   - `PowerTelemetryData.SystemPowerIn` (mW) can drive an optional "system draw" readout, labelled experimental. (Done as the menu's power flow, D114: `SystemPowerIn` and `SystemLoad` only, display only; see observation 13.)
 5. **Health:**
    - Show cycle count (public key) and the estimated Maximum Capacity (computed NCC/Design, labelled "estimate").
    - Optionally offer a "match System Settings" mode that runs `system_profiler SPPowerDataType -json` infrequently (on launch, then daily) and parses it defensively.

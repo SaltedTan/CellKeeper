@@ -24,6 +24,7 @@ struct MenuBarView: View {
                     openSettings()
                 })
                 Divider()
+                PowerFlowSection(model: model)
                 TelemetryDetails(snapshot: status.snapshot, thermalState: model.thermalState, isLowPowerModeEnabled: model.isLowPowerModeEnabled)
             } else {
                 ProgressView("Reading battery…")

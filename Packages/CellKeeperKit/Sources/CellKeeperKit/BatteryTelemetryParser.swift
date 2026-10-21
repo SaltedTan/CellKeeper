@@ -43,7 +43,7 @@ public enum BatteryTelemetryParser {
         "BatteryInstalled", "ExternalConnected", "IsCharging", "FullyCharged",
         "CurrentCapacity", "MaxCapacity", "AppleRawMaxCapacity", "DesignCapacity",
         "NominalChargeCapacity", "CycleCount", "DesignCycleCount9C", "DesignCycleCount70",
-        "Voltage", "Amperage", "BatteryData", "UpdateTime",
+        "Voltage", "Amperage", "BatteryData", "PowerTelemetryData", "UpdateTime",
     ]
 
     /// IOPowerSources description keys CellKeeper keeps. Others (including
@@ -61,10 +61,35 @@ public enum BatteryTelemetryParser {
     /// capacity values on recent macOS versions.
     static let batteryDataKeys: Set<String> = ["FullChargeCapacity", "NominalChargeCapacity", "DesignCapacity"]
 
+    /// Keys read from the nested `PowerTelemetryData` dictionary: the power
+    /// into the Mac from the adapter and the power the Mac uses, in mW
+    /// (inferred, research note 01), for the menu's power flow only. Nothing
+    /// else in it is read: not its `BatteryPower`, whose sign is unverified,
+    /// and none of its accumulators or counters.
+    static let powerTelemetryDataKeys: Set<String> = ["SystemPowerIn", "SystemLoad"]
+
+    /// The most power, in mW, the power flow accepts for either system
+    /// value: far above any Mac's adapter, so only a misread is discarded.
+    static let maximumSystemPowerMilliwatts = 500_000
+
+    /// `properties` with each nested dictionary reduced to its allowlisted
+    /// keys (``batteryDataKeys``, ``powerTelemetryDataKeys``). The registry
+    /// read applies it before the values go anywhere else.
+    static func allowlistingNestedKeys(of properties: [String: Any]) -> [String: Any] {
+        var properties = properties
+        for (key, allowed) in [("BatteryData", batteryDataKeys), ("PowerTelemetryData", powerTelemetryDataKeys)] {
+            if let nested = properties[key] as? [String: Any] {
+                properties[key] = nested.filter { allowed.contains($0.key) }
+            }
+        }
+        return properties
+    }
+
     public static func snapshot(from raw: RawPowerData, at timestamp: Date) -> BatterySnapshot {
         let ps = raw.powerSource ?? [:]
         let reg = raw.registry ?? [:]
         let batteryData = reg["BatteryData"] as? [String: Any] ?? [:]
+        let powerTelemetry = reg["PowerTelemetryData"] as? [String: Any] ?? [:]
 
         let isPresent = bool(ps["Is Present"]) ?? bool(reg["BatteryInstalled"]) ?? (raw.powerSource != nil)
 
@@ -120,6 +145,8 @@ public enum BatteryTelemetryParser {
             timeToEmptyMinutes: powerSource == .battery ? minutes(ps["Time to Empty"]) : nil,
             timeToFullMinutes: bool(ps["Is Charging"]) == true ? minutes(ps["Time to Full Charge"]) : nil,
             adapterWatts: powerSource == .externalPower ? positive(int(raw.adapter?["Watts"])) : nil,
+            systemPowerInMilliwatts: systemPower(powerTelemetry["SystemPowerIn"]),
+            systemLoadMilliwatts: systemPower(powerTelemetry["SystemLoad"]),
             health: health
         )
     }
@@ -139,6 +166,12 @@ public enum BatteryTelemetryParser {
     static func updateTime(_ value: Any?) -> Date? {
         guard let seconds = double(value), seconds > 978_307_200 else { return nil }
         return Date(timeIntervalSince1970: seconds)
+    }
+
+    /// A system power value in mW, as reported. Negative values and values
+    /// above ``maximumSystemPowerMilliwatts`` are discarded.
+    static func systemPower(_ value: Any?) -> Int? {
+        int(value).flatMap { (0...maximumSystemPowerMilliwatts).contains($0) ? $0 : nil }
     }
 
     static func percentage(_ current: Int, of max: Int) -> Int? {

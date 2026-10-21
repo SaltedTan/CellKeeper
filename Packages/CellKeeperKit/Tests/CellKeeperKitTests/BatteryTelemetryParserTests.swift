@@ -152,11 +152,86 @@ struct BatteryTelemetryParserTests {
         #expect(snapshot.health.cycleCount == nil)
     }
 
+    @Test("The system power values come from PowerTelemetryData, in mW, as reported")
+    func systemPower() {
+        var raw = appleSiliconCurrent
+        raw.registry?["PowerTelemetryData"] = ["SystemPowerIn": 37_304, "SystemLoad": 17_363]
+        let snapshot = BatteryTelemetryParser.snapshot(from: raw, at: now)
+        #expect(snapshot.systemPowerInMilliwatts == 37_304)
+        #expect(snapshot.systemLoadMilliwatts == 17_363)
+
+        // Kept on battery power too: the power flow decides what they mean.
+        raw.powerSource?["Power Source State"] = "Battery Power"
+        raw.providingPowerSourceType = "Battery Power"
+        let onBattery = BatteryTelemetryParser.snapshot(from: raw, at: now)
+        #expect(onBattery.powerSource == .battery)
+        #expect(onBattery.systemPowerInMilliwatts == 37_304)
+        #expect(onBattery.systemLoadMilliwatts == 17_363)
+    }
+
+    @Test("Without PowerTelemetryData the system power values are absent")
+    func systemPowerMissing() {
+        let snapshot = BatteryTelemetryParser.snapshot(from: appleSiliconCurrent, at: now)
+        #expect(snapshot.systemPowerInMilliwatts == nil)
+        #expect(snapshot.systemLoadMilliwatts == nil)
+
+        // Not a dictionary, or the values only at the top level.
+        var raw = appleSiliconCurrent
+        raw.registry?["PowerTelemetryData"] = "not a dictionary"
+        raw.registry?["SystemPowerIn"] = 30_000
+        raw.registry?["SystemLoad"] = 30_000
+        let misplaced = BatteryTelemetryParser.snapshot(from: raw, at: now)
+        #expect(misplaced.systemPowerInMilliwatts == nil)
+        #expect(misplaced.systemLoadMilliwatts == nil)
+    }
+
+    @Test(
+        "System power values outside 0–500 W, or of the wrong type, are discarded",
+        arguments: [
+            (-1, nil), (0, 0), (500_000, 500_000), (500_001, nil),
+            (Int.max, nil), (Int.min, nil), ("30000", nil), (true, nil), (30_000.5, 30_000),
+        ] as [(any Sendable, Int?)]
+    )
+    func systemPowerRange(value: any Sendable, expected: Int?) {
+        var raw = appleSiliconCurrent
+        raw.registry?["PowerTelemetryData"] = ["SystemPowerIn": value, "SystemLoad": value]
+        let snapshot = BatteryTelemetryParser.snapshot(from: raw, at: now)
+        #expect(snapshot.systemPowerInMilliwatts == expected)
+        #expect(snapshot.systemLoadMilliwatts == expected)
+    }
+
+    @Test("Only SystemPowerIn and SystemLoad are kept from PowerTelemetryData")
+    func powerTelemetryAllowlist() throws {
+        #expect(BatteryTelemetryParser.registryKeys.contains("PowerTelemetryData"))
+        #expect(BatteryTelemetryParser.powerTelemetryDataKeys == ["SystemPowerIn", "SystemLoad"])
+        let read: [String: Any] = [
+            "Voltage": 12_427,
+            "PowerTelemetryData": [
+                "SystemPowerIn": 34_848, "SystemLoad": 34_848, "BatteryPower": 0,
+                "AccumulatedSystemLoad": 8_426_200_041, "SystemPowerInAccumulatorCount": 822_508,
+                "WallEnergyEstimate": 10_572, "SystemVoltageIn": 20_289, "SystemCurrentIn": 1_717,
+            ] as [String: Any],
+            "BatteryData": ["FullChargeCapacity": 6131, "BatteryPower": 0, "RemainingCapacity": 6131] as [String: Any],
+        ]
+        let kept = BatteryTelemetryParser.allowlistingNestedKeys(of: read)
+        let telemetry = try #require(kept["PowerTelemetryData"] as? [String: Any])
+        #expect(Set(telemetry.keys) == ["SystemPowerIn", "SystemLoad"])
+        let batteryData = try #require(kept["BatteryData"] as? [String: Any])
+        #expect(Set(batteryData.keys) == ["FullChargeCapacity"])
+        #expect(kept["Voltage"] as? Int == 12_427)
+        // A nested value that is not a dictionary is left for the parser to
+        // ignore.
+        let odd = BatteryTelemetryParser.allowlistingNestedKeys(of: ["PowerTelemetryData": 5])
+        #expect(odd["PowerTelemetryData"] as? Int == 5)
+    }
+
     @Test("Allowlists exclude identifiers")
     func allowlistsExcludeIdentifiers() {
         let keys = BatteryTelemetryParser.registryKeys
             + BatteryTelemetryParser.powerSourceKeys
             + BatteryTelemetryParser.adapterKeys
+            + BatteryTelemetryParser.batteryDataKeys
+            + BatteryTelemetryParser.powerTelemetryDataKeys
         let lowered = keys.map { $0.lowercased() }
         #expect(!lowered.contains { $0.contains("serial") || $0.contains("lot") || $0.contains("manufacturerdata") || $0.contains("source id") })
     }
@@ -176,6 +251,18 @@ struct SystemTelemetrySmokeTests {
             }
         } catch {
             #expect(error is SystemTelemetryError)
+        }
+    }
+
+    @Test("The real registry read keeps only the allowlisted nested keys")
+    func registryReadIsAllowlisted() {
+        guard let registry = SystemTelemetryProvider.readSmartBatteryRegistry() else { return }
+        #expect(Set(registry.keys).isSubset(of: BatteryTelemetryParser.registryKeys))
+        if let telemetry = registry["PowerTelemetryData"] as? [String: Any] {
+            #expect(Set(telemetry.keys).isSubset(of: BatteryTelemetryParser.powerTelemetryDataKeys))
+        }
+        if let batteryData = registry["BatteryData"] as? [String: Any] {
+            #expect(Set(batteryData.keys).isSubset(of: BatteryTelemetryParser.batteryDataKeys))
         }
     }
 }

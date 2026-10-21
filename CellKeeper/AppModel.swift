@@ -122,6 +122,19 @@ final class AppModel {
     private(set) var menuBarIconPreferences: MenuBarIconPreferences
     /// True once quitting has started; Shortcuts actions then refuse.
     private(set) var isTerminating = false
+    /// The menu's power flow: the latest sample's flow and the last two
+    /// hours, from every status and from the menu's display-only reads. In
+    /// memory only; the policy and the controller never see it (D114).
+    private(set) var powerFlow = PowerFlowState()
+    /// Whether the menu's Power flow section is expanded, remembered across
+    /// launches. Only then does the menu read the flow every few seconds.
+    private(set) var isPowerFlowExpanded: Bool
+    /// Where the menu reads the power flow while it is open: macOS's
+    /// battery data, read through the telemetry provider. Display only.
+    @ObservationIgnored let powerFlowSource: any PowerFlowReading
+    /// Runs the menu's reads of the power flow, one at a time, and stops
+    /// them when quitting starts.
+    @ObservationIgnored private let powerFlowRefresher: PowerFlowRefresher
     /// Provided with the first status, for Shortcuts actions that need one.
     @ObservationIgnored let firstStatus = FirstValue<Bool>()
     /// The app's version, macOS and the model, read once: none of them
@@ -181,6 +194,9 @@ final class AppModel {
     }
 
     static let backendChoiceKey = "controlBackend"
+    /// "on" while the menu's Power flow section is expanded; anything else
+    /// is collapsed, the default.
+    static let powerFlowExpandedKey = "menu.powerFlowExpanded"
     static let periodicInterval: Duration = .seconds(60)
     /// macOS reports battery estimates as invalid for 30 s after wake
     /// (`BatteryInvalidWakeSeconds`), so re-read once that has passed.
@@ -222,7 +238,8 @@ final class AppModel {
         scheduleStore: any FullChargeScheduleStoring = FullChargeScheduleStore(),
         weeklyStore: any WeeklyFullChargeStoring = WeeklyFullChargeStore(),
         calibrationStore: any CalibrationStoring = CalibrationStore(),
-        notificationPoster: any NotificationPosting = SystemNotificationPoster()
+        notificationPoster: any NotificationPosting = SystemNotificationPoster(),
+        powerFlowSource: (any PowerFlowReading)? = nil
     ) {
         var loaded = store.loadChargingSettings()
         // While an adoption marker exists, CellKeeper kept a Charge Limit
@@ -242,6 +259,10 @@ final class AppModel {
         self.settingsRecoveryMessage = loaded.recoveryReason
         self.menuBarIconPreferences = store.loadMenuBarIconPreferences()
         self.backendChoice = choice
+        let powerFlowSource = powerFlowSource ?? BatteryDataPowerFlowReading(telemetry: telemetry)
+        self.powerFlowSource = powerFlowSource
+        self.powerFlowRefresher = PowerFlowRefresher(source: powerFlowSource)
+        self.isPowerFlowExpanded = store.string(forKey: Self.powerFlowExpandedKey) == "on"
         // Recovery must not depend on which backend is selected: if a record
         // of the user's own Charge Limit exists, start with the backend that
         // can restore it and switch once it has.
@@ -395,6 +416,8 @@ final class AppModel {
     /// the caller can restore defaults without involving the main actor.
     func stopForTermination() -> ChargeController {
         isTerminating = true
+        // The menu may stay open through the restore and its alert.
+        powerFlowRefresher.stop()
         commandSink.finish()
         for task in tasks { task.cancel() }
         tasks.removeAll()
@@ -792,6 +815,46 @@ final class AppModel {
         diagnosticsSaveFailure = nil
     }
 
+    // MARK: Power flow
+
+    func setPowerFlowExpanded(_ expanded: Bool) {
+        isPowerFlowExpanded = expanded
+        store.set(expanded ? "on" : "off", forKey: Self.powerFlowExpandedKey)
+    }
+
+    /// The power flow's note, from its source.
+    var powerFlowFootnote: String {
+        powerFlowSource.footnote
+    }
+
+    /// Where the power flow chart's lines break: the history fills from the
+    /// source while the section is shown and from the statuses otherwise.
+    var powerFlowLineBreakGap: TimeInterval {
+        PowerFlowHistory.lineBreakGap(sourceInterval: powerFlowSource.updateInterval, checkInterval: Self.periodicInterval)
+    }
+
+    /// Reads the power flow's source every few seconds while the Power flow
+    /// section is expanded, until the calling task is cancelled or quitting
+    /// starts: the menu runs it while it is open (the lead's decision,
+    /// 2026-10-21). Nothing is read while the section is collapsed. Display
+    /// only (``PowerFlowRefresher``): no evaluation, no log line, nothing for
+    /// the controller.
+    func refreshPowerFlowWhileShown() async {
+        await powerFlowRefresher.run(while: { [weak self] in self?.isPowerFlowExpanded == true }) { [weak self] sample in
+            self?.notePowerFlow { $0.take(sample) }
+        }
+    }
+
+    /// Gives the power flow a status's reading or failed read, or a sample
+    /// from the menu's reads; the state orders them by when their reads
+    /// began. The menu redraws only if what it shows changed.
+    private func notePowerFlow(_ change: (inout PowerFlowState) -> Void) {
+        guard !isTerminating else { return }
+        var state = powerFlow
+        change(&state)
+        if state != powerFlow { powerFlow = state }
+    }
+
     /// Announces the problem a step of the user's own action shows
     /// (``BannerChange/announcement``): every time it shows one, even the
     /// same as before; never for a step that keeps or clears the line.
@@ -826,6 +889,9 @@ final class AppModel {
     }
 
     private func perform(_ command: Command) async {
+        // No telemetry read made for this command began earlier
+        // (``PowerFlowState/takeStatus(snapshot:evaluatedAt:readBegan:)``).
+        let readBegan = ContinuousClock.now
         switch command {
         case .evaluate(let trigger):
             status = await controller.evaluate(trigger)
@@ -936,6 +1002,9 @@ final class AppModel {
         if let status {
             notifier.observe(status, trigger: command.trigger)
             firstStatus.provide(true)
+            notePowerFlow {
+                $0.takeStatus(snapshot: status.snapshot, evaluatedAt: status.lastEvaluation, readBegan: readBegan)
+            }
         }
         noteAdoptedChanges()
     }
