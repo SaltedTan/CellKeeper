@@ -371,7 +371,7 @@ final class AppModel {
     private func didWake() {
         // The SMC source's window resets, and the SMC track with it.
         smcPowerSource?.send(.wake)
-        notePowerFlow { $0.clearSMCTrack() }
+        notePowerFlow { $0.clearSMCTrack(at: .now) }
         forwardToInProcessHelpers { await $0.systemDidWake() }
         send(.evaluate(.didWake))
         postWakeReread?.cancel()
@@ -829,9 +829,15 @@ final class AppModel {
 
     // MARK: Power flow
 
+    /// Collapsing ends the section's reads at once, a display read in
+    /// flight included, so the SMC source stops sampling without waiting
+    /// for SwiftUI to cancel the section's task.
     func setPowerFlowExpanded(_ expanded: Bool) {
         isPowerFlowExpanded = expanded
         store.set(expanded ? "on" : "off", forKey: Self.powerFlowExpandedKey)
+        if !expanded {
+            powerFlowRefresher.endRuns()
+        }
     }
 
     /// The power flow's note, from the sample on screen: where its values
@@ -902,7 +908,7 @@ final class AppModel {
         // Collapsed or closed: the SMC source reset its window, and the SMC
         // track goes with it, so a reopened menu never shows an old window.
         if !powerFlowRefresher.isShowing {
-            notePowerFlow { $0.clearSMCTrack() }
+            notePowerFlow { $0.clearSMCTrack(at: .now) }
         }
     }
 

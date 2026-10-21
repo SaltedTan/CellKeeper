@@ -17,6 +17,57 @@ private final class Ticks {
     var values: [PowerFlowTick] = []
 }
 
+@MainActor
+private final class Toggle {
+    var value: Bool
+
+    init(_ value: Bool) {
+        self.value = value
+    }
+}
+
+/// A display source whose reads are held until the test releases them, as
+/// a registry read stuck in flight would be, and at most 10 s (its
+/// watchdog, counted), so that no test can hang on one.
+private actor HeldSource: PowerFlowReading {
+    private(set) var reads = 0
+    private(set) var finished = 0
+    private(set) var watchdogReleases = 0
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+    private var isReleased = false
+
+    nonisolated var sourceName: String { "a held source" }
+    nonisolated var updateInterval: Duration { .seconds(60) }
+
+    func currentSample() async -> PowerFlowSample {
+        reads += 1
+        let read = reads
+        if !isReleased {
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(10))
+                await self?.watchdog()
+            }
+            await withCheckedContinuation { waiting.append($0) }
+        }
+        finished += 1
+        return fastSample(TimeInterval(read))
+    }
+
+    /// Lets every held read return, and later ones at once.
+    func release() {
+        isReleased = true
+        let held = waiting
+        waiting = []
+        for read in held { read.resume() }
+    }
+
+    private func watchdog() {
+        guard !waiting.isEmpty else { return }
+        watchdogReleases += 1
+        release()
+    }
+}
+
 @Suite("Power flow with the SMC source")
 @MainActor
 struct PowerFlowSMCTests {
@@ -55,6 +106,137 @@ struct PowerFlowSMCTests {
         await eventually { await smc.isStopped }
         #expect(await smc.isStopped)
         reader.releaseAll()
+        #expect(reader.watchdogReleases == 0)
+    }
+
+    /// A refresher reading `source`, with an SMC source on `reader`, its
+    /// timer and the refresher's both waiting an hour between ticks.
+    private func refresher(_ source: HeldSource, _ reader: FakeSMCReader) -> (PowerFlowRefresher, SMCPowerCoordinator) {
+        let smc = SMCPowerCoordinator(reader: reader, configuration: SMCPowerSampler.Configuration(), pause: hour)
+        return (PowerFlowRefresher(source: source, smc: smc, pause: hour), smc)
+    }
+
+    /// Ends a test: quits, lets every held read return, and expects no
+    /// watchdog to have been needed.
+    private func finish(_ refresher: PowerFlowRefresher, _ source: HeldSource, _ reader: FakeSMCReader) async {
+        refresher.stop()
+        await source.release()
+        reader.releaseAll()
+        #expect(await source.watchdogReleases == 0)
+        #expect(reader.watchdogReleases == 0)
+    }
+
+    @Test("The menu closing with a display read in flight ends the run at once: SMC sampling stops, and the read's later completion delivers and restarts nothing")
+    func closeWithReadInFlight() async {
+        let source = HeldSource()
+        let reader = FakeSMCReader()
+        let (refresher, smc) = refresher(source, reader)
+        let ticks = Ticks()
+        let ended = Toggle(false)
+        let run = Task {
+            await refresher.run(while: { true }) { ticks.values.append($0) }
+            ended.value = true
+        }
+        await eventually { await source.reads == 1 }
+        await eventually { await smc.current.isShown }
+        #expect(await smc.current.isShown)
+        run.cancel()
+        // The run returns while the read is still held.
+        await eventually { await MainActor.run { ended.value } }
+        #expect(ended.value)
+        #expect(await source.finished == 0)
+        #expect(!refresher.isShowing)
+        await eventually { await smc.current.isShown == false }
+        #expect(await smc.current.isShown == false)
+        let smcReads = reader.calls
+        // The held read completes.
+        await source.release()
+        await eventually { await source.finished == 1 }
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(ticks.values.isEmpty)
+        #expect(await smc.current.isShown == false)
+        #expect(!refresher.isShowing)
+        #expect(reader.calls == smcReads)
+        await finish(refresher, source, reader)
+    }
+
+    @Test("Collapsing with a display read in flight ends the run at once, without the caller being cancelled")
+    func collapseWithReadInFlight() async {
+        let source = HeldSource()
+        let reader = FakeSMCReader()
+        let (refresher, smc) = refresher(source, reader)
+        let ticks = Ticks()
+        let expanded = Toggle(true)
+        let ended = Toggle(false)
+        let run = Task {
+            await refresher.run(while: { expanded.value }) { ticks.values.append($0) }
+            ended.value = true
+        }
+        await eventually { await source.reads == 1 }
+        await eventually { await smc.current.isShown }
+        expanded.value = false
+        refresher.endRuns()
+        await eventually { await MainActor.run { ended.value } }
+        #expect(ended.value)
+        #expect(!run.isCancelled)
+        #expect(!refresher.isShowing)
+        await eventually { await smc.current.isShown == false }
+        #expect(await smc.current.isShown == false)
+        await source.release()
+        await eventually { await source.finished == 1 }
+        try? await Task.sleep(for: .milliseconds(50))
+        #expect(ticks.values.isEmpty)
+        #expect(await smc.current.isShown == false)
+        await finish(refresher, source, reader)
+    }
+
+    @Test("Quitting with a display read in flight returns the run at once")
+    func quitWithReadInFlight() async {
+        let source = HeldSource()
+        let reader = FakeSMCReader()
+        let (refresher, smc) = refresher(source, reader)
+        let ticks = Ticks()
+        let ended = Toggle(false)
+        _ = Task {
+            await refresher.run(while: { true }) { ticks.values.append($0) }
+            ended.value = true
+        }
+        await eventually { await source.reads == 1 }
+        refresher.stop()
+        await eventually { await MainActor.run { ended.value } }
+        #expect(ended.value)
+        #expect(await source.finished == 0)
+        await eventually { await smc.isStopped }
+        #expect(await smc.isStopped)
+        await finish(refresher, source, reader)
+        #expect(ticks.values.isEmpty)
+    }
+
+    @Test("A run started while an ended run's read is still in flight shares that read, gets its sample, and shows the SMC source again")
+    func reopenWhileReadInFlight() async {
+        let source = HeldSource()
+        let reader = FakeSMCReader()
+        let (refresher, smc) = refresher(source, reader)
+        let ticks = Ticks()
+        let first = Task { await refresher.run(while: { true }) { ticks.values.append($0) } }
+        await eventually { await source.reads == 1 }
+        first.cancel()
+        await first.value
+        await eventually { await smc.current.isShown == false }
+        // The menu is opened again before the old read returns.
+        let second = Task { await refresher.run(while: { true }) { ticks.values.append($0) } }
+        await eventually { await refresher.source.waitingReads == 1 }
+        #expect(await source.reads == 1)
+        await eventually { await smc.current.isShown }
+        #expect(refresher.isShowing)
+        await source.release()
+        await eventually { await MainActor.run { ticks.values.count == 1 } }
+        #expect(ticks.values.map(\.content.kind) == ["registry"])
+        #expect(await source.reads == 1)
+        second.cancel()
+        await second.value
+        #expect(!refresher.isShowing)
+        await finish(refresher, source, reader)
     }
 
     @Test("The controller, the policy and the calibration never receive the power flow's values: no file of theirs names them")

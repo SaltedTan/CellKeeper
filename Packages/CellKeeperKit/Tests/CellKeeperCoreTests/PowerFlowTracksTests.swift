@@ -118,12 +118,71 @@ struct PowerFlowTracksTests {
         var state = PowerFlowState()
         state.status(powerSnapshot(load: 30_000, update: time(0)), at: 1)
         state.tick(.window(smcWindow(began: 2, macUse: 20)), at: 5)
-        state.clearSMCTrack()
+        state.clearSMCTrack(at: readInstant(5.5))
         #expect(state.shownTrack == .registry)
         #expect(state.flow?.macUseWatts == 30)
         // The same window is not shown again at the next tick.
         state.tick(.empty, at: 6)
         #expect(state.shownTrack == .registry)
+    }
+
+    @Test("Delivered late across a wake: a window published before the wake and arriving after it is dropped, and a later one is shown")
+    func delayedDeliveryAcrossWake() {
+        var state = PowerFlowState()
+        state.status(powerSnapshot(load: 30_000, update: time(0)), at: 1)
+        state.tick(.window(smcWindow(began: 2, macUse: 20)), at: 5)
+        let recorded = state.recordedUpdates
+        // The refresher took a window (its batches began at 5 s) from the
+        // source just before the Mac slept; the wake at 600 s clears the SMC
+        // track, and only then does that tick reach the state.
+        state.clearSMCTrack(at: readInstant(600))
+        state.tick(.window(smcWindow(began: 5, macUse: 99)), at: 600.1)
+        #expect(state.shownTrack == .registry)
+        #expect(state.flow?.macUseWatts == 30)
+        #expect(state.recordedUpdates == recorded)
+        // So is a window whose batches straddle the wake.
+        state.tick(.window(smcWindow(began: 599.5, macUse: 98)), at: 603)
+        #expect(state.shownTrack == .registry)
+        // A window read after the wake is shown.
+        state.tick(.window(smcWindow(began: 601, macUse: 21)), at: 604)
+        #expect(state.shownTrack == .smc)
+        #expect(state.flow?.macUseWatts == 21)
+        #expect(state.recordedUpdates == recorded + 1)
+    }
+
+    @Test("Every reset drops windows from before it: hiding the section, a wake, and a power-source change")
+    func everyResetDropsOlderWindows() {
+        for reset in ["hide", "wake", "power source"] {
+            var state = PowerFlowState()
+            state.status(powerSnapshot(source: .externalPower, update: time(0)), at: 1)
+            state.tick(.window(smcWindow(began: 2, adapterInput: 30)), at: 5)
+            switch reset {
+            case "power source":
+                state.status(powerSnapshot(source: .battery, current: -900, update: time(10)), at: 10)
+            default:
+                // Hiding and a wake both clear the track at that moment.
+                state.clearSMCTrack(at: readInstant(10))
+            }
+            #expect(state.shownTrack == .registry, "\(reset)")
+            // Published before the reset (its batches began at 8 s),
+            // delivered after it.
+            state.tick(.window(smcWindow(began: 8, adapterInput: 30)), at: 11)
+            #expect(state.shownTrack == .registry, "\(reset)")
+            state.tick(.window(smcWindow(began: 10.5)), at: 14)
+            #expect(state.shownTrack == .smc, "\(reset)")
+        }
+    }
+
+    @Test("A later clear never moves the cutoff back")
+    func cutoffOnlyMovesForward() {
+        var state = PowerFlowState()
+        state.status(powerSnapshot(update: time(0)), at: 1)
+        state.clearSMCTrack(at: readInstant(20))
+        state.clearSMCTrack(at: readInstant(10))
+        state.tick(.window(smcWindow(began: 15)), at: 21)
+        #expect(state.shownTrack == .registry)
+        state.tick(.window(smcWindow(began: 20)), at: 24)
+        #expect(state.shownTrack == .smc)
     }
 
     @Test("Repeats across tracks: a status delivered while the SMC is shown, delivered again after it fails, changes nothing")
@@ -239,7 +298,7 @@ struct PowerFlowTracksTests {
         #expect(footnote(state) == "Mac from the SMC, averaged over 1 second; battery from macOS's battery data, updated about once a minute.")
         state.tick(.window(smcWindow(began: 21, battery: -10)), at: 24)
         #expect(footnote(state) == "Mac and battery from the SMC, averaged over 3 seconds.")
-        state.clearSMCTrack()
+        state.clearSMCTrack(at: readInstant(25))
         #expect(footnote(state) == registry)
     }
 

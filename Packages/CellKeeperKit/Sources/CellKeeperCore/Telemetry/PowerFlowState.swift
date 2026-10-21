@@ -92,6 +92,11 @@ public struct PowerFlowState: Sendable, Equatable {
     private var smc: SMCTrack?
     /// When the first batch of the last accepted window began.
     private var lastWindowBegan: ContinuousClock.Instant?
+    /// When the SMC track was last cleared (the section hidden, a wake, a
+    /// power-source change): a window whose first batch began before then
+    /// holds readings from before that reset and is never accepted, even if
+    /// it was published before the reset and arrives after it.
+    private var smcCutoff: ContinuousClock.Instant?
     private var lastRecordedWindow: RecordedWindow?
     /// The registry track's power source, kept after a failed read, and when
     /// the read that first showed it began: a window that began before that
@@ -161,14 +166,16 @@ public struct PowerFlowState: Sendable, Equatable {
     /// power source, adapter rating and charge, and its battery power unless
     /// every batch had a valid `B0AP`. Not accepted while the source is not
     /// available, without a known power source in the registry track, when
-    /// it began no later than the last window, or before the read that
-    /// showed the current power source. Recorded in the history once, here.
+    /// it began no later than the last window, before the last reset of the
+    /// SMC track, or before the read that showed the current power source.
+    /// Recorded in the history once, here.
     private mutating func accept(_ window: SMCPowerWindow, at now: ContinuousClock.Instant) {
         guard smcState == .available,
               let reading = registry.sample,
               reading.powerSource == .externalPower || reading.powerSource == .battery
         else { return }
         if let lastWindowBegan, window.firstBatchBegan <= lastWindowBegan { return }
+        if let smcCutoff, window.firstBatchBegan < smcCutoff { return }
         if let registryPowerSourceSince, window.firstBatchBegan < registryPowerSourceSince { return }
         lastWindowBegan = window.firstBatchBegan
         let sample = PowerFlowSample(
@@ -190,13 +197,22 @@ public struct PowerFlowState: Sendable, Equatable {
         lastRecordedWindow = RecordedWindow(collectedAt: window.collectedAt, acceptedAt: now)
     }
 
-    /// Clears the SMC track, so that the registry track is shown at once:
-    /// every reset of the SMC source (the section hidden, a wake) and a
-    /// power-source change, so that a diagram accepted just before an
-    /// unplug never stays on screen after it.
-    public mutating func clearSMCTrack() {
+    /// Clears the SMC track at `now`, on the continuous clock, so that the
+    /// registry track is shown at once: every reset of the SMC source (the
+    /// section hidden, a wake) and a power-source change, so that a diagram
+    /// accepted just before an unplug never stays on screen after it. A
+    /// window whose first batch began before `now` is not accepted later
+    /// either: one published before the reset may still be on its way.
+    public mutating func clearSMCTrack(at now: ContinuousClock.Instant) {
+        clearSMCTrack(cutoff: now)
+    }
+
+    private mutating func clearSMCTrack(cutoff: ContinuousClock.Instant?) {
         smc = nil
         shownTrack = .registry
+        if let cutoff {
+            smcCutoff = max(smcCutoff ?? cutoff, cutoff)
+        }
     }
 
     // MARK: - The registry track
@@ -253,14 +269,15 @@ public struct PowerFlowState: Sendable, Equatable {
     }
 
     /// Notes the registry track's power source. A change from a known one
-    /// clears the SMC track (the app also resets the SMC source).
+    /// clears the SMC track, from when the read that showed it began (the
+    /// app also resets the SMC source).
     private mutating func notePowerSource(_ source: PowerSource, since began: ContinuousClock.Instant?) {
         guard source != registryPowerSource else { return }
         let isChange = registryPowerSource != nil
         registryPowerSource = source
         registryPowerSourceSince = began
         if isChange {
-            clearSMCTrack()
+            clearSMCTrack(cutoff: began)
         }
     }
 
