@@ -182,10 +182,10 @@ public actor SMCPowerCoordinator: SMCPowerPublishing {
         }
     }
 
-    /// Timer `number`'s tick: a tick only while that timer is the one
-    /// running.
+    /// Timer `number`'s tick: a tick only if that timer is the latest
+    /// started. (Hidden, the sampler begins nothing whichever timer ticks.)
     func tick(timer number: Int) {
-        guard timer != nil, number == timerNumber else { return }
+        guard number == timerNumber else { return }
         tick()
     }
 
