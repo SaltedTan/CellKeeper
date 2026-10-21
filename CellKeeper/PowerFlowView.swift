@@ -301,9 +301,13 @@ private struct PowerFlowChart: View {
                     ForEach(points, id: \.self) { point in
                         let name = Self.lineName(point)
                         if pointsPerLine[Line(series: point.series, segment: point.segment)] == 1 {
+                            // A point alone between gaps has its series'
+                            // symbol, so that it is not told apart by
+                            // colour only.
                             PointMark(x: .value("Time", point.time), y: .value("Watts", point.watts))
                                 .foregroundStyle(point.series.color)
-                                .symbolSize(30)
+                                .symbol(point.series.symbol)
+                                .symbolSize(36)
                                 .accessibilityLabel(name)
                                 .accessibilityValue(Self.spokenValue(point))
                         } else {
@@ -352,11 +356,11 @@ private struct PowerFlowChart: View {
 
     /// The quarter hours within `range`, for the time axis: whole local
     /// quarter hours, since every time zone's offset is a multiple of 15
-    /// minutes. None within 6 minutes of either end, where its label would
+    /// minutes. None within 9 minutes of either end, where its label would
     /// be cut off.
     private static func quarterHours(in range: ClosedRange<Date>) -> [Date] {
         let step: TimeInterval = 15 * 60
-        let margin: TimeInterval = 6 * 60
+        let margin: TimeInterval = 9 * 60
         var time = ((range.lowerBound.timeIntervalSinceReferenceDate + margin) / step).rounded(.up) * step
         var dates: [Date] = []
         while time <= range.upperBound.timeIntervalSinceReferenceDate - margin {
@@ -377,19 +381,25 @@ private struct PowerFlowChart: View {
     }
 }
 
-/// Each series' line key, in its colour and dash, and its name.
+/// Each series' key, its line in its colour and dash with its symbol, and
+/// its name.
 private struct PowerFlowLegend: View {
     var body: some View {
         HStack(spacing: 12) {
             ForEach(PowerFlowHistory.Series.allCases, id: \.self) { series in
                 HStack(spacing: 4) {
-                    Canvas { context, size in
-                        var line = Path()
-                        line.move(to: CGPoint(x: 1, y: size.height / 2))
-                        line.addLine(to: CGPoint(x: size.width - 1, y: size.height / 2))
-                        context.stroke(line, with: .color(series.color), style: series.stroke)
+                    ZStack {
+                        Canvas { context, size in
+                            var line = Path()
+                            line.move(to: CGPoint(x: 1, y: size.height / 2))
+                            line.addLine(to: CGPoint(x: size.width - 1, y: size.height / 2))
+                            context.stroke(line, with: .color(series.color), style: series.stroke)
+                        }
+                        series.symbol
+                            .fill(series.color)
+                            .frame(width: 6, height: 6)
                     }
-                    .frame(width: 18, height: 6)
+                    .frame(width: 22, height: 8)
                     .accessibilityHidden(true)
                     Text(PowerFlowWording.title(of: series))
                         .font(.caption2)
@@ -418,6 +428,16 @@ extension PowerFlowHistory.Series {
             let hex = isDark ? dark : light
             return NSColor(srgbRed: CGFloat(hex >> 16 & 0xFF) / 255, green: CGFloat(hex >> 8 & 0xFF) / 255, blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
         })
+    }
+
+    /// A circle for the Mac's use, a square for the adapter's input and a
+    /// triangle for the battery: an isolated point's mark, and in the legend.
+    fileprivate var symbol: BasicChartSymbolShape {
+        switch self {
+        case .macUse: .circle
+        case .adapterInput: .square
+        case .battery: .triangle
+        }
     }
 
     /// Solid for the Mac's use, dashed for the adapter's input, dotted for
