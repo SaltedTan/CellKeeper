@@ -48,7 +48,7 @@ public enum PowerFlowWording {
     public static let chartBatteryNote = "Battery above 0 W is charging, below is supplying the Mac."
 
     /// Until the history has a line to draw.
-    public static let chartEmpty = "The chart fills in as macOS updates its battery data."
+    public static let chartEmpty = "The chart fills in as new values arrive."
 
     // MARK: - Numbers
 
