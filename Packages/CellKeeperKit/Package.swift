@@ -11,7 +11,8 @@
 //   power-source notifications, the `shortcuts` and `pmset` runners, the
 //   Charge Limit record file, the saved diagnostics report, the helper's
 //   read-only power reading for the Simulated helper, the NSXPC helper
-//   transport, and the local-notification poster). Depends on
+//   transport, the local-notification poster, and the menu bar battery's
+//   Core Graphics drawing). Depends on
 //   CellKeeperCore, CellKeeperHelperCore and CellKeeperHelperXPC.
 // - CellKeeperHelperCore: the logic of the privileged helper (the wire
 //   vocabulary shared with the app, and the helper engine: sessions,
