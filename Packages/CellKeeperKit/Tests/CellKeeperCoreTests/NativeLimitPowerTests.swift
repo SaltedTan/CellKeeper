@@ -790,6 +790,36 @@ struct DeferredRestoreReviewTests {
         #expect(!ChargeController.wantsOwnLimitBack(decision(.nativeLimit(percent: 100), .refuse(.backendFaulted), .nativeFullCharge)))
     }
 
+    @Test("A failure that faults the backend keeps the wait its safety fallback set in the same evaluation")
+    func failedRequestFallbackWaitSurvivesEvaluation() async throws {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.clock.advance(by: 600)
+        rig.system.isActiveLimitCleared = true
+        _ = await rig.read(.battery, 70)
+        // In each evaluation the mode's read shows no active limit, then the
+        // new limit's read fails; once the backend faults, its safety
+        // fallback finds no active limit either and defers the 80% restore
+        // without writing.
+        rig.system.failRead(after: 1)
+        var failed = try await rig.controller.apply(settings: rig.settings(limit: 90))
+        for _ in 1..<ChargeController.maximumConsecutiveFailures {
+            rig.clock.advance(by: ChargingPolicy.minimumRestrictingInterval + 1)
+            rig.system.failRead(after: 1)
+            failed = await rig.read(.battery, 70)
+        }
+        #expect(failed.isBackendFaulted)
+        #expect(failed.nativeLimit?.ownerLimit == 80)
+        #expect(failed.nativeLimit?.isRestoreUnfinished == false)
+        #expect(rig.system.runInputs == ["85"], "nothing written on battery power")
+        #expect(failed.isOwnLimitRestoreWaitingForPower, "the faulted backend's safety restore waits for power")
+        expectRestoreStateIsConsistent(failed.nativeLimit)
+        let next = await rig.read(.battery, 70)
+        #expect(next.decision?.action == .enableCharging)
+        #expect(next.isOwnLimitRestoreWaitingForPower)
+    }
+
     @Test("A new limit request clears an unwritten restore even if the request itself must wait")
     func newLimitRequestClearsWait() async throws {
         let system = FakeChargeLimitSystem(reading: .limit(80))

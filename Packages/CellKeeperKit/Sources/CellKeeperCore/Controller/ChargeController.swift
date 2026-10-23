@@ -1563,12 +1563,16 @@ public actor ChargeController {
 
     /// Clears a restore that waited for power and wrote nothing once
     /// CellKeeper no longer wants the user's own limit back: management is
-    /// on, no backend switch is pending, and the decision neither wants nor
-    /// requests `.normal` (``wantsOwnLimitBack(_:)``). Nothing was written,
-    /// so the state must not outlive the wish, as when a pending backend
-    /// switch is cancelled (D116, D119).
+    /// on, no backend switch is pending, the backend is not faulted, and the
+    /// decision neither wants nor requests `.normal`
+    /// (``wantsOwnLimitBack(_:)``). Nothing was written, so the state must
+    /// not outlive the wish, as when a pending backend switch is cancelled.
+    /// A failure that faults the backend in this evaluation asks for the
+    /// user's limit at once, after the decision (the safety fallback), so
+    /// the decision alone does not say whether it is still wanted (D116,
+    /// D119; review r2 of PR #114).
     private func clearWaitingRestore(after decision: PolicyDecision) async {
-        guard settings.isManagementEnabled, pendingBackend == nil, !Self.wantsOwnLimitBack(decision),
+        guard settings.isManagementEnabled, pendingBackend == nil, !isBackendFaulted, !Self.wantsOwnLimitBack(decision),
               let native = backend as? NativeChargeLimitBackend
         else { return }
         await native.cancelWaitingRestore()
