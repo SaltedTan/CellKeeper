@@ -101,10 +101,10 @@ Requirements: macOS Tahoe 26.4 or later on a Mac with Apple silicon.
 
 What happens:
 - **Before its first change**, CellKeeper reads your current Charge Limit
-  and records it durably. It reads and records the limit only on AC power,
-  about a minute after power returns, a wake or its start; on battery power
-  it waits. If macOS reports "no limit", CellKeeper first asks you to
-  confirm that your limit is 100%, and only for such a read.
+  and records it durably. It does so only on AC power, once power has been
+  on for about a minute after a plug-in, a wake or its own start; on
+  battery power it waits. If such a read shows "no limit", CellKeeper
+  first asks you to confirm that your limit is 100%.
 - **It restores exactly that value** when you turn off **Manage charging**,
   switch backend, quit, or if anything fails, unless you have changed the
   limit yourself meanwhile (see below). If it cannot confirm the
