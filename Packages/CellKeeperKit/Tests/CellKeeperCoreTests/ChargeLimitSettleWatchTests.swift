@@ -60,6 +60,46 @@ private struct NappedApp {
 /// read from waiting for ever (review r2 of #113).
 @Suite("The settle minute ends on time, however late the periodic checks come")
 struct ChargeLimitSettleLivenessTests {
+    @Test("A wait an awake suspension pushed past the cap is still judged later, with checks 121 s apart and no sleep")
+    func cappedWaitRecovers() async throws {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        rig.system.changeExternally(to: 90)
+        rig.clock.advance(by: 121)
+        var status = await rig.read(.externalPower)
+        #expect(status.chargeLimitJudgmentDue != nil)
+        var watch = ChargeLimitSettleWatch()
+        watch.observe(judgmentDue: status.chargeLimitJudgmentDue, at: rig.controller.monotonicNow)
+        let heldSince = try #require(watch.heldSince)
+        // One awake suspension outlasts the episode: its timer resumes at
+        // the cap, which ends the activity.
+        rig.clock.advance(by: heldSince + ChargeLimitSettleWatch.cap - rig.clock.uptime)
+        let capFollowUp = watch.deadlineReached(at: rig.controller.monotonicNow)
+        #expect(!capFollowUp)
+        #expect(!watch.isHoldingActivity)
+        // The app can be napped again: its checks come 121 s apart, each
+        // restarting the settle time. The watch's deadlines still run.
+        status = await rig.read(.externalPower)
+        watch.observe(judgmentDue: status.chargeLimitJudgmentDue, at: rig.controller.monotonicNow)
+        for _ in 0..<10 where status.adoptedChange == nil {
+            let nextPeriodic = rig.clock.uptime + 121
+            var deadlines = 0
+            while let due = watch.nextDeadline, due < nextPeriodic, deadlines < 20 {
+                deadlines += 1
+                rig.clock.advance(by: max(0, due - rig.clock.uptime))
+                if watch.deadlineReached(at: rig.controller.monotonicNow) {
+                    status = await rig.read(.externalPower)
+                    watch.observe(judgmentDue: status.chargeLimitJudgmentDue, at: rig.controller.monotonicNow)
+                }
+            }
+            #expect(deadlines < 20, "the deadlines advance")
+            rig.clock.advance(by: nextPeriodic - rig.clock.uptime)
+            status = await rig.read(.externalPower)
+            watch.observe(judgmentDue: status.chargeLimitJudgmentDue, at: rig.controller.monotonicNow)
+        }
+        #expect(status.adoptedChange?.limit == 90, "after the rest a new episode follows up on time, and the owner's change is kept")
+    }
+
     @Test("Checks 121 s apart alone never judge a read: each starts the settle time again, as the bound requires")
     func delayedChecksAloneNeverJudge() async {
         let rig = PowerRig(limit: 85)
@@ -337,7 +377,7 @@ struct ChargeLimitSettleWatchTests {
         #expect(watch.nextDeadline == nil)
     }
 
-    @Test("The cap ends an episode at a status too, and none begins again until the wait ends")
+    @Test("The cap ends an episode at a status too, and none begins again for the rest, unless the wait ends")
     func capAtStatus() {
         var watch = ChargeLimitSettleWatch()
         watch.observe(judgmentDue: 1_060, at: 1_000)
@@ -345,12 +385,47 @@ struct ChargeLimitSettleWatchTests {
         #expect(!watch.isHoldingActivity)
         #expect(watch.nextDeadline == nil)
         watch.observe(judgmentDue: 1_460, at: 1_400)
-        #expect(!watch.isHoldingActivity, "the same wait goes on")
+        #expect(!watch.isHoldingActivity, "the same wait goes on, within the rest")
         #expect(watch.followUpAt == nil)
         watch.observe(judgmentDue: nil, at: 1_470)
         watch.observe(judgmentDue: 1_540, at: 1_480)
         #expect(watch.isHoldingActivity, "a new wait, a new episode")
         #expect(watch.followUpAt == 1_541)
+    }
+
+    @Test("After the rest, a wait that goes on begins another episode, so it is still followed up on time")
+    func capThenRest() {
+        let rest = ChargeLimitSettleWatch.rest
+        var watch = ChargeLimitSettleWatch()
+        watch.observe(judgmentDue: 1_060, at: 1_000)
+        expectDeadline(&watch, at: 1_000 + cap, isDue: false)
+        #expect(!watch.isHoldingActivity)
+        watch.observe(judgmentDue: 1_000 + cap + 60, at: 1_000 + cap + rest - 1)
+        #expect(!watch.isHoldingActivity, "a second before the rest ends")
+        watch.observe(judgmentDue: 1_000 + cap + rest + 60, at: 1_000 + cap + rest)
+        #expect(watch.isHoldingActivity, "the rest is over and the wait goes on")
+        #expect(watch.heldSince == 1_000 + cap + rest)
+        #expect(watch.followUpAt == 1_000 + cap + rest + 61)
+    }
+
+    @Test("A wait that never ends keeps the activity at most half the time")
+    func neverEndingWaitHalfTheTime() {
+        var watch = ChargeLimitSettleWatch()
+        var held: TimeInterval = 0
+        var now: TimeInterval = 1_000
+        let step: TimeInterval = 10
+        // Statuses every 10 s for two hours, each waiting for a settle time
+        // that keeps starting again.
+        while now < 1_000 + 2 * 60 * 60 {
+            watch.observe(judgmentDue: now + 60, at: now)
+            if let deadline = watch.nextDeadline, deadline <= now + step {
+                _ = watch.deadlineReached(at: deadline)
+            }
+            if watch.isHoldingActivity { held += step }
+            now += step
+        }
+        #expect(held <= 60 * 60 + cap, "about half of the two hours, give or take one episode")
+        #expect(held >= 60 * 60 - cap, "and episodes keep beginning")
     }
 
     @Test("At sleep and at quit nothing is held and nothing is pending; the next wait begins afresh, after a cap too")

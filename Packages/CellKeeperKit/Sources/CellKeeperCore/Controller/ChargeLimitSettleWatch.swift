@@ -23,8 +23,13 @@ import Foundation
 /// An episode begins with the first status that waits. It ends with the
 /// first that does not (a read judged, battery power, the power source
 /// unknown, Manage charging off with nothing owed), at sleep and at quit
-/// (``stop()``), and in any case ``cap`` after it began. Settling is a state
-/// of AC power only, so the activity is never held on battery power.
+/// (``stop()``), and in any case ``cap`` after it began. After a capped
+/// episode the app holds nothing for ``rest``; a wait that goes on then
+/// begins another, so a wait that never ends holds the activity at most
+/// half the time, and one that a long suspension pushed past the cap still
+/// gets an on-time check later, without needing a sleep or a relaunch.
+/// Settling is a state of AC power only, so the activity is never held on
+/// battery power.
 public struct ChargeLimitSettleWatch: Sendable, Equatable {
     /// The longest an episode keeps the app from being napped. The settle
     /// time is a minute and the follow-up check comes a second after it,
@@ -34,9 +39,15 @@ public struct ChargeLimitSettleWatch: Sendable, Equatable {
     /// activity) or a check takes long (a shortcut may run for 20 s per
     /// request). Five settle times leave room for that, and bound what a
     /// wait that does not end costs: no more than five minutes per episode,
-    /// on AC power. A wait that outlasts it holds no activity until it ends
-    /// or the Mac sleeps.
+    /// on AC power, then ``rest``.
     public static let cap: TimeInterval = 5 * 60
+    /// How long after a capped episode no other begins. As long as the cap,
+    /// so a wait that never ends keeps the app from being napped at most half
+    /// the time; then a wait that goes on begins another episode, since one
+    /// pushed past the cap (an awake suspension, review r3 of #113) would
+    /// otherwise never be judged while checks came further apart than
+    /// ``ChargeLimitReadGate/maximumSpan``.
+    public static let rest: TimeInterval = cap
     /// How long after the settle time ends the follow-up check is due, so
     /// that its reading of the power source comes after the end.
     public static let margin: TimeInterval = 1
@@ -48,9 +59,9 @@ public struct ChargeLimitSettleWatch: Sendable, Equatable {
     /// The end of the settle time the last follow-up check was for: never
     /// followed up twice.
     private var lastEnd: TimeInterval?
-    /// True once ``cap`` ended an episode whose wait went on: no other
-    /// begins until the wait ends or the Mac sleeps.
-    private var isCapped = false
+    /// When ``cap`` ended the last episode, while its wait goes on: no other
+    /// begins until ``rest`` has passed, the wait ends or the Mac sleeps.
+    private var cappedAt: TimeInterval?
 
     public init() {}
 
@@ -84,12 +95,13 @@ public struct ChargeLimitSettleWatch: Sendable, Equatable {
             self = ChargeLimitSettleWatch()
             return
         }
-        if heldSince == nil, !isCapped {
+        if heldSince == nil, cappedAt.map({ now >= $0 + Self.rest }) ?? true {
             heldSince = now
+            cappedAt = nil
         }
         guard let heldSince else { return }
         guard now < heldSince + Self.cap else {
-            endAtCap()
+            endAtCap(at: now)
             return
         }
         pendingEnd = due == lastEnd ? nil : due
@@ -100,7 +112,7 @@ public struct ChargeLimitSettleWatch: Sendable, Equatable {
     public mutating func deadlineReached(at now: TimeInterval) -> Bool {
         guard let heldSince else { return false }
         guard now < heldSince + Self.cap else {
-            endAtCap()
+            endAtCap(at: now)
             return false
         }
         guard let end = pendingEnd, now >= end + Self.margin else { return false }
@@ -115,10 +127,10 @@ public struct ChargeLimitSettleWatch: Sendable, Equatable {
         self = ChargeLimitSettleWatch()
     }
 
-    private mutating func endAtCap() {
+    private mutating func endAtCap(at now: TimeInterval) {
         heldSince = nil
         pendingEnd = nil
-        isCapped = true
+        cappedAt = now
     }
 }
 
