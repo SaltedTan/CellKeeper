@@ -232,8 +232,8 @@ extension ControllerStatus {
     /// True while CellKeeper was asked to give the user's own Charge Limit
     /// back and wrote nothing, because macOS's report could not be judged:
     /// the restore waits for power. Unlike ``isOwnLimitRestorePending`` this
-    /// is not a warning: it ends at the next plug-in, when the restore is
-    /// written and confirmed.
+    /// is not a warning: it ends at the next judged read on power, when the
+    /// restore is written, or when it is no longer wanted.
     public var isOwnLimitRestoreWaitingForPower: Bool {
         nativeLimit?.isRestoreWaitingForPower == true
     }

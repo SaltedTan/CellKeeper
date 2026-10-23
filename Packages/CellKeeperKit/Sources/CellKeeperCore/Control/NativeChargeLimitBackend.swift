@@ -487,8 +487,9 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         shortcutConfirmedAtUptime = nil
     }
 
-    /// Management was turned on again, so a restore that waited for power and
-    /// wrote nothing is no longer wanted (D116, D119).
+    /// Management was turned on again, or another release the restore was
+    /// asked for is gone, so a restore that waited for power and wrote
+    /// nothing is no longer wanted (D116, D119).
     public func cancelWaitingRestore() {
         isRestoreWaitingForPower = false
     }
@@ -697,7 +698,10 @@ public actor NativeChargeLimitBackend: ChargingBackend {
                 case .noLimitConsistent, .none:
                     guard isOwnAtFirstContact else {
                         lastReadDeferral = readCondition
-                        isRestoreWaitingForPower = true
+                        // A restore written earlier (still owed its
+                        // read-back) is `isRestoreUnfinished`, not waiting:
+                        // only one of the two describes it (D119).
+                        isRestoreWaitingForPower = !owned.isRestoring
                         return .deferred
                     }
                 }

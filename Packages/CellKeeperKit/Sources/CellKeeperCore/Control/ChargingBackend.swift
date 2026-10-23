@@ -341,9 +341,10 @@ public struct NativeLimitStatus: Sendable, Equatable {
     public var isRestoreUnfinished: Bool
     /// CellKeeper was asked to give the user's limit back and wrote nothing,
     /// because the read of macOS's Charge Limit could not be judged: the
-    /// restore waits for a judged read, on power. Cleared once the restore
-    /// is written (then ``isRestoreUnfinished`` applies), confirmed, or no
-    /// longer wanted (management turned on again).
+    /// restore waits for a judged read, on power. Never true together with
+    /// ``isRestoreUnfinished``: a restore that was written is unfinished
+    /// alone. Cleared once the restore is written, confirmed, or no longer
+    /// wanted (``NativeChargeLimitBackend/cancelWaitingRestore()``).
     public var isRestoreWaitingForPower: Bool
     /// An outside change was adopted but its marker could not be stored
     /// yet, so the record it replaced may still be on disk. Until it is

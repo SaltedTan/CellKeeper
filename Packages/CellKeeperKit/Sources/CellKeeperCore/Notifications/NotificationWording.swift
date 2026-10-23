@@ -271,15 +271,16 @@ public enum NativeLimitWording {
 
     /// What the menu says about the user's own limit while CellKeeper's
     /// restore waits for power, in place of saying when management stops:
-    /// nothing was written, and macOS applies its Charge Limit only on power
-    /// (research note 08, O20).
+    /// nothing was written, macOS applies its Charge Limit only on power
+    /// (research note 08, O20), and a change made meanwhile is kept, since
+    /// an outside change is adopted at the plug-in (D116, O15).
     public static func restoreWaitingForPower(_ owner: Int) -> String {
-        "Your own limit, \(limit(owner)), is restored once your Mac has been on power for a minute: macOS applies its Charge Limit only on power."
+        "CellKeeper gives back your own limit, \(limit(owner)), once your Mac has been on power for a minute and it has checked macOS's Charge Limit; if you change the limit meanwhile, it keeps your change. macOS applies its Charge Limit only on power."
     }
 
     /// Settings › Control's short value for the same state.
     public static func restoreWaitingForPowerValue(_ owner: Int) -> String {
-        "\(limit(owner)), recorded; restored once your Mac has been on power for a minute"
+        "\(limit(owner)), recorded; given back once your Mac has been on power for a minute, unless you change the limit meanwhile"
     }
 
     /// Why the user's own Charge Limit is not confirmed back, and what to do;

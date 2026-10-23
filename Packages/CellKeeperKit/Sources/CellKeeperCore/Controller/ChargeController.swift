@@ -418,11 +418,6 @@ public actor ChargeController {
             }
             managementRefusal = refusal
             guard validSettings != settings else { return }
-            // A restore that waits for power wrote nothing; turning
-            // management on again cancels it (D116, D119).
-            if validSettings.isManagementEnabled, !settings.isManagementEnabled, let native = backend as? NativeChargeLimitBackend {
-                await native.cancelWaitingRestore()
-            }
             let previous = settings
             settings = validSettings
             if validSettings.isManagementEnabled {
@@ -1561,7 +1556,21 @@ public actor ChargeController {
 
         if pendingBackend != nil, currentMode == .normal, !(nativeLimit?.hasUnresolvedOwnership ?? false), !isAdoptionUnsaved {
             await completePendingSwitch()
+        } else {
+            await clearWaitingRestore(releaseReason: releaseReason)
         }
+    }
+
+    /// Clears a restore that waited for power and wrote nothing once
+    /// CellKeeper no longer wants its restriction released: management is on
+    /// and no release is due (``ReleaseReason``: no backend switch pending,
+    /// no restore unfinished, no state unverified). Nothing was written, so
+    /// the state must not outlive the wish, as when a pending backend switch
+    /// is cancelled (D116, D119).
+    private func clearWaitingRestore(releaseReason: ReleaseReason?) async {
+        guard settings.isManagementEnabled, releaseReason == nil, let native = backend as? NativeChargeLimitBackend else { return }
+        await native.cancelWaitingRestore()
+        nativeLimit = await native.nativeLimitStatus()
     }
 
     /// Reads the backend's mode, counting failures and detecting changes that
