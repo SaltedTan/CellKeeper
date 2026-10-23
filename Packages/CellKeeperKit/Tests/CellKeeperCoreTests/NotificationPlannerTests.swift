@@ -262,6 +262,55 @@ struct NotificationPlannerTests {
         }
     }
 
+    @Test("With macOS's Charge Limit, a read that was not judged posts no limit notification; the next judged read posts it once")
+    func nativeLimitWaitsForJudgedRead() async {
+        let rig = PowerRig(limit: 80)
+        var planner = NotificationPlanner()
+        let launched = await rig.controller.evaluate(.launch)
+        _ = planner.plan(launched, trigger: .launch, uptime: rig.clock.uptime, isDelivering: true)
+        rig.clock.advance(by: ChargeController.chargeLimitSettleTime)
+        // Settled on power at 79%, charging toward 80%: the limit is armed.
+        let settled = await rig.read(.externalPower, 79)
+        #expect(settled.decision?.state == .osEnforcedLimit)
+        _ = planner.plan(settled, trigger: .periodic, uptime: rig.clock.uptime, isDelivering: true)
+
+        // Unplugged at 80%, then 301 s on battery: macOS clears its limit.
+        rig.clock.advance(by: 30)
+        let unplugged = await rig.read(.battery, 80, .powerSourceChanged)
+        #expect(planner.plan(unplugged, trigger: .powerSourceChanged, uptime: rig.clock.uptime, isDelivering: true).isEmpty)
+        rig.clock.advance(by: 301)
+        rig.system.isActiveLimitCleared = true
+        let cleared = await rig.read(.battery, 80)
+        #expect(planner.plan(cleared, trigger: .periodic, uptime: rig.clock.uptime, isDelivering: true).isEmpty)
+
+        // Plugged in before macOS re-creates its limit: the read shows no
+        // limit and cannot be judged, so it is no evidence of a hold.
+        await rig.telemetry.set(snapshot(percent: 80, source: .externalPower, charging: false))
+        let beforeLimit = await rig.controller.evaluate(.powerSourceChanged)
+        #expect(beforeLimit.nativeLimit?.readDeferral == .settling)
+        #expect(beforeLimit.nativeLimit?.reportedLimit == 100)
+        #expect(beforeLimit.currentMode == .nativeLimit(percent: 80), "the record's value, unconfirmed")
+        #expect(planner.plan(beforeLimit, trigger: .powerSourceChanged, uptime: rig.clock.uptime, isDelivering: true).isEmpty)
+
+        // Once judged, the battery still at 80%, on power and not charging,
+        // posts the same notification once.
+        rig.system.isActiveLimitCleared = false
+        await rig.telemetry.set(snapshot(percent: 80, source: .externalPower, charging: false))
+        rig.clock.advance(by: ChargeController.chargeLimitSettleTime)
+        let judged = await rig.controller.evaluate(.periodic)
+        #expect(judged.nativeLimit?.readDeferral == nil)
+        let held = planner.plan(judged, trigger: .periodic, uptime: rig.clock.uptime, isDelivering: true)
+        #expect(held == [PlannedNotification(
+            kind: .limitReached,
+            title: "Battery at the Charge Limit",
+            body: "macOS reports the battery at 80% and not charging. Your limit in CellKeeper is 80%, and macOS reports its Charge Limit at 80%."
+        )])
+        rig.clock.advance(by: 60)
+        await rig.telemetry.set(snapshot(percent: 80, source: .externalPower, charging: false))
+        let repeated = await rig.controller.evaluate(.periodic)
+        #expect(planner.plan(repeated, trigger: .periodic, uptime: rig.clock.uptime, isDelivering: true).isEmpty)
+    }
+
     @Test("With macOS's Charge Limit, telemetry the policy rejects neither arms nor reports the limit")
     func nativeStaleTelemetry() async {
         let stale = ChargingPolicy.maximumSourceAge + 10 * 60

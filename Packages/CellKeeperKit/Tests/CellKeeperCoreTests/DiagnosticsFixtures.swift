@@ -340,6 +340,35 @@ enum DiagnosticsFixture {
         return await controller.shutdown(reason: "CellKeeper is quitting")
     }
 
+    /// Management turned off on battery power after macOS cleared its active
+    /// limit: the restore waits for power and has written nothing.
+    static func nativeLimitRestoreWaitingForPower() async throws -> ControllerStatus {
+        let clock = TestClock()
+        let system = FakeChargeLimitSystem(reading: .limit(80))
+        let store = InMemoryRecordStore()
+        let telemetry = StubTelemetry(snapshot(percent: 78, charging: true), clock: clock)
+        let controller = ChargeController(
+            telemetry: telemetry,
+            backend: makeNativeBackend(system: system, store: store, clock: clock),
+            settings: ChargingSettings.default.withChargeLimit(85),
+            adoptionMarkerStore: store,
+            now: { clock.now },
+            uptime: { clock.uptime },
+            chargeLimitSettleTime: 0
+        )
+        await controller.evaluate(.launch)
+        clock.advance(by: 60)
+        await telemetry.set(snapshot(percent: 78, source: .battery))
+        _ = await controller.evaluate(.periodic)
+        clock.advance(by: 600)
+        system.isActiveLimitCleared = true
+        await telemetry.set(snapshot(percent: 70, source: .battery))
+        _ = await controller.evaluate(.periodic)
+        var settings = ChargingSettings.default.withChargeLimit(85)
+        settings.isManagementEnabled = false
+        return try await controller.apply(settings: settings)
+    }
+
     /// Management turned off while the shortcut fails, so CellKeeper wants
     /// the user's own recorded limit back and has not restored it yet.
     static func nativeLimitRestorePending() async throws -> ControllerStatus {
@@ -541,6 +570,7 @@ enum DiagnosticsFixture {
             ("nativeLimitNotRead", await nativeLimitNotRead()),
             ("nativeLimitNoShortcut", await nativeLimitNoShortcut()),
             ("nativeLimitRestoreUnfinished", await nativeLimitRestoreUnfinished()),
+            ("nativeLimitRestoreWaitingForPower", try await nativeLimitRestoreWaitingForPower()),
             ("nativeLimitRestorePending", try await nativeLimitRestorePending()),
             ("nativeLimitEarlierSessionAdoption", await nativeLimitEarlierSessionAdoption()),
             ("nativeLimitAdoptedBeforeWrite", try await nativeLimitAdoptedBeforeWrite()),

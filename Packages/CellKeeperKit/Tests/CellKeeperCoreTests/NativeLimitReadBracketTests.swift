@@ -630,6 +630,8 @@ struct NativeLimitReadBracketTests {
         #expect(rig.system.runInputs == ["85"], "nothing written blind")
         #expect(status.nativeLimit?.readDeferral == .onBattery)
         #expect(status.nativeLimit?.ownerLimit == 80, "still owed")
+        #expect(status.isOwnLimitRestoreWaitingForPower, "the menu says the restore waits for power (D119)")
+        #expect(!status.isOwnLimitRestorePending)
         #expect(status.adoptionCount == 0)
         expectRecordStands(rig)
 
@@ -637,6 +639,7 @@ struct NativeLimitReadBracketTests {
         status = await rig.read(.externalPower, 74, .powerSourceChanged)
         #expect(rig.system.runInputs == ["85", "80"])
         #expect(rig.system.reading == .limit(80))
+        #expect(!status.isOwnLimitRestoreWaitingForPower)
         #expect(status.nativeLimit?.ownerLimit == nil)
         #expect(NativeChargeLimitBackend.outstandingRecord(in: rig.store) == nil)
     }

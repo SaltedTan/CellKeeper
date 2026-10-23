@@ -68,6 +68,12 @@ func saysChangedOutside(_ status: ControllerStatus) -> Bool {
     status.events.contains { $0.message.contains("changed outside CellKeeper") || $0.message.contains("Released the Charge Limit: adopted") }
 }
 
+/// A restore is written and unfinished, or unwritten and waiting: never
+/// both at once (D119).
+func expectRestoreStateIsConsistent(_ native: NativeLimitStatus?, sourceLocation: SourceLocation = #_sourceLocation) {
+    #expect(!(native?.isRestoreUnfinished == true && native?.isRestoreWaitingForPower == true), "a written restore is never also waiting", sourceLocation: sourceLocation)
+}
+
 @Suite("macOS's Charge Limit is judged only on power, once settled")
 struct NativeLimitPowerTests {
     // MARK: - On battery power
@@ -396,6 +402,144 @@ struct NativeLimitPowerTests {
         #expect(NativeChargeLimitBackend.outstandingRecord(in: rig.store) == nil)
     }
 
+    @Test("A restore that wrote nothing waits for power in the menu's and Settings' words, without a warning")
+    func deferredRestoreSaysItWaitsForPower() async throws {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.system.isActiveLimitCleared = true
+        rig.clock.advance(by: 600)
+        _ = await rig.read(.battery, 70)
+        var status = try await rig.controller.apply(settings: rig.settings(limit: 85, managed: false))
+        #expect(status.lastExecution?.result == .deferred(written: false))
+        #expect(status.nativeLimit?.ownerLimit == 80)
+        #expect(status.currentMode == .nativeLimit(percent: 85), "the record's value, unconfirmed")
+        #expect(status.nativeLimit?.isRestoreWaitingForPower == true)
+        #expect(status.isOwnLimitRestoreWaitingForPower)
+        #expect(!status.isOwnLimitRestorePending, "no critical warning: it resolves at the next plug-in")
+        #expect(NativeLimitWording.restoreProblem(status) == nil)
+        #expect(NativeLimitWording.restoreWaitingForPower(80) == "CellKeeper gives back your own limit, 80%, once your Mac has been on power for a minute and it has checked macOS's Charge Limit; if you change the limit meanwhile, it keeps your change. macOS applies its Charge Limit only on power.")
+        #expect(NativeLimitWording.restoreWaitingForPowerValue(80) == "80%, recorded; given back once your Mac has been on power for a minute, unless you change the limit meanwhile")
+        var planner = NotificationPlanner()
+        let posts = planner.plan(status, trigger: .settingsChanged, uptime: rig.clock.uptime, isDelivering: true)
+        #expect(!posts.contains { $0.kind == .restoreUnconfirmed })
+
+        // Plugged in before macOS re-creates its limit: the read still
+        // cannot be judged, so the restore keeps waiting and writes nothing.
+        status = await rig.read(.externalPower, 70, .powerSourceChanged)
+        #expect(status.nativeLimit?.readDeferral == .settling)
+        #expect(status.isOwnLimitRestoreWaitingForPower)
+        #expect(rig.system.runInputs == ["85"])
+
+        // Judged once power has settled: the restore is written, confirmed
+        // and the state clears.
+        rig.system.isActiveLimitCleared = false
+        rig.clock.advance(by: ChargeController.chargeLimitSettleTime)
+        status = await rig.read(.externalPower, 70)
+        #expect(rig.system.runInputs == ["85", "80"])
+        #expect(status.nativeLimit?.ownerLimit == nil)
+        #expect(status.nativeLimit?.isRestoreWaitingForPower == false)
+        #expect(!status.isOwnLimitRestoreWaitingForPower)
+        #expect(!status.isOwnLimitRestorePending)
+    }
+
+    @Test("Turning management on again cancels a restore that waits for power, and writes nothing")
+    func managementOnCancelsWaitingRestore() async throws {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.system.isActiveLimitCleared = true
+        rig.clock.advance(by: 600)
+        _ = await rig.read(.battery, 70)
+        var status = try await rig.controller.apply(settings: rig.settings(limit: 85, managed: false))
+        #expect(status.isOwnLimitRestoreWaitingForPower)
+
+        status = try await rig.controller.apply(settings: rig.settings(limit: 85))
+        #expect(!status.isOwnLimitRestoreWaitingForPower)
+        #expect(!status.isOwnLimitRestorePending)
+        #expect(status.nativeLimit?.ownerLimit == 80, "the record still stands")
+        #expect(status.nativeLimit?.isRestoreUnfinished == false)
+        #expect(rig.system.runInputs == ["85"], "nothing written")
+
+        // On power the limit CellKeeper wants is still 85%: the restore it
+        // cancelled is not attempted.
+        rig.system.isActiveLimitCleared = false
+        _ = await rig.read(.externalPower, 70, .powerSourceChanged)
+        rig.clock.advance(by: ChargeController.chargeLimitSettleTime)
+        status = await rig.read(.externalPower, 70)
+        #expect(rig.system.runInputs == ["85"])
+        #expect(!status.isOwnLimitRestoreWaitingForPower)
+        #expect(status.nativeLimit?.ownerLimit == 80)
+    }
+
+    @Test("A restore written when power returns is owed, not waiting for power")
+    func writtenRestoreIsNotWaiting() async throws {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.system.isActiveLimitCleared = true
+        rig.clock.advance(by: 600)
+        _ = await rig.read(.battery, 70)
+        var status = try await rig.controller.apply(settings: rig.settings(limit: 85, managed: false))
+        #expect(status.isOwnLimitRestoreWaitingForPower)
+        #expect(rig.system.runInputs == ["85"])
+
+        // Plugged in before the settle window ends: macOS shows CellKeeper's
+        // 85% again, so the restore is written, but its read-back cannot be
+        // judged, so it is owed, not waiting.
+        rig.system.isActiveLimitCleared = false
+        rig.system.scheduleRuns([.appliesWithoutActiveLimit])
+        status = await rig.read(.externalPower, 70, .powerSourceChanged)
+        #expect(status.lastExecution?.result == .deferred(written: true))
+        #expect(status.nativeLimit?.isRestoreUnfinished == true)
+        #expect(status.nativeLimit?.isRestoreWaitingForPower == false)
+        #expect(!status.isOwnLimitRestoreWaitingForPower)
+    }
+
+    @Test("A judged read that shows your own limit back ends a restore's wait without writing")
+    func ownerLimitBackEndsWaitingRestore() async throws {
+        let rig = PowerRig(limit: 80)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.system.isActiveLimitCleared = true
+        rig.clock.advance(by: 600)
+        _ = await rig.read(.battery, 70)
+        var status = try await rig.controller.apply(settings: rig.settings(limit: 80, managed: false))
+        #expect(status.isOwnLimitRestoreWaitingForPower)
+        #expect(rig.system.runInputs.isEmpty, "nothing written on battery power")
+
+        rig.system.isActiveLimitCleared = false
+        rig.system.changeExternally(to: 80)
+        rig.clock.advance(by: ChargeController.chargeLimitSettleTime)
+        status = await rig.read(.externalPower, 70)
+        #expect(status.nativeLimit?.ownerLimit == nil)
+        #expect(!status.isOwnLimitRestoreWaitingForPower)
+        #expect(rig.system.runInputs.isEmpty)
+    }
+
+    @Test("A judged outside change ends a restore's wait, and nothing is written over it")
+    func outsideChangeEndsWaitingRestore() async throws {
+        let rig = PowerRig(limit: 80)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.system.isActiveLimitCleared = true
+        rig.clock.advance(by: 600)
+        _ = await rig.read(.battery, 70)
+        var status = try await rig.controller.apply(settings: rig.settings(limit: 80, managed: false))
+        #expect(status.isOwnLimitRestoreWaitingForPower)
+
+        rig.system.isActiveLimitCleared = false
+        rig.system.changeExternally(to: 90)
+        status = await rig.read(.externalPower, 70, .powerSourceChanged)
+        #expect(status.nativeLimit?.readDeferral == .settling, "power just returned")
+        rig.clock.advance(by: ChargeController.chargeLimitSettleTime)
+        status = await rig.read(.externalPower, 70)
+        #expect(status.adoptionCount == 1)
+        #expect(status.nativeLimit?.ownerLimit == nil)
+        #expect(!status.isOwnLimitRestoreWaitingForPower)
+        #expect(rig.system.runInputs.isEmpty, "nothing written over the outside change")
+    }
+
     @Test("Quitting on battery power after macOS cleared its limit writes nothing and leaves the record for the next launch")
     func quitOnBatteryLeavesRecord() async {
         let rig = PowerRig(limit: 85)
@@ -564,6 +708,239 @@ struct NativeLimitPowerTests {
     }
 }
 
+/// Review round 1 of D119: the wait follows what CellKeeper still wants, a
+/// restore that was written is never also waiting, and the words allow for
+/// an outside change that is adopted at the plug-in instead of restored.
+@Suite("D119 review round 1: the wait ends with the wish")
+struct DeferredRestoreReviewTests {
+    @Test("Cancelling a pending backend switch clears the restore's wait, and no restore is written later")
+    func cancellingBackendSwitchClearsWaiting() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.system.isActiveLimitCleared = true
+        rig.clock.advance(by: 600)
+        _ = await rig.read(.battery, 70)
+
+        // Choosing another backend asks for the restore while it waits.
+        let pending = await rig.controller.switchBackend(to: ReadOnlyChargingBackend(reason: "review"))
+        #expect(pending.pendingBackend?.identifier == "read-only")
+        #expect(pending.isOwnLimitRestoreWaitingForPower)
+        expectRestoreStateIsConsistent(pending.nativeLimit)
+
+        // Choosing the current kind again cancels the switch: management
+        // resumes and nothing is owed, so the wait must go too.
+        let resumed = await rig.controller.switchBackend(to: makeNativeBackend(system: rig.system, store: rig.store, clock: rig.clock))
+        #expect(resumed.pendingBackend == nil)
+        #expect(resumed.settings.isManagementEnabled)
+        #expect(resumed.decision?.state == .osEnforcedLimit)
+        #expect(resumed.decision?.action == .noAction)
+        #expect(!resumed.isOwnLimitRestoreWaitingForPower, "management resumed and no restore is scheduled")
+        expectRestoreStateIsConsistent(resumed.nativeLimit)
+
+        // On power the resumed policy keeps 85%: the cancelled 80% restore
+        // is never written, and a judged read does not bring the wait back.
+        rig.system.isActiveLimitCleared = false
+        _ = await rig.read(.externalPower, 70, .powerSourceChanged)
+        rig.clock.advance(by: ChargeController.chargeLimitSettleTime)
+        let powered = await rig.read(.externalPower, 70)
+        #expect(rig.system.runInputs == ["85"], "resumed policy never restores 80%")
+        #expect(!powered.isOwnLimitRestoreWaitingForPower, "a judged read does not resurrect the stale wait")
+        #expect(powered.nativeLimit?.ownerLimit == 80, "the record still stands")
+    }
+
+    @Test("A restore written just after an unplug does not turn into an unwritten wait at its retry")
+    func writtenRestoreRetryStaysWritten() async throws {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.system.scheduleRuns([.appliesWithoutActiveLimit])
+        let written = try await rig.controller.apply(settings: rig.settings(limit: 85, managed: false))
+        #expect(written.lastExecution?.result == .deferred(written: true))
+        #expect(written.nativeLimit?.isRestoreUnfinished == true)
+        #expect(!written.isOwnLimitRestoreWaitingForPower)
+        expectRestoreStateIsConsistent(written.nativeLimit)
+
+        // The next check asks for the restore again, but it was written:
+        // only `isRestoreUnfinished` describes it.
+        rig.clock.advance(by: 120)
+        let retried = await rig.read(.battery, 74)
+        #expect(rig.system.runInputs == ["85", "80"], "not written again while it awaits confirmation")
+        #expect(retried.isOwnLimitRestorePending)
+        #expect(retried.nativeLimit?.isRestoreUnfinished == true)
+        #expect(!retried.isOwnLimitRestoreWaitingForPower, "this restore was written; it only awaits confirmation")
+        expectRestoreStateIsConsistent(retried.nativeLimit)
+    }
+
+    @Test("The wait stays while a decision still wants or requests the user's own limit, and goes only when it asks for CellKeeper's")
+    func waitFollowsTheDecision() {
+        func decision(_ desired: ChargeControlMode, _ action: ChargingAction, _ reason: DecisionReason) -> PolicyDecision {
+            PolicyDecision(state: .osEnforcedLimit, desiredMode: desired, action: action, reason: reason, notes: [], memory: PolicyMemory(), overrideEnded: nil)
+        }
+        // A release that is due, and the policy's other fail-safes with
+        // management on: the restore is still wanted.
+        #expect(ChargeController.wantsOwnLimitBack(decision(.normal, .enableCharging, .releaseRequired(.stateUnverified))))
+        #expect(ChargeController.wantsOwnLimitBack(decision(.normal, .noAction, .nativeLimitUnsupported(limit: 82, steps: [80, 85, 90, 95, 100]))))
+        #expect(ChargeController.wantsOwnLimitBack(decision(.normal, .enableCharging, .batteryNotPresent)))
+        // A faulted backend's fail-safe requests it while wanting
+        // CellKeeper's limit.
+        #expect(ChargeController.wantsOwnLimitBack(decision(.nativeLimit(percent: 85), .enableCharging, .nativeLimitActive(limit: 85))))
+        // CellKeeper's own limit, set, kept or refused: not wanted any more.
+        #expect(!ChargeController.wantsOwnLimitBack(decision(.nativeLimit(percent: 85), .noAction, .nativeLimitActive(limit: 85))))
+        #expect(!ChargeController.wantsOwnLimitBack(decision(.nativeLimit(percent: 90), .setNativeLimit(90), .nativeLimitActive(limit: 90))))
+        #expect(!ChargeController.wantsOwnLimitBack(decision(.nativeLimit(percent: 100), .refuse(.backendFaulted), .nativeFullCharge)))
+    }
+
+    @Test("A failure that faults the backend keeps the wait its safety fallback set in the same evaluation")
+    func failedRequestFallbackWaitSurvivesEvaluation() async throws {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.clock.advance(by: 600)
+        rig.system.isActiveLimitCleared = true
+        _ = await rig.read(.battery, 70)
+        // In each evaluation the mode's read shows no active limit, then the
+        // new limit's read fails; once the backend faults, its safety
+        // fallback finds no active limit either and defers the 80% restore
+        // without writing.
+        rig.system.failRead(after: 1)
+        var failed = try await rig.controller.apply(settings: rig.settings(limit: 90))
+        for _ in 1..<ChargeController.maximumConsecutiveFailures {
+            rig.clock.advance(by: ChargingPolicy.minimumRestrictingInterval + 1)
+            rig.system.failRead(after: 1)
+            failed = await rig.read(.battery, 70)
+        }
+        #expect(failed.isBackendFaulted)
+        #expect(failed.nativeLimit?.ownerLimit == 80)
+        #expect(failed.nativeLimit?.isRestoreUnfinished == false)
+        #expect(rig.system.runInputs == ["85"], "nothing written on battery power")
+        #expect(failed.isOwnLimitRestoreWaitingForPower, "the faulted backend's safety restore waits for power")
+        expectRestoreStateIsConsistent(failed.nativeLimit)
+        let next = await rig.read(.battery, 70)
+        #expect(next.decision?.action == .enableCharging)
+        #expect(next.isOwnLimitRestoreWaitingForPower)
+    }
+
+    @Test("A new limit request clears an unwritten restore even if the request itself must wait")
+    func newLimitRequestClearsWait() async throws {
+        let system = FakeChargeLimitSystem(reading: .limit(80))
+        let store = InMemoryRecordStore()
+        let backend = makeNativeBackend(system: system, store: store)
+        _ = try await backend.setMode(.nativeLimit(percent: 85))
+        system.isActiveLimitCleared = true
+        await backend.noteChargeLimitReadCondition(.onBattery)
+        let restored = try await backend.setMode(.normal)
+        #expect(restored == .deferred)
+        let waiting = await backend.nativeLimitStatus()
+        #expect(waiting?.isRestoreWaitingForPower == true)
+        expectRestoreStateIsConsistent(waiting)
+
+        let requested = try await backend.setMode(.nativeLimit(percent: 90))
+        #expect(requested == .deferred)
+        let cancelled = await backend.nativeLimitStatus()
+        #expect(cancelled?.isRestoreWaitingForPower == false)
+        #expect(cancelled?.ownerLimit == 80)
+        #expect(system.runInputs == ["85"])
+    }
+
+    @Test("An unwritten wait is not persisted, and a new session recreates it while recovering its record")
+    func relaunchRecreatesWaitFromRecovery() async throws {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.clock.advance(by: 600)
+        rig.system.isActiveLimitCleared = true
+        _ = await rig.read(.battery, 70)
+        let quitting = await rig.controller.shutdown(reason: "review quit")
+        #expect(quitting.isOwnLimitRestoreWaitingForPower)
+        expectRestoreStateIsConsistent(quitting.nativeLimit)
+        let stored = try #require(rig.store.data)
+        let recordText = String(decoding: stored, as: UTF8.self)
+        #expect(!recordText.contains("WaitingForPower"), "the wait is in memory only")
+
+        // A new session recovers the record on battery power: the restore it
+        // owes wrote nothing and waits again, while the warning stands.
+        let backend = makeNativeBackend(system: rig.system, store: rig.store, clock: rig.clock)
+        let initial = await backend.nativeLimitStatus()
+        #expect(initial?.isRestoreWaitingForPower == false)
+        let controller = ChargeController(
+            telemetry: rig.telemetry,
+            backend: backend,
+            settings: rig.settings(limit: 85),
+            adoptionMarkerStore: rig.store,
+            now: { rig.clock.now },
+            uptime: { rig.clock.uptime }
+        )
+        let relaunched = await controller.evaluate(.launch)
+        #expect(relaunched.isOwnLimitRestoreWaitingForPower)
+        #expect(relaunched.isOwnLimitRestorePending, "an earlier session's outstanding record remains a warning")
+        expectRestoreStateIsConsistent(relaunched.nativeLimit)
+        rig.system.isActiveLimitCleared = false
+        await rig.telemetry.set(snapshot(percent: 70, source: .externalPower))
+        let recovered = await controller.evaluate(.powerSourceChanged)
+        #expect(recovered.nativeLimit?.reportedLimit == 80)
+        #expect(!recovered.isOwnLimitRestoreWaitingForPower)
+        #expect(recovered.nativeLimit?.isRestoreUnfinished == false, "the read-back confirmed this restore")
+    }
+
+    @Test("A pending switch clears its wait when the restore completes")
+    func completedBackendSwitchClearsWait() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.clock.advance(by: 600)
+        rig.system.isActiveLimitCleared = true
+        _ = await rig.read(.battery, 70)
+        let pending = await rig.controller.switchBackend(to: ReadOnlyChargingBackend(reason: "review"))
+        #expect(pending.isOwnLimitRestoreWaitingForPower)
+        expectRestoreStateIsConsistent(pending.nativeLimit)
+
+        rig.system.isActiveLimitCleared = false
+        let finished = await rig.read(.externalPower, 70, .powerSourceChanged)
+        #expect(finished.backend.identifier == "read-only")
+        #expect(finished.pendingBackend == nil)
+        #expect(!finished.isOwnLimitRestoreWaitingForPower)
+        expectRestoreStateIsConsistent(finished.nativeLimit)
+        #expect(rig.system.runInputs == ["85", "80"])
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: rig.store) == nil)
+    }
+
+    @Test("An outside choice after an unplug makes the waiting words promise nothing that will not happen")
+    func outsideChoiceMakesRestorePromiseFalse() async throws {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.clock.advance(by: 600)
+        rig.system.isActiveLimitCleared = true
+        _ = await rig.read(.battery, 70)
+        _ = try await rig.controller.apply(settings: rig.settings(limit: 85, managed: false))
+
+        // The owner chooses 90% in System Settings on battery, after the
+        // restore was asked for: at the plug-in it is adopted, not restored.
+        rig.system.changeExternally(to: 90)
+        rig.system.isActiveLimitCleared = false
+        let settling = await rig.read(.externalPower, 70, .powerSourceChanged)
+        #expect(settling.isOwnLimitRestoreWaitingForPower)
+        #expect(settling.nativeLimit?.readDeferral == .settling)
+        #expect(NativeLimitWording.restoreProblem(settling) == nil)
+        let owner = try #require(settling.nativeLimit?.ownerLimit)
+        let menu = NativeLimitWording.restoreWaitingForPower(owner)
+        let settings = NativeLimitWording.restoreWaitingForPowerValue(owner)
+        #expect(!menu.contains("is restored once"), "the waiting state promises a restore that will not happen: \(menu)")
+        #expect(!settings.contains("restored once"), "the waiting state promises a restore that will not happen: \(settings)")
+        #expect(menu.contains("if you change the limit meanwhile, it keeps your change"))
+        #expect(settings.contains("unless you change the limit meanwhile"))
+
+        rig.clock.advance(by: ChargeController.chargeLimitSettleTime)
+        let adopted = await rig.read(.externalPower, 70)
+        #expect(adopted.adoptedChange?.limit == 90)
+        #expect(adopted.nativeLimit?.reportedLimit == 90)
+        #expect(adopted.nativeLimit?.ownerLimit == nil)
+        #expect(rig.system.runInputs == ["85"], "80% was not restored once power settled")
+        expectRestoreStateIsConsistent(adopted.nativeLimit)
+    }
+}
+
 /// What the menu, Settings, Diagnostics and the calibration's lines say
 /// about a read that was not judged: never that the limit changed.
 @Suite("macOS's Charge Limit on battery power: the words")
@@ -584,6 +961,13 @@ struct NativeLimitPowerWordingTests {
         #expect(NativeLimitWording.deferral(.onBattery) == "macOS applies its Charge Limit only on power. CellKeeper checks macOS's Charge Limit once your Mac has been on power for a minute.")
         #expect(NativeLimitWording.deferralValue(.onBattery) == "Not active on battery")
         #expect(NativeLimitWording.deferral(NativeLimitStatus(reportedLimit: 80)) == nil)
+    }
+
+    @Test("A restore that waits for power says so, in the menu's and Settings' words")
+    func restoreWaitingWords() {
+        #expect(NativeLimitWording.restoreWaitingForPower(80) == "CellKeeper gives back your own limit, 80%, once your Mac has been on power for a minute and it has checked macOS's Charge Limit; if you change the limit meanwhile, it keeps your change. macOS applies its Charge Limit only on power.")
+        #expect(NativeLimitWording.restoreWaitingForPowerValue(80) == "80%, recorded; given back once your Mac has been on power for a minute, unless you change the limit meanwhile")
+        #expect(NativeLimitWording.restoreWaitingForPower(100) == "CellKeeper gives back your own limit, 100% (no limit), once your Mac has been on power for a minute and it has checked macOS's Charge Limit; if you change the limit meanwhile, it keeps your change. macOS applies its Charge Limit only on power.")
     }
 
     @Test("Diagnostics and the calibration's outcome say the read was not judged, not that macOS reports 100%")

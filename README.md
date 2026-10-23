@@ -38,7 +38,7 @@ Limit** (80–100%) through a shortcut you create, and macOS enforces it.
 | Diagnostics view, and a report for bug reports without serial numbers or other identifiers | **Real** — Settings › **Diagnostics** shows what CellKeeper sees and does; **Copy Diagnostics** there, or **Save Diagnostics…** to a text file you choose |
 | Notifications: charging held at your limit (or, with macOS's Charge Limit, macOS reporting the battery at or above that limit and not charging), a temperature pause, a temporary full charge or discharge ending, a control fault, and a return to normal charging or to your own Charge Limit that CellKeeper cannot confirm (and what resolved it later) | **Real, opt-in** — off by default; turn on in Settings › Charging, and macOS asks for permission; you can turn them off there at any time. They say only what CellKeeper observed, and say so when its control is simulated |
 | Shortcuts actions: set CellKeeper's limit, start or stop a temporary full charge, turn Manage charging on or off, get its status | **Implemented, not yet tried in the Shortcuts app on a Mac** — the same commands as the menu, with the same checks; see [Shortcuts actions](#shortcuts-actions) |
-| Guided battery calibration: CellKeeper raises macOS's Charge Limit to 100% only for its charges and rest at the top, asks you to unplug, rest the Mac unplugged and plug in again, returns to your limit confirmed, and reports before and after | **Implemented, not yet tried on a Mac** — with macOS's Charge Limit only; user-initiated; about one to two days, though its 72-hour cap allows three; with bounds on each charge and on the wait to unplug, and a 72-hour cap; see [research note 12](docs/research/12-guided-calibration.md) |
+| Guided battery calibration: CellKeeper raises macOS's Charge Limit to 100% only for its charges, the rest at the top and the wait for you to unplug, asks you to unplug, rest the Mac unplugged and plug in again, returns to your limit confirmed, and reports before and after | **Implemented; first tried on a Mac on 2026-10-21, when it ended early in step 4 because of a bug since fixed; the updated calibration has not been run yet** — with macOS's Charge Limit only; user-initiated; about one to two days, though its 72-hour cap allows three; with bounds on each charge and on the wait to unplug, and a 72-hour cap; see [research note 12](docs/research/12-guided-calibration.md) |
 | Menu bar icon: battery style (charge fill, charging bolt or plug, optional percentage) or CellKeeper's status icon | **Implemented, not yet seen in a Mac's menu bar** (checked in offscreen renders) — choose in Settings › **Appearance**; the battery style, with the percentage, is the default, and keeps a warning or thermometer symbol beside the battery while CellKeeper needs your attention. If you want only one battery icon, you can hide macOS's own in System Settings › Menu Bar › Battery (Control Center › Battery on older macOS versions); CellKeeper never changes that setting |
 | Scheduled limits, other recurring schedules, launch at login | Planned |
 
@@ -101,13 +101,19 @@ Requirements: macOS Tahoe 26.4 or later on a Mac with Apple silicon.
 
 What happens:
 - **Before its first change**, CellKeeper reads your current Charge Limit
-  and records it durably. If macOS reports "no limit", CellKeeper first asks
-  you to confirm that your limit is 100%.
+  and records it durably. It does so only on AC power, once power has been
+  on for about a minute after a plug-in, a wake or its own start; on
+  battery power it waits. If such a read shows "no limit", CellKeeper
+  first asks you to confirm that your limit is 100%.
 - **It restores exactly that value** when you turn off **Manage charging**,
   switch backend, quit, or if anything fails, unless you have changed the
   limit yourself meanwhile (see below). If it cannot confirm the
   restore when quitting, it tells you which value to set, and it tries
-  again the next time it starts.
+  again the next time it starts. On battery power it waits: once your Mac
+  has been on power for a minute, it checks macOS's Charge Limit and gives
+  the recorded limit back, keeping a change you made meanwhile (macOS
+  applies its Charge Limit only on power); the menu and Settings say that
+  it is waiting.
 - **Every change is confirmed** by reading the setting back from macOS.
   The read uses `pmset -g battlimit`, an undocumented, read-only report.
   If CellKeeper cannot read or recognise it, it sets no new limit; it still
@@ -121,8 +127,10 @@ What happens:
   it, CellKeeper keeps your new value as your own limit, changes nothing,
   and turns off **Manage charging**. Turn it on again to let CellKeeper
   manage the limit; your new value is then the one it restores. CellKeeper
-  cannot tell who changed the limit, so it does the same if another tool
-  changes it.
+  notices a change only on AC power, once the reading has settled (about a
+  minute after power returns or a wake); a change made on battery power is
+  noticed after the Mac is plugged in. It cannot tell who changed the
+  limit, so it does the same if another tool changes it.
 
 You can always set the limit yourself in **System Settings › Battery › ⓘ
 next to Charging**. See [docs/safety.md](docs/safety.md#getting-your-own-charge-limit-back).

@@ -238,6 +238,15 @@ extension ControllerStatus {
         return nativeLimit?.isRestoreUnfinished == true || decision?.reason == .releaseRequired(.restoreUnfinished)
     }
 
+    /// True while CellKeeper was asked to give the user's own Charge Limit
+    /// back and wrote nothing, because macOS's report could not be judged:
+    /// the restore waits for power. Unlike ``isOwnLimitRestorePending`` this
+    /// is not a warning: it ends at the next judged read on power, when the
+    /// restore is written, or when it is no longer wanted.
+    public var isOwnLimitRestoreWaitingForPower: Bool {
+        nativeLimit?.isRestoreWaitingForPower == true
+    }
+
     /// ``chargeLimitSettlesAt`` while something waits for a read of macOS's
     /// Charge Limit to be judged: the latest read was not, because power had
     /// not settled (``NativeLimitStatus/readDeferral``), and Manage charging
@@ -253,7 +262,7 @@ extension ControllerStatus {
         guard let settlesAt = chargeLimitSettlesAt, let native = nativeLimit, native.readDeferral == .settling else { return nil }
         let isOwedOrWatched = settings.isManagementEnabled || native.ownerLimit != nil || calibration.isEvidenceRetained
         let agreesWithRecord = native.reportedLimit == 100 && native.target == 100
-            && native.pendingLimits.isEmpty && !native.isRestoreUnfinished
+            && native.pendingLimits.isEmpty && !native.isRestoreUnfinished && !native.isRestoreWaitingForPower
         guard isOwedOrWatched, !agreesWithRecord else { return nil }
         return settlesAt
     }
