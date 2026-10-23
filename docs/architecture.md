@@ -666,7 +666,9 @@ every case, so a failed check never lengthens the time at a low charge.
   shown in the menu and Settings), and every evaluation checks again. A
   limit that could not be read turns Manage charging off too and keeps the
   record until it reads: as the owner's own, the record is replaced; as
-  another value, that value is kept the same way first.
+  another value, that value is kept the same way first. Only a failed read
+  whose power evidence held counts (D118): one that failed across a sleep
+  or an unplug waits, as a read not judged does.
   Passed bounds, an unplug in step 1, or a one-shot schedule found end it
   too. Otherwise it stays paused with the normal policy, asking for
   nothing, until the owner chooses "continue" (`continueCalibration`),

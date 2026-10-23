@@ -787,12 +787,20 @@ public actor NativeChargeLimitBackend: ChargingBackend {
 
     private func read() async throws -> NativeChargeLimitReading {
         lastReadAt = now()
+        let outcome: Result<NativeChargeLimitReading, any Error>
         do {
-            let reading = try await reader.readChargeLimit()
-            // The one place a read's condition is decided, after the read
-            // (D118): whatever was known before it says nothing about a read
-            // that ran across a sleep or an unplug.
-            readCondition = await readGate.conditionAfterRead()
+            outcome = .success(try await reader.readChargeLimit())
+        } catch {
+            outcome = .failure(error)
+        }
+        // The one place a read's condition is decided, after the read,
+        // whether it returned a report or failed (D118): whatever was known
+        // before it says nothing about a read that ran across a sleep or an
+        // unplug, and a failed one that did must still restart the settle
+        // time, so that nothing judges its missing report.
+        readCondition = await readGate.conditionAfterRead()
+        switch outcome {
+        case .success(let reading):
             lastReading = reading
             if case .unrecognized(let detail) = reading {
                 lastReadProblem = "unrecognised report (\(detail))"
@@ -807,7 +815,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
                 lastReadDeferral = readCondition.isJudged ? nil : readCondition
             }
             return reading
-        } catch {
+        case .failure(let error):
             lastReading = nil
             lastReadDeferral = nil
             lastReadProblem = String(describing: error)

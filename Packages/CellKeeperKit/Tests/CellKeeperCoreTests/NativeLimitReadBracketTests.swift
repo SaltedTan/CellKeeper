@@ -30,6 +30,12 @@ private func saysSlept(_ status: ControllerStatus) -> Bool {
     status.events.contains { $0.kind == .telemetry && $0.message.hasPrefix("Your Mac slept while CellKeeper was reading macOS's Charge Limit, so it did not judge that read.") }
 }
 
+/// True if the activity log says any read was not judged after its gate
+/// failed.
+private func saysNotJudged(_ status: ControllerStatus) -> Bool {
+    status.events.contains { $0.kind == .telemetry && $0.message.contains("did not judge that read") }
+}
+
 /// The record of the owner's own limit stands, and nothing replaced it.
 private func expectRecordStands(_ rig: PowerRig, owner: Int = 80, sourceLocation: SourceLocation = #_sourceLocation) {
     #expect(NativeChargeLimitBackend.outstandingRecord(in: rig.store)?.ownerLimit == owner, sourceLocation: sourceLocation)
@@ -204,6 +210,92 @@ struct NativeLimitReadBracketTests {
         #expect(status.isNativeLimitSettled)
         #expect(status.currentMode == .nativeLimit(percent: 85))
         #expect(rig.system.runInputs == ["85"])
+    }
+
+    // MARK: - Reads that fail
+
+    @Test("A read that fails across a sleep and an unplug is asked about too: a calibration's launch check waits instead of taking the unreadable limit for the owner's change, and Manage charging stays on")
+    func failedReadAcrossSleepAtPendingCalibrationCheck() async {
+        let rig = CalibrationRig.settling()
+        _ = await rig.startedSettled()
+        _ = await rig.controller.shutdown(reason: "quit")
+        rig.system.isActiveLimitCleared = true
+        let second = rig.relaunched(reading: calibrationReading(85))
+        let initial = await second.controller.evaluate(.launch)
+        #expect(initial.calibration.session != nil)
+        #expect(initial.settings.isManagementEnabled)
+        second.clock.advance(by: ChargeController.chargeLimitSettleTime)
+        let clock = second.clock, telemetry = second.telemetry, system = second.system
+        system.beforeRead {
+            clock.advanceAsleep(by: 601)
+            await telemetry.set(calibrationReading(80, .battery))
+            system.readFails = true
+        }
+        let status = await second.controller.evaluate(.periodic)
+        #expect(second.system.reads > 0)
+        #expect(status.settings.isManagementEnabled)
+        #expect(status.calibration.last?.end != .unaccountedLimit(found: nil, expected: 90))
+        #expect(status.calibration.last?.end == .controlUnavailable, "as when the read fails on battery power")
+        #expect(status.adoptionCount == 0)
+        #expect(saysSlept(status))
+    }
+
+    @Test("Control: a launch check still pending, whose read fails on battery power, does not turn Manage charging off")
+    func unreadableStartupKnownOnBattery() async {
+        let rig = CalibrationRig.settling()
+        _ = await rig.startedSettled()
+        _ = await rig.controller.shutdown(reason: "quit")
+        rig.system.isActiveLimitCleared = true
+        let second = rig.relaunched(reading: calibrationReading(85))
+        _ = await second.controller.evaluate(.launch)
+        second.clock.advance(by: ChargeController.chargeLimitSettleTime)
+        await second.telemetry.set(calibrationReading(80, .battery))
+        second.system.readFails = true
+        let status = await second.controller.evaluate(.periodic)
+        #expect(status.settings.isManagementEnabled)
+        #expect(status.calibration.last?.end == .controlUnavailable)
+        #expect(status.adoptionCount == 0)
+    }
+
+    @Test("A launch check still pending, whose read fails on settled power with nothing amiss, ends the session as before: the limit could not be read, so it is not accounted for")
+    func unreadableStartupOnSettledPower() async {
+        let rig = CalibrationRig.settling()
+        _ = await rig.startedSettled()
+        _ = await rig.controller.shutdown(reason: "quit")
+        rig.system.isActiveLimitCleared = true
+        let second = rig.relaunched(reading: calibrationReading(85))
+        _ = await second.controller.evaluate(.launch)
+        second.clock.advance(by: ChargeController.chargeLimitSettleTime)
+        second.system.readFails = true
+        let status = await second.controller.evaluate(.periodic)
+        #expect(status.calibration.last?.end == .unaccountedLimit(found: nil, expected: 90))
+        #expect(!status.settings.isManagementEnabled)
+        #expect(!saysNotJudged(status))
+    }
+
+    @Test("A read that fails on settled power, with nothing amiss, is handled as before: the problem is shown and counted, no read is reported as not judged, and the next check judges at once")
+    func failedReadOnSettledPower() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        let probes = await rig.telemetry.powerSourceReads
+        rig.system.readFails = true
+        var status = await rig.read(.externalPower, 75)
+        #expect(status.nativeLimit?.readProblem == "read failed")
+        // The mode's read, then the fail-safe restore's, as before D118.
+        #expect(status.consecutiveFailures == 2)
+        #expect(status.events.contains { $0.message.hasPrefix("Could not read the backend's mode: Operation failed: Could not read macOS's Charge Limit: read failed") })
+        #expect(status.settings.isManagementEnabled)
+        #expect(status.adoptionCount == 0)
+        #expect(!saysNotJudged(status))
+        let probesAfter = await rig.telemetry.powerSourceReads
+        #expect(probesAfter > probes, "asked about after the failed reads too")
+        expectRecordStands(rig)
+
+        rig.system.readFails = false
+        rig.system.changeExternally(to: 90)
+        status = await rig.read(.externalPower, 75)
+        #expect(status.nativeLimit?.readProblem == nil)
+        #expect(status.adoptedChange?.limit == 90, "judged at once: the settle time did not start again")
     }
 
     // MARK: - Every place a read is judged
