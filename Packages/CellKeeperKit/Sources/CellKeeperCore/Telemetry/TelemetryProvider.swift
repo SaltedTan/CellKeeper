@@ -12,8 +12,19 @@ public protocol TelemetryProvider: Sendable {
     /// each read gets its own Core Foundation objects from IOKit.
     func currentSnapshot() async throws -> BatterySnapshot
 
+    /// Reads afresh only which power source the Mac runs on: what the
+    /// controller checks after every read of macOS's Charge Limit (D118), so
+    /// it should cost little. Default: ``currentSnapshot()``'s.
+    func currentPowerSource() async throws -> PowerSource
+
     /// A stream that yields whenever the system signals that power-source
     /// information may have changed. Consumers should re-read
     /// ``currentSnapshot()`` when it yields; the stream carries no data.
     func powerSourceChanges() -> AsyncStream<Void>
+}
+
+extension TelemetryProvider {
+    public func currentPowerSource() async throws -> PowerSource {
+        try await currentSnapshot().powerSource
+    }
 }

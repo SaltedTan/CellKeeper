@@ -38,6 +38,8 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
     private var _delayedChange: (remainingReads: Int, reading: NativeChargeLimitReading)?
     private var _delayedFailure: Int?
     private var _isActiveLimitCleared = false
+    private var _beforeRead: (remainingReads: Int, body: @Sendable () async -> Void)?
+    private var _reads = 0
 
     init(reading: NativeChargeLimitReading = .limit(80), shortcutNames: [String] = [NativeChargeLimitBackend.defaultShortcutName]) {
         _reading = reading
@@ -89,6 +91,13 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
         lock.withLock { _delayedFailure = count }
     }
 
+    /// Runs `body` before the read that comes after `count` more reads, as
+    /// if CellKeeper were suspended between deciding to read and the read
+    /// returning: the Mac sleeps, or is unplugged (D118).
+    func beforeRead(after count: Int = 0, _ body: @escaping @Sendable () async -> Void) {
+        lock.withLock { _beforeRead = (count, body) }
+    }
+
     /// Behaviours for the next runs, before ``runBehaviour`` applies again.
     func scheduleRuns(_ behaviours: [RunBehaviour]) {
         lock.withLock { _nextRuns.append(contentsOf: behaviours) }
@@ -97,6 +106,8 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
     /// Every input the shortcut was run with, in order.
     var runInputs: [String] { lock.withLock { _runInputs } }
     var listCalls: Int { lock.withLock { _listCalls } }
+    /// Reads of the limit, as `pmset` would run.
+    var reads: Int { lock.withLock { _reads } }
 
     /// Changes the limit as if the user or another tool had done it.
     func changeExternally(to percent: Int) {
@@ -143,7 +154,18 @@ final class FakeChargeLimitSystem: ShortcutRunning, ChargeLimitReading, @uncheck
     }
 
     func readChargeLimit() async throws -> NativeChargeLimitReading {
-        try lock.withLock {
+        let hook: (@Sendable () async -> Void)? = lock.withLock {
+            guard let pending = _beforeRead else { return nil }
+            guard pending.remainingReads == 0 else {
+                _beforeRead = (pending.remainingReads - 1, pending.body)
+                return nil
+            }
+            _beforeRead = nil
+            return pending.body
+        }
+        await hook?()
+        return try lock.withLock {
+            _reads += 1
             if _readFails { throw FakeError(description: "read failed") }
             if _failingReads > 0 {
                 _failingReads -= 1

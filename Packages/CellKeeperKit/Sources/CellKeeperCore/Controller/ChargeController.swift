@@ -96,6 +96,14 @@ import os
 ///   power begin, a wake, or its own start. Until then no outside change is
 ///   adopted, nothing is recorded as the user's own limit, a read-back is
 ///   not a failure, and no calibration ends because of a read.
+/// - It tells the backend through a ``ChargeLimitReadGate``, which decides
+///   again for each read once the read has returned (D118): judged only if
+///   the evidence brackets it, settled when the gate was made, still on
+///   external power by a fresh reading after the read, and no sleep since
+///   the evidence was taken, by two clocks rather than by a wake
+///   notification. A read that fails this is not judged, nor is anything
+///   after it in that operation, and the settle time starts again, as it
+///   also does when the clocks show a sleep since the last reading.
 public actor ChargeController {
     public static let maximumConsecutiveFailures = 3
     /// How long after CellKeeper sees external power begin (a plug-in, a
@@ -119,6 +127,9 @@ public actor ChargeController {
     private let adoptionMarkerStore: (any OwnershipRecordStore)?
     private let now: @Sendable () -> Date
     private let uptime: @Sendable () -> TimeInterval
+    /// Monotonic seconds that stop during sleep, compared with ``uptime``
+    /// to tell whether the Mac slept (D118).
+    private let awakeUptime: @Sendable () -> TimeInterval
     /// Where the scheduled full charge is kept; nil turns scheduling off.
     private let scheduleStore: (any FullChargeScheduleStoring)?
     /// Where the weekly full charge is kept; nil turns it off.
@@ -268,8 +279,14 @@ public actor ChargeController {
     /// Nil while the latest reading is not a usable one on external power.
     private var externalPowerSinceUptime: TimeInterval?
     /// Whether macOS's Charge Limit can be judged in the current
-    /// evaluation, as the backend was told.
+    /// evaluation, as the backend was told, or as its gate found since.
     private var chargeLimitCondition = ChargeLimitReadCondition.powerUnknown
+    /// The clocks read just before ``snapshot`` was taken: where the power
+    /// evidence of the next gate begins (D118).
+    private var snapshotClocks: ChargeLimitReadGate.Clocks?
+    /// The gate the backend was last given, until a read it did not judge
+    /// has been taken into account (``noteReadGateFailure()``).
+    private var readGate: ChargeLimitReadGate?
     private var events: [ControlEvent] = []
     private var nextEventID = 0
     private var lastEvaluation: Date?
@@ -289,6 +306,11 @@ public actor ChargeController {
     ///     is saved, together with `now`; never captured once.
     ///   - uptime: monotonic seconds that keep counting during sleep, for
     ///     override expiry and rate limiting. Defaults to `ContinuousClock`.
+    ///   - awakeUptime: monotonic seconds that stop during sleep, compared
+    ///     with `uptime` around every read of macOS's Charge Limit to tell
+    ///     whether the Mac slept (D118). Defaults to `SuspendingClock` with
+    ///     the default `uptime`, and to `uptime` itself with another, so a
+    ///     test's single clock never shows a sleep.
     ///   - calibrationStore: where a guided calibration is kept; nil turns
     ///     calibration off.
     ///   - calibrationClock: the boot-wide monotonic clock and boot identity
@@ -307,6 +329,7 @@ public actor ChargeController {
         now: @escaping @Sendable () -> Date = { Date() },
         timeZone: @escaping @Sendable () -> TimeZone = { TimeZone.current },
         uptime: (@Sendable () -> TimeInterval)? = nil,
+        awakeUptime: (@Sendable () -> TimeInterval)? = nil,
         calibrationClock: CalibrationClock? = nil,
         chargeLimitSettleTime: TimeInterval = ChargeController.chargeLimitSettleTime
     ) {
@@ -319,13 +342,15 @@ public actor ChargeController {
         self.chargeLimitSettleTime = chargeLimitSettleTime
         self.now = now
         self.timeZone = timeZone
-        let uptime = uptime ?? Self.continuousUptime()
+        let awakeUptime = awakeUptime ?? (uptime == nil ? Self.seconds(on: SuspendingClock()) : nil)
+        let uptime = uptime ?? Self.seconds(on: ContinuousClock())
         self.uptime = uptime
+        self.awakeUptime = awakeUptime ?? uptime
         calibration = CalibrationRunner(store: calibrationStore, clock: calibrationClock ?? CalibrationClock(monotonic: uptime, bootSession: { nil }))
     }
 
-    private static func continuousUptime() -> @Sendable () -> TimeInterval {
-        let clock = ContinuousClock()
+    /// Seconds on `clock` since this call.
+    private static func seconds<C: Clock & Sendable>(on clock: C) -> @Sendable () -> TimeInterval where C.Duration == Duration, C.Instant: Sendable {
         let origin = clock.now
         return {
             let elapsed = origin.duration(to: clock.now).components
@@ -1388,6 +1413,11 @@ public actor ChargeController {
         }
         let adoptionsBefore = adoptionCount
         let previousSnapshot = snapshot
+        // Before the reading, so that the power evidence it gives begins no
+        // later than the reading itself (D118).
+        let readingClocks = clocks()
+        let sleptSinceLastReading = snapshotClocks.map { readingClocks.hasSlept(since: $0) } ?? false
+        snapshotClocks = readingClocks
         do {
             let fresh = try await telemetry.currentSnapshot()
             snapshot = fresh
@@ -1420,12 +1450,13 @@ public actor ChargeController {
             consecutiveFailures = 0
             lastFailureUptime = nil
         }
-        notePowerSource(trigger, at: evaluationUptime)
-        chargeLimitCondition = chargeLimitReadCondition(at: evaluationUptime)
-        await backend.noteChargeLimitReadCondition(chargeLimitCondition)
+        notePowerSource(trigger, slept: sleptSinceLastReading, at: evaluationUptime)
+        await passReadGate(at: evaluationUptime)
 
         capabilities = await backend.capabilities()
         await observeBackendMode()
+        // Before anything below judges by the condition (the calibration).
+        noteReadGateFailure()
         let heldWhenMacOSLimitStarted = noteMacOSChargeLimit()
         let releaseReason: ReleaseReason? = pendingBackend != nil ? .backendSwitch
             : isRestoreOutstanding ? .restoreUnfinished
@@ -1553,6 +1584,7 @@ public actor ChargeController {
             record(.safety, "A read-back now shows normal charging: CellKeeper's restriction, \(describeTarget(held))\(simulationNote), which it asked to end when macOS's Charge Limit started to apply, has ended.")
         }
         await renewHoldIfStillWanted(newDecision)
+        noteReadGateFailure()
 
         if pendingBackend != nil, currentMode == .normal, !(nativeLimit?.hasUnresolvedOwnership ?? false), !isAdoptionUnsaved {
             await completePendingSwitch()
@@ -1659,15 +1691,67 @@ public actor ChargeController {
     /// at the first usable reading on external power after one that was
     /// not, or after none (CellKeeper's start), and again at a wake on it,
     /// since macOS may have cleared and created its limit again meanwhile
-    /// (note 08, O20).
-    private func notePowerSource(_ trigger: EvaluationTrigger, at uptimeNow: TimeInterval) {
+    /// (note 08, O20). A wake counts when the clocks show that the Mac
+    /// `slept` since the last reading, even before its notification arrives
+    /// (D118).
+    private func notePowerSource(_ trigger: EvaluationTrigger, slept: Bool, at uptimeNow: TimeInterval) {
         guard ChargingPolicy.usableSnapshot(snapshot, now: now())?.powerSource == .externalPower else {
             externalPowerSinceUptime = nil
             return
         }
-        if externalPowerSinceUptime == nil || trigger == .didWake {
+        if externalPowerSinceUptime == nil || trigger == .didWake || slept {
             externalPowerSinceUptime = uptimeNow
         }
+    }
+
+    /// Both clocks, read together.
+    private func clocks() -> ChargeLimitReadGate.Clocks {
+        ChargeLimitReadGate.Clocks(uptime: uptime(), awake: awakeUptime())
+    }
+
+    /// Tells the backend what macOS's Charge Limit reads are judged by
+    /// until the next call (D118): the condition from the latest reading,
+    /// decided again by the gate after every read, from a fresh reading of
+    /// the power source and the clocks.
+    private func passReadGate(at uptimeNow: TimeInterval) async {
+        // A failure no earlier check took into account (an operation that
+        // ended in a path without one) still counts.
+        noteReadGateFailure()
+        chargeLimitCondition = chargeLimitReadCondition(at: uptimeNow)
+        let gate = ChargeLimitReadGate(
+            condition: chargeLimitCondition,
+            clocks: snapshotClocks ?? clocks(),
+            externalPowerSince: externalPowerSinceUptime,
+            settleTime: chargeLimitSettleTime,
+            powerSource: { [telemetry] in try? await telemetry.currentPowerSource() },
+            readClocks: { [uptime, awakeUptime] in ChargeLimitReadGate.Clocks(uptime: uptime(), awake: awakeUptime()) }
+        )
+        readGate = gate
+        await backend.noteChargeLimitReadGate(gate)
+    }
+
+    /// After the backend's reads: if the gate did not judge one although
+    /// it was settled when made (the Mac slept, or the power source
+    /// changed, since the evidence was taken), nothing else in this
+    /// operation is judged either, and the settle time starts again, as at
+    /// a wake: macOS may have cleared and created its limit again meanwhile
+    /// (note 08, O20; D118).
+    private func noteReadGateFailure() {
+        guard let failure = readGate?.failure else { return }
+        readGate = nil
+        chargeLimitCondition = failure.condition
+        externalPowerSinceUptime = nil
+        let message: String
+        if failure.didSleep {
+            message = "Your Mac slept while CellKeeper was reading macOS's Charge Limit, so it did not judge that read. It checks again once your Mac has been on power for a minute."
+        } else {
+            switch failure.condition {
+            case .onBattery: message = "Your Mac was on battery power when CellKeeper's read of macOS's Charge Limit returned, so it did not judge that read."
+            case .powerUnknown: message = "CellKeeper could not tell whether your Mac was still on power when its read of macOS's Charge Limit returned, so it did not judge that read."
+            case .settling, .settled: message = "Power had not settled when CellKeeper's read of macOS's Charge Limit returned, so it did not judge that read."
+            }
+        }
+        record(.telemetry, message, level: .default)
     }
 
     /// Whether macOS's Charge Limit report can be judged now, from the
@@ -2230,9 +2314,10 @@ public actor ChargeController {
     /// other mode. Caller must hold the lock.
     private func restoreNormal(reason: String) async -> Bool {
         // Outside an evaluation too (quitting, a backend switch), from the
-        // latest reading and the monotonic clock now.
-        chargeLimitCondition = chargeLimitReadCondition(at: uptime())
-        await backend.noteChargeLimitReadCondition(chargeLimitCondition)
+        // latest reading and the monotonic clock now; the gate checks each
+        // read again from the clocks read before that reading (D118).
+        await passReadGate(at: uptime())
+        defer { noteReadGateFailure() }
         // Never waits for anything `.normal` does not depend on, such as a
         // read of macOS's Charge Limit.
         let capabilities = await backend.capabilitiesForRelease()

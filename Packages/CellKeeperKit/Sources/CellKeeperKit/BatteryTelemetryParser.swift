@@ -85,6 +85,20 @@ public enum BatteryTelemetryParser {
         return properties
     }
 
+    /// The power source alone, as ``snapshot(from:at:)`` reads it: the
+    /// battery's state, else the providing power source, else the
+    /// registry's `ExternalConnected`.
+    public static func powerSource(from raw: RawPowerData) -> PowerSource {
+        let state = (raw.powerSource?["Power Source State"] as? String) ?? raw.providingPowerSourceType
+        switch state {
+        case "AC Power": return .externalPower
+        case "Battery Power": return .battery
+        default:
+            if let external = bool(raw.registry?["ExternalConnected"]) { return external ? .externalPower : .battery }
+            return .unknown
+        }
+    }
+
     public static func snapshot(from raw: RawPowerData, at timestamp: Date) -> BatterySnapshot {
         let ps = raw.powerSource ?? [:]
         let reg = raw.registry ?? [:]
@@ -93,16 +107,7 @@ public enum BatteryTelemetryParser {
 
         let isPresent = bool(ps["Is Present"]) ?? bool(reg["BatteryInstalled"]) ?? (raw.powerSource != nil)
 
-        let powerSource: PowerSource = {
-            let state = (ps["Power Source State"] as? String) ?? raw.providingPowerSourceType
-            switch state {
-            case "AC Power": return .externalPower
-            case "Battery Power": return .battery
-            default:
-                if let external = bool(reg["ExternalConnected"]) { return external ? .externalPower : .battery }
-                return .unknown
-            }
-        }()
+        let powerSource = powerSource(from: raw)
 
         let percent: Int? = {
             if let current = int(ps["Current Capacity"]), let max = int(ps["Max Capacity"]), max > 0 {
