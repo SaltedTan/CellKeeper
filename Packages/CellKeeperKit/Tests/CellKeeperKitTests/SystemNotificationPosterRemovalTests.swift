@@ -130,7 +130,9 @@ struct SystemNotificationPosterRemovalTests {
         let unplug = PlannedNotification(kind: .calibrationUnplug, title: "", body: "", identifier: "calibration.session.unplug")
         #expect(await poster.add(unplug, in: NotificationGeneration()) == .posted)
         await poster.remove(identifiers: [unplug.identifier])
-        try await Task.sleep(for: .milliseconds(50))
+        // The removal is handed to the poster's queue: wait, bounded, until
+        // it has been recorded, then check it was recorded once.
+        #expect(await eventually { record.events.count == 2 })
         #expect(record.events == ["add calibration.session.unplug", "remove calibration.session.unplug"])
     }
 }
