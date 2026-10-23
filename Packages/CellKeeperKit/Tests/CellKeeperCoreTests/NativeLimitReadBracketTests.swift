@@ -30,6 +30,12 @@ private func saysSlept(_ status: ControllerStatus) -> Bool {
     status.events.contains { $0.kind == .telemetry && $0.message.hasPrefix("Your Mac slept while CellKeeper was reading macOS's Charge Limit, so it did not judge that read.") }
 }
 
+/// True if the activity log says a read was not judged because it returned
+/// too long after the reading its evidence began at.
+private func saysTooLate(_ status: ControllerStatus) -> Bool {
+    status.events.contains { $0.kind == .telemetry && $0.message.hasPrefix("CellKeeper's read of macOS's Charge Limit returned more than 2 minutes after it last read the power source, so it did not judge that read") }
+}
+
 /// True if the activity log says any read was not judged after its gate
 /// failed.
 private func saysNotJudged(_ status: ControllerStatus) -> Bool {
@@ -126,6 +132,20 @@ struct NativeLimitReadBracketTests {
         #expect(rig.system.runInputs == ["85"])
     }
 
+    @Test("A sleep of a minute during a read, well within two minutes and on power throughout, still keeps it from being judged")
+    func shortSleepOnPowerThroughout() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        rig.suspendRead(for: 60, power: .externalPower)
+        let status = await rig.controller.evaluate(.periodic)
+        #expect(status.adoptionCount == 0)
+        #expect(status.settings.isManagementEnabled)
+        #expect(status.nativeLimit?.readDeferral == .settling)
+        #expect(saysSlept(status))
+        #expect(!saysTooLate(status))
+        expectRecordStands(rig)
+    }
+
     @Test("An unplug during a read, with no sleep, keeps it from being judged; plugged in again before the next check, the settle time has started again")
     func unplugDuringReadWithoutSleep() async {
         let rig = PowerRig(limit: 85)
@@ -210,6 +230,146 @@ struct NativeLimitReadBracketTests {
         #expect(status.isNativeLimitSettled)
         #expect(status.currentMode == .nativeLimit(percent: 85))
         #expect(rig.system.runInputs == ["85"])
+    }
+
+    // MARK: - How long the evidence lasts
+
+    @Test("An unplug and a plug-in while awake, both while a read waits to run, keep it from being judged although both ends show power: the limit macOS cleared is not adopted, Manage charging stays on, the settle time starts again, and a minute later reads are judged")
+    func awakeUnplugAndPlugInDuringRead() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        let clock = rig.clock, telemetry = rig.telemetry, system = rig.system
+        // Review r1 of #113: the operation waits before the read runs;
+        // meanwhile the Mac is unplugged for 601 s, awake, and macOS clears
+        // its limit; it is plugged in again just before the read, before
+        // macOS creates the limit again (note 08, O20).
+        system.beforeRead {
+            await telemetry.set(snapshot(percent: 74, source: .battery))
+            clock.advance(by: 601)
+            system.isActiveLimitCleared = true
+            await telemetry.set(snapshot(percent: 74, source: .externalPower))
+        }
+        var status = await rig.controller.evaluate(.periodic)
+        #expect(rig.system.isActiveLimitCleared, "the read suspended was this evaluation's")
+        #expect(status.adoptionCount == 0)
+        #expect(status.adoptedChange == nil)
+        #expect(status.settings.isManagementEnabled)
+        #expect(status.nativeLimit?.readDeferral == .settling)
+        #expect(status.nativeLimit?.ownerLimit == 80)
+        #expect(status.currentMode == .nativeLimit(percent: 85))
+        #expect(status.consecutiveFailures == 0)
+        #expect(!saysChangedOutside(status))
+        #expect(!saysSlept(status))
+        #expect(saysTooLate(status))
+        expectRecordStands(rig)
+
+        // macOS shows its limit again, now one set outside CellKeeper (O15).
+        rig.system.isActiveLimitCleared = false
+        rig.system.changeExternally(to: 90)
+        status = await rig.read(.externalPower, 75)
+        #expect(status.adoptionCount == 0, "the settle time started again")
+        #expect(status.nativeLimit?.readDeferral == .settling)
+        rig.clock.advance(by: ChargeController.chargeLimitSettleTime)
+        status = await rig.read(.externalPower, 75)
+        #expect(status.adoptedChange?.limit == 90, "judged a minute later")
+        #expect(!status.settings.isManagementEnabled)
+        #expect(rig.system.runInputs == ["85"])
+    }
+
+    @Test("A read that returns exactly two minutes after the clocks its evidence begins at is judged")
+    func bracketAtTheBound() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        let clock = rig.clock, system = rig.system
+        system.beforeRead {
+            clock.advance(by: ChargeLimitReadGate.maximumSpan)
+            system.changeExternally(to: 90)
+        }
+        let status = await rig.controller.evaluate(.periodic)
+        #expect(status.adoptedChange?.limit == 90)
+        #expect(!status.settings.isManagementEnabled)
+        #expect(!saysNotJudged(status))
+        #expect(rig.system.runInputs == ["85"])
+    }
+
+    @Test("A read that returns half a second more than two minutes after the clocks its evidence begins at is not judged, on power throughout, and the settle time starts again")
+    func bracketJustOverTheBound() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        let clock = rig.clock, system = rig.system
+        system.beforeRead {
+            clock.advance(by: ChargeLimitReadGate.maximumSpan + 0.5)
+            system.changeExternally(to: 90)
+        }
+        var status = await rig.controller.evaluate(.periodic)
+        #expect(status.adoptionCount == 0)
+        #expect(status.settings.isManagementEnabled)
+        #expect(status.nativeLimit?.readDeferral == .settling)
+        #expect(saysTooLate(status))
+        expectRecordStands(rig)
+
+        status = await rig.read(.externalPower, 75)
+        #expect(status.adoptionCount == 0, "the settle time started again")
+        #expect(status.nativeLimit?.readDeferral == .settling)
+        rig.clock.advance(by: ChargeController.chargeLimitSettleTime - 1)
+        status = await rig.read(.externalPower, 75)
+        #expect(status.adoptionCount == 0)
+        rig.clock.advance(by: 1)
+        status = await rig.read(.externalPower, 75)
+        #expect(status.adoptedChange?.limit == 90, "judged once settled again")
+    }
+
+    @Test("Readings more than two minutes apart start the settle time again, as a wake does: a change made outside CellKeeper is judged only a minute later")
+    func gapJustOverTheBound() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        // No check for a while, awake (App Nap can defer one): an unplug
+        // long enough for macOS to clear its limit could have fitted unseen.
+        rig.clock.advance(by: ChargeLimitReadGate.maximumSpan + 0.5)
+        rig.system.changeExternally(to: 90)
+        var status = await rig.read(.externalPower, 75)
+        #expect(status.adoptionCount == 0)
+        #expect(status.settings.isManagementEnabled)
+        #expect(status.nativeLimit?.readDeferral == .settling)
+        #expect(!saysNotJudged(status), "found before the read, not after it")
+        expectRecordStands(rig)
+
+        rig.clock.advance(by: ChargeController.chargeLimitSettleTime - 1)
+        status = await rig.read(.externalPower, 75)
+        #expect(status.adoptionCount == 0)
+        rig.clock.advance(by: 1)
+        status = await rig.read(.externalPower, 75)
+        #expect(status.adoptedChange?.limit == 90, "judged once settled again")
+    }
+
+    @Test("Readings exactly two minutes apart keep the settle time: a change made outside CellKeeper is judged at once")
+    func gapAtTheBound() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        rig.clock.advance(by: ChargeLimitReadGate.maximumSpan)
+        rig.system.changeExternally(to: 90)
+        let status = await rig.read(.externalPower, 75)
+        #expect(status.adoptedChange?.limit == 90)
+        #expect(!status.settings.isManagementEnabled)
+        #expect(rig.system.runInputs == ["85"])
+    }
+
+    @Test("A short unplug during a read, with no sleep and no long gap, still starts the settle time again: plugged in again before the next check, that check does not judge")
+    func shortUnplugDuringRead() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        rig.suspendRead(asleep: false, for: 30)
+        var status = await rig.controller.evaluate(.periodic)
+        #expect(status.adoptionCount == 0)
+        #expect(status.nativeLimit?.readDeferral == .onBattery)
+        #expect(!saysTooLate(status))
+        expectRecordStands(rig)
+
+        rig.clock.advance(by: 30)
+        status = await rig.read(.externalPower, 74, .powerSourceChanged)
+        #expect(status.adoptionCount == 0)
+        #expect(status.nativeLimit?.readDeferral == .settling, "power began at this reading")
+        expectRecordStands(rig)
     }
 
     // MARK: - Reads that fail
@@ -367,11 +527,11 @@ struct NativeLimitReadBracketTests {
         expectRecordStands(rig)
     }
 
-    @Test("Quitting after a sleep, before any check since: the evidence begins at the last reading, so the restore's read is not judged")
+    @Test("Quitting after a sleep, before any check since: the restore's own reading of the power source shows the sleep, so the settle time starts again and the restore's read is not judged")
     func quitAfterSleepBeforeAnyCheck() async {
         let rig = PowerRig(limit: 85)
         await rig.settledOnPower()
-        // A short sleep: the reading before it is still recent enough to use.
+        // A short sleep, well within the time between readings.
         rig.clock.advanceAsleep(by: 30)
         rig.system.isActiveLimitCleared = true
         let status = await rig.controller.shutdown(reason: "quit")
@@ -379,7 +539,41 @@ struct NativeLimitReadBracketTests {
         #expect(status.adoptionCount == 0)
         #expect(rig.system.runInputs == ["85"])
         #expect(status.nativeLimit?.readDeferral == .settling)
-        #expect(saysSlept(status))
+        #expect(!saysNotJudged(status), "found before the read, not after it")
+        expectRecordStands(rig)
+    }
+
+    @Test("Quitting 90 s after the last check, when its reading is too old to use: the restore reads the power source itself, so its read is judged, and a change made outside CellKeeper is kept at once")
+    func quitTakesItsOwnReading() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        rig.clock.advance(by: 90)
+        rig.system.changeExternally(to: 90)
+        let probes = await rig.telemetry.powerSourceReads
+        let status = await rig.controller.shutdown(reason: "quit")
+        #expect(status.adoptedChange?.limit == 90)
+        #expect(!status.settings.isManagementEnabled)
+        #expect(rig.system.runInputs == ["85"], "nothing written over it")
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: rig.store) == nil)
+        let probesAfter = await rig.telemetry.powerSourceReads
+        #expect(probesAfter == probes + 2, "the restore's own reading, and one after its read")
+    }
+
+    @Test("Quitting more than two minutes after the last check, after an unplug no check saw: the restore's own reading on power starts the settle time again, so the no limit macOS shows is not kept, nothing is written, and the record stays for the next launch")
+    func quitLongAfterTheLastReading() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        // Unplugged for 601 s with no check (App Nap can defer one), and
+        // plugged in again just before quitting, before macOS creates its
+        // limit again (note 08, O20).
+        rig.clock.advance(by: 601)
+        rig.system.isActiveLimitCleared = true
+        let status = await rig.controller.shutdown(reason: "quit")
+        #expect(status.adoptedChange == nil)
+        #expect(status.adoptionCount == 0)
+        #expect(rig.system.runInputs == ["85"])
+        #expect(status.nativeLimit?.readDeferral == .settling)
+        #expect(status.events.contains { $0.message.contains("waits; nothing was changed") })
         expectRecordStands(rig)
     }
 
@@ -611,6 +805,33 @@ struct ChargeLimitReadGateTests {
         #expect(gate.failure == ChargeLimitReadGate.Failure(condition: expected, didSleep: false))
         inputs.power = .externalPower
         #expect(await gate.conditionAfterRead() == expected)
+    }
+
+    @Test("A read is judged up to exactly two minutes after the evidence was taken, and not after, whatever the power source shows")
+    func span() async {
+        let inputs = GateInputs()
+        let gate = inputs.gate()
+        inputs.pass(ChargeLimitReadGate.maximumSpan)
+        #expect(await gate.conditionAfterRead() == .settled)
+        #expect(gate.failure == nil)
+        inputs.pass(0.5)
+        #expect(await gate.conditionAfterRead() == .settling)
+        #expect(gate.failure == ChargeLimitReadGate.Failure(condition: .settling, didSleep: false, isTooLate: true))
+
+        let onBattery = inputs.gate()
+        inputs.pass(ChargeLimitReadGate.maximumSpan + 0.5)
+        inputs.power = .battery
+        #expect(await onBattery.conditionAfterRead() == .onBattery)
+        #expect(onBattery.failure == ChargeLimitReadGate.Failure(condition: .onBattery, didSleep: false, isTooLate: true))
+    }
+
+    @Test("The span counts time asleep and awake alike")
+    func spanCountsSleep() {
+        let earlier = ChargeLimitReadGate.Clocks(uptime: 1_000, awake: 500)
+        #expect(!ChargeLimitReadGate.Clocks(uptime: 1_120, awake: 620).exceedsMaximumSpan(since: earlier))
+        #expect(ChargeLimitReadGate.Clocks(uptime: 1_120.5, awake: 620.5).exceedsMaximumSpan(since: earlier))
+        #expect(ChargeLimitReadGate.Clocks(uptime: 1_121, awake: 501).exceedsMaximumSpan(since: earlier))
+        #expect(!ChargeLimitReadGate.Clocks(uptime: 1_100, awake: 501).exceedsMaximumSpan(since: earlier))
     }
 
     @Test("The settle time must still hold when the read returns")
