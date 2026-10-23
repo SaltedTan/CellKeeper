@@ -1,6 +1,6 @@
 # CellKeeper architecture
 
-Status: milestones 1–3 and phase 4a of milestone 4 (telemetry + policy engine + simulated control + macOS's native Charge Limit + a one-shot and a weekly scheduled full charge + Shortcuts actions for CellKeeper's own controls + notifications + diagnostics), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper), the helper's NSXPC transport, tested over an anonymous listener but not used by the app yet, and the helper daemon's executable, which serves its engine over that transport to CellKeeper only, controls no hardware, refuses to listen when built without a team identifier, and is neither installed nor embedded, and the logic that removes the helper only after its restore, tested against fakes. Status line updated 2026-10-19.
+Status: milestones 1–3 and phase 4a of milestone 4 (telemetry + policy engine + simulated control + macOS's native Charge Limit + a one-shot and a weekly scheduled full charge + Shortcuts actions for CellKeeper's own controls + notifications + diagnostics + a guided calibration + the battery-style menu bar icon (Settings › Appearance) + the power flow, whose faster SMC source is off by default and needs the owner's reader), plus the logic of the future privileged helper, which the app runs in process on a simulated control (the Simulated helper), the helper's NSXPC transport, tested over an anonymous listener but not used by the app yet, and the helper daemon's executable, which serves its engine over that transport to CellKeeper only, controls no hardware, refuses to listen when built without a team identifier, and is neither installed nor embedded, and the logic that removes the helper only after its restore, tested against fakes. Status line updated 2026-10-23.
 
 This document describes how CellKeeper is put together and why. Research that
 informed these decisions is in [`docs/research/`](research/README.md); safety
@@ -579,7 +579,9 @@ D112) gives the battery's gauge the conditions it needs to relearn its
 capacity, with no SMC write, no helper and no root: the only control
 output is macOS's Charge Limit through the native backend, and the owner
 unplugs, rests and plugs in the Mac when asked. Only with macOS's Charge
-Limit; user-initiated only; not yet tried on a Mac.
+Limit; user-initiated only. Its first run on a Mac, on 2026-10-21, ended
+early in step 4 because of a bug since fixed (D116); the step-3 change
+(D117) has not yet been tried.
 
 **The session** (`CalibrationSession`, Core) is a pure value with every
 clock and reading given by the caller. Its steps:

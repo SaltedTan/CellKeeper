@@ -4,8 +4,10 @@ An audit of CellKeeper's user interface for VoiceOver, keyboard use, text
 size, contrast, colour, motion and announcements, approved by the owner on
 2026-10-19, and the fixes made for it (D109). It covers the menu-bar status
 item, the menu, every Settings tab (Charging, Control, Activity,
-Diagnostics, About), the confirmation dialogs, the alerts and the save
-panel, including the weekly full charge (#90).
+Diagnostics, About), the Appearance tab, added later and reviewed in the
+D113 follow-up below (the battery-style menu bar icon), the confirmation
+dialogs, the alerts and the save panel, including the weekly full charge
+(#90).
 
 Classes: **must** blocks or misleads a VoiceOver or keyboard user; **should**
 makes the app noticeably harder to use with an assistive technology or a

@@ -363,11 +363,13 @@ maintainer's Mac can use the free Personal Team signing (unverified with
   ([research note 12](research/12-guided-calibration.md), 2026-10-21): the
   owner unplugs and plugs in when asked, and the Mac rests asleep or shut
   down at about 20%. The owner approved the design on 2026-10-21.
-  *Implemented, not yet tried on a Mac* (see `architecture.md`, "Guided
-  calibration", D112): Settings › Charging › Calibration, the menu's
-  requests and opt-in notifications, and its report in the activity log
-  and Diagnostics. Still later: a scheduled calibration, with its own
-  decision (§7.8).
+  *Implemented; first tried on a Mac on 2026-10-21, when it ended early
+  in step 4 because of a bug since fixed (D116), and its step-3 change
+  (D117) has not yet been tried* (see `architecture.md`, "Guided
+  calibration", D112, D116, D117): Settings › Charging › Calibration,
+  the menu's requests and opt-in notifications, and its report in the
+  activity log and Diagnostics. Still later: a scheduled calibration,
+  with its own decision (§7.8).
 - Battery temperature, if a public source returns or a reviewed source is
   verified.
 - Distribution: notarized DMG on GitHub Releases, Homebrew cask, optional
