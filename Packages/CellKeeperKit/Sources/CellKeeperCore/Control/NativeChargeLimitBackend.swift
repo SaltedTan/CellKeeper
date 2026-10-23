@@ -681,6 +681,17 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             throw BackendError.unavailable("CellKeeper's record of your own Charge Limit cannot be read, so it does not know what to restore.")
         case .owned(var owned):
             let current = try? await read()
+            if current == nil, !readCondition.isJudged {
+                // A read that failed and could not have been judged either
+                // (on battery power, before power settled, or across a sleep
+                // or an unplug, D118) says nothing about the limit, which
+                // may have been changed meanwhile: nothing is written over
+                // it. Only a read that failed on settled power, with its
+                // evidence intact, lets the restore below go ahead without
+                // one.
+                lastReadDeferral = readCondition
+                return .deferred
+            }
             if let current, !readCondition.isJudged {
                 // As in `currentMode()`: an active limit the record accounts
                 // for, or the user's own at first contact, is evidence now;
@@ -722,8 +733,8 @@ public actor NativeChargeLimitBackend: ChargingBackend {
                 // A record from an earlier session is restored only once the
                 // limit has been read: someone may have changed it since, and
                 // writing blind could overwrite their choice. In this session
-                // the restore goes ahead without a read; only the read-back
-                // afterwards can confirm it.
+                // the restore goes ahead without a read, on settled power
+                // (above); only the read-back afterwards can confirm it.
                 throw BackendError.operationFailed("macOS's Charge Limit could not be read, so CellKeeper waits to restore the limit recorded in an earlier session until it can check it first.")
             }
             // Mark the restore as in progress, so a later reading of the

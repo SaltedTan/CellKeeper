@@ -577,6 +577,84 @@ struct NativeLimitReadBracketTests {
         expectRecordStands(rig)
     }
 
+    @Test("Quitting more than two minutes after the last check, on power throughout with CellKeeper's limit active: the settle time starts again, but an active limit the record accounts for is evidence, so the owner's limit is restored and the record cleared (D116)")
+    func quitAfterIdleACWithActiveOwnedLimit() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        rig.clock.advance(by: 601)
+        let status = await rig.controller.shutdown(reason: "quit")
+        #expect(rig.system.runInputs == ["85", "80"])
+        #expect(rig.system.reading == .limit(80))
+        #expect(status.nativeLimit?.ownerLimit == nil)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: rig.store) == nil)
+        #expect(status.adoptionCount == 0)
+    }
+
+    // MARK: - Restores whose read fails
+
+    @Test("Quitting: a restore whose read fails after a sleep or a long wait, while the owner changes the limit, writes nothing over it and leaves the record for the next launch", arguments: [true, false])
+    func failedRestoreReadAcrossSleep(asleep: Bool) async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        let clock = rig.clock, telemetry = rig.telemetry, system = rig.system
+        system.beforeRead {
+            if asleep {
+                clock.advanceAsleep(by: 601)
+            } else {
+                clock.advance(by: 601)
+            }
+            await telemetry.set(snapshot(percent: 74, source: .externalPower))
+            system.changeExternally(to: 90)
+            system.failNextReads(1)
+        }
+        let status = await rig.controller.shutdown(reason: "quit")
+        #expect(asleep ? saysSlept(status) : saysTooLate(status))
+        #expect(rig.system.runInputs == ["85"], "nothing written over the owner's 90%")
+        #expect(rig.system.reading == .limit(90))
+        #expect(status.nativeLimit?.readProblem == "read failed")
+        #expect(status.nativeLimit?.readDeferral == .settling)
+        #expect(status.events.contains { $0.message.contains("waits; nothing was changed") })
+        #expect(status.adoptionCount == 0)
+        #expect(status.consecutiveFailures == 0)
+        expectRecordStands(rig)
+    }
+
+    @Test("Turning Manage charging off on battery power: a restore whose read fails writes nothing and waits; on power it restores the owner's limit")
+    func failedRestoreReadOnBattery() async throws {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        _ = await rig.read(.battery, 75, .powerSourceChanged)
+        rig.system.readFails = true
+        var status = try await rig.controller.apply(settings: rig.settings(limit: 85, managed: false))
+        #expect(status.lastExecution?.result == .deferred(written: false))
+        #expect(rig.system.runInputs == ["85"], "nothing written blind")
+        #expect(status.nativeLimit?.readDeferral == .onBattery)
+        #expect(status.nativeLimit?.ownerLimit == 80, "still owed")
+        #expect(status.adoptionCount == 0)
+        expectRecordStands(rig)
+
+        rig.system.readFails = false
+        status = await rig.read(.externalPower, 74, .powerSourceChanged)
+        #expect(rig.system.runInputs == ["85", "80"])
+        #expect(rig.system.reading == .limit(80))
+        #expect(status.nativeLimit?.ownerLimit == nil)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: rig.store) == nil)
+    }
+
+    @Test("Quitting on settled power, the restore's read failing with its evidence intact: the restore goes ahead without it, as before, and its read-back confirms it")
+    func failedRestoreReadOnSettledPower() async {
+        let rig = PowerRig(limit: 85)
+        await rig.settledOnPower()
+        rig.system.failNextReads(1)
+        let status = await rig.controller.shutdown(reason: "quit")
+        #expect(rig.system.runInputs == ["85", "80"])
+        #expect(rig.system.reading == .limit(80))
+        #expect(!saysNotJudged(status))
+        #expect(status.nativeLimit?.ownerLimit == nil)
+        #expect(NativeChargeLimitBackend.outstandingRecord(in: rig.store) == nil)
+        #expect(status.adoptionCount == 0)
+    }
+
     @Test("Recovering a record left by an earlier session: its read suspended across a sleep and an unplug adopts nothing; on power the owner's limit is restored")
     func recoveryAcrossSleep() async {
         let store = InMemoryRecordStore()
