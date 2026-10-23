@@ -1259,6 +1259,66 @@ struct DiagnosticsReportGoldenTests {
             """)
     }
 
+    @Test("A restore that waits for power, with nothing written")
+    func nativeLimitRestoreWaitingForPower() async throws {
+        let status = try await DiagnosticsFixture.nativeLimitRestoreWaitingForPower()
+        #expect(status.isOwnLimitRestoreWaitingForPower)
+        expectReport(status, head: """
+            CellKeeper diagnostics
+            Generated: 2027-01-15T08:00:00Z
+            App: 0.1.0 (1)
+            macOS: Version 27.0.1 (Build 26A434)
+            Model: Mac16,1
+
+            == Control
+            Backend: macOS Charge Limit (native-charge-limit)
+            Availability: experimental
+            Style: macOS Charge Limit, steps 80, 85, 90, 95, 100
+            Reported mode: a macOS Charge Limit of 85% (nativeLimit(85%))
+            Pending switch: none
+            Consecutive failures: 0
+
+            == Settings
+            Manage charging: off
+            Charge limit: 85%
+            Resume threshold: 75%
+            Temperature protection: on (pause \(Self.number(40)) °C, resume \(Self.number(35)) °C)
+
+            == Battery
+            Read at: 2027-01-15T08:11:00Z
+            Driver updated: not available
+            Charge: 70%
+            Power source: battery power (battery)
+            Charging status: discharging (discharging)
+            Temperature: \(Self.number(30)) °C
+            Voltage: not available
+            Current: not available
+            Adapter: not available
+            System power in: not available
+            Mac use: not available
+            Cycle count: not available
+            Full-charge capacity: not available
+            Design capacity: not available
+            Condition: not available
+
+            == Decision
+            State: not managing charging (unmanaged)
+            Wants: your own macOS Charge Limit of 80% (normal)
+            Action: restore your own limit
+            Reason: Charge management is off; macOS manages charging.
+            Last action: 2027-01-15T08:11:00Z restore your own limit: waiting: macOS's Charge Limit not judged, nothing changed
+            Last evaluation: 2027-01-15T08:11:00Z
+
+            == macOS Charge Limit
+            Reported by macOS: 100% (not judged: on battery power)
+            Read at: 2027-01-15T08:11:00Z
+            Own limit: 80% recorded
+            CellKeeper's limit: 85%
+            Shortcut found: yes
+            Flags: restore waits for power
+            """)
+    }
+
     @Test("An unfinished restore of the user's own limit")
     func nativeLimitRestoreUnfinished() async {
         let status = await DiagnosticsFixture.nativeLimitRestoreUnfinished()

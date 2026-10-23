@@ -386,7 +386,8 @@ public struct NotificationPlanner: Sendable {
     /// The limit at which charging is held, as a read-back shows, with the
     /// charge then: CellKeeper holds charging at its limit
     /// (``PolicyState/holding``, not the sleep precaution); or, with macOS's
-    /// Charge Limit set by CellKeeper below 100%, usable telemetry shows the
+    /// Charge Limit set by CellKeeper below 100%, a judged read
+    /// (``NativeLimitStatus/readDeferral`` nil) and usable telemetry show the
     /// battery at or above it, on external power and not charging. Nil
     /// otherwise.
     static func heldLimit(_ status: ControllerStatus) -> (limit: Int, percent: Int)? {
@@ -395,6 +396,7 @@ public struct NotificationPlanner: Sendable {
         else { return nil }
         if status.capabilities.isEnforcedByMacOS {
             guard decision.state == .osEnforcedLimit, case .nativeLimit(let limit) = decision.desiredMode, limit < 100,
+                  status.nativeLimit?.readDeferral == nil,
                   let snapshot = usableSnapshot(status), snapshot.isOnExternalPower, snapshot.isCharging == false,
                   let percent = snapshot.chargePercent, percent >= limit
             else { return nil }

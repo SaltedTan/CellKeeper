@@ -418,6 +418,11 @@ public actor ChargeController {
             }
             managementRefusal = refusal
             guard validSettings != settings else { return }
+            // A restore that waits for power wrote nothing; turning
+            // management on again cancels it (D116, D119).
+            if validSettings.isManagementEnabled, !settings.isManagementEnabled, let native = backend as? NativeChargeLimitBackend {
+                await native.cancelWaitingRestore()
+            }
             let previous = settings
             settings = validSettings
             if validSettings.isManagementEnabled {

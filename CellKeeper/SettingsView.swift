@@ -798,6 +798,11 @@ private struct NativeLimitSetupSection: View {
                          : "\(Format.chargeLimit(owner)), recorded; CellKeeper cannot restore it right now, set it in System Settings")
                         .multilineTextAlignment(.trailing)
                         .foregroundStyle(.criticalText)
+                } else if let owner = native?.ownerLimit, let status = model.status, status.isOwnLimitRestoreWaitingForPower {
+                    // Nothing was written: the restore waits for a judged
+                    // read, on power (D116, D119).
+                    Text(NativeLimitWording.restoreWaitingForPowerValue(owner))
+                        .multilineTextAlignment(.trailing)
                 } else if let owner = native?.ownerLimit {
                     Text("\(Format.chargeLimit(owner)), recorded; restored when CellKeeper stops managing it")
                         .multilineTextAlignment(.trailing)
