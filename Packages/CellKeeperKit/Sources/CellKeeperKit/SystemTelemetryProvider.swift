@@ -35,6 +35,19 @@ public struct SystemTelemetryProvider: TelemetryProvider {
         return BatteryTelemetryParser.snapshot(from: raw, at: Date())
     }
 
+    /// IOPowerSources only, as ``currentSnapshot()`` derives the power
+    /// source: no adapter details, and no registry read unless
+    /// IOPowerSources returns nothing. Taken after every read of macOS's
+    /// Charge Limit (D118).
+    public func currentPowerSource() async throws -> PowerSource {
+        var raw = Self.readPowerSources(includingAdapter: false)
+        if raw.providingPowerSourceType == nil, raw.powerSource == nil {
+            raw.registry = Self.readSmartBatteryRegistry()
+            guard raw.registry != nil else { throw SystemTelemetryError.powerSourcesUnavailable }
+        }
+        return BatteryTelemetryParser.powerSource(from: raw)
+    }
+
     public func powerSourceChanges() -> AsyncStream<Void> {
         PowerSourceNotifications.stream()
     }
@@ -52,9 +65,10 @@ public struct SystemTelemetryProvider: TelemetryProvider {
     /// The documented IOPowerSources part of ``readRawPowerData()``: the
     /// internal battery's description, the providing power source, and the
     /// attached adapter's details (nil when `IOPSCopyExternalPowerAdapterDetails`
-    /// returns nothing: no adapter is attached, or they could not be read).
-    /// Reads no registry properties.
-    static func readPowerSources() -> RawPowerData {
+    /// returns nothing: no adapter is attached, or they could not be read;
+    /// not asked for without `includingAdapter`). Reads no registry
+    /// properties.
+    static func readPowerSources(includingAdapter: Bool = true) -> RawPowerData {
         var raw = RawPowerData()
 
         if let info = IOPSCopyPowerSourcesInfo()?.takeRetainedValue() {
@@ -69,6 +83,7 @@ public struct SystemTelemetryProvider: TelemetryProvider {
                 }
             }
         }
+        guard includingAdapter else { return raw }
         raw.adapter = (IOPSCopyExternalPowerAdapterDetails()?.takeRetainedValue() as? [String: Any])?
             .filter { BatteryTelemetryParser.adapterKeys.contains($0.key) }
         return raw

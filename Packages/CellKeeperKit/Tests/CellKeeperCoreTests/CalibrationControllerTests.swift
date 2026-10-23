@@ -90,6 +90,7 @@ struct CalibrationRig {
             now: { clock.now },
             timeZone: { timeZone },
             uptime: { clock.uptime },
+            awakeUptime: { clock.awakeUptime },
             calibrationClock: self.boot.calibrationClock,
             chargeLimitSettleTime: settleTime
         )

@@ -71,6 +71,8 @@ func memoryAfterReading(_ percent: Int, settings: ChargingSettings = .default, m
 actor StubTelemetry: TelemetryProvider {
     private var next: Result<BatterySnapshot, any Error>
     private let clock: TestClock?
+    /// Reads of the power source alone (D118).
+    private(set) var powerSourceReads = 0
 
     init(_ snapshot: BatterySnapshot, clock: TestClock? = nil) {
         next = .success(snapshot)
@@ -91,6 +93,11 @@ actor StubTelemetry: TelemetryProvider {
         return reading
     }
 
+    func currentPowerSource() throws -> PowerSource {
+        powerSourceReads += 1
+        return try next.get().powerSource
+    }
+
     nonisolated func powerSourceChanges() -> AsyncStream<Void> {
         AsyncStream { $0.finish() }
     }
@@ -101,11 +108,13 @@ struct TelemetryTestError: Error, CustomStringConvertible {
 }
 
 /// A mutable clock for controller tests: wall time plus a monotonic uptime
-/// that advance together.
+/// that advance together, and an awake uptime that stops while the Mac
+/// sleeps (``advanceAsleep(by:)``).
 final class TestClock: @unchecked Sendable {
     private let lock = NSLock()
     private let start: Date
     private var elapsed: TimeInterval = 0
+    private var asleep: TimeInterval = 0
     private var wallOffset: TimeInterval = 0
 
     init(_ start: Date = referenceDate) {
@@ -120,8 +129,23 @@ final class TestClock: @unchecked Sendable {
         lock.withLock { 10_000 + elapsed }
     }
 
+    /// Monotonic seconds that stop while the Mac sleeps, as
+    /// `SuspendingClock`; ``uptime`` keeps counting, as `ContinuousClock`.
+    var awakeUptime: TimeInterval {
+        lock.withLock { 10_000 + elapsed - asleep }
+    }
+
     func advance(by interval: TimeInterval) {
         lock.withLock { elapsed += interval }
+    }
+
+    /// The Mac sleeps for `interval`: the wall clock and ``uptime`` advance,
+    /// ``awakeUptime`` does not.
+    func advanceAsleep(by interval: TimeInterval) {
+        lock.withLock {
+            elapsed += interval
+            asleep += interval
+        }
     }
 
     /// Changes the wall clock only, as setting the system clock does; the

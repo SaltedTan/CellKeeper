@@ -207,7 +207,8 @@ public enum ControlOutcome: String, Sendable, Equatable {
 /// macOS clears it, and reports "no limit" while the setting stays as it
 /// was; on plug-in it creates it again within a moment. The controller
 /// decides the condition from the power source and from when it last saw
-/// external power begin.
+/// external power begin, and a ``ChargeLimitReadGate`` decides it again
+/// for each read once the read has returned (D118).
 public enum ChargeLimitReadCondition: String, Sendable, Equatable, CaseIterable, CustomStringConvertible {
     /// On external power for at least the settle time: the report is
     /// judged by the usual rules.
@@ -215,7 +216,8 @@ public enum ChargeLimitReadCondition: String, Sendable, Equatable, CaseIterable,
     /// On battery power: macOS's limit may not be active.
     case onBattery
     /// On external power, but less than the settle time since CellKeeper saw
-    /// it begin (a plug-in, a wake, or CellKeeper's own start).
+    /// it begin (a plug-in, a wake, a sleep during a read, or CellKeeper's
+    /// own start).
     case settling
     /// CellKeeper has no usable reading of the power source.
     case powerUnknown
@@ -518,12 +520,13 @@ public enum ReportedModeOrigin: Sendable, Equatable {
 ///   reported once by ``takeAdoptedLimitChange()``.
 /// - Only a fresh read of the setting from macOS confirms a change. A
 ///   shortcut or command finishing successfully does not.
-/// - A read is judged only under ``ChargeLimitReadCondition/settled``, which
-///   the controller passes before every operation
-///   (``noteChargeLimitReadCondition(_:)``). Under any other condition only
-///   an active limit that the backend's record accounts for is evidence:
-///   nothing is recorded or adopted, and a read-back that does not show the
-///   value requested is not a failure. `setMode` then returns
+/// - A read is judged only under ``ChargeLimitReadCondition/settled``, as
+///   the gate the controller passes before every operation
+///   (``noteChargeLimitReadGate(_:)``) finds once the read has returned
+///   (D118): never by a condition taken only before it. Under any other
+///   condition only an active limit that the backend's record accounts for
+///   is evidence: nothing is recorded or adopted, and a read-back that does
+///   not show the value requested is not a failure. `setMode` then returns
 ///   ``ControlOutcome/deferred`` or ``ControlOutcome/awaitingConfirmation``
 ///   instead of throwing, the only times it returns without the requested
 ///   state confirmed; `currentMode()` reports the limit last confirmed.
@@ -613,10 +616,12 @@ public protocol ChargingBackend: Sendable {
     /// limit since the last call, if any. Each adoption is returned once.
     func takeAdoptedLimitChange() async -> AdoptedLimitChange?
 
-    /// Native-limit backends: whether macOS's Charge Limit report can be
-    /// judged from now on, until the next call. The controller calls it
-    /// before every evaluation and every restore. Default: nothing.
-    func noteChargeLimitReadCondition(_ condition: ChargeLimitReadCondition) async
+    /// Native-limit backends: what each read of macOS's Charge Limit is
+    /// judged by from now on, until the next call: the condition the gate
+    /// gives once that read has returned
+    /// (``ChargeLimitReadGate/conditionAfterRead()``). The controller calls
+    /// it before every evaluation and every restore. Default: nothing.
+    func noteChargeLimitReadGate(_ gate: ChargeLimitReadGate) async
 }
 
 extension ChargingBackend {
@@ -629,5 +634,5 @@ extension ChargingBackend {
     public func recheckAvailability() async {}
     public func nativeLimitStatus() async -> NativeLimitStatus? { nil }
     public func takeAdoptedLimitChange() async -> AdoptedLimitChange? { nil }
-    public func noteChargeLimitReadCondition(_ condition: ChargeLimitReadCondition) async {}
+    public func noteChargeLimitReadGate(_ gate: ChargeLimitReadGate) async {}
 }

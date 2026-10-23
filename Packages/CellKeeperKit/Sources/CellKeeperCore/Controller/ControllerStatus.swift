@@ -207,6 +207,15 @@ public struct ControllerStatus: Sendable, Equatable {
     /// The guided calibration: the session in progress, if any, and the
     /// latest one that ended.
     public var calibration: CalibrationStatus = CalibrationStatus()
+    /// While reads of macOS's Charge Limit wait for power to settle
+    /// (``ChargeLimitReadCondition/settling``) from a start CellKeeper saw:
+    /// when the settle time ends, on the controller's monotonic clock
+    /// (``ChargeController/monotonicNow``). A read from then on is judged
+    /// if the Mac stays on power and the reading before it comes within
+    /// ``ChargeLimitReadGate/maximumSpan`` of the last one. Nil otherwise,
+    /// also after a read the gate did not judge, until the next reading of
+    /// the power source starts the settle time again (D118).
+    public var chargeLimitSettlesAt: TimeInterval? = nil
 }
 
 /// An override that ended by itself, and how.
@@ -236,6 +245,26 @@ extension ControllerStatus {
     /// restore is written, or when it is no longer wanted.
     public var isOwnLimitRestoreWaitingForPower: Bool {
         nativeLimit?.isRestoreWaitingForPower == true
+    }
+
+    /// ``chargeLimitSettlesAt`` while something waits for a read of macOS's
+    /// Charge Limit to be judged: the latest read was not, because power had
+    /// not settled (``NativeLimitStatus/readDeferral``), and Manage charging
+    /// is on (an outside change to notice, the owner's limit to record, a
+    /// value to confirm, a guided calibration, which turning it off ends),
+    /// CellKeeper owes the owner's limit back (a restore), or a calibration
+    /// that ended kept its evidence. Nil otherwise: nothing then gains from
+    /// the settle time ending on time (``ChargeLimitSettleWatch``, D118).
+    /// Nil too for "no limit" while CellKeeper's confirmed limit is 100%
+    /// and nothing it wrote or restored waits: that report already agrees
+    /// with the record, and judging it changes nothing.
+    public var chargeLimitJudgmentDue: TimeInterval? {
+        guard let settlesAt = chargeLimitSettlesAt, let native = nativeLimit, native.readDeferral == .settling else { return nil }
+        let isOwedOrWatched = settings.isManagementEnabled || native.ownerLimit != nil || calibration.isEvidenceRetained
+        let agreesWithRecord = native.reportedLimit == 100 && native.target == 100
+            && native.pendingLimits.isEmpty && !native.isRestoreUnfinished && !native.isRestoreWaitingForPower
+        guard isOwedOrWatched, !agreesWithRecord else { return nil }
+        return settlesAt
     }
 
     /// With macOS's Charge Limit: CellKeeper's limit is in effect and

@@ -72,10 +72,12 @@ public enum NativeChargeLimitReading: Sendable, Equatable {
 ///
 /// Judging: macOS reports its *active* limit, which it clears on battery
 /// power and creates again on plug-in (research note 08, O20). Only a read
-/// taken under ``ChargeLimitReadCondition/settled`` is judged as above.
-/// Otherwise only an active limit that the record accounts for is evidence;
-/// anything else, "no limit" included, records nothing, adopts nothing,
-/// fails nothing and writes nothing, and waits for a read that is judged.
+/// that the controller's ``ChargeLimitReadGate`` finds
+/// ``ChargeLimitReadCondition/settled`` once it has returned is judged as
+/// above: power evidence must bracket the read (D118). Otherwise only an
+/// active limit that the record accounts for is evidence; anything else,
+/// "no limit" included, records nothing, adopts nothing, fails nothing and
+/// writes nothing, and waits for a read that is judged.
 ///
 /// The backend is an actor, but its operations contain suspension points.
 /// The controller serialises all calls into it, which the record logic
@@ -194,9 +196,12 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     private var lastRestoredLimit: Int?
     /// Unreadable records discarded at the user's request.
     private var recordsDiscarded = 0
-    /// Whether reads can be judged now, as the controller last said
-    /// (``noteChargeLimitReadCondition(_:)``). Settled until it says
-    /// otherwise, so a backend used on its own keeps the usual rules.
+    /// What reads are judged by, as the controller last said
+    /// (``noteChargeLimitReadGate(_:)``). Settled, with no evidence, until it
+    /// says otherwise, so a backend used on its own keeps the usual rules.
+    private var readGate = ChargeLimitReadGate.fixed(.settled)
+    /// Whether the latest read can be judged, as ``readGate`` found once it
+    /// returned (D118): what every caller of ``read()`` judges it by.
     private var readCondition = ChargeLimitReadCondition.settled
     /// Why the last read was not judged (``NativeLimitStatus/readDeferral``).
     private var lastReadDeferral: ChargeLimitReadCondition?
@@ -470,8 +475,15 @@ public actor NativeChargeLimitBackend: ChargingBackend {
 
     // `async`, as the requirement is: a synchronous one would lose to the
     // protocol's default in direct calls from asynchronous code.
+    public func noteChargeLimitReadGate(_ gate: ChargeLimitReadGate) async {
+        readGate = gate
+        readCondition = gate.condition
+    }
+
+    /// Judges every read by `condition`, with no evidence
+    /// (``ChargeLimitReadGate/fixed(_:)``): for a backend used on its own.
     public func noteChargeLimitReadCondition(_ condition: ChargeLimitReadCondition) async {
-        readCondition = condition
+        await noteChargeLimitReadGate(.fixed(condition))
     }
 
     /// ``ReportedModeOrigin/cellKeeper`` when the value last reported is one
@@ -682,6 +694,18 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             throw BackendError.unavailable("CellKeeper's record of your own Charge Limit cannot be read, so it does not know what to restore.")
         case .owned(var owned):
             let current = try? await read()
+            if current == nil, !readCondition.isJudged {
+                // A read that failed and could not have been judged either
+                // (on battery power, before power settled, or across a sleep
+                // or an unplug, D118) says nothing about the limit, which
+                // may have been changed meanwhile: nothing is written over
+                // it. Only a read that failed on settled power, with its
+                // evidence intact, lets the restore below go ahead without
+                // one. It waits for power as an unjudged read does (D119).
+                lastReadDeferral = readCondition
+                isRestoreWaitingForPower = !owned.isRestoring
+                return .deferred
+            }
             if let current, !readCondition.isJudged {
                 // As in `currentMode()`: an active limit the record accounts
                 // for, or the user's own at first contact, is evidence now;
@@ -727,8 +751,8 @@ public actor NativeChargeLimitBackend: ChargingBackend {
                 // A record from an earlier session is restored only once the
                 // limit has been read: someone may have changed it since, and
                 // writing blind could overwrite their choice. In this session
-                // the restore goes ahead without a read; only the read-back
-                // afterwards can confirm it.
+                // the restore goes ahead without a read, on settled power
+                // (above); only the read-back afterwards can confirm it.
                 throw BackendError.operationFailed("macOS's Charge Limit could not be read, so CellKeeper waits to restore the limit recorded in an earlier session until it can check it first.")
             }
             // Mark the restore as in progress, so a later reading of the
@@ -793,8 +817,20 @@ public actor NativeChargeLimitBackend: ChargingBackend {
 
     private func read() async throws -> NativeChargeLimitReading {
         lastReadAt = now()
+        let outcome: Result<NativeChargeLimitReading, any Error>
         do {
-            let reading = try await reader.readChargeLimit()
+            outcome = .success(try await reader.readChargeLimit())
+        } catch {
+            outcome = .failure(error)
+        }
+        // The one place a read's condition is decided, after the read,
+        // whether it returned a report or failed (D118): whatever was known
+        // before it says nothing about a read that ran across a sleep or an
+        // unplug, and a failed one that did must still restart the settle
+        // time, so that nothing judges its missing report.
+        readCondition = await readGate.conditionAfterRead()
+        switch outcome {
+        case .success(let reading):
             lastReading = reading
             if case .unrecognized(let detail) = reading {
                 lastReadProblem = "unrecognised report (\(detail))"
@@ -809,7 +845,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
                 lastReadDeferral = readCondition.isJudged ? nil : readCondition
             }
             return reading
-        } catch {
+        case .failure(let error):
             lastReading = nil
             lastReadDeferral = nil
             lastReadProblem = String(describing: error)

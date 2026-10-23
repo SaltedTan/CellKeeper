@@ -32,7 +32,8 @@ struct PowerRig {
             settings: settings,
             adoptionMarkerStore: store,
             now: { clock.now },
-            uptime: { clock.uptime }
+            uptime: { clock.uptime },
+            awakeUptime: { clock.awakeUptime }
         )
     }
 
