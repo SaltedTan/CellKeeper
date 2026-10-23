@@ -200,6 +200,9 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     private var readCondition = ChargeLimitReadCondition.settled
     /// Why the last read was not judged (``NativeLimitStatus/readDeferral``).
     private var lastReadDeferral: ChargeLimitReadCondition?
+    /// True while a restore was asked for, could not be judged, and wrote
+    /// nothing (``NativeLimitStatus/isRestoreWaitingForPower``).
+    private var isRestoreWaitingForPower = false
 
     /// Thrown by ``confirm(_:expected:owned:)`` when a read-back that cannot
     /// be judged does not show the value written.
@@ -456,6 +459,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         status.lastRestoredLimit = lastRestoredLimit
         status.recordsDiscarded = recordsDiscarded
         status.readDeferral = lastReadDeferral
+        status.isRestoreWaitingForPower = isRestoreWaitingForPower
         return status
     }
 
@@ -481,6 +485,13 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     /// capability check looks again (for example after the user created it).
     public func recheckAvailability() async {
         shortcutConfirmedAtUptime = nil
+    }
+
+    /// Management was turned on again, or another release the restore was
+    /// asked for is gone, so a restore that waited for power and wrote
+    /// nothing is no longer wanted (D116, D119).
+    public func cancelWaitingRestore() {
+        isRestoreWaitingForPower = false
     }
 
     /// The user confirmed that their own Charge Limit is 100%, so a report of
@@ -565,12 +576,14 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         record = .none
         hasReconciledRecord = true
         recordsDiscarded += 1
+        isRestoreWaitingForPower = false
         CellKeeperLog.safety.notice("The unreadable record of the user's Charge Limit was discarded at the user's request")
     }
 
     // MARK: - Changes
 
     private func setLimit(_ percent: Int) async throws -> ControlOutcome {
+        isRestoreWaitingForPower = false
         guard Self.supportedLimits.contains(percent) else {
             throw BackendError.unsupportedMode(.nativeLimit(percent: percent))
         }
@@ -685,6 +698,10 @@ public actor NativeChargeLimitBackend: ChargingBackend {
                 case .noLimitConsistent, .none:
                     guard isOwnAtFirstContact else {
                         lastReadDeferral = readCondition
+                        // A restore written earlier (still owed its
+                        // read-back) is `isRestoreUnfinished`, not waiting:
+                        // only one of the two describes it (D119).
+                        isRestoreWaitingForPower = !owned.isRestoring
                         return .deferred
                     }
                 }
@@ -719,6 +736,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
             // goes ahead even if this cannot be stored.
             owned.isRestoring = true
             saveRecordBestEffort(owned)
+            isRestoreWaitingForPower = false
             try await runShortcut(owned.ownerLimit)
             // A mismatch names the user's own limit, the value the read-back
             // should show, rather than normal charging.
@@ -877,6 +895,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
         )
         adoptedChange = marker.change(fromEarlierSession: false)
         isLastReportedStateOwn = false
+        isRestoreWaitingForPower = false
         // Nothing to restore from now on, even if the marker cannot be
         // stored: never write over the change in this session.
         record = .none
@@ -905,6 +924,7 @@ public actor NativeChargeLimitBackend: ChargingBackend {
     private func clearRecord(_ owned: OwnershipRecord, reason: String) {
         restoresConfirmed += 1
         lastRestoredLimit = owned.ownerLimit
+        isRestoreWaitingForPower = false
         do {
             try store.remove()
         } catch {

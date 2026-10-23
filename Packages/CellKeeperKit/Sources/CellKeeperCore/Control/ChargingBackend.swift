@@ -339,6 +339,13 @@ public struct NativeLimitStatus: Sendable, Equatable {
     /// CellKeeper started restoring the user's limit and has not confirmed
     /// it, possibly in an earlier session.
     public var isRestoreUnfinished: Bool
+    /// CellKeeper was asked to give the user's limit back and wrote nothing,
+    /// because the read of macOS's Charge Limit could not be judged: the
+    /// restore waits for a judged read, on power. Never true together with
+    /// ``isRestoreUnfinished``: a restore that was written is unfinished
+    /// alone. Cleared once the restore is written, confirmed, or no longer
+    /// wanted (``NativeChargeLimitBackend/cancelWaitingRestore()``).
+    public var isRestoreWaitingForPower: Bool
     /// An outside change was adopted but its marker could not be stored
     /// yet, so the record it replaced may still be on disk. Until it is
     /// stored, CellKeeper does not switch backend or turn management on.
@@ -376,6 +383,7 @@ public struct NativeLimitStatus: Sendable, Equatable {
         isRecordUnreadable: Bool = false,
         needsNoLimitConfirmation: Bool = false,
         isRestoreUnfinished: Bool = false,
+        isRestoreWaitingForPower: Bool = false,
         isAdoptionUnsaved: Bool = false,
         isShortcutFound: Bool? = nil,
         restoresConfirmed: Int = 0,
@@ -392,6 +400,7 @@ public struct NativeLimitStatus: Sendable, Equatable {
         self.isRecordUnreadable = isRecordUnreadable
         self.needsNoLimitConfirmation = needsNoLimitConfirmation
         self.isRestoreUnfinished = isRestoreUnfinished
+        self.isRestoreWaitingForPower = isRestoreWaitingForPower
         self.isAdoptionUnsaved = isAdoptionUnsaved
         self.isShortcutFound = isShortcutFound
         self.restoresConfirmed = restoresConfirmed

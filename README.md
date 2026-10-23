@@ -109,7 +109,11 @@ What happens:
   switch backend, quit, or if anything fails, unless you have changed the
   limit yourself meanwhile (see below). If it cannot confirm the
   restore when quitting, it tells you which value to set, and it tries
-  again the next time it starts.
+  again the next time it starts. On battery power it waits: once your Mac
+  has been on power for a minute, it checks macOS's Charge Limit and gives
+  the recorded limit back, keeping a change you made meanwhile (macOS
+  applies its Charge Limit only on power); the menu and Settings say that
+  it is waiting.
 - **Every change is confirmed** by reading the setting back from macOS.
   The read uses `pmset -g battlimit`, an undocumented, read-only report.
   If CellKeeper cannot read or recognise it, it sets no new limit; it still

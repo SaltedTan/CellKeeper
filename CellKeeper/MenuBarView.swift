@@ -215,6 +215,10 @@ private struct NativeLimitSummary: View {
                 if let problem = NativeLimitWording.restoreProblem(status) {
                     Text(problem)
                         .foregroundStyle(.criticalText)
+                } else if let owner = native?.ownerLimit, status.isOwnLimitRestoreWaitingForPower {
+                    // Nothing was written: the restore waits for a judged
+                    // read, on power (D116, D119).
+                    Text(NativeLimitWording.restoreWaitingForPower(owner))
                 } else if let owner = native?.ownerLimit {
                     Text("Set by CellKeeper. Your own limit, \(Format.chargeLimit(owner)), is restored when CellKeeper stops managing it, quits, or fails.")
                 } else {

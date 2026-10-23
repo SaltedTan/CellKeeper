@@ -397,6 +397,7 @@ public enum DiagnosticsReport {
             var flags: [String] = []
             if native.needsNoLimitConfirmation { flags.append("needs no-limit confirmation") }
             if native.isRestoreUnfinished { flags.append("restore unfinished") }
+            if native.isRestoreWaitingForPower { flags.append("restore waits for power") }
             if native.isAdoptionUnsaved { flags.append("adoption marker unsaved") }
             field("Flags", "\(flags.isEmpty ? "none" : flags.joined(separator: ", "))")
             if let adopted = status.adoptedChange {
