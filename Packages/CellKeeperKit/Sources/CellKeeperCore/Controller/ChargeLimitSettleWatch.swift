@@ -25,8 +25,10 @@ import Foundation
 /// unknown, Manage charging off with nothing owed), at sleep and at quit
 /// (``stop()``), and in any case ``cap`` after it began. After a capped
 /// episode the app holds nothing for ``rest``; a wait that goes on then
-/// begins another, so a wait that never ends holds the activity at most
-/// half the time, and one that a long suspension pushed past the cap still
+/// begins another, so a wait that never ends holds the activity about half
+/// the time (more only by however late the cap's deadline is handled: an
+/// episode ends when the app sees its cap), and one that a long suspension
+/// pushed past the cap still
 /// gets an on-time check later, without needing a sleep or a relaunch.
 /// Settling is a state of AC power only, so the activity is never held on
 /// battery power.
@@ -42,8 +44,8 @@ public struct ChargeLimitSettleWatch: Sendable, Equatable {
     /// on AC power, then ``rest``.
     public static let cap: TimeInterval = 5 * 60
     /// How long after a capped episode no other begins. As long as the cap,
-    /// so a wait that never ends keeps the app from being napped at most half
-    /// the time; then a wait that goes on begins another episode, since one
+    /// so a wait that never ends keeps the app from being napped about half
+    /// the time (more only by a late handling of the cap); then a wait that goes on begins another episode, since one
     /// pushed past the cap (an awake suspension, review r3 of #113) would
     /// otherwise never be judged while checks came further apart than
     /// ``ChargeLimitReadGate/maximumSpan``.

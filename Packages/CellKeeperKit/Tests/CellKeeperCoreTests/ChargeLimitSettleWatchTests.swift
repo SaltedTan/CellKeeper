@@ -408,7 +408,7 @@ struct ChargeLimitSettleWatchTests {
         #expect(watch.followUpAt == 1_000 + cap + rest + 61)
     }
 
-    @Test("A wait that never ends keeps the activity at most half the time")
+    @Test("A wait that never ends, its deadlines handled on time, keeps the activity about half the time")
     func neverEndingWaitHalfTheTime() {
         var watch = ChargeLimitSettleWatch()
         var held: TimeInterval = 0
