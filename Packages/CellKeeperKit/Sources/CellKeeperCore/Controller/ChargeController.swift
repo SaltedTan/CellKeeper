@@ -1557,20 +1557,32 @@ public actor ChargeController {
         if pendingBackend != nil, currentMode == .normal, !(nativeLimit?.hasUnresolvedOwnership ?? false), !isAdoptionUnsaved {
             await completePendingSwitch()
         } else {
-            await clearWaitingRestore(releaseReason: releaseReason)
+            await clearWaitingRestore(after: newDecision)
         }
     }
 
     /// Clears a restore that waited for power and wrote nothing once
-    /// CellKeeper no longer wants its restriction released: management is on
-    /// and no release is due (``ReleaseReason``: no backend switch pending,
-    /// no restore unfinished, no state unverified). Nothing was written, so
-    /// the state must not outlive the wish, as when a pending backend switch
-    /// is cancelled (D116, D119).
-    private func clearWaitingRestore(releaseReason: ReleaseReason?) async {
-        guard settings.isManagementEnabled, releaseReason == nil, let native = backend as? NativeChargeLimitBackend else { return }
+    /// CellKeeper no longer wants the user's own limit back: management is
+    /// on, no backend switch is pending, and the decision neither wants nor
+    /// requests `.normal` (``wantsOwnLimitBack(_:)``). Nothing was written,
+    /// so the state must not outlive the wish, as when a pending backend
+    /// switch is cancelled (D116, D119).
+    private func clearWaitingRestore(after decision: PolicyDecision) async {
+        guard settings.isManagementEnabled, pendingBackend == nil, !Self.wantsOwnLimitBack(decision),
+              let native = backend as? NativeChargeLimitBackend
+        else { return }
         await native.cancelWaitingRestore()
         nativeLimit = await native.nativeLimitStatus()
+    }
+
+    /// Whether `decision` still asks for the user's own limit, `.normal`
+    /// with macOS's Charge Limit: it wants it (a release that is due, or one
+    /// of the policy's other fail-safes with management on, such as a limit
+    /// macOS's Charge Limit cannot set or a missing battery), or it requests
+    /// it while still wanting a limit of CellKeeper's (the fail-safe of a
+    /// faulted backend). A restore waiting for power stays wanted then (D119).
+    static func wantsOwnLimitBack(_ decision: PolicyDecision) -> Bool {
+        decision.desiredMode == .normal || decision.action.requestedMode == .normal
     }
 
     /// Reads the backend's mode, counting failures and detecting changes that

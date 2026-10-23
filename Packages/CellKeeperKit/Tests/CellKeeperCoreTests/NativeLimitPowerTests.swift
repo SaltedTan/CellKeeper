@@ -771,6 +771,25 @@ struct DeferredRestoreReviewTests {
         expectRestoreStateIsConsistent(retried.nativeLimit)
     }
 
+    @Test("The wait stays while a decision still wants or requests the user's own limit, and goes only when it asks for CellKeeper's")
+    func waitFollowsTheDecision() {
+        func decision(_ desired: ChargeControlMode, _ action: ChargingAction, _ reason: DecisionReason) -> PolicyDecision {
+            PolicyDecision(state: .osEnforcedLimit, desiredMode: desired, action: action, reason: reason, notes: [], memory: PolicyMemory(), overrideEnded: nil)
+        }
+        // A release that is due, and the policy's other fail-safes with
+        // management on: the restore is still wanted.
+        #expect(ChargeController.wantsOwnLimitBack(decision(.normal, .enableCharging, .releaseRequired(.stateUnverified))))
+        #expect(ChargeController.wantsOwnLimitBack(decision(.normal, .noAction, .nativeLimitUnsupported(limit: 82, steps: [80, 85, 90, 95, 100]))))
+        #expect(ChargeController.wantsOwnLimitBack(decision(.normal, .enableCharging, .batteryNotPresent)))
+        // A faulted backend's fail-safe requests it while wanting
+        // CellKeeper's limit.
+        #expect(ChargeController.wantsOwnLimitBack(decision(.nativeLimit(percent: 85), .enableCharging, .nativeLimitActive(limit: 85))))
+        // CellKeeper's own limit, set, kept or refused: not wanted any more.
+        #expect(!ChargeController.wantsOwnLimitBack(decision(.nativeLimit(percent: 85), .noAction, .nativeLimitActive(limit: 85))))
+        #expect(!ChargeController.wantsOwnLimitBack(decision(.nativeLimit(percent: 90), .setNativeLimit(90), .nativeLimitActive(limit: 90))))
+        #expect(!ChargeController.wantsOwnLimitBack(decision(.nativeLimit(percent: 100), .refuse(.backendFaulted), .nativeFullCharge)))
+    }
+
     @Test("A new limit request clears an unwritten restore even if the request itself must wait")
     func newLimitRequestClearsWait() async throws {
         let system = FakeChargeLimitSystem(reading: .limit(80))
