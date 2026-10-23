@@ -31,7 +31,10 @@ import Foundation
 /// its readings of the power source, so it cannot fit between readings
 /// either: one of them shows battery power, or the gap itself starts the
 /// settle time again, and the read waits until the Mac has been on power
-/// for the settle time.
+/// for the settle time. So that checks App Nap delays cannot keep that
+/// time from ever ending, the app keeps itself from being napped while a
+/// read waits for it, and checks again as it ends
+/// (``ChargeLimitSettleWatch``).
 ///
 /// A sleep shows in two monotonic clocks read together: one that counts
 /// sleep (`ContinuousClock`) and one that does not (`SuspendingClock`).

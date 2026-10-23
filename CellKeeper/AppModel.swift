@@ -227,6 +227,15 @@ final class AppModel {
     /// The pending re-read after a wake; cancelled if the Mac announces
     /// sleep again first.
     @ObservationIgnored private var postWakeReread: Task<Void, Never>?
+    /// While a read of macOS's Charge Limit waits for power to settle: the
+    /// activity that keeps the app from being napped, and the check just
+    /// after the settle time ends (D118).
+    @ObservationIgnored private var settleWatch = ChargeLimitSettleWatch()
+    @ObservationIgnored private let settleActivity = ChargeLimitSettleActivity()
+    /// The pending wake-up at `settleWatch`'s next deadline, and when it is
+    /// due; cancelled at sleep and at quit.
+    @ObservationIgnored private var settleDeadline: Task<Void, Never>?
+    @ObservationIgnored private var settleDeadlineAt: TimeInterval?
     /// Notification observers, each with the center it was added to, so
     /// that stopping removes them all.
     @ObservationIgnored private var observers: [(center: NotificationCenter, token: any NSObjectProtocol)] = []
@@ -385,8 +394,53 @@ final class AppModel {
     private func willSleep() {
         postWakeReread?.cancel()
         postWakeReread = nil
+        settleWatch.stop()
+        applySettleWatch()
         forwardToInProcessHelpers { await $0.systemWillSleep() }
         send(.evaluate(.willSleep))
+    }
+
+    /// Follows a status while a read of macOS's Charge Limit waits for power
+    /// to settle (``ChargeLimitSettleWatch``, D118). The status of the
+    /// evaluation before sleep begins nothing: a wake starts the settle time
+    /// again.
+    private func noteChargeLimitSettle(_ status: ControllerStatus, trigger: EvaluationTrigger) {
+        guard !isTerminating else { return }
+        if trigger == .willSleep {
+            settleWatch.stop()
+        } else {
+            settleWatch.observe(judgmentDue: status.chargeLimitJudgmentDue, at: controller.monotonicNow)
+        }
+        applySettleWatch()
+    }
+
+    /// Holds the activity while `settleWatch` says so, and keeps one
+    /// wake-up pending for its next deadline.
+    private func applySettleWatch() {
+        settleActivity.setHolding(settleWatch.isHoldingActivity)
+        let deadline = settleWatch.nextDeadline
+        guard deadline != settleDeadlineAt else { return }
+        settleDeadline?.cancel()
+        settleDeadlineAt = deadline
+        settleDeadline = deadline.map { due in
+            let delay = max(0, due - controller.monotonicNow)
+            return Task { [weak self] in
+                try? await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled else { return }
+                self?.settleDeadlineReached()
+            }
+        }
+    }
+
+    private func settleDeadlineReached() {
+        settleDeadline = nil
+        settleDeadlineAt = nil
+        let isFollowUpDue = settleWatch.deadlineReached(at: controller.monotonicNow)
+        applySettleWatch()
+        // An early periodic check: everything treats it as one.
+        if isFollowUpDue {
+            send(.evaluate(.periodic))
+        }
     }
 
     /// Notes the in-process helper of a Simulated helper backend, so it is
@@ -434,6 +488,11 @@ final class AppModel {
         for task in tasks { task.cancel() }
         tasks.removeAll()
         postWakeReread?.cancel()
+        settleWatch.stop()
+        settleDeadline?.cancel()
+        settleDeadline = nil
+        settleDeadlineAt = nil
+        settleActivity.setHolding(false)
         for observer in observers {
             observer.center.removeObserver(observer.token)
         }
@@ -1074,6 +1133,7 @@ final class AppModel {
         // Plans at once and posts later; never waits.
         if let status {
             notifier.observe(status, trigger: command.trigger)
+            noteChargeLimitSettle(status, trigger: command.trigger)
             firstStatus.provide(true)
             notePowerFlow {
                 $0.takeStatus(snapshot: status.snapshot, evaluatedAt: status.lastEvaluation, readBegan: readBegan)

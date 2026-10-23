@@ -106,7 +106,10 @@ import os
 ///   operation, and the settle time starts again, as it also does when the
 ///   clocks show a sleep since the last reading of the power source, or
 ///   more than ``ChargeLimitReadGate/maximumSpan`` since it. A restore
-///   takes a reading of its own first.
+///   takes a reading of its own first. While a read waits for the settle
+///   time, the status says when it ends
+///   (``ControllerStatus/chargeLimitSettlesAt``), so the app can check
+///   again then, on time (``ChargeLimitSettleWatch``).
 public actor ChargeController {
     public static let maximumConsecutiveFailures = 3
     /// How long after CellKeeper sees external power begin (a plug-in, a
@@ -403,8 +406,15 @@ public actor ChargeController {
             weeklyFullChargeStoreProblem: weeklyStoreProblem,
             lastEndedOverride: lastEndedOverride,
             overridesEnded: overridesEnded,
-            calibration: calibration.status
+            calibration: calibration.status,
+            chargeLimitSettlesAt: chargeLimitCondition == .settling ? externalPowerSinceUptime.map { $0 + chargeLimitSettleTime } : nil
         )
+    }
+
+    /// The controller's monotonic clock now, which counts sleep: what
+    /// ``ControllerStatus/chargeLimitSettlesAt`` is measured on.
+    public nonisolated var monotonicNow: TimeInterval {
+        uptime()
     }
 
     // MARK: - Commands
