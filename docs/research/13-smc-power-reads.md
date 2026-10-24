@@ -4,7 +4,8 @@
 - **Status:** Design approved. Step 3 is built (PR #109, architecture
   D115): everything above the reader, switched off by default
   (`CELLKEEPER_SMC_READER = NO`), with a placeholder reader that reads
-  nothing. The owner's reader (§7 step 4) is pending, and so are O1–O3.
+  nothing. The owner wrote the reader (§7 step 4) on 2026-10-24; it is
+  untried until O3, and O1–O3 are pending.
   GPT approved the design in design
   review r3, and the owner confirmed §5 (a)–(c) on 2026-10-21. On 2026-10-21 the owner found
   the menu's power flow (D114), which updates once a minute, "not too
@@ -196,6 +197,14 @@ decoded its bytes. The file is not committed.
     this Mac. It is like note 11's exception for `CHIE`.
   - **(b) The sandbox exception and its scope** (§6.6).
   - **(c) The reader's contract** (§6.1).
+- **Extended by the owner on 2026-10-24, with the reader (§7 step 4):** the
+  reader may also use, as facts, the AppleSMC interface's wire-level facts
+  that note 11's exception names (the parameter block's fields, sizes and
+  offsets, and the open type, selector, command and result values) from
+  OSI-licensed projects. Note 11 §3.2 records only some of them and no
+  layout, so the reader's header cites their source and licence. The
+  reader is still written independently, with no code, comments, other
+  text or structure taken (CONTRIBUTING §1).
 
 ## 6. Design
 
@@ -237,8 +246,9 @@ build switch on (§6.6), conforms to it:**
   - No root or helper; it runs in the app, in the sandbox.
   - No logging of values, and no identifiers read.
   - It is written from the owner's own knowledge, Apple's public IOKit
-    documentation and the interface facts in note 11 §3.2. No code is
-    taken from any project.
+    documentation, the interface facts in note 11 §3.2 and the wire-level
+    facts §5 allows since 2026-10-24, cited in its header with their
+    source and licence. No code is taken from any project.
 - **Provenance.** Its header says the owner wrote it.
 
 **Review acceptance.** GPT and the lead read the complete reader file and

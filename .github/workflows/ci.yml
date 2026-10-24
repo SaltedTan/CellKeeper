@@ -205,9 +205,8 @@ jobs:
           fi
 
       # A second Release build with the SMC reader compiled in, as the owner
-      # will build it (note 13 §6.6). Its reader is the placeholder, which
-      # reads nothing, until the owner's replaces it; the app is checked,
-      # never run. On every toolchain, like the default build: the switch
+      # will build it (note 13 §6.6), with the owner's reader (note 13
+      # §6.1); the app is checked, never run. On every toolchain, like the default build: the switch
       # changes which files compile and which entitlements are signed, which
       # each Xcode must handle.
       - name: Build CellKeeper with the SMC reader (Release, ad-hoc signed)

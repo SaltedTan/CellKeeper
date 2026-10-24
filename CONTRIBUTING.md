@@ -56,7 +56,13 @@ or other text is copied, and no project's implementation structure (its
 files, types, functions or control flow). The reader that opens the SMC's
 user client and reads these keys is the owner's own, written against
 CellKeeper's interface; contributions add no SMC client code (note 11
-§2.2). Not covered: AlDente or any other proprietary or source-available
+§2.2). On 2026-10-24 the owner extended this exception to that reader: it
+may also use, as facts, the AppleSMC interface's wire-level facts that the
+2026-10-20 exception names (the parameter block's fields, sizes and
+offsets, and the open type, selector, command and result values), cited
+with their source and licence in the reader's header. The reader is still
+written independently: no code, comments, other text or implementation
+structure is taken. Not covered: AlDente or any other proprietary or source-available
 tool, anything obtained from binaries, and any other key or mechanism
 (each needs its own owner decision). This is a project rule, not a legal
 opinion or a licence-compatibility review. See

@@ -11,7 +11,7 @@
 // The power flow's SMC reader (docs/research/13-smc-power-reads.md §6.6),
 // off by default. YES compiles CellKeeper/SMC/SMCPowerReader.swift and signs
 // the app with Config/CellKeeper-SMC.entitlements, which adds a sandbox
-// exception for the SMC's user client. Until the owner's reader replaces
-// the placeholder, it reads nothing. One-off builds can instead pass
+// exception for the SMC's user client. The reader is the owner's (note 13
+// §6.1), untried until note 13's O3 trial. One-off builds can instead pass
 // CELLKEEPER_SMC_READER=YES on the xcodebuild command line.
 // CELLKEEPER_SMC_READER = YES
