@@ -18,12 +18,18 @@
 // examples that the owner used here (the allowlist set, the type-string
 // conversion, the per-key result loop, copying bytes out of a tuple). It gave
 // no SMC interface details and wrote none of the IOKit calls, constants or the
-// parameter block. It drafted this header at the owner's request.
+// parameter block. It drafted this header at the owner's request, and added
+// the `@preconcurrency import Darwin` line below so the file builds with
+// Xcode 16.0.
 //
 // AppleSMC is a private, undocumented interface. This reader performs only
 // key-info and key-read operations; it never enumerates or writes SMC keys.
 
 import CellKeeperCore
+// The macOS 15.0 SDK (Xcode 16.0) declares `mach_task_self_` without the
+// concurrency annotation later SDKs give it, so Swift 6 rejects reading it;
+// @preconcurrency accepts it there and changes nothing on later SDKs.
+@preconcurrency import Darwin
 import IOKit
 
 struct SMCPowerReader: SMCPowerReading {
