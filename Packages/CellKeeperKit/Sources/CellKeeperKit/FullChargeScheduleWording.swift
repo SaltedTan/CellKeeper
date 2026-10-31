@@ -142,6 +142,31 @@ public enum FullChargeScheduleWording {
         return "At the start, CellKeeper requests a temporary full charge: it asks for none of its own restrictions, unless a safety rule such as the temperature pause still pauses charging. \(duration) CellKeeper then requests its \(limit)% limit again at its next check; sleep, or a request that fails or is refused, can delay that.\(deferring)"
     }
 
+    /// One sentence or two for Settings' "Full-charge schedules" footer:
+    /// what a scheduled full charge does with the backend in charge, chosen
+    /// by the same branches as ``explanation(for:end:timeZone:locale:calendar:now:)``,
+    /// which keeps the complete account under "How scheduled charging
+    /// works". Like the explanation it says "requests", never that the
+    /// battery reaches 100% or when the limit is back; an unavailable
+    /// backend keeps its actual reason, and the simulated backend keeps the
+    /// deferral while macOS's Charge Limit is on.
+    public static func summary(for status: ControllerStatus) -> String {
+        let capabilities = status.capabilities
+        if case .unavailable(let reason) = capabilities.availability {
+            return "\(status.backend.displayName) is unavailable (\(reason)), so a scheduled full charge changes nothing."
+        }
+        if capabilities.isEnforcedByMacOS {
+            return "Requests a 100% macOS Charge Limit at the start. Returning to your limit can be delayed by sleep or a refused request."
+        }
+        let deferring = capabilities.macOSChargeLimit?.isLimiting == true
+            ? " While macOS's Charge Limit is on, it stays in charge and the full charge has no effect."
+            : ""
+        if capabilities.availability == .simulated {
+            return "Simulated — scheduled charging leaves your Mac's charging unchanged.\(deferring)"
+        }
+        return "Requests a temporary full charge at the start; safety rules such as the temperature pause still apply. Returning to your limit can be delayed by sleep or a failed or refused request.\(deferring)"
+    }
+
     /// Said with every schedule: when it can start, and what happens if it
     /// cannot.
     public static let startConditions = "Your Mac must be awake, with CellKeeper running, for the full charge to start; CellKeeper cannot wake your Mac or open itself after a restart. If the start passes while it cannot start, it starts at CellKeeper's next check before the end; otherwise the menu says the window passed. Unplugging ends it."
