@@ -405,6 +405,11 @@ private struct ControlQualifier: View {
 /// on, like "Charge to 100% once"; cancelling never does. What a schedule
 /// does with the backend in charge is under "How scheduled charging works".
 private struct ScheduledFullChargeSection: View {
+    /// Why Schedule Full Charge and Save Weekly Full Charge are disabled
+    /// while Manage charging is off: the same switch that disables their
+    /// editors, said beside each button, outside the disabled group.
+    static let managementOffReason = "Turn on Manage charging to schedule a full charge."
+
     let model: AppModel
     @State private var start: Date
     @State private var end: Date
@@ -444,10 +449,11 @@ private struct ScheduledFullChargeSection: View {
                     DatePicker("Start", selection: $start, displayedComponents: [.date, .hourAndMinute])
                     DatePicker("End", selection: $end, in: start.addingTimeInterval(FullChargeSchedule.minimumWindow)...start.addingTimeInterval(FullChargeSchedule.maximumWindow), displayedComponents: [.date, .hourAndMinute])
                     Button("Schedule Full Charge") { model.setFullChargeSchedule(start: start, end: end) }
-                        .disabledReasonHint(isCalibrating ? CalibrationWording.inProgress : nil)
+                        .disabledReasonHint(!isManaged ? Self.managementOffReason : isCalibrating ? CalibrationWording.inProgress : nil)
                         .leadingInDisclosure()
                     if isCalibrating {
                         DisabledReason(text: CalibrationWording.inProgress)
+                            .leadingInDisclosure()
                     }
                 }
                 .disabled(!isManaged || isCalibrating)
@@ -455,6 +461,10 @@ private struct ScheduledFullChargeSection: View {
                     let earliest = newStart.addingTimeInterval(FullChargeSchedule.minimumWindow)
                     let latest = newStart.addingTimeInterval(FullChargeSchedule.maximumWindow)
                     end = min(max(end, earliest), latest)
+                }
+                if !isManaged {
+                    DisabledReason(text: Self.managementOffReason)
+                        .leadingInDisclosure()
                 }
                 Text("Choose a start within \(Int(FullChargeSchedule.maximumLeadTime / 86_400)) days and a 1–\(Int(FullChargeSchedule.maximumWindow / 3600)) hour window. Your Mac must be awake with CellKeeper running; unplugging ends the full charge.")
                     .disclosureParagraph()
@@ -494,6 +504,7 @@ private struct WeeklyFullChargeSection: View {
         let status = model.status
         let now = status?.describedAt ?? Date()
         let weekly = status?.weeklyFullCharge
+        let isManaged = model.settings.isManagementEnabled
         Group {
             if let weekly {
                 LabeledContent("Weekly full charge", value: WeeklyFullChargeWording.summary(weekly.pattern))
@@ -554,13 +565,18 @@ private struct WeeklyFullChargeSection: View {
                     Button(weekly == nil ? "Save Weekly Full Charge" : "Save Changes") { model.setWeeklyFullCharge(draft.pattern) }
                         .disabled(!draft.pattern.issues.isEmpty || draft.pattern == weekly?.pattern || status?.calibration.isInProgress == true)
                         .help(WeeklyFullChargeWording.saveHelp)
-                        .disabledReasonHint(status?.calibration.isInProgress == true ? CalibrationWording.inProgress : nil, help: WeeklyFullChargeWording.saveHelp)
+                        .disabledReasonHint(!isManaged ? ScheduledFullChargeSection.managementOffReason : status?.calibration.isInProgress == true ? CalibrationWording.inProgress : nil, help: WeeklyFullChargeWording.saveHelp)
                         .leadingInDisclosure()
                     if status?.calibration.isInProgress == true {
                         DisabledReason(text: "\(CalibrationWording.inProgress) A weekly full charge that falls due meanwhile is skipped; the schedule continues afterwards.")
+                            .leadingInDisclosure()
                     }
                 }
-                .disabled(!model.settings.isManagementEnabled)
+                .disabled(!isManaged)
+                if !isManaged {
+                    DisabledReason(text: ScheduledFullChargeSection.managementOffReason)
+                        .leadingInDisclosure()
+                }
                 Text("Requests a temporary full charge on the selected days while your Mac is awake and CellKeeper is running. Times follow your Mac's time zone; unplugging ends it.")
                     .disclosureParagraph()
             }
@@ -1346,8 +1362,9 @@ private extension View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// A button inside a disclosure's content, which a grouped Form would
-    /// otherwise centre, at the leading edge like the rows around it.
+    /// A button, or the reason it is disabled, inside a disclosure's
+    /// content, which a grouped Form would otherwise centre, at the leading
+    /// edge like the rows around it.
     func leadingInDisclosure() -> some View {
         frame(maxWidth: .infinity, alignment: .leading)
     }
