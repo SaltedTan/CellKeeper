@@ -16,4 +16,5 @@
 - [ ] No hardware writes, privileged operations, or SMC access are added (or: the change follows `docs/safety.md` and has been discussed in an issue first)
 - [ ] No serial numbers, identifiers, credentials, signing material, or build products are committed
 - [ ] This is my own work (or properly attributed and licence-compatible), not code copied from another battery application
+- [ ] Interface changes follow `docs/design.md`, keep warnings that ask the user to act visible, and were rendered in light and dark
 - [ ] Docs updated if behaviour, safety properties, or setup changed
