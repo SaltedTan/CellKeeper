@@ -144,12 +144,29 @@ with the CellKeeper status style, and says why below it and as its hint
 1× and 2×; the status item itself was not run, because a calibration was
 running on the owner's Mac.
 
+### Follow-up: the redesign moved elements (2026-10-31, D120)
+
+The minimalist redesign (#119, #121) moved elements this review checked
+where they were. In the menu, Power flow, Battery details and Charging
+control (Backend, Policy, Desired mode, Last action; still a heading) are
+now inside a collapsed **Details**, with a new Schedules group; the line
+under the header is plain text in place of the tinted badge (M5); Schedule…
+left the menu. In Settings, Appearance and About became sections of a
+**General** pane, which also holds Notifications (moved from Charging);
+long explanations sit behind disclosures, and the window is 560 × 540
+(G14). The labels, combined rows, headings and warning tones were kept in
+the code and seen only in offscreen renders. No VoiceOver, keyboard or
+Increase Contrast check of the new layout has been done: a fresh one is
+pending on the owner's Mac (issue #89), for the reading order through
+Details and the General pane, rows inside disclosures, the Show percentage
+row, and keyboard focus through Details.
+
 ### For the owner's Mac
 
 With VoiceOver: the slider's value and its 1% steps (M1, M2), the
 announcements of a refused setting and of Copy Diagnostics (G2, G4), the
 weekly Start picker reading the time it shows (W6), a disabled "Charge to
-100% once" or "Discharge Now…" giving its reason as a hint (M14, G9), the
+100% Once" or "Discharge Now…" giving its reason as a hint (M14, G9), the
 Diagnostics rows reading their units in words (G10), and the status item
 reading only its label in the Battery style, once, without the
 percentage a second time (D113). With Full
