@@ -280,8 +280,16 @@ private struct PolicyAttention: View {
 
     var body: some View {
         if decision.state.asksAttention, !Self.isSaidElsewhere(decision.reason) {
+            // Labelled as the policy, as in Details: a pause the backend
+            // refused is still only what the policy asks for, and the last
+            // action's line says what came of it.
             VStack(alignment: .leading, spacing: 2) {
-                Label(decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS), systemImage: "exclamationmark.triangle")
+                LabeledContent {
+                    Text(decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS))
+                } label: {
+                    Label("Policy", systemImage: "exclamationmark.triangle")
+                }
+                .accessibilityElement(children: .combine)
                 Text(status.displayedReason ?? decision.reason.description)
             }
             .foregroundStyle(.warningText)
@@ -910,7 +918,7 @@ private struct ChargingControlDetails: View {
     var body: some View {
         let isApplied = ControlStatement.isPolicyApplied(status)
         let isNative = status.capabilities.isEnforcedByMacOS
-        DisclosureGroup("Charging control") {
+        DisclosureGroup {
             VStack(alignment: .leading, spacing: MenuLayout.lineSpacing) {
                 // The Simulated backend is named by its availability already.
                 LabeledContent("Backend", value: status.backend.displayName == status.capabilities.availability.badgeTitle
@@ -959,6 +967,11 @@ private struct ChargingControlDetails: View {
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, MenuLayout.lineSpacing)
+        } label: {
+            // A heading, as the section's title was before it moved into
+            // Details (D109).
+            Text("Charging control")
+                .accessibilityAddTraits(.isHeader)
         }
     }
 }
@@ -1028,12 +1041,13 @@ extension PolicyNote {
     /// the limit suggests, so the menu shows it under the header: a limit
     /// being confirmed before charging pauses, a native limit kept without
     /// telemetry, a discharge the backend cannot run and one that ended for
-    /// macOS's Charge Limit. The temperature's absence is routine, and a
+    /// macOS's Charge Limit, and temperature protection that cannot act
+    /// without a reading (losing it can end a temperature pause). A
     /// suppressed full charge is said by the full charge's own line.
     fileprivate var asksAttention: Bool {
         switch self {
-        case .confirmingLimit, .nativeLimitKeptWithoutTelemetry, .dischargeUnsupported, .dischargeEndedForMacOSChargeLimit: true
-        case .temperatureUnavailable, .fullChargeSuppressed: false
+        case .confirmingLimit, .nativeLimitKeptWithoutTelemetry, .dischargeUnsupported, .dischargeEndedForMacOSChargeLimit, .temperatureUnavailable: true
+        case .fullChargeSuppressed: false
         }
     }
 
@@ -1041,8 +1055,8 @@ extension PolicyNote {
     /// than information about what CellKeeper is doing.
     fileprivate var isWarning: Bool {
         switch self {
-        case .nativeLimitKeptWithoutTelemetry, .dischargeUnsupported, .dischargeEndedForMacOSChargeLimit: true
-        case .confirmingLimit, .temperatureUnavailable, .fullChargeSuppressed: false
+        case .nativeLimitKeptWithoutTelemetry, .dischargeUnsupported, .dischargeEndedForMacOSChargeLimit, .temperatureUnavailable: true
+        case .confirmingLimit, .fullChargeSuppressed: false
         }
     }
 }
