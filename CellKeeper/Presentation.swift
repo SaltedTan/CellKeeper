@@ -15,15 +15,6 @@ extension ControlAvailability {
         }
     }
 
-    var badgeColor: Color {
-        switch self {
-        case .available: .green
-        case .experimental: .orange
-        case .simulated: .purple
-        case .unavailable: .secondary
-        }
-    }
-
     var explanation: String {
         switch self {
         case .available:
@@ -57,7 +48,9 @@ extension ControlCapabilities {
 
 extension PolicyState {
     /// With a native-limit backend the fail-safe is the user's own macOS
-    /// limit, never a default such as 100%.
+    /// limit, never a default such as 100%. The titles name intent (M9):
+    /// using macOS's Charge Limit is what the policy wants, not evidence
+    /// that macOS enforces it, which only a judged read establishes.
     func title(nativeLimit: Bool) -> String {
         switch self {
         case .unmanaged: "Not managing charging"
@@ -69,7 +62,7 @@ extension PolicyState {
         case .charging: "Charging to limit"
         case .holding: "Holding at limit"
         case .discharging: "Discharging to limit"
-        case .osEnforcedLimit: "Limit enforced by macOS"
+        case .osEnforcedLimit: "Use macOS Charge Limit"
         case .deferringToMacOS: "Deferring to macOS's Charge Limit"
         case .calibrating: "Calibration: macOS's limit at 100%"
         }
@@ -183,13 +176,16 @@ extension ChargeControlMode {
 }
 
 extension ExecutionRecord.Result {
+    /// A deferred result names the written and unwritten cases without
+    /// promising a confirmation (M10): the native deferral beside it says
+    /// what the check waits for.
     var title: String {
         switch self {
         case .applied: "Applied and confirmed"
         case .unchanged: "Already in effect — nothing changed"
         case .simulated: "Simulated — hardware unchanged"
         case .adoptedOutsideChange: "Kept your change made outside CellKeeper — nothing changed"
-        case .deferred(let written): written ? "Set — confirmed once your Mac has been on power for a minute" : "Waiting until your Mac has been on power for a minute"
+        case .deferred(let written): written ? "Set; confirmation pending." : "Waiting for a check after a minute on power."
         case .failed(let message): "Failed: \(message)"
         case .refused(let reason): "Refused: \(reason)"
         }
@@ -405,24 +401,6 @@ extension View {
     /// remove the help tag's.
     func disabledReasonHint(_ reason: String?, help: String = "") -> some View {
         accessibilityHint(reason ?? help)
-    }
-}
-
-/// A small capsule label, tinted and outlined in `color`. The text keeps
-/// the label colour: coloured text on a tint of its own colour is too faint
-/// to read (2.2:1 to 4:1 against white).
-struct StatusBadge: View {
-    let title: String
-    let color: Color
-
-    var body: some View {
-        Text(title)
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .foregroundStyle(.primary)
-            .background(color.opacity(0.18), in: Capsule())
-            .overlay(Capsule().strokeBorder(color.opacity(0.6), lineWidth: 1))
     }
 }
 
