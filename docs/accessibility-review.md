@@ -5,7 +5,8 @@ size, contrast, colour, motion and announcements, approved by the owner on
 2026-10-19, and the fixes made for it (D109). It covers the menu-bar status
 item, the menu, every Settings tab (Charging, Control, Activity,
 Diagnostics, About), the Appearance tab, added later and reviewed in the
-D113 follow-up below (the battery-style menu bar icon), the confirmation
+D113 follow-up below (the battery-style menu bar icon; Appearance and About
+became sections of a General pane on 2026-10-31), the confirmation
 dialogs, the alerts and the save panel, including the weekly full charge
 (#90).
 
@@ -128,7 +129,7 @@ requires words for each row whose value writes a unit's symbol (D111).
 ### Follow-up: the battery-style menu bar icon (D113)
 
 The status item can now show a battery that CellKeeper draws, the default,
-or the status symbol as before (Settings › Appearance). In both styles it
+or the status symbol as before (Settings › General › Menu bar). In both styles it
 is one image with the same accessibility label, which already says the
 charge, the charging status and CellKeeper's state: the Battery style
 draws its percentage into the image rather than adding a `Text`, which
