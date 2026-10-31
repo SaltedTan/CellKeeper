@@ -138,6 +138,10 @@ and 26 can open it (CI enforces this).
   chain review).
 - Keep comments for intent and constraints, not narration.
 - Match the existing style; use `swift-format` defaults if unsure.
+- Interface and wording changes follow [docs/design.md](docs/design.md)
+  (native, minimal, truthful) and keep what
+  [docs/accessibility-review.md](docs/accessibility-review.md) fixed.
+  Coding agents also read [AGENTS.md](AGENTS.md).
 
 ## Pull requests
 
