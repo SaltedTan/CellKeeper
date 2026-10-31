@@ -144,12 +144,47 @@ with the CellKeeper status style, and says why below it and as its hint
 1× and 2×; the status item itself was not run, because a calibration was
 running on the owner's Mac.
 
+### Follow-up: the redesign moved elements (2026-10-31, D120)
+
+The minimalist redesign (#119, #121) moved elements this review checked
+where they were. In the menu, Power flow, Battery details and Charging
+control (Backend, Policy, Desired mode, Last action) are now inside a
+collapsed **Details**, with a new Schedules group; the line
+under the header is plain text in place of the tinted badge (M5); Schedule…
+left the menu. In Settings, Appearance and About became sections of a
+**General** pane, which also holds Notifications (moved from Charging);
+long explanations sit behind disclosures, and the window is 560 × 540
+(G14).
+
+The new layout's accessibility tree was then read the same way as above
+(offscreen harness, read-only, never frontmost; 24 menu and 15 Settings
+scenes). It confirmed the header as one element, the headings with their
+values, units in speech, disabled reasons as text and hint, warnings
+outside closed disclosures, and every disclosure's expanded state. It
+found: Details' Charging control exposed as a heading instead of a
+disclosure (fixed in #121: a disclosure again, like its siblings, and no
+longer a heading); and, fixed in #124, the native limit's 100 segment
+not always read as "100% (no limit)" (the picker now gives its value);
+Settings › Control's Backend row as an unknown role, as G3 was (static
+text now); the one-time full charge's Start and End read as GMT dates
+(local date and time now); Save Weekly Full Charge disabled without a
+reason when no day is chosen (the reason is shown and is its hint); and
+label and value read as two elements for Version, the schedule summaries
+and two Control rows (one element each now). Still open: the power-flow
+chart's data points have no units or series names in the tree.
+
+No VoiceOver, keyboard or Increase Contrast check of the new layout has
+been done: a fresh one is pending on the owner's Mac (issue #89), for the
+reading order through Details and the General pane, rows inside
+disclosures, the Show percentage row, the limit picker and the date
+pickers as spoken, and keyboard focus through Details.
+
 ### For the owner's Mac
 
 With VoiceOver: the slider's value and its 1% steps (M1, M2), the
 announcements of a refused setting and of Copy Diagnostics (G2, G4), the
 weekly Start picker reading the time it shows (W6), a disabled "Charge to
-100% once" or "Discharge Now…" giving its reason as a hint (M14, G9), the
+100% Once" or "Discharge Now…" giving its reason as a hint (M14, G9), the
 Diagnostics rows reading their units in words (G10), and the status item
 reading only its label in the Battery style, once, without the
 percentage a second time (D113). With Full
