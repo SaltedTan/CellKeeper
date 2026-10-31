@@ -24,7 +24,7 @@ Limit** (80–100%) through a shortcut you create, and macOS enforces it.
 | Cycle count, voltage, current, mAh capacities | **Real** — read-only IORegistry properties (some undocumented) |
 | Adapter wattage | **Real** — public API |
 | Mac thermal state and Low Power Mode | **Real** — public `ProcessInfo` API; system-wide, not battery temperature; shown only |
-| Power flow: adapter, battery and Mac power, with the last hour | **Implemented** — undocumented macOS data, updated about once a minute; shown only, never used to control charging; in the menu under **Power flow**. Not yet tried in the menu on a Mac. A faster SMC source (about once a second, averaged over 3 s) is designed and built, with the owner's reader, off by default; not yet tried on a Mac |
+| Power flow: adapter, battery and Mac power, with the last hour | **Implemented** — undocumented macOS data, updated about once a minute; shown only, never used to control charging; in the menu under **Details › Power flow**. Not yet tried in the menu on a Mac. A faster SMC source (about once a second, averaged over 3 s) is designed and built, with the owner's reader, off by default; not yet tried on a Mac |
 | Battery temperature | **Not available** on macOS 27 through any public interface; shown as unavailable |
 | Battery health / condition as shown by macOS | **Not available** to third-party apps; CellKeeper shows its own computed capacity ratio, labelled as such |
 | Charge limit 80/85/90/95/100% via macOS's Charge Limit | **Real, experimental, opt-in** (macOS 26.4+, Apple silicon); enforced by macOS; verified on one Mac |
@@ -42,8 +42,10 @@ Limit** (80–100%) through a shortcut you create, and macOS enforces it.
 | Menu bar icon: battery style (charge fill, charging bolt or plug, optional percentage) or CellKeeper's status icon | **Implemented, not yet seen in a Mac's menu bar** (checked in offscreen renders) — choose in Settings › **General** › Menu bar; the battery style, with the percentage, is the default, and keeps a warning or thermometer symbol beside the battery while CellKeeper needs your attention. If you want only one battery icon, you can hide macOS's own in System Settings › Menu Bar › Battery (Control Center › Battery on older macOS versions); CellKeeper never changes that setting |
 | Scheduled limits, other recurring schedules, launch at login | Planned |
 
-The menu bar always shows which kind of control is in effect: **Available**,
-**Experimental**, **Simulated**, or **Unavailable**.
+The menu always says, under the battery, which kind of control is in
+effect: macOS's Charge Limit with how far it is verified (**Available**,
+**Experimental** or **Unavailable**), or a line that says when CellKeeper's
+own control is **Simulated**.
 
 ### Why only macOS's Charge Limit?
 

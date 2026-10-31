@@ -70,7 +70,7 @@ never by hiding a fact rule 1 or 2 needs.
   4. **One contextual action** (for example Charge to 100% once, or the
      running session's Cancel).
   5. **Details**, collapsed: power flow, battery details, policy and last
-     action.
+     action, schedules.
   6. **Footer:** Settings… (⌘,) and Quit CellKeeper (⌘Q).
 - Separate groups with `Divider()`, not each row. No boxes, cards or tinted
   backgrounds behind rows.
@@ -123,7 +123,7 @@ never by hiding a fact rule 1 or 2 needs.
   disables it (`DisabledReason`); a help tag alone is not enough.
 - Buttons are named for what they do (Cancel Full Charge, Check Again), in
   title case, with an ellipsis only when more input follows (Settings…,
-  Schedule…). OK only acknowledges.
+  Save Diagnostics…). OK only acknowledges.
 - Alerts and confirmation dialogs only for decisions with consequences;
   routine status stays inline.
 

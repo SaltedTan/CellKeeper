@@ -136,7 +136,7 @@ app (`AppModel`, `AppDelegate` and the views) are checked by hand.
 | The read-back uses `pmset -g battlimit` with fixed arguments, read-only, through a strict parser; anything unrecognised is never guessed | `PmsetChargeLimitReader`, `ChargeLimitReportParser` |
 | Tools are run directly (no shell), with standard input closed, a deadline (shortcut 20 s, pmset 5 s), bounded output, and cancellation; incomplete output is never parsed | `ProcessRunner` |
 | Features the Charge Limit cannot express are not offered, and a note says so: custom resume threshold, temperature pause, discharge | `SettingsView`, `MenuBarView`, `ChargingPolicy.evaluateNativeLimit` |
-| The menu shows that macOS is enforcing the limit, the value macOS reports, and the limit that will be restored | `NativeLimitSummary` |
+| The menu shows the value macOS enforces only after a judged read, and the limit that will be restored (your own limit, saved) | `NativeLimitLine`, `OwnLimitLine` |
 
 ### Validation ranges
 

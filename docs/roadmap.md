@@ -133,11 +133,11 @@ charge limit" action instead of `pmset -g battlimit` (note 08, O18).
   Diagnostics copies a plain-text report (#20), and Save Diagnostics…
   saves it to a text file the user chooses (D76).
 - `ProcessInfo` thermal and Low Power Mode state in the UI (system-wide, not
-  battery temperature). Done: shown in the menu's Battery details (#19).
+  battery temperature). Done: shown in the menu's Details › Battery details (#19).
 - Unplug/replug and sleep/wake observation runs on real hardware to measure
   notification cadence (research 01, open question 1).
 - Notifications (limit reached, temperature pause, fault or an unconfirmed
-  restore, override ended), opt-in. Done: Settings › Charging, off by
+  restore, override ended), opt-in. Done: Settings › General, off by
   default; each says only what CellKeeper confirmed, and that simulated
   controls change nothing (architecture, "Notifications").
 

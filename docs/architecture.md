@@ -693,12 +693,13 @@ every case, so a failed check never lengthens the time at a low charge.
   mark); a failure to save that is retried at every evaluation and shown.
 
 **What the owner sees**: Settings › Charging › Calibration (what it does,
-the confirmations, the recovery with the owner's own limit, Start with the
-first reason it is disabled; during a session the step, when it ends, the
+under "What calibration involves"; with no session, under "Set up
+calibration", the confirmations, the recovery with the owner's own limit,
+Start with the first reason it is disabled; during a session the step, when it ends, the
 recovery, Continue for one found at launch, Cancel; the last calibration
 and its report); the menu's status line with the next action (§7.5's
 requests, "returning to your limit", the paused prompt), Continue and
-Cancel, and what became of a session that ended, worded from what a
+Cancel Calibration, and what became of a session that ended, worded from what a
 read-back now shows about macOS's Charge Limit (`CalibrationWording.limitAfter`:
 CellKeeper's limit confirmed, the owner's own confirmed, or not confirmed
 yet, with the owner's limit to set in System Settings › Battery), never
@@ -2635,9 +2636,9 @@ tested.
   unchanged.", "Deferring to macOS's Charge Limit", or "Unavailable:
   <reason>". Unavailable comes first: a
   backend that accepts no requests is never said to defer or to control
-  anything, and the menu shows its policy as "Policy (not applied)" and
-  "Would want", without the reasons and notes that speak of pausing
-  charging. macOS's Charge Limit keeps its own summary.
+  anything, and the menu's Details › Charging control shows its policy as
+  "Policy (not applied)" and "Desired mode (not applied)", without the
+  reasons and notes that speak of pausing charging. macOS's Charge Limit keeps its own summary.
 - **Turning macOS's Charge Limit off.** While macOS's limit may be
   limiting and the backend switches charging itself and accepts requests
   (`ControlStatement.offersMacOSLimitGuide`), the menu's notice offers
@@ -2716,10 +2717,12 @@ tested.
   panel returns; CellKeeper stops it once the write has ended, whatever
   the outcome.
 - **Scheduled full charge.**
-  - **Settings › Charging** has a "Scheduled full charge" section: start and
-    end pickers and a Schedule button, editable only while Manage charging
-    is on. An armed schedule shows its window and Cancel Schedule, which is
-    always enabled. The section also says what a schedule does with the
+  - **Settings › Charging** has a "Full-charge schedules" section, where
+    schedules are set up: a "One-time full charge" disclosure with start
+    and end pickers and Schedule Full Charge, editable only while Manage
+    charging is on. An armed schedule shows its window and Cancel Schedule,
+    which is always enabled, outside any disclosure. "How scheduled
+    charging works", in that section, says what a schedule does with the
     backend in charge (`FullChargeScheduleWording`, Kit): simulated and
     unavailable backends change nothing; with macOS's Charge Limit,
     CellKeeper requests 100% and later requests its limit again at its next
@@ -2728,16 +2731,17 @@ tested.
     safety rules, such as the temperature pause, still override. It gives the start
     conditions and, for macOS's Charge Limit, an overnight hint: start while
     the Mac is awake and wait until the menu shows macOS enforcing 100%.
-  - **The menu** adds "Schedule…" next to "Charge to 100% once". It shows
-    the armed window with Cancel, or why a due schedule cannot start yet,
-    and an outcome line with OK. A running full charge, scheduled or
+  - **The menu** sets up no schedule (Details › Schedules lists them and
+    points to Settings › Charging). It shows the armed window with Cancel
+    Schedule, or why a due schedule cannot start yet, and an outcome line
+    with OK. A running full charge, scheduled or
     started by the user, has one line (`TemporaryFullChargeWording`, Kit).
     It says what was requested and what a read-back confirmed for the
     backend in charge (with macOS's Charge Limit: the limit at 100%), and
     that CellKeeper requests its limit again at a check after the battery
     is full, the user unplugs, or the charge expires (its deadline as
     estimated now), which sleep can delay. The help of "Charge to 100%
-    once" says the same, and, for a backend that accepts no requests
+    Once" says the same, and, for a backend that accepts no requests
     (Read-only, an unavailable macOS Charge Limit), that a full charge
     changes nothing. The button is enabled exactly when
     `FullChargeStart.refusal` (Kit), which Start CellKeeper Full Charge
@@ -2763,13 +2767,15 @@ tested.
   enabled by `CalibrationAdmission`, with its first reason shown under the
   button and as its hint, as for the full charge (D110); Cancel in Settings
   asks for confirmation, the menu's does not, like the full charge's. The
-  disabled "Charge to 100% once" and schedule editors say "A calibration is
+  disabled "Charge to 100% Once" and schedule editors say "A calibration is
   in progress." The status item's label names the calibration step.
 - **Weekly full charge.**
-  - **Settings › Charging** has a "Weekly full charge" section after
-    "Scheduled full charge": day toggles in the calendar's order, a start
-    time, a duration of 1–48 hours, Save (editing needs Manage charging on)
-    and Remove (always enabled). The editor keeps the start as an hour and a
+  - **Settings › Charging** has the weekly editor in "Full-charge
+    schedules", after the one-time full charge, behind a "Weekly full
+    charge" disclosure ("Change days or time" once one is saved): day
+    toggles in the calendar's order, a start time, a duration of 1–48
+    hours, Save (editing needs Manage charging on) and Remove (always
+    enabled). The editor keeps the start as an hour and a
     minute (`WeeklyFullChargeDraft`, Kit), never as a moment in the Mac's
     time zone, and its time picker is shown and read on 2001-01-01 in GMT,
     so a skipped hour or a time zone change cannot move it and saving with
@@ -2777,8 +2783,9 @@ tested.
     ("Every Mon and Fri at 7:00 AM, for 12 hours"), its next start, a note
     when skipped time moves that start, an occurrence that is due and why
     it waits, the latest occurrence that started or passed, the latest
-    outcome, and a line while the store cannot keep up. Below, it says that
-    each start requests the same full charge as a scheduled one, that
+    outcome, and a line while the store cannot keep up, outside the
+    disclosure; a line also says when edits behind a closed editor are not
+    saved. "How scheduled charging works" says that each start requests the same full charge as a scheduled one, that
     times follow the Mac's time zone and the duration is elapsed time, the
     start conditions, and that CellKeeper records each one that starts or
     passes so it does not start that one again. Removing deletes the saved
