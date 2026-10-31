@@ -161,9 +161,9 @@ The new layout's accessibility tree was then read the same way as above
 scenes). It confirmed the header as one element, the headings with their
 values, units in speech, disabled reasons as text and hint, warnings
 outside closed disclosures, and every disclosure's expanded state. It
-found, and this change fixes: Details' Charging control exposed as a
-heading instead of a disclosure (it is a disclosure again, like its
-siblings, so it is no longer a heading); the native limit's 100 segment
+found: Details' Charging control exposed as a heading instead of a
+disclosure (fixed in #121: a disclosure again, like its siblings, and no
+longer a heading); and, fixed in #124, the native limit's 100 segment
 not always read as "100% (no limit)" (the picker now gives its value);
 Settings › Control's Backend row as an unknown role, as G3 was (static
 text now); the one-time full charge's Start and End read as GMT dates
