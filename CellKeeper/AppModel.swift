@@ -59,14 +59,16 @@ enum ControlBackendChoice: String, CaseIterable, Identifiable {
     }
 }
 
-/// The tabs of the Settings window, so the menu can open one.
+/// The panes of the Settings window, so the menu can open one. General
+/// holds the menu bar icon, notifications and About (the Appearance and
+/// About tabs it replaced, 2026-10-31); the menu opens Charging for the
+/// schedules and Control for macOS's Charge Limit.
 enum SettingsTab: Hashable {
+    case general
     case charging
     case control
     case activity
     case diagnostics
-    case appearance
-    case about
 }
 
 /// Main-actor state for the UI. Owns the ``ChargeController`` and feeds it
@@ -101,8 +103,9 @@ final class AppModel {
     /// them.
     private(set) var thermalState = ProcessInfo.processInfo.thermalState
     private(set) var isLowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
-    /// The Settings tab shown; the menu opens Control for the macOS Charge
-    /// Limit steps.
+    /// The Settings pane shown, kept while the app runs; the menu opens
+    /// Charging for the schedules and Control for the macOS Charge Limit
+    /// steps.
     var settingsTab: SettingsTab = .charging
     /// Whether Settings › Control shows the steps for turning macOS's Charge
     /// Limit off.
