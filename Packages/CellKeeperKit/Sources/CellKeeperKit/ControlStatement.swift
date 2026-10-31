@@ -22,9 +22,9 @@ public enum ControlStatement {
         let isSimulatedHelper = status.backend.identifier == HelperChargingBackend.simulatedHelperIdentifier
         switch capabilities.availability {
         case .simulated where isSimulatedHelper:
-            return "Simulated helper: CellKeeper's own control, simulated; nothing on your Mac changes"
+            return "Simulated helper — charging unchanged."
         case .simulated:
-            return "\(status.backend.displayName): CellKeeper records what it would do; nothing on your Mac changes"
+            return "Simulated — charging unchanged."
         case .experimental:
             return "\(status.backend.displayName): controls your Mac's charging (experimental)"
         case .available:

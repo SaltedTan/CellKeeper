@@ -248,7 +248,7 @@ public enum NativeLimitWording {
     /// The rest of ``deferral(_:)``: when CellKeeper checks again.
     public static func deferralDetail(_ condition: ChargeLimitReadCondition) -> String {
         switch condition {
-        case .onBattery, .settled, .settling: "CellKeeper checks macOS's Charge Limit once your Mac has been on power for a minute."
+        case .onBattery, .settled, .settling: "CellKeeper checks macOS's Charge Limit after a minute on power."
         case .powerUnknown: "CellKeeper checks macOS's Charge Limit once it can."
         }
     }
@@ -293,7 +293,7 @@ public enum NativeLimitWording {
         guard let owner = native?.ownerLimit, status.isOwnLimitRestorePending else { return nil }
         // A backend that accepts no requests is never asked to restore.
         return status.capabilities.availability.acceptsRequests
-            ? "CellKeeper could not confirm yet that your own limit, \(limit(owner)), is back. It keeps trying; you can also set it in System Settings › Battery › Charging."
-            : "CellKeeper cannot give back your own limit, \(limit(owner)), right now. Set it in System Settings › Battery › Charging."
+            ? "Your own limit, \(limit(owner)), is not confirmed back yet. CellKeeper keeps trying; you can also set it in System Settings › Battery › Charging."
+            : "CellKeeper cannot give back your own limit, \(limit(owner)), now. Set it in System Settings › Battery › Charging."
     }
 }

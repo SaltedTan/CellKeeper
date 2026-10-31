@@ -28,10 +28,10 @@ struct ControlStatementTests {
         )
     }
 
-    @Test("The Simulated helper says it is CellKeeper's own control, simulated, while macOS's limit is off")
+    @Test("The Simulated helper is named, and says charging is unchanged, while macOS's limit is off")
     func simulatedHelperOff() async {
         let status = await evaluated(simulatedHelper(.noLimit))
-        #expect(ControlStatement.text(for: status) == "Simulated helper: CellKeeper's own control, simulated; nothing on your Mac changes")
+        #expect(ControlStatement.text(for: status) == "Simulated helper — charging unchanged.")
         #expect(!ControlStatement.isDeferringToMacOS(status))
         #expect(!ControlStatement.offersMacOSLimitGuide(status))
         #expect(ControlStatement.limitNote(for: status) == nil)
@@ -98,10 +98,10 @@ struct ControlStatementTests {
         #expect(!ControlStatement.isDeferringToMacOS(helper))
     }
 
-    @Test("The simulated backend says what it does; macOS's Charge Limit has its own summary")
+    @Test("The simulated backend says charging is unchanged; macOS's Charge Limit has its own summary")
     func otherBackends() async {
         let simulated = await evaluated(MockChargingBackend())
-        #expect(ControlStatement.text(for: simulated) == "Simulated: CellKeeper records what it would do; nothing on your Mac changes")
+        #expect(ControlStatement.text(for: simulated) == "Simulated — charging unchanged.")
         var native = simulated
         native.capabilities = .nativeLimit(availability: .experimental, steps: NativeChargeLimitBackend.supportedLimits)
         native.capabilities.macOSChargeLimit = MacOSChargeLimitStatus(reportedLimit: 80, readAt: Date())
