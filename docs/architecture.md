@@ -2476,7 +2476,7 @@ Limitations:
 
 ## Notifications
 
-Opt-in and off by default (Settings › Charging). Notifications are a side
+Opt-in and off by default (Settings › General). Notifications are a side
 channel: they report what statuses establish and never affect charging.
 
 - **What is notified** (`NotificationKind`): CellKeeper's own hold at the
@@ -2808,8 +2808,8 @@ tested.
   to the unified log, privately. A limit set in the UI is checked against
   the limits offered for the backend in charge (`ChargeLimitRequest`), as
   Set CellKeeper Limit's is.
-- **Notifications.** Settings › Charging has the opt-in, under the
-  temperature protection and independent of Manage charging (a fault or an
+- **Notifications.** Settings › General has the opt-in, under the menu
+  bar icon and independent of Manage charging (a fault or an
   unconfirmed restore can happen with management off): one toggle, a line
   saying why it is off when macOS does not show CellKeeper's notifications,
   "Open Notification Settings" when macOS refuses, hides or did not

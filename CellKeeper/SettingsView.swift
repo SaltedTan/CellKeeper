@@ -554,6 +554,14 @@ private struct WeeklyFullChargeSection: View {
                 Text("Requests a temporary full charge on the selected days while your Mac is awake and CellKeeper is running. Times follow your Mac's time zone; unplugging ends it.")
                     .disclosureParagraph()
             }
+            // The draft outlives a closed editor: say so where it stays
+            // visible, or the summary above would read as what was chosen.
+            if !isEditorExpanded, draft != weekly.map({ WeeklyFullChargeDraft($0.pattern) }) ?? WeeklyFullChargeDraft() {
+                Label("Your changes to the weekly full charge are not saved.", systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if weekly != nil {
                 Button("Remove Weekly Full Charge") { model.removeWeeklyFullCharge() }
                     .help(WeeklyFullChargeWording.removeHelp)
