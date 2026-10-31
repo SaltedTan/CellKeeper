@@ -190,10 +190,10 @@ public enum TemporaryFullChargeWording {
         let endings = "at a check after the battery is full, you unplug, or it expires (about \(expiry))"
         let limit = status.settings.chargeLimit
         if capabilities.isEnforcedByMacOS {
-            return "\(name): macOS's Charge Limit is at 100%, confirmed. CellKeeper requests its \(limit)% limit again \(endings); sleep can delay that."
+            return "\(name): macOS Charge Limit 100% (no limit), confirmed. CellKeeper requests \(limit)% again \(endings); sleep can delay that."
         }
         if capabilities.availability == .simulated {
-            return "\(name), simulated: nothing on your Mac changes. It ends \(endings)."
+            return "\(name), simulated: charging unchanged. It ends \(endings)."
         }
         return "\(name): CellKeeper has lifted its own restrictions, confirmed. It requests its \(limit)% limit again \(endings); sleep can delay that."
     }

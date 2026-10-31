@@ -282,10 +282,10 @@ struct TemporaryFullChargeWordingTests {
         FullChargeScheduleWording.format(override.expiresAt, timeZone: utc, locale: posix, calendar: gregorian, now: now)
     }
 
-    @Test("Simulated: nothing on the Mac changes, and it ends at a check after full, unplugging or its expiry")
+    @Test("Simulated: charging is unchanged, and it ends at a check after full, unplugging or its expiry")
     func simulated() async throws {
         let (override, status) = try await running(MockChargingBackend())
-        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now) == "Temporary full charge, simulated: nothing on your Mac changes. It ends at a check after the battery is full, you unplug, or it expires (about \(expiry(override))).")
+        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now) == "Temporary full charge, simulated: charging unchanged. It ends at a check after the battery is full, you unplug, or it expires (about \(expiry(override))).")
         var scheduled = override
         scheduled.source = .schedule
         #expect(TemporaryFullChargeWording.line(for: scheduled, status: status, lastResult: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now).hasPrefix("Scheduled full charge, simulated:"))
@@ -299,7 +299,7 @@ struct TemporaryFullChargeWordingTests {
         let backend = NativeChargeLimitBackend(runner: system, reader: system, store: KitMemoryRecordStore(), platformIssue: nil, now: { clock.now }, uptime: { clock.uptime })
         let (override, status) = try await running(backend, limit: 85, settle: 60)
         #expect(status.currentMode == .nativeLimit(percent: 100))
-        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now) == "Temporary full charge: macOS's Charge Limit is at 100%, confirmed. CellKeeper requests its 85% limit again at a check after the battery is full, you unplug, or it expires (about \(expiry(override))); sleep can delay that.")
+        #expect(TemporaryFullChargeWording.line(for: override, status: status, lastResult: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now) == "Temporary full charge: macOS Charge Limit 100% (no limit), confirmed. CellKeeper requests 85% again at a check after the battery is full, you unplug, or it expires (about \(expiry(override))); sleep can delay that.")
         #expect(TemporaryFullChargeWording.buttonHelp(for: status) == "Requests a macOS Charge Limit of 100% once. CellKeeper requests its limit again at a check after the battery is full, you unplug, or 12 hours pass.")
     }
 

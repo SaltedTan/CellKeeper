@@ -935,7 +935,7 @@ struct NotificationPlannerTests {
         #expect(launched == [PlannedNotification(
             kind: .restoreUnconfirmed,
             title: "Your own Charge Limit is not confirmed back",
-            body: "CellKeeper could not confirm yet that your own limit, 80%, is back. It keeps trying; you can also set it in System Settings › Battery › Charging."
+            body: "Restoring your 80% limit is not confirmed. CellKeeper keeps trying; you can also set it in System Settings › Battery › Charging."
         )])
         #expect(launched.first?.body == NativeLimitWording.restoreProblem(status))
 
