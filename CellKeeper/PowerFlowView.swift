@@ -417,7 +417,7 @@ extension PowerFlowHistory.Series {
     /// The chart's colours: blue, orange and green, three categorical hues
     /// told apart under colour blindness. Each reaches WCAG's 3:1 graphic
     /// contrast on every menu and Settings background (`TextTone.backgrounds`).
-    /// Dark mode uses the system's colours (at least 3.4:1); the system's
+    /// Dark mode uses the system's colours (at least 3.3:1); the system's
     /// orange and green reach only about 2:1 on the light backgrounds, so
     /// light mode uses darker shades of all three (at least 4.1:1, 3.4:1
     /// and 3.7:1). The dashes and symbols tell the series apart without
