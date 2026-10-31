@@ -2631,9 +2631,9 @@ tested.
 
 - **What controls charging.** With a backend that switches charging
   itself, the menu and Settings › Control say in one line what controls
-  charging (`ControlStatement`, Kit): "Simulated helper: CellKeeper's own
-  control, simulated; nothing on your Mac changes", "Deferring to macOS's
-  Charge Limit", or "Unavailable: <reason>". Unavailable comes first: a
+  charging (`ControlStatement`, Kit): "Simulated helper — charging
+  unchanged.", "Deferring to macOS's Charge Limit", or "Unavailable:
+  <reason>". Unavailable comes first: a
   backend that accepts no requests is never said to defer or to control
   anything, and the menu shows its policy as "Policy (not applied)" and
   "Would want", without the reasons and notes that speak of pausing
