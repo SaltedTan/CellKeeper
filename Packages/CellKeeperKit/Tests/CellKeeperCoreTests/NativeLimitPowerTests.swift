@@ -958,7 +958,7 @@ struct NativeLimitPowerWordingTests {
 
     @Test("On battery power the words are those of the brief")
     func batteryWords() {
-        #expect(NativeLimitWording.deferral(.onBattery) == "macOS applies its Charge Limit only on power. Checks the Charge Limit after a minute on power.")
+        #expect(NativeLimitWording.deferral(.onBattery) == "macOS applies its Charge Limit only on power. CellKeeper checks macOS's Charge Limit after a minute on power.")
         #expect(NativeLimitWording.deferralValue(.onBattery) == "Not active on battery")
         #expect(NativeLimitWording.deferral(NativeLimitStatus(reportedLimit: 80)) == nil)
     }
@@ -984,7 +984,7 @@ struct NativeLimitPowerWordingTests {
         #expect(!report.contains("Kept outside change"))
         #expect(CalibrationWording.limitAfter(status) == .notJudged(.onBattery))
         let sentence = CalibrationWording.limitSentence(.notJudged(.onBattery), ownerLimit: 80)
-        #expect(sentence == "macOS has not confirmed CellKeeper's limit back yet. macOS applies its Charge Limit only on power. Checks the Charge Limit after a minute on power.")
+        #expect(sentence == "macOS has not confirmed CellKeeper's limit back yet. macOS applies its Charge Limit only on power. CellKeeper checks macOS's Charge Limit after a minute on power.")
         #expect(status.isNativeLimitSettled, "the menu's summary, which says why, says all there is to say")
     }
 
