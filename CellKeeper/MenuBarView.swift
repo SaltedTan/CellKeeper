@@ -367,6 +367,10 @@ private struct NativeChargeLimitPicker: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
+            // A segment's own label does not reliably reach VoiceOver (only the
+            // first picker in a run read "100% (no limit)"), so the picker
+            // gives its value itself, worded as the heading shows it.
+            .accessibilityValue(steps.contains(limit) ? AccessibilityWording.chargeLimit(limit) : "Not set")
             .disabled(!model.settings.isManagementEnabled)
             .help("macOS enforces this limit and resumes charging once the battery drops more than 5%; a custom resume point is not available with its Charge Limit.")
             if !steps.contains(limit) {

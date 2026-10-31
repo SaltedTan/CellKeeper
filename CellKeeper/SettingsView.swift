@@ -156,6 +156,8 @@ private struct AboutSection: View {
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
         Section {
             LabeledContent("Version", value: version)
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isStaticText)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Open-source battery charge management for macOS.")
                 Text("CellKeeper is an independent open-source project and is not affiliated with Apple, AppHouseKitchen, AlDente, or their respective developers.")
@@ -436,6 +438,8 @@ private struct ScheduledFullChargeSection: View {
         let isCalibrating = status?.calibration.isInProgress == true
         if let schedule = status?.fullChargeSchedule {
             LabeledContent("One-time full charge", value: FullChargeScheduleWording.window(schedule, now: now))
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isStaticText)
             if let wait = status?.fullChargeScheduleWait {
                 Label(FullChargeScheduleWording.armedLine(schedule, wait: wait, now: now), systemImage: "exclamationmark.triangle")
                     .font(.caption)
@@ -447,7 +451,12 @@ private struct ScheduledFullChargeSection: View {
             DisclosureGroup("One-time full charge", isExpanded: $isEditorExpanded) {
                 Group {
                     DatePicker("Start", selection: $start, displayedComponents: [.date, .hourAndMinute])
+                        // Its own value is the raw moment (a GMT date); say
+                        // the local date and time it shows, as a schedule's
+                        // window is said elsewhere.
+                        .accessibilityValue(FullChargeScheduleWording.format(start, now: now))
                     DatePicker("End", selection: $end, in: start.addingTimeInterval(FullChargeSchedule.minimumWindow)...start.addingTimeInterval(FullChargeSchedule.maximumWindow), displayedComponents: [.date, .hourAndMinute])
+                        .accessibilityValue(FullChargeScheduleWording.format(end, now: now))
                     Button("Schedule Full Charge") { model.setFullChargeSchedule(start: start, end: end) }
                         .disabledReasonHint(!isManaged ? Self.managementOffReason : isCalibrating ? CalibrationWording.inProgress : nil)
                         .leadingInDisclosure()
@@ -505,9 +514,19 @@ private struct WeeklyFullChargeSection: View {
         let now = status?.describedAt ?? Date()
         let weekly = status?.weeklyFullCharge
         let isManaged = model.settings.isManagementEnabled
+        // Why Save is disabled, in the order the button's hint gives them: the
+        // switch that disables the whole editor, a calibration in progress,
+        // then a problem with the draft. A draft that only repeats the saved
+        // pattern is not a problem and says nothing.
+        let draftIssue = draft.pattern.issues.first?.description
+        let saveReason = !isManaged
+            ? ScheduledFullChargeSection.managementOffReason
+            : status?.calibration.isInProgress == true ? CalibrationWording.inProgress : draftIssue
         Group {
             if let weekly {
                 LabeledContent("Weekly full charge", value: WeeklyFullChargeWording.summary(weekly.pattern))
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.isStaticText)
                 if let next = status?.weeklyFullChargeNext {
                     Text(WeeklyFullChargeWording.nextLine(next, now: now))
                         .font(.caption)
@@ -565,10 +584,13 @@ private struct WeeklyFullChargeSection: View {
                     Button(weekly == nil ? "Save Weekly Full Charge" : "Save Changes") { model.setWeeklyFullCharge(draft.pattern) }
                         .disabled(!draft.pattern.issues.isEmpty || draft.pattern == weekly?.pattern || status?.calibration.isInProgress == true)
                         .help(WeeklyFullChargeWording.saveHelp)
-                        .disabledReasonHint(!isManaged ? ScheduledFullChargeSection.managementOffReason : status?.calibration.isInProgress == true ? CalibrationWording.inProgress : nil, help: WeeklyFullChargeWording.saveHelp)
+                        .disabledReasonHint(saveReason, help: WeeklyFullChargeWording.saveHelp)
                         .leadingInDisclosure()
                     if status?.calibration.isInProgress == true {
                         DisabledReason(text: "\(CalibrationWording.inProgress) A weekly full charge that falls due meanwhile is skipped; the schedule continues afterwards.")
+                            .leadingInDisclosure()
+                    } else if let draftIssue, isManaged {
+                        DisabledReason(text: draftIssue)
                             .leadingInDisclosure()
                     }
                 }
@@ -901,6 +923,7 @@ private struct ControlSettingsTab: View {
                         }
                     }
                     .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.isStaticText)
                     // While a switch waits, the one chosen is not the one
                     // in charge.
                     if status.pendingBackend != nil {
@@ -1067,6 +1090,8 @@ private struct NativeLimitSetupSection: View {
                 }
             }
             LabeledContent("Charge Limit reported by macOS", value: native?.readDeferral.map(NativeLimitWording.deferralValue) ?? native?.reportedLimit.map(Format.chargeLimit) ?? "Unknown")
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isStaticText)
             if let deferral = native?.readDeferral {
                 Text(NativeLimitWording.deferral(deferral))
                     .font(.caption)
@@ -1101,6 +1126,8 @@ private struct NativeLimitSetupSection: View {
                     Text("In effect; CellKeeper has not changed it")
                 }
             }
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isStaticText)
             if native?.needsNoLimitConfirmation == true {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("macOS reports no Charge Limit. That usually means your limit is 100%, but it can also mean a temporary full charge is in progress. CellKeeper records your limit only once it knows it.")
