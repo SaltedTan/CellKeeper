@@ -76,9 +76,10 @@ never by hiding a fact rule 1 or 2 needs.
   backgrounds behind rows.
 - At most one prominent (`.borderedProminent` or glass prominent) button,
   and only when the user is being asked to act. Ordinary actions use the
-  default or `.small` bordered style. "One contextual action" means one
-  routine start/cancel area; it never removes a recovery control, a
-  calibration answer or a pending switch's cancel.
+  default button style; secondary menu actions add `.controlSize(.small)`.
+  "One contextual action" means one routine start/cancel area; it never
+  removes a recovery control, a calibration answer or a pending switch's
+  cancel.
 - Show backend mechanics (policy state, desired mode, last action, notes)
   only in the collapsed Details or in Settings › Control, unless they
   explain a warning. Schedules are set up in Settings; the menu shows only
@@ -195,8 +196,10 @@ never by hiding a fact rule 1 or 2 needs.
   through `.buttonStyle(.glass)`/`.glassProminent` rather than raw
   `glassEffect`.
 - Any macOS 26 API needs `if #available(macOS 26, *)` and a compile-time
-  guard (`#if compiler(>=6.2)`) so Xcode 16.0 still builds, with an
-  ordinary fallback.
+  guard so Xcode 16.0 still builds, with an ordinary fallback. For the
+  supported stock Xcode toolchains that guard is `#if compiler(>=6.2)`
+  (Xcode 26 pairs Swift 6.2 with the macOS 26 SDK); a compiler version is
+  not an SDK check, so verify any other toolchain separately.
 
 ## Checking a UI change
 
