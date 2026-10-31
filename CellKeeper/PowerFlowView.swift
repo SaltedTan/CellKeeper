@@ -414,21 +414,19 @@ private struct PowerFlowLegend: View {
 }
 
 extension PowerFlowHistory.Series {
-    /// The chart's colours: the system's blue, orange and green, three
-    /// categorical hues told apart under colour blindness, which follow the
-    /// appearance. Each was checked for WCAG's 3:1 graphic contrast against
-    /// the menu's light and dark backgrounds (`TextTone.backgrounds`): the
-    /// system blue reaches it on the window background in both (3.5:1
-    /// light, 5.2:1 dark; it dips to 2.7:1 only on the light margin), and
-    /// the orange and green in dark mode (4.9:1 and 5.5:1), but against the
-    /// light background they reach only 2.3:1 and 2.2:1, so light mode
-    /// keeps their darker shades, a documented exception. The dashes and
-    /// symbols tell the series apart without colour.
+    /// The chart's colours: blue, orange and green, three categorical hues
+    /// told apart under colour blindness. Each reaches WCAG's 3:1 graphic
+    /// contrast on every menu and Settings background (`TextTone.backgrounds`).
+    /// Dark mode uses the system's colours (at least 3.4:1); the system's
+    /// orange and green reach only about 2:1 on the light backgrounds, so
+    /// light mode uses darker shades of all three (at least 4.1:1, 3.4:1
+    /// and 3.7:1). The dashes and symbols tell the series apart without
+    /// colour.
     fileprivate var color: Color {
         switch self {
-        case .macUse: Color(nsColor: .systemBlue)
-        case .adapterInput: Self.color(light: 0xEB6834, dark: .systemOrange)
-        case .battery: Self.color(light: 0x1BAF7A, dark: .systemGreen)
+        case .macUse: Self.color(light: 0x0064D7, dark: .systemBlue)
+        case .adapterInput: Self.color(light: 0xC4520F, dark: .systemOrange)
+        case .battery: Self.color(light: 0x12805C, dark: .systemGreen)
         }
     }
 

@@ -163,8 +163,9 @@ never by hiding a fact rule 1 or 2 needs.
   missing, never a line across it or a zero in its place; estimated and
   measured kept apart.
 - Series are told apart by label or line style as well as colour, and each
-  chart has a text summary for VoiceOver. Use system colours for series,
-  checked for contrast on the real background.
+  chart has a text summary for VoiceOver. Series use system colours where
+  they reach 3:1 against every background in `TextTone.backgrounds`, and
+  darker shades where they do not (as the warning text does).
 - An unknown charge uses a neutral symbol, never an empty or full battery.
   Each number keeps its own source; never adjust values so the diagram
   balances.
