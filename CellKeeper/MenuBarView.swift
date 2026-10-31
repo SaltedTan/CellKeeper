@@ -976,10 +976,11 @@ private struct ChargingControlDetails: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.top, MenuLayout.lineSpacing)
         } label: {
-            // A heading, as the section's title was before it moved into
-            // Details (D109).
+            // A disclosure like its siblings, not a heading: the heading
+            // trait replaces the disclosure role, and VoiceOver would then
+            // never say whether it is collapsed or expanded (AX tree,
+            // 2026-10-31).
             Text("Charging control")
-                .accessibilityAddTraits(.isHeader)
         }
     }
 }
