@@ -80,6 +80,62 @@ struct FullChargeScheduleWordingTests {
         #expect(text == "At the start, CellKeeper requests a temporary full charge: it asks for none of its own restrictions, unless a safety rule such as the temperature pause still pauses charging. The full charge lasts for the time left until the end you choose when it starts (longer only if a full charge that expires later is already running), or less if the battery is full or you unplug first. CellKeeper then requests its 80% limit again at its next check; sleep, or a request that fails or is refused, can delay that.")
     }
 
+    @Test("The footer's summary is chosen by the explanation's branch and keeps its claim: simulated and unchanged, with the same deferral while macOS's Charge Limit is on")
+    func summarySimulated() async {
+        let status = await evaluatedStatus()
+        let summary = FullChargeScheduleWording.summary(for: status)
+        #expect(summary == "Simulated — scheduled charging leaves your Mac's charging unchanged.")
+        #expect(FullChargeScheduleWording.explanation(for: status, end: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now).hasPrefix("Simulated:"))
+        let deferred = await evaluatedStatus(macOSLimitOn)
+        let deferredSummary = FullChargeScheduleWording.summary(for: deferred)
+        let suffix = " While macOS's Charge Limit is on, it stays in charge and the full charge has no effect."
+        #expect(deferredSummary == "Simulated — scheduled charging leaves your Mac's charging unchanged." + suffix)
+        #expect(FullChargeScheduleWording.explanation(for: deferred, end: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now).hasSuffix(suffix))
+    }
+
+    @Test("The footer's summary for an unavailable backend keeps the backend's actual reason, as the explanation does, also for an unavailable macOS Charge Limit")
+    func summaryUnavailable() async {
+        let status = await evaluatedStatus(.unavailable("no shortcut"))
+        #expect(FullChargeScheduleWording.summary(for: status) == "Simulated is unavailable (no shortcut), so a scheduled full charge changes nothing.")
+        #expect(FullChargeScheduleWording.explanation(for: status, end: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now).hasPrefix("Simulated is unavailable (no shortcut), so a scheduled full charge changes nothing"))
+        // Unavailability wins over the native style in both texts: nothing
+        // says macOS's Charge Limit is requested.
+        let unavailableNative = await evaluatedStatus(.unavailable("no shortcut", style: .nativeLimit(steps: NativeChargeLimitBackend.supportedLimits)))
+        let summary = FullChargeScheduleWording.summary(for: unavailableNative)
+        #expect(summary.contains("unavailable (no shortcut)"))
+        #expect(!summary.contains("Requests"))
+        #expect(!FullChargeScheduleWording.explanation(for: unavailableNative, end: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now).contains("requests"))
+    }
+
+    @Test("The footer's summary with macOS's Charge Limit says 100% is requested and the return can be delayed, like the explanation, and never that 100% is reached")
+    func summaryNativeLimit() async {
+        let status = await evaluatedStatus(nativeSteps, limit: 85)
+        let summary = FullChargeScheduleWording.summary(for: status)
+        #expect(summary == "Requests a 100% macOS Charge Limit at the start. Returning to your limit can be delayed by sleep or a refused request.")
+        let explanation = FullChargeScheduleWording.explanation(for: status, end: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now)
+        #expect(explanation.contains("requests a macOS Charge Limit of 100%"))
+        #expect(explanation.contains("a request that is refused, can delay that"))
+        #expect(!summary.lowercased().contains("reach"))
+        #expect(!summary.lowercased().contains("will be"))
+    }
+
+    @Test("The footer's summary for a backend that switches charging itself keeps the safety-rule override and the delayed return, like the explanation, with the same deferral")
+    func summaryRealChargingModes() async {
+        let status = await evaluatedStatus(realChargingModes, limit: 80)
+        let summary = FullChargeScheduleWording.summary(for: status)
+        #expect(summary == "Requests a temporary full charge at the start; safety rules such as the temperature pause still apply. Returning to your limit can be delayed by sleep or a failed or refused request.")
+        let explanation = FullChargeScheduleWording.explanation(for: status, end: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now)
+        #expect(explanation.contains("requests a temporary full charge"))
+        #expect(explanation.contains("a safety rule such as the temperature pause still pauses charging"))
+        #expect(explanation.contains("a request that fails or is refused, can delay that"))
+        var deferring = realChargingModes
+        deferring.macOSChargeLimit = macOSLimitOn.macOSChargeLimit
+        let deferred = await evaluatedStatus(deferring, limit: 80)
+        let suffix = " While macOS's Charge Limit is on, it stays in charge and the full charge has no effect."
+        #expect(FullChargeScheduleWording.summary(for: deferred).hasSuffix(suffix))
+        #expect(FullChargeScheduleWording.explanation(for: deferred, end: nil, timeZone: utc, locale: posix, calendar: gregorian, now: now).hasSuffix(suffix))
+    }
+
     @Test("A schedule that starts during a temperature pause installs its full charge while charging stays paused, and nothing says charging is allowed")
     func suppressedActivation() async throws {
         let clock = KitTestClock()
@@ -354,6 +410,7 @@ struct FullChargeWordingClaimsTests {
         for capabilities in [nil, macOSLimitOn, nativeSteps, realChargingModes, .unavailable("x")] {
             let current = await evaluatedStatus(capabilities)
             texts.append(FullChargeScheduleWording.explanation(for: current, end: schedule.endsAt, timeZone: utc, locale: posix, calendar: gregorian, now: now))
+            texts.append(FullChargeScheduleWording.summary(for: current))
             texts.append(FullChargeScheduleWording.overnightHint(for: current) ?? "")
             texts.append(TemporaryFullChargeWording.buttonHelp(for: current))
         }

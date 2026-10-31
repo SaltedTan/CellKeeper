@@ -323,7 +323,7 @@ private struct ChargingSettingsTab: View {
                 }
             }
 
-            Section("Full-charge schedules") {
+            Section {
                 ScheduledFullChargeSection(model: model)
                 WeeklyFullChargeSection(model: model)
                 if let status {
@@ -342,6 +342,16 @@ private struct ChargingSettingsTab: View {
                         }
                         .disclosureParagraph()
                     }
+                }
+            } header: {
+                Text("Full-charge schedules")
+            } footer: {
+                // What a scheduled full charge does with the backend in
+                // charge, in short: the same branch as the explanation
+                // above, so the footer never says more than it does.
+                if let status {
+                    Text(FullChargeScheduleWording.summary(for: status))
+                        .footerParagraph()
                 }
             }
 
