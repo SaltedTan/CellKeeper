@@ -326,7 +326,12 @@ private struct PowerFlowChart: View {
                 .chartXAxis {
                     AxisMarks(values: Self.quarterHours(in: domain)) { _ in
                         AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                        AxisValueLabel(format: .dateTime.hour().minute())
+                        // A time label sits to the right of its tick, so
+                        // the last one can reach past the plot. One that
+                        // does not fit is left out, its grid line kept,
+                        // rather than cut to "6:30…"; the axis measures the
+                        // label, so this holds in every locale.
+                        AxisValueLabel(format: .dateTime.hour().minute(), collisionResolution: .greedy)
                     }
                 }
                 .chartYAxis {
@@ -358,8 +363,9 @@ private struct PowerFlowChart: View {
 
     /// The quarter hours within `range`, for the time axis: whole local
     /// quarter hours, since every time zone's offset is a multiple of 15
-    /// minutes. None within 9 minutes of either end, where its label would
-    /// be cut off.
+    /// minutes. None within 9 minutes of either end, where a grid line
+    /// would crowd the edge; whether the last one's label fits is the
+    /// axis's decision, from the label's width.
     private static func quarterHours(in range: ClosedRange<Date>) -> [Date] {
         let step: TimeInterval = 15 * 60
         let margin: TimeInterval = 9 * 60
