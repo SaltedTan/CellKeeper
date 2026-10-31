@@ -134,11 +134,14 @@ private struct NotificationSettingsSection: View {
                     }
                 }
             }
+            // The full list is reference, not a warning: what permission
+            // macOS gives is the explanation above, always visible.
+            DisclosureGroup("What CellKeeper notifies you about") {
+                Text(NotificationWording.settingsSummary)
+                    .disclosureParagraph()
+            }
         } header: {
             Text("Notifications")
-        } footer: {
-            Text(NotificationWording.settingsSummary)
-                .footerParagraph()
         }
         .onAppear { model.refreshNotificationPermission() }
     }
