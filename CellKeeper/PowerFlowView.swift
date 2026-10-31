@@ -41,7 +41,7 @@ private struct PowerFlowContent: View {
                 PowerFlowDiagram(flow: flow)
                 PowerFlowChart(history: state.history, lineBreakGap: lineBreakGap)
                 Text(footnote)
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -121,9 +121,11 @@ private struct PowerFlowDiagram: View {
         .accessibilityLabel(PowerFlowWording.summary(flow))
     }
 
-    /// A battery symbol for the charge, in quarters.
+    /// A battery symbol for the charge, in quarters; a plain battery while
+    /// the charge is unknown, which an empty one would misstate.
     private static func batterySymbol(_ percent: Int?) -> String {
-        switch percent ?? 0 {
+        guard let percent else { return "batteryblock" }
+        return switch percent {
         case 88...: "battery.100percent"
         case 63...: "battery.75percent"
         case 38...: "battery.50percent"
@@ -165,7 +167,7 @@ private struct FlowNode: View {
                     .monospacedDigit()
                 if let subtitle {
                     Text(subtitle)
-                        .font(.caption2)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
                 }
@@ -219,7 +221,7 @@ private struct FlowArrows: View {
             }
             ForEach(arrows) { arrow in
                 Text(PowerFlowWording.watts(arrow.watts))
-                    .font(.caption2)
+                    .font(.caption)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
                     .fixedSize()
@@ -342,13 +344,13 @@ private struct PowerFlowChart: View {
                 .accessibilityLabel(PowerFlowWording.chartLabel)
                 PowerFlowLegend()
                 Text(PowerFlowWording.chartBatteryNote)
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         } else {
             Text(PowerFlowWording.chartEmpty)
-                .font(.caption2)
+                .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -402,7 +404,7 @@ private struct PowerFlowLegend: View {
                     .frame(width: 22, height: 8)
                     .accessibilityHidden(true)
                     Text(PowerFlowWording.title(of: series))
-                        .font(.caption2)
+                        .font(.caption)
                         .foregroundStyle(.secondary)
                 }
             }
@@ -412,21 +414,32 @@ private struct PowerFlowLegend: View {
 }
 
 extension PowerFlowHistory.Series {
-    /// The chart's colours: three categorical hues told apart under colour
-    /// blindness (checked against the menu's light and dark backgrounds),
-    /// a step lighter in dark mode. The dashes tell them apart without
-    /// colour.
+    /// The chart's colours: the system's blue, orange and green, three
+    /// categorical hues told apart under colour blindness, which follow the
+    /// appearance. Each was checked for WCAG's 3:1 graphic contrast against
+    /// the menu's light and dark backgrounds (`TextTone.backgrounds`): the
+    /// system blue reaches it on the window background in both (3.5:1
+    /// light, 5.2:1 dark; it dips to 2.7:1 only on the light margin), and
+    /// the orange and green in dark mode (4.9:1 and 5.5:1), but against the
+    /// light background they reach only 2.3:1 and 2.2:1, so light mode
+    /// keeps their darker shades, a documented exception. The dashes and
+    /// symbols tell the series apart without colour.
     fileprivate var color: Color {
-        let (light, dark): (UInt32, UInt32) = switch self {
-        case .macUse: (0x2A78D6, 0x3987E5)
-        case .adapterInput: (0xEB6834, 0xD95926)
-        case .battery: (0x1BAF7A, 0x199E70)
+        switch self {
+        case .macUse: Color(nsColor: .systemBlue)
+        case .adapterInput: Self.color(light: 0xEB6834, dark: .systemOrange)
+        case .battery: Self.color(light: 0x1BAF7A, dark: .systemGreen)
         }
-        return Color(nsColor: NSColor(name: nil) { appearance in
+    }
+
+    /// `light`, an sRGB hex, in the light appearances, and `dark` in the
+    /// dark ones.
+    private static func color(light: UInt32, dark: NSColor) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
             let isDark = appearance.bestMatch(from: [.aqua, .darkAqua, .accessibilityHighContrastAqua, .accessibilityHighContrastDarkAqua])
                 .map { $0 == .darkAqua || $0 == .accessibilityHighContrastDarkAqua } ?? false
-            let hex = isDark ? dark : light
-            return NSColor(srgbRed: CGFloat(hex >> 16 & 0xFF) / 255, green: CGFloat(hex >> 8 & 0xFF) / 255, blue: CGFloat(hex & 0xFF) / 255, alpha: 1)
+            if isDark { return dark }
+            return NSColor(srgbRed: CGFloat(light >> 16 & 0xFF) / 255, green: CGFloat(light >> 8 & 0xFF) / 255, blue: CGFloat(light & 0xFF) / 255, alpha: 1)
         })
     }
 
