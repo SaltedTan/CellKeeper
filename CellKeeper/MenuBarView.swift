@@ -2,41 +2,49 @@ import CellKeeperCore
 import CellKeeperKit
 import SwiftUI
 
+/// The menu's measurements, in one place (design guide): its width, the
+/// inset around its content, the gap between its groups and the gaps
+/// inside one.
+private enum MenuLayout {
+    static let width: CGFloat = 340
+    static let inset: CGFloat = 14
+    static let groupSpacing: CGFloat = 12
+    static let rowSpacing: CGFloat = 6
+    static let lineSpacing: CGFloat = 4
+    /// How far Details' groups sit in from its disclosure.
+    static let detailsIndent: CGFloat = 16
+}
+
+/// The menu, top to bottom (design guide): the battery's state and what
+/// qualifies it; the charge limit, Manage charging and one contextual
+/// action; Details, collapsed; and the footer. A warning or a request that
+/// asks the user to act stays visible beside the state it qualifies, never
+/// only inside Details (rule 2); the backend's routine mechanics are in
+/// Details (O6).
 struct MenuBarView: View {
     let model: AppModel
     @Environment(\.openSettings) private var openSettings
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: MenuLayout.groupSpacing) {
             if let status = model.status {
-                BatteryHeader(snapshot: status.snapshot, telemetryError: status.telemetryError, nativeLimit: status.nativeLimit)
+                StatusGroup(model: model, status: status, openSettingsWindow: openSettingsWindow)
                 Divider()
-                ControlSummary(status: status, selectBackend: { model.selectBackend($0) }, recheck: { model.recheckBackend() }, showMacOSLimitGuide: {
-                    model.showMacOSLimitGuide()
-                    NSApp.activate()
-                    openSettings()
-                })
+                VStack(alignment: .leading, spacing: MenuLayout.rowSpacing) {
+                    ChargeLimitControl(model: model)
+                    FullChargeControl(model: model, status: status)
+                        .padding(.top, MenuLayout.lineSpacing)
+                }
                 Divider()
-                ChargeLimitControl(model: model)
-                FullChargeControl(model: model, status: status, openScheduleSettings: {
-                    model.settingsTab = .charging
-                    NSApp.activate()
-                    openSettings()
-                })
-                Divider()
-                PowerFlowSection(model: model)
-                TelemetryDetails(snapshot: status.snapshot, thermalState: model.thermalState, isLowPowerModeEnabled: model.isLowPowerModeEnabled)
+                DetailsDisclosure(model: model, status: status)
             } else {
                 ProgressView("Reading battery…")
                     .frame(maxWidth: .infinity)
             }
             Divider()
             HStack {
-                Button("Settings…") {
-                    NSApp.activate()
-                    openSettings()
-                }
-                .keyboardShortcut(",", modifiers: .command)
+                Button("Settings…", action: openSettingsWindow)
+                    .keyboardShortcut(",", modifiers: .command)
                 Spacer()
                 Button("Quit CellKeeper") {
                     NSApp.terminate(nil)
@@ -44,15 +52,41 @@ struct MenuBarView: View {
                 .keyboardShortcut("q", modifiers: .command)
             }
         }
-        .padding(14)
-        .frame(width: 340)
+        .padding(MenuLayout.inset)
+        .frame(width: MenuLayout.width)
+    }
+
+    /// Opens the Settings window at the pane `model.settingsTab` names.
+    private func openSettingsWindow() {
+        NSApp.activate()
+        openSettings()
+    }
+}
+
+// MARK: - Header and attention
+
+/// The header and what qualifies it: the battery's charge, power source
+/// and charging status; what controls charging and how far it is trusted;
+/// and anything that asks the user to act or explains a charging state
+/// that differs from what the limit suggests.
+private struct StatusGroup: View {
+    let model: AppModel
+    let status: ControllerStatus
+    /// Opens the Settings window at the pane `model.settingsTab` names.
+    let openSettingsWindow: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: MenuLayout.rowSpacing) {
+            BatteryHeader(snapshot: status.snapshot, telemetryError: status.telemetryError)
+            ControlLine(status: status)
+            AttentionLines(model: model, status: status, openSettingsWindow: openSettingsWindow)
+        }
     }
 }
 
 private struct BatteryHeader: View {
     let snapshot: BatterySnapshot?
     let telemetryError: String?
-    let nativeLimit: NativeLimitStatus?
     /// 30 points at the standard text size, scaled with it where macOS
     /// applies one.
     @ScaledMetric(relativeTo: .largeTitle) private var chargeSize: CGFloat = 30
@@ -62,30 +96,28 @@ private struct BatteryHeader: View {
             // One element for VoiceOver: "Charge 81%, Power adapter, Charging".
             HStack(alignment: .firstTextBaseline) {
                 Text(Format.percent(snapshot.chargePercent))
-                    .font(.system(size: chargeSize, weight: .semibold, design: .rounded))
+                    .font(.system(size: chargeSize, weight: .semibold))
                     .monospacedDigit()
                     .accessibilityLabel("Charge \(Format.percent(snapshot.chargePercent))")
                 VStack(alignment: .leading, spacing: 2) {
-                    Label(snapshot.powerSource.title, systemImage: snapshot.isOnExternalPower ? "powerplug" : "battery.100percent")
-                    Text(snapshot.chargingStatus.title)
-                        .foregroundStyle(.secondary)
+                    // A neutral battery symbol: the percentage says how full
+                    // it is, and an unknown source is said in words.
+                    Label(snapshot.powerSource.title, systemImage: snapshot.isOnExternalPower ? "powerplug" : "batteryblock")
+                    if snapshot.chargingStatus == .notCharging {
+                        // macOS does not report why charging is paused; its
+                        // Charge Limit, when on, is one possible cause among
+                        // others, so none is named (M1).
+                        Text("\(snapshot.chargingStatus.title) · Cause not reported.")
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel("\(snapshot.chargingStatus.title). Cause not reported.")
+                    } else {
+                        Text(snapshot.chargingStatus.title)
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 .font(.callout)
             }
             .accessibilityElement(children: .combine)
-            if snapshot.chargingStatus == .notCharging {
-                // macOS does not report why charging is paused.
-                Group {
-                    if let limit = nativeLimit?.reportedLimit, limit < 100 {
-                        Text("macOS reports charging as paused. Its Charge Limit is \(limit)%, the likely reason, but macOS does not report the cause.")
-                    } else {
-                        Text("macOS reports charging as paused. The cause (for example Charge Limit, Optimized Battery Charging, or another app) is not reported.")
-                    }
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
         } else if let snapshot, !snapshot.isBatteryPresent {
             Label("No battery detected on this Mac.", systemImage: "batteryblock.slash")
         } else {
@@ -95,162 +127,183 @@ private struct BatteryHeader: View {
     }
 }
 
-private struct ControlSummary: View {
+/// What controls charging and how far it is trusted, under the header.
+/// macOS's Charge Limit shows its name and availability (M4: the mechanism
+/// and how far it is verified are in Details › Charging control and
+/// Settings › Control) and, when unavailable, the reason. A backend that
+/// switches charging itself shows ``ControlStatement``'s line, which names
+/// a simulation.
+private struct ControlLine: View {
     let status: ControllerStatus
-    /// Selects a backend, to cancel a pending switch.
-    let selectBackend: (ControlBackendChoice) -> Void
-    /// Checks again what the backend depends on, such as macOS's Charge Limit.
-    let recheck: () -> Void
-    /// Opens Settings › Control with the steps for turning macOS's Charge
-    /// Limit off.
-    let showMacOSLimitGuide: () -> Void
 
     var body: some View {
-        // When macOS's Charge Limit is settled, its summary says it all; the
-        // details return as soon as anything differs (Settings › Control,
-        // Activity and Diagnostics always have them).
-        let isSettled = status.isNativeLimitSettled
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Charging control")
-                    .font(.headline)
-                Spacer()
-                StatusBadge(title: status.capabilities.availability.badgeTitle, color: status.capabilities.availability.badgeColor)
+        let capabilities = status.capabilities
+        if capabilities.isEnforcedByMacOS {
+            Text("\(status.backend.displayName) · \(capabilities.availability.badgeTitle)")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("\(status.backend.displayName), \(capabilities.availability.badgeTitle)")
+            if case .unavailable = capabilities.availability {
+                Label(capabilities.explanation, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .accessibilityElement(children: .combine)
-            .accessibilityAddTraits(.isHeader)
-            if !isSettled {
-                // What controls charging, in one line (macOS's Charge Limit:
-                // what its availability means).
-                ControlStatementText(status: status)
-            }
+        } else {
+            ControlStatementText(status: status)
+        }
+    }
+}
 
+/// What asks the user to act, or explains a charging state that differs
+/// from what the limit suggests, each under its existing condition: a
+/// backend fault, a failed or refused action, macOS's Charge Limit as seen
+/// by a backend that switches charging itself, a pending backend switch,
+/// the policy's exceptional states, and, with macOS's Charge Limit as the
+/// backend, an unjudged read, a restore that is not confirmed, an adopted
+/// outside change and a read problem. A settled, healthy state shows
+/// nothing here.
+private struct AttentionLines: View {
+    let model: AppModel
+    let status: ControllerStatus
+    let openSettingsWindow: () -> Void
+
+    var body: some View {
+        Group {
+            if status.isBackendFaulted {
+                VStack(alignment: .leading, spacing: MenuLayout.lineSpacing) {
+                    Label(status.capabilities.isEnforcedByMacOS
+                          ? "The control backend failed repeatedly. Until the fault is cleared, CellKeeper only gives back your own Charge Limit."
+                          : "The control backend failed repeatedly. Only normal charging will be requested.",
+                          systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.criticalText)
+                    // The fault is cleared in Settings › Control.
+                    Button("Control Settings…") {
+                        model.settingsTab = .control
+                        openSettingsWindow()
+                    }
+                    .controlSize(.small)
+                    .help("Opens Settings › Control, where the fault is cleared.")
+                }
+            }
+            if let execution = status.lastExecution, let tone = execution.result.attentionTone {
+                Label(execution.result.title, systemImage: "exclamationmark.triangle")
+                    .foregroundStyle(tone)
+            }
             if status.capabilities.isEnforcedByMacOS {
-                NativeLimitSummary(status: status)
+                NativeLimitAttention(status: status)
             }
             // What macOS reports and how to turn it off, whatever the policy
             // says first (an unfinished restore, for example). Not for a
             // backend that controls nothing: turning macOS's limit off would
             // then leave nothing limiting charging.
             if let macOSLimit = status.capabilities.macOSChargeLimit, ControlStatement.offersMacOSLimitGuide(status) {
-                MacOSChargeLimitNotice(macOSLimit: macOSLimit, status: status, recheck: recheck, showGuide: showMacOSLimitGuide)
-                    .font(.caption)
+                MacOSChargeLimitNotice(macOSLimit: macOSLimit, status: status, recheck: { model.recheckBackend() }, showGuide: {
+                    model.showMacOSLimitGuide()
+                    openSettingsWindow()
+                })
             }
-            PendingSwitchNotice(status: status, select: selectBackend)
-
-            if let decision = status.decision, !isSettled {
-                // A backend that accepts no requests carries nothing out:
-                // the decision is only what CellKeeper would do, so its
-                // reason and notes, which speak of pausing charging, are not
-                // shown.
-                let isApplied = ControlStatement.isPolicyApplied(status)
-                // While the policy defers to macOS's limit, the line and the
-                // notice above say all its state and reason would.
-                if decision.state != .deferringToMacOS {
-                    LabeledContent(isApplied ? "Policy" : "Policy (not applied)", value: decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS))
-                        .accessibilityElement(children: .combine)
-                }
-                LabeledContent(isApplied ? "Wants" : "Would want", value: decision.desiredMode.intentTitle(nativeLimit: status.capabilities.isEnforcedByMacOS))
-                    .accessibilityElement(children: .combine)
-                if decision.state != .deferringToMacOS, isApplied {
-                    Text(status.displayedReason ?? decision.reason.description)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if let execution = status.lastExecution {
-                    LabeledContent("Last action") {
-                        Text(execution.result.title)
-                            .multilineTextAlignment(.trailing)
-                    }
-                    .font(.caption)
-                    .accessibilityElement(children: .combine)
-                }
-                ForEach(Array((isApplied ? decision.notes : []).enumerated()), id: \.offset) { _, note in
-                    Label(note.description, systemImage: "info.circle")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            if status.isBackendFaulted {
-                Label(status.capabilities.isEnforcedByMacOS
-                      ? "The control backend failed repeatedly. Until the fault is cleared, CellKeeper only gives back your own Charge Limit."
-                      : "The control backend failed repeatedly. Only normal charging will be requested.",
-                      systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .foregroundStyle(.criticalText)
-                    .fixedSize(horizontal: false, vertical: true)
+            PendingSwitchNotice(status: status, select: { model.selectBackend($0) })
+            // A backend that accepts no requests carries nothing out: its
+            // decision is only what CellKeeper would do.
+            if let decision = status.decision, ControlStatement.isPolicyApplied(status) {
+                PolicyAttention(decision: decision, status: status)
             }
         }
+        .font(.caption)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 
-/// Who enforces the limit, what macOS reports, and what will be restored.
-private struct NativeLimitSummary: View {
+/// macOS's Charge Limit as the backend: what keeps the menu from calling
+/// the limit enforced, and what asks the user to act. An unjudged read is
+/// neutral (D118, D119). A restore that is not confirmed, an outside change
+/// adopted with Manage charging off, a "no limit" report to confirm, a read
+/// problem and a limit CellKeeper cannot change back are warnings, each
+/// with a symbol and words.
+private struct NativeLimitAttention: View {
     let status: ControllerStatus
 
     var body: some View {
         let native = status.nativeLimit
-        VStack(alignment: .leading, spacing: 4) {
-            Label {
-                if let deferral = native?.readDeferral {
-                    // Not "no limit": macOS clears its active limit on
-                    // battery power (note 08, O20).
-                    Text(NativeLimitWording.deferralTitle(deferral))
-                } else if let reported = native?.reportedLimit {
-                    Text("macOS is enforcing its Charge Limit: \(Format.chargeLimit(reported))")
-                } else {
-                    Text("macOS enforces its own Charge Limit; its current value could not be read.")
-                }
-            } icon: {
-                Image(systemName: "laptopcomputer")
+        if let deferral = native?.readDeferral {
+            // Not "no limit": macOS clears its active limit on battery power
+            // (note 08, O20).
+            VStack(alignment: .leading, spacing: 2) {
+                Text(NativeLimitWording.deferralTitle(deferral))
+                    .font(.callout)
+                Text(NativeLimitWording.deferralDetail(deferral))
+                    .foregroundStyle(.secondary)
             }
-            .font(.callout)
-            Group {
-                if let deferral = native?.readDeferral {
-                    Text(NativeLimitWording.deferralDetail(deferral))
-                }
-                // Shared with the restore notification.
-                if let problem = NativeLimitWording.restoreProblem(status) {
-                    Text(problem)
-                        .foregroundStyle(.criticalText)
-                } else if let owner = native?.ownerLimit, status.isOwnLimitRestoreWaitingForPower {
-                    // Nothing was written: the restore waits for a judged
-                    // read, on power (D116, D119).
-                    Text(NativeLimitWording.restoreWaitingForPower(owner))
-                } else if let owner = native?.ownerLimit {
-                    Text("Set by CellKeeper. Your own limit, \(Format.chargeLimit(owner)), is restored when CellKeeper stops managing it, quits, or fails.")
-                } else {
-                    Text("This is your own setting; CellKeeper has not changed it.")
-                }
-                if let adopted = status.adoptedChange, !status.settings.isManagementEnabled {
+        }
+        // Shared with the restore notification.
+        if let problem = NativeLimitWording.restoreProblem(status) {
+            Label(problem, systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.criticalText)
+        }
+        if let adopted = status.adoptedChange, !status.settings.isManagementEnabled {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
                     Text("The limit was changed outside CellKeeper to \(Format.chargeLimit(adopted.limit)), so CellKeeper kept it as your own and turned off Manage charging. Turn it on to let CellKeeper manage the limit again.")
-                        .foregroundStyle(.warningText)
                     if adopted.isNoLimit, adopted.previousOwnerLimit != adopted.limit {
                         Text("If that was a temporary full charge rather than your choice, your earlier limit was \(Format.chargeLimit(adopted.previousOwnerLimit)).")
-                            .foregroundStyle(.warningText)
                     }
                 }
-                if native?.needsNoLimitConfirmation == true {
-                    Text("macOS reports no limit. If your own limit is 100%, confirm it in Settings › Control before CellKeeper changes anything.")
-                        .foregroundStyle(.warningText)
-                }
-                if let problem = native?.readProblem {
-                    Text("Could not read the Charge Limit: \(problem)")
-                        .foregroundStyle(.warningText)
-                }
-                if let owner = native?.ownerLimit, !status.capabilities.availability.acceptsRequests, !status.isOwnLimitRestorePending {
-                    Text("CellKeeper cannot change the limit back right now. Set \(Format.chargeLimit(owner)) in System Settings › Battery › Charging.")
-                        .foregroundStyle(.criticalText)
-                }
+            } icon: {
+                Image(systemName: "exclamationmark.triangle")
             }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
+            .foregroundStyle(.warningText)
+        }
+        if native?.needsNoLimitConfirmation == true {
+            Label("macOS reports no limit. If your own limit is 100%, confirm it in Settings › Control before CellKeeper changes anything.", systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.warningText)
+        }
+        if let problem = native?.readProblem {
+            Label("Could not read the Charge Limit: \(problem)", systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.warningText)
+        }
+        if let owner = native?.ownerLimit, !status.capabilities.availability.acceptsRequests, !status.isOwnLimitRestorePending {
+            Label("CellKeeper cannot change the limit back right now. Set \(Format.chargeLimit(owner)) in System Settings › Battery › Charging.", systemImage: "exclamationmark.triangle")
+                .foregroundStyle(.criticalText)
         }
     }
 }
+
+/// The policy's state when charging then differs materially from what the
+/// limit suggests (a temperature pause, the fail-safe), with its reason,
+/// and the notes that explain such a state. Ordinary threshold narration
+/// and the other notes are in Details › Charging control. A decision is
+/// intent: whether the backend carried it out is said by its own lines.
+private struct PolicyAttention: View {
+    let decision: PolicyDecision
+    let status: ControllerStatus
+
+    var body: some View {
+        if decision.state.asksAttention, !Self.isSaidElsewhere(decision.reason) {
+            VStack(alignment: .leading, spacing: 2) {
+                Label(decision.state.title(nativeLimit: status.capabilities.isEnforcedByMacOS), systemImage: "exclamationmark.triangle")
+                Text(status.displayedReason ?? decision.reason.description)
+            }
+            .foregroundStyle(.warningText)
+        }
+        ForEach(Array(decision.notes.filter(\.asksAttention).enumerated()), id: \.offset) { _, note in
+            Label(note.description, systemImage: note.isWarning ? "exclamationmark.triangle" : "info.circle")
+                .foregroundStyle(note.isWarning ? Color.warningText : Color.secondary)
+        }
+    }
+
+    /// Whether another visible line already says why the policy is in the
+    /// fail-safe: the pending switch's notice, the restore warning, the
+    /// header's missing battery, or the limit control's "Not set".
+    private static func isSaidElsewhere(_ reason: DecisionReason) -> Bool {
+        switch reason {
+        case .releaseRequired(.backendSwitch), .releaseRequired(.restoreUnfinished), .batteryNotPresent, .nativeLimitUnsupported: true
+        default: false
+        }
+    }
+}
+
+// MARK: - Charge limit
 
 /// The charge-limit control: a slider for CellKeeper's own control, or the
 /// values macOS's Charge Limit accepts.
@@ -266,16 +319,19 @@ private struct ChargeLimitControl: View {
     }
 }
 
-/// Changes are applied immediately; the controller rate-limits them.
+/// Changes are applied immediately; the controller rate-limits them. The
+/// heading names CellKeeper's configured target; what macOS established is
+/// said under the control, from a judged read only (D118). A selected
+/// segment is never evidence of enforcement.
 private struct NativeChargeLimitPicker: View {
     let model: AppModel
 
     var body: some View {
         let steps = model.nativeLimitSteps
         let limit = model.settings.chargeLimit
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: MenuLayout.lineSpacing) {
             HStack {
-                Text("Charge limit")
+                Text("CellKeeper limit")
                     .font(.headline)
                 Spacer()
                 Text(steps.contains(limit) ? Format.chargeLimit(limit) : "Not set")
@@ -288,7 +344,7 @@ private struct NativeChargeLimitPicker: View {
                 set: { if let value = $0 { model.setChargeLimit(value) } }
             )) {
                 ForEach(steps, id: \.self) { step in
-                    Text("\(step)")
+                    Text("\(step)%")
                         .accessibilityLabel(AccessibilityWording.chargeLimit(step))
                         .tag(Int?.some(step))
                 }
@@ -298,12 +354,70 @@ private struct NativeChargeLimitPicker: View {
             .disabled(!model.settings.isManagementEnabled)
             .help("macOS enforces this limit and resumes charging once the battery drops more than 5%; a custom resume point is not available with its Charge Limit.")
             if !steps.contains(limit) {
-                Text("\(ChargeLimitChoices.notSettableWithMacOSLimit(limit)) Choose one of the values above; until then your own limit stays in effect.")
+                Label("\(ChargeLimitChoices.notSettableWithMacOSLimit(limit)) Choose one of the values above; until then your own limit stays in effect.", systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.warningText)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if let status = model.status {
+                NativeLimitLine(status: status)
+            }
             ManageChargingToggle(model: model)
+            if let status = model.status {
+                OwnLimitLine(status: status)
+            }
+        }
+    }
+}
+
+/// What macOS established, under the segments: the limit a judged read
+/// showed (M5), or that it could not be read (M6). Nothing while the read
+/// is deferred, when the header says why; a write still awaiting its
+/// read-back says so here instead (M10).
+private struct NativeLimitLine: View {
+    let status: ControllerStatus
+
+    var body: some View {
+        let native = status.nativeLimit
+        Group {
+            if native?.readDeferral == nil {
+                if let reported = native?.reportedLimit {
+                    Text("macOS enforces \(Format.chargeLimit(reported)).")
+                } else {
+                    Text("macOS Charge Limit could not be read.")
+                }
+            } else if let execution = status.lastExecution, case .deferred(written: true) = execution.result {
+                Text(execution.result.title)
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// The user's own limit, under Manage charging: saved, so CellKeeper can
+/// give it back (M7; when it does is said in Details › Charging control);
+/// waiting for power with nothing written, which is neutral (D119); or not
+/// changed by CellKeeper (M8). Nothing while a restore is not confirmed:
+/// the header's warning names the limit then.
+private struct OwnLimitLine: View {
+    let status: ControllerStatus
+
+    var body: some View {
+        if NativeLimitWording.restoreProblem(status) == nil {
+            Group {
+                if let owner = status.nativeLimit?.ownerLimit, status.isOwnLimitRestoreWaitingForPower {
+                    Text(NativeLimitWording.restoreWaitingForPower(owner))
+                } else if let owner = status.nativeLimit?.ownerLimit {
+                    Text("Your own limit: \(Format.chargeLimit(owner)) (saved).")
+                } else {
+                    Text("CellKeeper has not changed this setting.")
+                }
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -328,7 +442,7 @@ private struct ChargeLimitSlider: View {
 
     var body: some View {
         let shown = edit?.draft ?? model.settings.chargeLimit
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: MenuLayout.lineSpacing) {
             HStack {
                 Text("Charge limit")
                     .font(.headline)
@@ -359,20 +473,23 @@ private struct ChargeLimitSlider: View {
                 }
                 send(.userChanged(min(max(shown + step, Self.range.lowerBound), Self.range.upperBound)))
             }
-            Text("Resumes charging at \(model.settings.resumeThreshold)%.")
+            // The configured value (M18): whether charging resumes there is
+            // the backend's to establish.
+            Text("Resume threshold: \(model.settings.resumeThreshold)%.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             // The notice above already warns of a restriction that may remain.
             if let status = model.status, let note = ControlStatement.limitNote(for: status, includesOwnRestriction: false) {
-                Text(note)
+                Label(note, systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.warningText)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if shown < 50 {
-                Text("Limits below 50% leave little charge for unplugged use.")
+                Label("Limits below 50% leave little charge for unplugged use.", systemImage: "exclamationmark.triangle")
                     .font(.caption)
                     .foregroundStyle(.warningText)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             ManageChargingToggle(model: model)
         }
@@ -424,14 +541,17 @@ private struct ManageChargingToggle: View {
     let model: AppModel
 
     var body: some View {
-        Toggle("Manage charging", isOn: Binding(
+        Toggle(isOn: Binding(
             get: { model.settings.isManagementEnabled },
             set: { newValue in model.updateSettings { $0.isManagementEnabled = newValue } }
-        ))
+        )) {
+            // The label fills the row, so the switch sits at its end.
+            Text("Manage charging")
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
         .toggleStyle(.switch)
-        .controlSize(.small)
         if let error = model.settingsError {
-            Text(error)
+            Label(error, systemImage: "exclamationmark.triangle")
                 .font(.caption)
                 .foregroundStyle(.warningText)
                 .fixedSize(horizontal: false, vertical: true)
@@ -439,58 +559,55 @@ private struct ManageChargingToggle: View {
     }
 }
 
+// MARK: - Contextual action
+
+/// The one contextual action: Charge to 100% Once, or the running
+/// session's line and its cancel. While a calibration runs, its lines and
+/// answers take the action's place: its status says why no full charge
+/// can start. Beneath, the schedules' status, due reasons, store problems
+/// and outcomes; schedules are set up in Settings › Charging (O2).
 private struct FullChargeControl: View {
     let model: AppModel
     let status: ControllerStatus
-    /// Opens Settings › Charging, where a full charge is scheduled.
-    let openScheduleSettings: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            CalibrationLines(model: model, status: status)
-            if let override = status.activeOverride {
+        CalibrationLines(model: model, status: status)
+        if let override = status.activeOverride {
+            VStack(alignment: .leading, spacing: MenuLayout.lineSpacing) {
+                switch override.kind {
+                case .fullCharge:
+                    Label(TemporaryFullChargeWording.line(for: override, status: status, lastResult: status.lastExecution?.result.title, now: status.describedAt), systemImage: "arrow.up.to.line")
+                case .dischargeToLimit:
+                    Label(dischargeText(override), systemImage: "minus.plus.batteryblock")
+                        .foregroundStyle(.warningText)
+                }
                 HStack {
-                    switch override.kind {
-                    case .fullCharge:
-                        Label(TemporaryFullChargeWording.line(for: override, status: status, lastResult: status.lastExecution?.result.title, now: status.describedAt), systemImage: "arrow.up.to.line")
-                            .fixedSize(horizontal: false, vertical: true)
-                    case .dischargeToLimit:
-                        Label(dischargeText(override), systemImage: "minus.plus.batteryblock")
-                            .foregroundStyle(.warningText)
-                    }
                     Spacer()
-                    Button("Cancel") { model.cancelOverride() }
+                    Button(override.kind == .fullCharge ? "Cancel Full Charge" : "Cancel Discharge") { model.cancelOverride() }
                         .controlSize(.small)
                         .accessibilityLabel(override.kind == .fullCharge ? "Cancel the temporary full charge" : "Cancel the discharge")
                 }
-                .font(.caption)
-            } else {
-                // One predicate enables the button and gives the reason.
-                let refusal = FullChargeStart.refusal(settings: model.settings, status: status)
-                let help = TemporaryFullChargeWording.buttonHelp(for: status)
-                HStack {
-                    Button {
-                        model.startFullCharge()
-                    } label: {
-                        Label("Charge to 100% once", systemImage: "arrow.up.to.line")
-                    }
-                    .disabled(refusal != nil)
-                    .help(help)
-                    .disabledReasonHint(refusal, help: help)
-                    Spacer()
-                    if status.fullChargeSchedule == nil {
-                        Button("Schedule…") { openScheduleSettings() }
-                            .controlSize(.small)
-                            .help("Schedule a temporary full charge in Settings › Charging.")
-                    }
-                }
-                if let refusal {
-                    DisabledReason(text: refusal)
-                }
             }
-            ScheduledFullChargeLines(model: model, status: status)
-            WeeklyFullChargeLines(model: model, status: status)
+            .font(.caption)
+            .fixedSize(horizontal: false, vertical: true)
+        } else if !status.calibration.isInProgress {
+            // One predicate enables the button and gives the reason.
+            let refusal = FullChargeStart.refusal(settings: model.settings, status: status)
+            let help = TemporaryFullChargeWording.buttonHelp(for: status)
+            Button {
+                model.startFullCharge()
+            } label: {
+                Label("Charge to 100% Once", systemImage: "arrow.up.to.line")
+            }
+            .disabled(refusal != nil)
+            .help(help)
+            .disabledReasonHint(refusal, help: help)
+            if let refusal {
+                DisabledReason(text: refusal)
+            }
         }
+        ScheduledFullChargeLines(model: model, status: status)
+        WeeklyFullChargeLines(model: model, status: status)
     }
 
     /// Says a discharge is happening only while the policy is running one
@@ -543,7 +660,7 @@ private struct CalibrationLines: View {
         let calibration = status.calibration
         if let session = calibration.session, let line = CalibrationWording.statusLine(for: status) {
             let isRequest = CalibrationWording.request(for: status) != nil || calibration.isPaused
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: MenuLayout.lineSpacing) {
                 Label(line, systemImage: "gauge.with.needle")
                     .fontWeight(isRequest ? .semibold : .regular)
                     .fixedSize(horizontal: false, vertical: true)
@@ -565,12 +682,12 @@ private struct CalibrationLines: View {
                                 .accessibilityLabel("Continue the calibration")
                         }
                     }
-                    Button("Cancel") { model.cancelCalibration() }
+                    Button("Cancel Calibration") { model.cancelCalibration() }
                         .accessibilityLabel("Cancel the calibration")
                 }
                 .controlSize(.small)
                 if let refusal = calibration.refusal {
-                    Text(refusal)
+                    Label(refusal, systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.warningText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -614,11 +731,11 @@ private struct ScheduledFullChargeLines: View {
     var body: some View {
         if let schedule = status.fullChargeSchedule {
             HStack(alignment: .firstTextBaseline) {
-                Label(FullChargeScheduleWording.armedLine(schedule, wait: status.fullChargeScheduleWait, now: status.describedAt), systemImage: "calendar.badge.clock")
+                Label(FullChargeScheduleWording.armedLine(schedule, wait: status.fullChargeScheduleWait, now: status.describedAt), systemImage: status.fullChargeScheduleWait == nil ? "calendar.badge.clock" : "exclamationmark.triangle")
                     .foregroundStyle(status.fullChargeScheduleWait == nil ? Color.primary : Color.warningText)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()
-                Button("Cancel") { model.cancelFullChargeSchedule() }
+                Button("Cancel Schedule") { model.cancelFullChargeSchedule() }
                     .controlSize(.small)
                     .accessibilityLabel("Cancel the scheduled full charge")
             }
@@ -681,6 +798,42 @@ private struct WeeklyFullChargeLines: View {
     }
 }
 
+// MARK: - Details
+
+/// Everything one click away (design guide): the power flow, the battery's
+/// details, the backend's mechanics and the configured schedules, each
+/// under its own disclosure. Closed when the menu's view is made. Closing
+/// it closes Power flow with it, through the existing collapse path, so
+/// nothing samples while hidden (D114, D115): a persisted "expanded" flag
+/// is not proof of visibility.
+private struct DetailsDisclosure: View {
+    let model: AppModel
+    let status: ControllerStatus
+    @State private var isExpanded = false
+
+    var body: some View {
+        DisclosureGroup("Details", isExpanded: Binding(
+            get: { isExpanded },
+            set: { expanded in
+                isExpanded = expanded
+                if !expanded, model.isPowerFlowExpanded {
+                    model.setPowerFlowExpanded(false)
+                }
+            }
+        )) {
+            VStack(alignment: .leading, spacing: MenuLayout.rowSpacing) {
+                PowerFlowSection(model: model)
+                TelemetryDetails(snapshot: status.snapshot, thermalState: model.thermalState, isLowPowerModeEnabled: model.isLowPowerModeEnabled)
+                ChargingControlDetails(status: status)
+                SchedulesDetails(status: status)
+            }
+            // Indented under Details, so the four groups read as its content.
+            .padding(.leading, MenuLayout.detailsIndent)
+            .padding(.top, MenuLayout.lineSpacing)
+        }
+    }
+}
+
 private struct TelemetryDetails: View {
     let snapshot: BatterySnapshot?
     let thermalState: ProcessInfo.ThermalState
@@ -691,7 +844,8 @@ private struct TelemetryDetails: View {
             if let snapshot {
                 Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 3) {
                     row("Cycle count", snapshot.health.cycleCount.map(String.init) ?? Format.unavailable)
-                    row("Capacity", Format.capacity(snapshot.health), spoken: Format.Spoken.capacity(snapshot.health))
+                    row("Capacity", Format.capacity(snapshot.health), spoken: Format.Spoken.capacity(snapshot.health),
+                        note: "Computed from full-charge and design capacity; may differ from macOS.")
                     if let condition = snapshot.health.condition {
                         row("Condition", condition)
                     }
@@ -707,15 +861,16 @@ private struct TelemetryDetails: View {
                     if let toFull = Format.minutes(snapshot.timeToFullMinutes) {
                         row("Time to full", toFull, spoken: Format.Spoken.minutes(snapshot.timeToFullMinutes))
                     }
-                    row("Mac thermal state", thermalState.title)
+                    row("Mac thermal state", thermalState.title, note: "For the whole Mac, not the battery temperature.")
                     row("Low Power Mode", isLowPowerModeEnabled ? "On" : "Off")
                 }
                 .font(.caption)
-                .padding(.top, 4)
-                Text("Read at \(snapshot.timestamp.formatted(date: .omitted, time: .standard)). Capacity percentage is computed by CellKeeper from full-charge and design capacity, and may differ from the figure macOS shows. The thermal state is macOS's reading for the whole Mac, not the battery's temperature.")
-                    .font(.caption2)
+                .padding(.top, MenuLayout.lineSpacing)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                Text("Read at \(snapshot.timestamp.formatted(date: .omitted, time: .standard)).")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 Text(Format.unavailable).font(.caption)
             }
@@ -724,13 +879,170 @@ private struct TelemetryDetails: View {
 
     /// One element for VoiceOver per row: the value, named by its label,
     /// with its unit in words (`spoken`) where the screen abbreviates it.
-    private func row(_ label: String, _ value: String, spoken: String? = nil) -> some View {
-        GridRow {
+    /// A `note` qualifies the value beside it (M17), as its own element.
+    private func row(_ label: String, _ value: String, spoken: String? = nil, note: String? = nil) -> some View {
+        GridRow(alignment: .firstTextBaseline) {
             Text(label).foregroundStyle(.secondary)
                 .accessibilityHidden(true)
-            Text(value).monospacedDigit()
-                .accessibilityLabel(label)
-                .accessibilityValue(spoken ?? value)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(value).monospacedDigit()
+                    .accessibilityLabel(label)
+                    .accessibilityValue(spoken ?? value)
+                if let note {
+                    Text(note)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+}
+
+/// The backend's mechanics (O6): what it is and what its availability
+/// means, the policy's state and desired mode, which are intent rather
+/// than evidence that a request was sent, its ordinary reason and notes,
+/// the last action, and, with macOS's Charge Limit, when it was read and
+/// when the user's own limit is given back. A backend that accepts no
+/// requests carries nothing out: its rows say so.
+private struct ChargingControlDetails: View {
+    let status: ControllerStatus
+
+    var body: some View {
+        let isApplied = ControlStatement.isPolicyApplied(status)
+        let isNative = status.capabilities.isEnforcedByMacOS
+        DisclosureGroup("Charging control") {
+            VStack(alignment: .leading, spacing: MenuLayout.lineSpacing) {
+                // The Simulated backend is named by its availability already.
+                LabeledContent("Backend", value: status.backend.displayName == status.capabilities.availability.badgeTitle
+                               ? status.backend.displayName
+                               : "\(status.backend.displayName) · \(status.capabilities.availability.badgeTitle)")
+                    .accessibilityElement(children: .combine)
+                Text(status.capabilities.explanation)
+                    .foregroundStyle(.secondary)
+                if let decision = status.decision {
+                    // While the policy defers to macOS's limit, the line
+                    // under the header and the notice say all its state and
+                    // reason would.
+                    if decision.state != .deferringToMacOS {
+                        LabeledContent(isApplied ? "Policy" : "Policy (not applied)", value: decision.state.title(nativeLimit: isNative))
+                            .accessibilityElement(children: .combine)
+                    }
+                    LabeledContent(isApplied ? "Desired mode" : "Desired mode (not applied)", value: decision.desiredMode.intentTitle(nativeLimit: isNative))
+                        .accessibilityElement(children: .combine)
+                    if decision.state != .deferringToMacOS, isApplied {
+                        Text(status.displayedReason ?? decision.reason.description)
+                            .foregroundStyle(.secondary)
+                    }
+                    // The notes that explain an exceptional state are under
+                    // the header.
+                    ForEach(Array((isApplied ? decision.notes.filter { !$0.asksAttention } : []).enumerated()), id: \.offset) { _, note in
+                        Label(note.description, systemImage: "info.circle")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                if let execution = status.lastExecution {
+                    LabeledContent("Last action", value: execution.result.title)
+                        .accessibilityElement(children: .combine)
+                }
+                if isNative {
+                    if let readAt = status.nativeLimit?.readAt {
+                        LabeledContent("Charge Limit read", value: readAt.formatted(date: .omitted, time: .standard))
+                            .accessibilityElement(children: .combine)
+                    }
+                    if let owner = status.nativeLimit?.ownerLimit, NativeLimitWording.restoreProblem(status) == nil, !status.isOwnLimitRestoreWaitingForPower {
+                        Text("Set by CellKeeper. Your own limit, \(Format.chargeLimit(owner)), is restored when CellKeeper stops managing it, quits, or fails.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .font(.caption)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, MenuLayout.lineSpacing)
+        }
+    }
+}
+
+/// The configured schedules (O2): the one-off window and the weekly
+/// pattern, set up in Settings › Charging. Their status, due reasons,
+/// store problems and outcomes stay in the panel above.
+private struct SchedulesDetails: View {
+    let status: ControllerStatus
+
+    var body: some View {
+        DisclosureGroup("Schedules") {
+            VStack(alignment: .leading, spacing: MenuLayout.lineSpacing) {
+                if let schedule = status.fullChargeSchedule {
+                    LabeledContent("Full charge", value: FullChargeScheduleWording.window(schedule, now: status.describedAt))
+                        .accessibilityElement(children: .combine)
+                }
+                if let weekly = status.weeklyFullCharge {
+                    LabeledContent("Weekly", value: WeeklyFullChargeWording.summary(weekly.pattern))
+                        .accessibilityElement(children: .combine)
+                }
+                if status.fullChargeSchedule == nil, status.weeklyFullCharge == nil {
+                    Text("No full charge is scheduled.")
+                }
+                Text("Schedules are set up in Settings › Charging.")
+                    .foregroundStyle(.secondary)
+            }
+            .font(.caption)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, MenuLayout.lineSpacing)
+        }
+    }
+}
+
+// MARK: - What stays visible
+
+extension ExecutionRecord.Result {
+    /// The tone of a result the menu keeps visible under the header: a
+    /// failure, or a refusal with its reason. Nil for the rest, which
+    /// Details › Charging control lists as the last action.
+    fileprivate var attentionTone: Color? {
+        switch self {
+        case .failed: .criticalText
+        case .refused: .warningText
+        case .applied, .unchanged, .simulated, .adoptedOutsideChange, .deferred: nil
+        }
+    }
+}
+
+extension PolicyState {
+    /// Whether charging then differs materially from what the limit
+    /// suggests, so the menu explains the state under the header rather
+    /// than in Details: a temperature pause and the fail-safe. The deferral
+    /// to macOS's Charge Limit has its own line and notice there already.
+    fileprivate var asksAttention: Bool {
+        switch self {
+        case .temperaturePause, .failSafe: true
+        case .unmanaged, .safetyFloor, .onBattery, .fullChargeOverride, .charging, .holding, .discharging,
+             .osEnforcedLimit, .deferringToMacOS, .calibrating: false
+        }
+    }
+}
+
+extension PolicyNote {
+    /// Whether the note explains a charging state that differs from what
+    /// the limit suggests, so the menu shows it under the header: a limit
+    /// being confirmed before charging pauses, a native limit kept without
+    /// telemetry, a discharge the backend cannot run and one that ended for
+    /// macOS's Charge Limit. The temperature's absence is routine, and a
+    /// suppressed full charge is said by the full charge's own line.
+    fileprivate var asksAttention: Bool {
+        switch self {
+        case .confirmingLimit, .nativeLimitKeptWithoutTelemetry, .dischargeUnsupported, .dischargeEndedForMacOSChargeLimit: true
+        case .temperatureUnavailable, .fullChargeSuppressed: false
+        }
+    }
+
+    /// Whether the note is a warning (something is not as asked) rather
+    /// than information about what CellKeeper is doing.
+    fileprivate var isWarning: Bool {
+        switch self {
+        case .nativeLimitKeptWithoutTelemetry, .dischargeUnsupported, .dischargeEndedForMacOSChargeLimit: true
+        case .confirmingLimit, .temperatureUnavailable, .fullChargeSuppressed: false
         }
     }
 }
