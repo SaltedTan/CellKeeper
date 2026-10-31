@@ -15,15 +15,6 @@ extension ControlAvailability {
         }
     }
 
-    var badgeColor: Color {
-        switch self {
-        case .available: .green
-        case .experimental: .orange
-        case .simulated: .purple
-        case .unavailable: .secondary
-        }
-    }
-
     var explanation: String {
         switch self {
         case .available:
@@ -410,24 +401,6 @@ extension View {
     /// remove the help tag's.
     func disabledReasonHint(_ reason: String?, help: String = "") -> some View {
         accessibilityHint(reason ?? help)
-    }
-}
-
-/// A small capsule label, tinted and outlined in `color`. The text keeps
-/// the label colour: coloured text on a tint of its own colour is too faint
-/// to read (2.2:1 to 4:1 against white).
-struct StatusBadge: View {
-    let title: String
-    let color: Color
-
-    var body: some View {
-        Text(title)
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, 6)
-            .padding(.vertical, 2)
-            .foregroundStyle(.primary)
-            .background(color.opacity(0.18), in: Capsule())
-            .overlay(Capsule().strokeBorder(color.opacity(0.6), lineWidth: 1))
     }
 }
 
