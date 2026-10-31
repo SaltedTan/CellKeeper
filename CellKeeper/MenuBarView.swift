@@ -279,7 +279,7 @@ private struct PolicyAttention: View {
     let status: ControllerStatus
 
     var body: some View {
-        if decision.state.asksAttention, !Self.isSaidElsewhere(decision.reason) {
+        if decision.state.asksAttention, !Self.isSaidElsewhere(decision.reason, status: status) {
             // Labelled as the policy, as in Details: a pause the backend
             // refused is still only what the policy asks for, and the last
             // action's line says what came of it.
@@ -300,13 +300,21 @@ private struct PolicyAttention: View {
         }
     }
 
-    /// Whether another visible line already says why the policy is in the
-    /// fail-safe: the pending switch's notice, the restore warning, the
-    /// header's missing battery, or the limit control's "Not set".
-    private static func isSaidElsewhere(_ reason: DecisionReason) -> Bool {
+    /// Whether another line the menu shows in this status already says why
+    /// the policy is in the fail-safe: the pending switch's notice, macOS's
+    /// Charge Limit restore warning, the header's missing battery, or the
+    /// native limit control's "Not set". Each is checked by the condition
+    /// that shows that line, so the reason is never left unsaid: an
+    /// unfinished restore of another backend's own restriction has no line
+    /// of its own (review r2 of #121).
+    private static func isSaidElsewhere(_ reason: DecisionReason, status: ControllerStatus) -> Bool {
+        let isNative = status.capabilities.isEnforcedByMacOS
         switch reason {
-        case .releaseRequired(.backendSwitch), .releaseRequired(.restoreUnfinished), .batteryNotPresent, .nativeLimitUnsupported: true
-        default: false
+        case .releaseRequired(.backendSwitch): return status.pendingBackend != nil
+        case .releaseRequired(.restoreUnfinished): return isNative && NativeLimitWording.restoreProblem(status) != nil
+        case .batteryNotPresent: return status.snapshot?.isBatteryPresent == false
+        case .nativeLimitUnsupported: return isNative
+        default: return false
         }
     }
 }
