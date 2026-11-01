@@ -307,7 +307,7 @@ struct HelperOwnershipEvidenceTests {
         // The helper's own restore made the restriction; no outside writer
         // took part, and none is named. The backend still faults.
         #expect(gated.isBackendFaulted)
-        assertNamesHelperFailure(gated, "CellKeeper's helper's own restore after a failure (restoredAfterWriteFailure) left the adapter disabled active")
+        assertNamesHelperFailure(gated, "CellKeeper's helper's own restore after a failure (restoredAfterWriteFailure) left external power input disabled active")
     }
 
     /// The activity log and the diagnostics report name the helper's own

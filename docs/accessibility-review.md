@@ -116,7 +116,7 @@ report and the tab write as before ("12427 mV", "31 °C"; the golden tests
 are unchanged) and VoiceOver reads in words, with the menu's words and the
 locale's numbers: "Voltage, 12,427 millivolts", "Current, -845
 milliamps", "Full-charge capacity, 6,131 milliamp-hours", "Adapter, 70
-watts", "Temperature protection, on (pause 40 degrees Celsius, resume 35
+watts" ("Negotiated power in" since #127), "Temperature protection, on (pause 40 degrees Celsius, resume 35
 degrees Celsius)", and a unit in the singular when its number, as shown,
 is one, in any locale's digits ("1 milliamp", "١ milliamp"). Temperatures
 in the policy's sentences are read so too ("Reason, Battery at 41.5

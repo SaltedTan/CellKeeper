@@ -369,7 +369,7 @@ struct HelperChargingBackendTests {
         InterlockRelease(held: .inhibitCharging, condition: .batteryFloor, wording: "10% floor"),
         InterlockRelease(held: .inhibitCharging, condition: .notOnExternalPower, wording: "not on external power"),
         InterlockRelease(held: .inhibitCharging, condition: .powerStateUnavailable, wording: "power reading"),
-        InterlockRelease(held: .forceDischarge, condition: .adapterAbsent, wording: "no power adapter"),
+        InterlockRelease(held: .forceDischarge, condition: .adapterAbsent, wording: "no external power"),
         InterlockRelease(held: .forceDischarge, condition: .adapterPresenceUnknown, wording: "cannot tell"),
         InterlockRelease(held: .forceDischarge, condition: .adapterFloor, wording: "floor for running"),
         InterlockRelease(held: .forceDischarge, condition: .thermalPressure, wording: "thermal"),

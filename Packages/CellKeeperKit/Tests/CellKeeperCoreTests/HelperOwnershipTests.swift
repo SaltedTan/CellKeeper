@@ -112,7 +112,7 @@ struct HelperOwnershipTests {
         var wording: String {
             switch self {
             case .thermalPressure: "thermal"
-            case .adapterAbsent: "no power adapter"
+            case .adapterAbsent: "no external power"
             case .adapterPresenceUnknown: "cannot tell"
             case .powerStateUnavailable: "power reading"
             case .sleep: "sleep"
