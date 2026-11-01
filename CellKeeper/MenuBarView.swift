@@ -529,13 +529,14 @@ private struct ChargeLimitSlider: View {
         }
         .onDisappear(perform: close)
         // The view lives on while the menu is closed (``AppModel/isMenuVisible``):
-        // closing the menu closes the edit as disappearing would, and
-        // reopening it starts a new one.
-        .onChange(of: model.isMenuVisible) {
+        // every close, and every reopen, closes the edit as disappearing
+        // would (a closed edit ignores a second close), and a reopen starts
+        // a new one. Keyed on ``AppModel/menuShowing``, so a close and
+        // reopen that SwiftUI sees as one update still closes the edit.
+        .onChange(of: model.menuShowing) {
+            close()
             if model.isMenuVisible {
                 edit = ChargeLimitSliderEdit(limit: model.settings.chargeLimit, revision: model.settingsRevision)
-            } else {
-                close()
             }
         }
     }
