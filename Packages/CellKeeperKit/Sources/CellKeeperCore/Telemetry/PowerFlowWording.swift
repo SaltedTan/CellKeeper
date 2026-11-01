@@ -127,7 +127,7 @@ public enum PowerFlowWording {
 
     /// What VoiceOver reads for the "Power in" node, after its name.
     public static func adapterSpoken(_ flow: PowerFlow, locale: Locale = .current) -> String {
-        let rating = flow.adapterRatingWatts.map { ", up to \($0.formatted(.number.locale(locale))) watts" } ?? ""
+        let rating = flow.adapterRatingWatts.map { ", up to \(spokenWatts(Double($0), locale: locale))" } ?? ""
         switch flow.powerSource {
         case .externalPower:
             guard let input = flow.adapterInputWatts else { return "Input not available\(rating)" }

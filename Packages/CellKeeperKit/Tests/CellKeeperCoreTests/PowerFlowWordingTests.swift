@@ -68,6 +68,8 @@ struct PowerFlowWordingTests {
         #expect(PowerFlowWording.adapterSpoken(reading6, locale: english) == "Input not available, up to 68 watts")
         let reading7 = try flow(powerSnapshot(adapter: nil))
         #expect(PowerFlowWording.adapterSpoken(reading7, locale: english) == "45 watts in")
+        // One watt is said in the singular.
+        #expect(PowerFlowWording.adapterSpoken(try flow(powerSnapshot(adapter: 1)), locale: english) == "45 watts in, up to 1 watt")
         let reading8 = try flow(powerSnapshot(source: .battery))
         #expect(PowerFlowWording.adapterSpoken(reading8, locale: english) == "Not connected")
         let reading9 = try flow(powerSnapshot(source: .unknown))
@@ -110,6 +112,7 @@ struct PowerFlowWordingTests {
         #expect(PowerFlowWording.spokenWatts(12.3, locale: german) == "12,3 watts")
         let reading13 = try flow(powerSnapshot(adapter: 1_000))
         #expect(PowerFlowWording.adapterSpoken(reading13, locale: german) == "45 watts in, up to 1.000 watts")
+        #expect(PowerFlowWording.adapterSpoken(try flow(powerSnapshot(adapter: 1)), locale: german) == "45 watts in, up to 1 watt")
     }
 
     @Test("The footnote names the source and how often it updates")
