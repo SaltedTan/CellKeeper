@@ -502,7 +502,7 @@ public actor HelperChargingBackend: ChargingBackend {
         defer { updateActivity() }
         guard let control = Self.control(for: mode) else { return }
         guard let hold = holds[control], !hold.isReleaseRequested else {
-            throw BackendError.operationFailed("CellKeeper holds no \(Self.describe([control])) on its helper to renew")
+            throw BackendError.operationFailed("CellKeeper has no lease on its helper to renew for \(Self.describe([control]))")
         }
         if let deadline = leaseDeadlines[control], uptime() >= deadline {
             return
@@ -1229,7 +1229,7 @@ public actor HelperChargingBackend: ChargingBackend {
         HelperControl.allCases.filter(controls.contains).map { control -> String in
             switch control {
             case .chargingInhibited: "charging inhibited"
-            case .adapterDisabled: "external power input disabled"
+            case .adapterDisabled: "the external power input restriction"
             }
         }.joined(separator: " and ")
     }

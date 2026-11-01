@@ -652,7 +652,7 @@ With the simulated, read-only or Simulated helper backend, CellKeeper cannot
 affect charging. With the macOS Charge Limit backend, the only thing CellKeeper changes is
 macOS's Charge Limit, which never goes below 80%. If your Mac shows "Not
 Charging", macOS's own Charge Limit, Optimized Battery Charging, battery
-health management, a weak adapter, or another battery tool may be
+health management, too little external power, or another battery tool may be
 responsible; see Apple's guidance on the "Not Charging" status.
 
 After a run of the probe (research notes 09 and 10): stop the probe if it
@@ -814,7 +814,7 @@ necessarily restored anything.
 6. **Check macOS's own charging settings.** macOS's Charge Limit and
    Optimized Battery Charging (System Settings › Battery › ⓘ next to
    Charging) hold charging below full on their own, as can battery health
-   management, a weak adapter or another battery tool; see Apple's
+   management, too little external power or another battery tool; see Apple's
    guidance on the "Not Charging" status. *How to tell:* the Charge Limit
    and Optimized Battery Charging are set as you want them. For a limit
    CellKeeper set through macOS's Charge Limit, see "Getting your own
