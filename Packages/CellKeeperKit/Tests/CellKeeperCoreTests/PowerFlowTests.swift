@@ -115,6 +115,32 @@ struct PowerFlowTests {
         }
     }
 
+    @Test("The diagram's links: each one reported value, in the direction the power goes")
+    func links() throws {
+        let charging = try #require(PowerFlow(powerSnapshot()))
+        #expect(charging.adapterLink == .flowing(watts: 45, isTowardsMac: true))
+        #expect(charging.batteryLink == .flowing(watts: 15, isTowardsMac: false))
+
+        let supplying = try #require(PowerFlow(powerSnapshot(powerIn: 20_000, load: 30_000, current: -833)))
+        #expect(supplying.adapterLink == .flowing(watts: 20, isTowardsMac: true))
+        #expect(supplying.batteryLink == .flowing(watts: 12_000.0 * 833 / 1_000_000, isTowardsMac: true))
+
+        let onBattery = try #require(PowerFlow(powerSnapshot(source: .battery, powerIn: 500, load: 11_500, current: -1_000)))
+        #expect(onBattery.adapterLink == .idle)
+        #expect(onBattery.batteryLink == .flowing(watts: 12, isTowardsMac: true))
+
+        let full = try #require(PowerFlow(powerSnapshot(powerIn: 37_304, load: 37_304, current: 0)))
+        #expect(full.batteryLink == .idle)
+        #expect(try #require(PowerFlow(powerSnapshot(powerIn: 200))).adapterLink == .idle)
+    }
+
+    @Test("A link whose power is not known says so, never idle")
+    func unknownLinks() throws {
+        #expect(try #require(PowerFlow(powerSnapshot(powerIn: nil))).adapterLink == .unknown)
+        #expect(try #require(PowerFlow(powerSnapshot(source: .unknown))).adapterLink == .unknown)
+        #expect(try #require(PowerFlow(powerSnapshot(current: nil))).batteryLink == .unknown)
+    }
+
     @Test("Without the adapter's input, only the battery's flows are known on external power")
     func adapterInputUnknown() throws {
         let flow = try #require(PowerFlow(powerSnapshot(powerIn: nil)))

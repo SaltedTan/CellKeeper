@@ -123,7 +123,7 @@ public struct PowerFlow: Sendable, Equatable {
     }
 
     /// Below this, in either direction, the battery is idle and a flow is
-    /// not active: the diagram draws no arrow for it.
+    /// not active: the diagram shows its link idle.
     public static let idleThresholdWatts = 0.3
 
     public let powerSource: PowerSource
@@ -191,7 +191,41 @@ public struct PowerFlow: Sendable, Equatable {
         return watts
     }
 
-    /// Whether a flow of `watts` is active, and gets an arrow: known, and at
+    /// What one of the diagram's two links carries (D121): power at
+    /// `watts` towards the Mac or away from it, none, or not known.
+    public enum Link: Sendable, Equatable {
+        case flowing(watts: Double, isTowardsMac: Bool)
+        /// None, or less than ``PowerFlow/idleThresholdWatts``.
+        case idle
+        case unknown
+    }
+
+    /// The link between the adapter and the Mac: the adapter's input, as
+    /// reported, towards the Mac while on external power; none on battery
+    /// power; not known without the input or a known power source.
+    public var adapterLink: Link {
+        switch powerSource {
+        case .externalPower:
+            guard let adapterInputWatts else { return .unknown }
+            return Self.isActive(adapterInputWatts) ? .flowing(watts: adapterInputWatts, isTowardsMac: true) : .idle
+        case .battery: return .idle
+        case .unknown: return .unknown
+        }
+    }
+
+    /// The link between the Mac and the battery: the battery's power, as
+    /// reported, away from the Mac while it charges and towards it while it
+    /// supplies the Mac.
+    public var batteryLink: Link {
+        switch battery {
+        case .charging(let watts): .flowing(watts: watts, isTowardsMac: false)
+        case .supplying(let watts): .flowing(watts: watts, isTowardsMac: true)
+        case .idle: .idle
+        case nil: .unknown
+        }
+    }
+
+    /// Whether a flow of `watts` is active, and flows in the diagram: known, and at
     /// least ``idleThresholdWatts``.
     public static func isActive(_ watts: Double?) -> Bool {
         guard let watts else { return false }

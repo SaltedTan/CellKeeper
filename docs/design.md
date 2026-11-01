@@ -66,12 +66,14 @@ never by hiding a fact rule 1 or 2 needs.
   1. **Header:** the charge percentage (the only large type), power source
      and charging state.
   2. **Attention:** any warning or request that rule 2 keeps visible.
-  3. **Charge limit:** its control and the Manage charging switch.
-  4. **One contextual action** (for example Charge to 100% once, or the
+  3. **Power flow**, when Settings › General › Show power flow is on (the
+     default): the diagram only, never above a warning.
+  4. **Charge limit:** its control and the Manage charging switch.
+  5. **One contextual action** (for example Charge to 100% once, or the
      running session's Cancel).
-  5. **Details**, collapsed: power flow, battery details, policy and last
-     action, schedules.
-  6. **Footer:** Settings… (⌘,) and Quit CellKeeper (⌘Q).
+  6. **Details**, collapsed: power history (or the whole power flow, with
+     the switch off), battery details, policy and last action, schedules.
+  7. **Footer:** Settings… (⌘,) and Quit CellKeeper (⌘Q).
 - Separate groups with `Divider()`, not each row. No boxes, cards or tinted
   backgrounds behind rows.
 - At most one prominent (`.borderedProminent` or glass prominent) button,
@@ -159,7 +161,8 @@ never by hiding a fact rule 1 or 2 needs.
 
 ## Power flow and charts
 
-- Optional, under its disclosure. Units on every value; a gap where data is
+- The diagram is at the top of the menu unless the user turns it off
+  (D121); the chart stays under a disclosure. Units on every value; a gap where data is
   missing, never a line across it or a zero in its place; estimated and
   measured kept apart.
 - Series are told apart by label or line style as well as colour, and each
@@ -169,6 +172,12 @@ never by hiding a fact rule 1 or 2 needs.
 - An unknown charge uses a neutral symbol, never an empty or full battery.
   Each number keeps its own source; never adjust values so the diagram
   balances.
+- The diagram: SF Symbols in soft circles, joined by links rather than
+  arrows. A link's width and its blob's length and speed grow with its
+  watts; a link with no power is a faint line, and one whose power is not
+  known a faint dashed line. The motion stops with Reduce Motion, and the
+  link then brightens towards where the power goes. The animation runs
+  only while the menu shows a flowing link.
 
 ## Words
 
