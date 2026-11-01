@@ -527,13 +527,24 @@ private struct ChargeLimitSlider: View {
         .onChange(of: model.settingsRevision) {
             send(.settingsChanged(revision: model.settingsRevision, limit: model.settings.chargeLimit))
         }
-        .onDisappear {
-            // Applies the current edit once, at once; the timer then does
-            // nothing.
-            send(.closed)
-            timer?.cancel()
-            timer = nil
+        .onDisappear(perform: close)
+        // The view lives on while the menu is closed (``AppModel/isMenuVisible``):
+        // closing the menu closes the edit as disappearing would, and
+        // reopening it starts a new one.
+        .onChange(of: model.isMenuVisible) {
+            if model.isMenuVisible {
+                edit = ChargeLimitSliderEdit(limit: model.settings.chargeLimit, revision: model.settingsRevision)
+            } else {
+                close()
+            }
         }
+    }
+
+    /// Applies the current edit once, at once; the timer then does nothing.
+    private func close() {
+        send(.closed)
+        timer?.cancel()
+        timer = nil
     }
 
     private func send(_ event: ChargeLimitSliderEdit.Event) {

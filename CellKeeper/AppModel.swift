@@ -142,6 +142,23 @@ final class AppModel {
     /// window out without ending the view's tasks, so the power flow's
     /// reads and animation follow this instead (D121, the owner's trial).
     private(set) var isMenuVisible = false
+    /// How many times the menu's window has left the screen. The reading
+    /// tasks' identities include it, so a close and reopen that SwiftUI
+    /// sees only as "visible" again still restarts the reads that the close
+    /// ended (review r1 of #126).
+    private(set) var menuHideCount = 0
+
+    /// The menu's showing, for the identity of a task that reads while it
+    /// is on screen: changes at every close and every reopen, however
+    /// quickly one follows the other.
+    struct MenuShowing: Hashable {
+        let isVisible: Bool
+        let hideCount: Int
+    }
+
+    var menuShowing: MenuShowing {
+        MenuShowing(isVisible: isMenuVisible, hideCount: menuHideCount)
+    }
     /// Where the menu reads the power flow while it is open: macOS's
     /// battery data, read through the telemetry provider, the registry
     /// track's source. Display only.
@@ -917,11 +934,12 @@ final class AppModel {
     /// event, as collapsing the section is: the runs end and the SMC source
     /// is told at once, since SwiftUI does not cancel the view's tasks when
     /// the window is only ordered out. Coming back restarts the reads
-    /// through the views' tasks, whose identity includes this.
+    /// through the views' tasks, whose identity includes ``menuShowing``.
     func setMenuVisible(_ visible: Bool) {
         guard visible != isMenuVisible else { return }
         isMenuVisible = visible
         if !visible {
+            menuHideCount += 1
             notePowerFlow { powerFlowRefresher.collapse(&$0) }
         }
     }

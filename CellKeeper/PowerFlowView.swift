@@ -21,7 +21,7 @@ struct PowerFlowGlance: View {
         }
         // Restarted when the menu's window comes back on screen: the view
         // lives on while the menu is closed (``AppModel/isMenuVisible``).
-        .task(id: model.isMenuVisible) {
+        .task(id: model.menuShowing) {
             await model.refreshPowerFlowWhileShown()
         }
     }
@@ -72,10 +72,17 @@ struct PowerFlowSection: View {
         // expanded; started again when either changes, since the view lives
         // on while the menu is closed. Otherwise it reads nothing and ends
         // at once.
-        .task(id: [model.isPowerFlowExpanded, model.isMenuVisible]) {
+        .task(id: SectionTaskID(isExpanded: model.isPowerFlowExpanded, showing: model.menuShowing)) {
             await model.refreshPowerFlowWhileShown()
         }
     }
+}
+
+/// The section's task identity: it restarts when the section is expanded or
+/// collapsed and at every close and reopen of the menu.
+private struct SectionTaskID: Hashable {
+    let isExpanded: Bool
+    let showing: AppModel.MenuShowing
 }
 
 private struct PowerFlowContent: View {
