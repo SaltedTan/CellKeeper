@@ -924,13 +924,15 @@ final class AppModel {
     }
 
     /// Shows or hides the power flow's diagram at the top of the menu
-    /// (Settings › General). Hiding it is a hide event, as collapsing the
-    /// section is, unless the section under Details still shows the flow.
+    /// (Settings › General). Hiding it is always a hide event, as
+    /// collapsing the section is: while the diagram is on, the section
+    /// under Details is not in the menu, so no run of its own can be
+    /// reading, whatever its saved state; once shown, it starts its own.
     func setShowsPowerFlowInMenu(_ shows: Bool) {
         guard shows != showsPowerFlowInMenu else { return }
         showsPowerFlowInMenu = shows
         store.set(shows ? "on" : "off", forKey: Self.powerFlowInMenuKey)
-        if !isPowerFlowShown {
+        if !shows {
             notePowerFlow { powerFlowRefresher.collapse(&$0) }
         }
     }

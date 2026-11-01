@@ -117,11 +117,12 @@ private struct PowerFlowUnavailable: View {
 /// circle with its name and value beneath, joined by two links: the
 /// adapter's input into the Mac, and the battery's power between the Mac
 /// and the battery, which runs either way. Each link is one reported value,
-/// never a sum or a difference (D114): its width grows with the watts and a
-/// blob glides along it towards where the power goes, faster for more. A
-/// link with no power, or whose power is not known, is a faint track with
-/// no blob, dashed when not known. With Reduce Motion the blob stays still
-/// and the link brightens towards where the power goes. One element for
+/// never a sum or a difference (D114): a solid line in its series' colour,
+/// wider for more watts, with a blob gliding along it towards where the
+/// power goes, longer and faster for more. A link with no power is a thin
+/// grey line with no blob, dashed when its power is not known. With Reduce
+/// Motion the blob stays still, three quarters of the way towards where
+/// the power goes. One element for
 /// VoiceOver, named by the flow's summary, containing the three nodes.
 private struct PowerFlowDiagram: View {
     let flow: PowerFlow
@@ -295,37 +296,44 @@ private struct FlowLinks: View {
         track.addLine(to: CGPoint(x: end, y: y))
 
         guard case .flowing(let watts, let isTowardsMac) = link.state else {
-            // Idle: a faint line; not known: a faint dashed one.
+            // Idle: a thin grey line; not known: a thin grey dashed one. The
+            // secondary label colour reaches about 3.8:1 on the light
+            // backgrounds and 4.6:1 on the dark ones.
             let dash: [CGFloat] = link.state == .unknown ? [2, 4] : []
-            context.stroke(track, with: .style(.quaternary), style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: dash))
+            context.stroke(track, with: .style(.secondary), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: dash))
             return
         }
+        // A flowing link: a solid line in its series' colour, which reaches
+        // 3:1 on every background (never made transparent), and a wider
+        // blob of the same colour on it.
         let strength = Self.strength(watts)
-        let width = 3 + strength * 3
+        let width = 2 + strength * 2
+        context.stroke(track, with: .color(link.color), style: StrokeStyle(lineWidth: width, lineCap: .round))
         // Towards the Mac is rightwards on the adapter's side and leftwards
         // on the battery's.
         let isRightwards = (link.side == .adapter) == isTowardsMac
         let from = isRightwards ? start : end
         let to = isRightwards ? end : start
-
-        guard let time else {
-            // Still: the track brightens towards where the power goes.
-            let gradient = Gradient(colors: [link.color.opacity(0.2), link.color])
-            context.stroke(track, with: .linearGradient(gradient, startPoint: CGPoint(x: from, y: y), endPoint: CGPoint(x: to, y: y)), style: StrokeStyle(lineWidth: width, lineCap: .round))
-            return
+        // Moving, the blob is longer and quicker for more power and fades in
+        // and out at the ends so it never pops; still (`time` nil), it
+        // stays three quarters of the way towards where the power goes.
+        let phase: CGFloat
+        if let time {
+            let period = 2.4 - Double(strength) * 1.5
+            phase = CGFloat((time / period).truncatingRemainder(dividingBy: 1))
+        } else {
+            phase = 0.75
         }
-        context.stroke(track, with: .color(link.color.opacity(0.22)), style: StrokeStyle(lineWidth: width, lineCap: .round))
-        // The blob: longer and quicker for more power, fading in and out at
-        // the ends so it never pops.
-        let period = 2.4 - Double(strength) * 1.5
-        let phase = CGFloat((time / period).truncatingRemainder(dividingBy: 1))
-        let length = 10 + strength * 16
+        let length = 12 + strength * 14
+        let height = width + 5
         let centre = from + (to - from) * phase
-        let blob = CGRect(x: centre - length / 2, y: y - (width + 3) / 2, width: length, height: width + 3)
+        let blob = CGRect(x: centre - length / 2, y: y - height / 2, width: length, height: height)
         var blobContext = context
-        blobContext.opacity = Double(sin(phase * .pi))
-        blobContext.clip(to: Path(CGRect(x: start - width, y: 0, width: end - start + 2 * width, height: size.height)))
-        blobContext.fill(Path(roundedRect: blob, cornerRadius: blob.height / 2), with: .color(link.color))
+        if time != nil {
+            blobContext.opacity = Double(sin(phase * .pi))
+        }
+        blobContext.clip(to: Path(CGRect(x: start - height, y: 0, width: end - start + 2 * height, height: size.height)))
+        blobContext.fill(Path(roundedRect: blob, cornerRadius: height / 2), with: .color(link.color))
     }
 }
 

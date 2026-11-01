@@ -173,11 +173,12 @@ never by hiding a fact rule 1 or 2 needs.
   Each number keeps its own source; never adjust values so the diagram
   balances.
 - The diagram: SF Symbols in soft circles, joined by links rather than
-  arrows. A link's width and its blob's length and speed grow with its
-  watts; a link with no power is a faint line, and one whose power is not
-  known a faint dashed line. The motion stops with Reduce Motion, and the
-  link then brightens towards where the power goes. The animation runs
-  only while the menu shows a flowing link.
+  arrows. A flowing link is a solid line in its series' colour (3:1, never
+  made transparent), wider for more watts, with a blob that grows longer
+  and faster; a link with no power is a thin line in the secondary label
+  colour, dashed when its power is not known. With Reduce Motion the blob
+  stays still, three quarters of the way towards where the power goes.
+  The animation runs only while the menu shows a flowing link.
 
 ## Words
 
