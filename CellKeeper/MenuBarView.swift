@@ -58,6 +58,10 @@ struct MenuBarView: View {
         }
         .padding(MenuLayout.inset)
         .frame(width: MenuLayout.width)
+        // The power flow reads and animates only while this window is on
+        // screen (``AppModel/isMenuVisible``).
+        .background(WindowVisibilityObserver { model.setMenuVisible($0) })
+        .environment(\.isMenuVisible, model.isMenuVisible)
     }
 
     /// Opens the Settings window at the pane `model.settingsTab` names.

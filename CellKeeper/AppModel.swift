@@ -137,6 +137,11 @@ final class AppModel {
     /// (Settings › General, on by default; D121), remembered across
     /// launches. Off, the flow is under Details › Power flow, as before.
     private(set) var showsPowerFlowInMenu: Bool
+    /// Whether the menu's window is on screen, as AppKit reports it. The
+    /// menu's view outlives each opening: closing the menu orders its
+    /// window out without ending the view's tasks, so the power flow's
+    /// reads and animation follow this instead (D121, the owner's trial).
+    private(set) var isMenuVisible = false
     /// Where the menu reads the power flow while it is open: macOS's
     /// battery data, read through the telemetry provider, the registry
     /// track's source. Display only.
@@ -900,12 +905,25 @@ final class AppModel {
 
     // MARK: Power flow
 
-    /// Whether the menu reads the power flow while it is open: its diagram
-    /// is at the top, or its section under Details is expanded. The view
-    /// that shows it runs the reads, so nothing is read while the menu is
-    /// closed or the section hidden.
+    /// Whether the menu reads the power flow: its window is on screen, and
+    /// its diagram is at the top or its section under Details is expanded.
+    /// The view that shows it runs the reads, so nothing is read while the
+    /// menu is closed or the section hidden.
     var isPowerFlowShown: Bool {
-        showsPowerFlowInMenu || isPowerFlowExpanded
+        isMenuVisible && (showsPowerFlowInMenu || isPowerFlowExpanded)
+    }
+
+    /// The menu's window came on screen or left it. Leaving it is a hide
+    /// event, as collapsing the section is: the runs end and the SMC source
+    /// is told at once, since SwiftUI does not cancel the view's tasks when
+    /// the window is only ordered out. Coming back restarts the reads
+    /// through the views' tasks, whose identity includes this.
+    func setMenuVisible(_ visible: Bool) {
+        guard visible != isMenuVisible else { return }
+        isMenuVisible = visible
+        if !visible {
+            notePowerFlow { powerFlowRefresher.collapse(&$0) }
+        }
     }
 
     /// Collapsing ends the section's reads at once, a display read in

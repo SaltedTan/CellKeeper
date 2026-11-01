@@ -19,7 +19,9 @@ struct PowerFlowGlance: View {
                 PowerFlowUnavailable(state: model.powerFlow)
             }
         }
-        .task(id: model.showsPowerFlowInMenu) {
+        // Restarted when the menu's window comes back on screen: the view
+        // lives on while the menu is closed (``AppModel/isMenuVisible``).
+        .task(id: model.isMenuVisible) {
             await model.refreshPowerFlowWhileShown()
         }
     }
@@ -66,11 +68,11 @@ struct PowerFlowSection: View {
             PowerFlowContent(state: model.powerFlow, footnote: model.powerFlowFootnote, lineBreakGap: model.powerFlowLineBreakGap)
                 .padding(.top, 4)
         }
-        // Reads while the menu is open and the section expanded. SwiftUI
-        // cancels the task when the menu closes, and starts it again when
-        // the section is expanded or collapsed; collapsed, it reads nothing
-        // and ends at once.
-        .task(id: model.isPowerFlowExpanded) {
+        // Reads while the menu's window is on screen and the section
+        // expanded; started again when either changes, since the view lives
+        // on while the menu is closed. Otherwise it reads nothing and ends
+        // at once.
+        .task(id: [model.isPowerFlowExpanded, model.isMenuVisible]) {
             await model.refreshPowerFlowWhileShown()
         }
     }
@@ -251,14 +253,15 @@ private struct FlowLink: Equatable {
 }
 
 /// The links, drawn behind the nodes. A flowing link's blob moves only
-/// while the menu shows it and Reduce Motion is off. Hidden from VoiceOver:
+/// while the menu's window is on screen and Reduce Motion is off. Hidden from VoiceOver:
 /// the diagram's summary says the same.
 private struct FlowLinks: View {
     let links: [FlowLink]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isMenuVisible) private var isMenuVisible
 
     var body: some View {
-        let animates = !reduceMotion && links.contains(where: \.isFlowing)
+        let animates = isMenuVisible && !reduceMotion && links.contains(where: \.isFlowing)
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animates)) { timeline in
             Canvas { context, size in
                 let time = timeline.date.timeIntervalSinceReferenceDate
@@ -334,6 +337,60 @@ private struct FlowLinks: View {
         }
         blobContext.clip(to: Path(CGRect(x: start - height, y: 0, width: end - start + 2 * height, height: size.height)))
         blobContext.fill(Path(roundedRect: blob, cornerRadius: height / 2), with: .color(link.color))
+    }
+}
+
+// MARK: - The menu's visibility
+
+private struct MenuVisibleKey: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    /// Whether the menu's window is on screen (``AppModel/isMenuVisible``);
+    /// true outside the menu.
+    var isMenuVisible: Bool {
+        get { self[MenuVisibleKey.self] }
+        set { self[MenuVisibleKey.self] = newValue }
+    }
+}
+
+/// Reports whether the window holding it is on screen: when it moves into
+/// a window, and whenever that window's occlusion state changes, which
+/// AppKit posts when the window is ordered in or out. A menu bar extra's
+/// window is ordered out when the menu closes, without its view going away.
+struct WindowVisibilityObserver: NSViewRepresentable {
+    let onChange: (Bool) -> Void
+
+    func makeNSView(context: Context) -> ObserverView {
+        let view = ObserverView()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ view: ObserverView, context: Context) {
+        view.onChange = onChange
+    }
+
+    final class ObserverView: NSView {
+        var onChange: ((Bool) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            NotificationCenter.default.removeObserver(self)
+            if let window {
+                NotificationCenter.default.addObserver(self, selector: #selector(occlusionChanged), name: NSWindow.didChangeOcclusionStateNotification, object: window)
+            }
+            report()
+        }
+
+        @objc private func occlusionChanged(_ notification: Notification) {
+            report()
+        }
+
+        private func report() {
+            onChange?(window.map { $0.isVisible && $0.occlusionState.contains(.visible) } ?? false)
+        }
     }
 }
 
