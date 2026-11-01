@@ -185,7 +185,7 @@ The power flow's diagram moved to the top of the menu, under the header,
 with a switch in Settings › General (on by default); its chart and note
 are under Details › Power history. Off, everything is under Details ›
 Power flow, as before. The diagram keeps its accessibility: one element
-named by the flow's summary, holding the adapter, the Mac and the battery,
+named by the flow's summary, holding Power in, the Mac and the battery,
 each one static-text element with its value in words. Its links are
 hidden from VoiceOver, as the arrows were. They animate: a blob glides
 along each flowing link. With Reduce Motion the blob stays still, three

@@ -372,7 +372,7 @@ struct PowerFlowSMCWordingTests {
         #expect(PowerFlowWording.diagnosticsSource(nil, registrySourceName: name) == "none")
         #expect(PowerFlowWording.diagnosticsSource(.registry, registrySourceName: name) == "macOS's battery data")
         #expect(PowerFlowWording.diagnosticsSource(PowerFlowProvenance(system: .smc(averagedOver: .seconds(3)), battery: .registry), registrySourceName: name)
-            == "the SMC, averaged over 3 seconds (adapter and Mac); macOS's battery data (battery)")
+            == "the SMC, averaged over 3 seconds (power in and Mac); macOS's battery data (battery)")
         #expect(PowerFlowWording.diagnosticsSource(PowerFlowProvenance(system: .smc(averagedOver: .seconds(2)), battery: .smc), registrySourceName: name)
             == "the SMC, averaged over 2 seconds")
     }

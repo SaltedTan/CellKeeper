@@ -122,7 +122,7 @@ private struct PowerFlowUnavailable: View {
 
 // MARK: - Diagram
 
-/// The adapter, the Mac and the battery in a row, each a symbol in a soft
+/// Power in, the Mac and the battery in a row, each a symbol in a soft
 /// circle with its name and value beneath, joined by two links: the
 /// adapter's input into the Mac, and the battery's power between the Mac
 /// and the battery, which runs either way. Each link is one reported value,
@@ -140,7 +140,7 @@ private struct PowerFlowDiagram: View {
         HStack(alignment: .top, spacing: 0) {
             FlowNode(
                 symbol: "powerplug",
-                title: "Adapter",
+                title: "Power in",
                 value: PowerFlowWording.adapterValue(flow),
                 subtitle: PowerFlowWording.adapterSubtitle(flow),
                 isDimmed: flow.powerSource != .externalPower,
@@ -190,7 +190,7 @@ private struct FlowNode: View {
     let title: String
     let value: String
     var subtitle: String?
-    /// Shown in the secondary colour: the adapter while not connected.
+    /// Shown in the secondary colour: power in while none is connected.
     var isDimmed = false
     let spokenValue: String
 
