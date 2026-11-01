@@ -101,7 +101,7 @@ private struct BatteryHeader: View {
 
     var body: some View {
         if let snapshot, snapshot.isBatteryPresent {
-            // One element for VoiceOver: "Charge 81%, Power adapter, Charging".
+            // One element for VoiceOver: "Charge 81%, External power, Charging".
             HStack(alignment: .firstTextBaseline) {
                 Text(Format.percent(snapshot.chargePercent))
                     .font(.system(size: chargeSize, weight: .semibold))
@@ -898,7 +898,9 @@ private struct TelemetryDetails: View {
                     row("Voltage", Format.volts(fromMillivolts: snapshot.voltageMillivolts), spoken: Format.Spoken.volts(fromMillivolts: snapshot.voltageMillivolts))
                     row("Current", Format.milliamps(snapshot.amperageMilliamps), spoken: Format.Spoken.milliamps(snapshot.amperageMilliamps))
                     if let watts = snapshot.adapterWatts {
-                        row("Adapter", "\(watts) W", spoken: AccessibilityWording.watts(watts))
+                        // Negotiated with whatever supplies the power (a
+                        // charger, a display or a dock), not what flows now.
+                        row("Power in", "Up to \(watts) W", spoken: "up to \(AccessibilityWording.watts(watts))")
                     }
                     if let toEmpty = Format.minutes(snapshot.timeToEmptyMinutes) {
                         row("Time to empty", toEmpty, spoken: Format.Spoken.minutes(snapshot.timeToEmptyMinutes))

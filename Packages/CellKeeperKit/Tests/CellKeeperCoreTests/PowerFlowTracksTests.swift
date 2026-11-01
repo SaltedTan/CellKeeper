@@ -314,7 +314,7 @@ struct PowerFlowTracksTests {
     func provenanceSwitches() {
         var state = PowerFlowState()
         let registry = "From macOS's battery data, updated about once a minute."
-        let smc = "Adapter and Mac from the SMC, averaged over 3 seconds; battery from macOS's battery data, updated about once a minute."
+        let smc = "Power in and Mac from the SMC, averaged over 3 seconds; battery from macOS's battery data, updated about once a minute."
         #expect(footnote(state) == nil)
         state.status(powerSnapshot(update: time(0)), at: 1)
         #expect(state.provenance == .registry)
@@ -324,9 +324,9 @@ struct PowerFlowTracksTests {
         state.tick(.empty, at: 11)
         #expect(footnote(state) == registry)
         state.tick(.window(smcWindow(began: 9, span: 2)), at: 12)
-        #expect(footnote(state) == "Adapter and Mac from the SMC, averaged over 2 seconds; battery from macOS's battery data, updated about once a minute.")
+        #expect(footnote(state) == "Power in and Mac from the SMC, averaged over 2 seconds; battery from macOS's battery data, updated about once a minute.")
         state.tick(.window(smcWindow(began: 12, battery: 10)), at: 15)
-        #expect(footnote(state) == "Adapter, Mac and battery from the SMC, averaged over 3 seconds.")
+        #expect(footnote(state) == "Power in, Mac and battery from the SMC, averaged over 3 seconds.")
         state.tick(.empty, .failing, at: 16)
         #expect(footnote(state) == registry)
         // On battery the adapter has no value to name.

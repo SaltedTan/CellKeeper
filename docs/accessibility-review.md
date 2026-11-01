@@ -115,8 +115,8 @@ The section model keeps a number with a unit as a quantity, which the
 report and the tab write as before ("12427 mV", "31 °C"; the golden tests
 are unchanged) and VoiceOver reads in words, with the menu's words and the
 locale's numbers: "Voltage, 12,427 millivolts", "Current, -845
-milliamps", "Full-charge capacity, 6,131 milliamp-hours", "Adapter, 70
-watts", "Temperature protection, on (pause 40 degrees Celsius, resume 35
+milliamps", "Full-charge capacity, 6,131 milliamp-hours", "Negotiated power
+in, 70 watts", "Temperature protection, on (pause 40 degrees Celsius, resume 35
 degrees Celsius)", and a unit in the singular when its number, as shown,
 is one, in any locale's digits ("1 milliamp", "١ milliamp"). Temperatures
 in the policy's sentences are read so too ("Reason, Battery at 41.5
@@ -185,7 +185,7 @@ The power flow's diagram moved to the top of the menu, under the header,
 with a switch in Settings › General (on by default); its chart and note
 are under Details › Power history. Off, everything is under Details ›
 Power flow, as before. The diagram keeps its accessibility: one element
-named by the flow's summary, holding the adapter, the Mac and the battery,
+named by the flow's summary, holding Power in, the Mac and the battery,
 each one static-text element with its value in words. Its links are
 hidden from VoiceOver, as the arrows were. They animate: a blob glides
 along each flowing link. With Reduce Motion the blob stays still, three
@@ -224,7 +224,7 @@ the arrow keys (M2). With Increase Contrast: the warning and error text
 |---|---|---|---|---|
 | M1 | Slider, `MenuBarView.swift:299-311` | VoiceOver reads the value as a bare number ("80"); no unit, and 100 is not said to mean no limit | must | Fixed: "80%", "100% (no limit)" |
 | M2 | Slider, `MenuBarView.swift:300-309` | A change is applied only in `onEditingChanged(false)`, the end of a drag. Arrow keys and VoiceOver's increment move the knob through the binding; if AppKit reports no editing end for them (not verifiable without interaction), the menu shows a limit that is never applied | must | Fixed: a change made without a drag is applied once the value has stayed put for 0.6 s, a drag when it ends, either only if no other settings change came first (`ChargeLimitSliderEdit`); VoiceOver's increment and decrement move 1% (D109) |
-| M3 | Battery header, `MenuBarView.swift:56-66` | Three separate elements, "81%", "Power adapter", "Charging": the bare percentage has no context | should | Fixed: "Charge 81%, Power adapter, Charging" |
+| M3 | Battery header, `MenuBarView.swift:56-66` | Three separate elements, "81%", "Power adapter", "Charging": the bare percentage has no context | should | Fixed: "Charge 81%, External power, Charging" |
 | M4 | "Charging control" and "Charge limit" rows, `MenuBarView.swift:105-110`, `252-258`, `292-298` | Section titles are plain text, not headings, and their value (the badge, the limit) is a separate element | should | Fixed: headings with their value ("Charging control, Simulated") |
 | M5 | Status badge, `Presentation.swift:352-364` | Coloured text on a 15% tint of the same colour: about 2.2:1 (green, orange) to 4:1 (purple) against white, less on the tint; WCAG asks 4.5:1 for text this small | should | Fixed: label-coloured text on a tinted capsule with a border of the colour |
 | M6 | Warning and error text in system orange and red: `MenuBarView.swift:84, 168, 196, 204, 207, 212, 216, 220, 274, 319, 325, 345, 367, 443`, `Presentation.swift:97, 134, 339` | In light mode system orange is 2.3:1 and red 3.6:1 against white, and these lines are the important ones (faults, restore problems, the 50% warning). Dark mode passes (7.5:1, 4.9:1) | should | Fixed: `TextTone` colours, at least 4.5:1, and 7:1 with Increase Contrast (D109) |

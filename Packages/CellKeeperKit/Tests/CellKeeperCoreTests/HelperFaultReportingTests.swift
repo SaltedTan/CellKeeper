@@ -134,7 +134,7 @@ struct HelperFaultReportingTests {
             Issue.record("a new outside activation was downgraded: \(String(describing: origin))")
             return
         }
-        #expect(detail.contains("the adapter disabled was changed outside the helper"))
+        #expect(detail.contains("the external power input restriction was changed outside the helper"))
     }
 
     @Test("A helper failure already handled does not hide a later outside change: it is logged as its own safety event, not counted again")

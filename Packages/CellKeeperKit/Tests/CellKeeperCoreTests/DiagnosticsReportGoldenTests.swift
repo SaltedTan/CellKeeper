@@ -76,7 +76,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(31)) °C
             Voltage: 12427 mV
             Current: -12 mA
-            Adapter: 70 W
+            Negotiated power in: 70 W
             System power in: \(Self.number(36.25)) W
             Mac use: \(Self.number(34.848)) W
             Cycle count: 54
@@ -128,7 +128,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -188,7 +188,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -331,7 +331,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -383,7 +383,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -430,7 +430,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -483,7 +483,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -535,7 +535,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -587,7 +587,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -640,7 +640,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -700,7 +700,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -763,7 +763,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -814,7 +814,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -860,7 +860,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -950,7 +950,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: not available
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1002,7 +1002,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1055,7 +1055,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1115,7 +1115,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1176,7 +1176,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1234,7 +1234,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1293,7 +1293,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1353,7 +1353,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1414,7 +1414,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1474,7 +1474,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1533,7 +1533,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1593,7 +1593,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1646,7 +1646,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1699,7 +1699,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1752,7 +1752,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1804,7 +1804,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1855,7 +1855,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1907,7 +1907,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -1961,7 +1961,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -2016,7 +2016,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -2070,7 +2070,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available
@@ -2121,7 +2121,7 @@ struct DiagnosticsReportGoldenTests {
             Temperature: \(Self.number(30)) °C
             Voltage: not available
             Current: not available
-            Adapter: not available
+            Negotiated power in: not available
             System power in: not available
             Mac use: not available
             Cycle count: not available

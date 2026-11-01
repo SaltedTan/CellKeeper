@@ -353,7 +353,7 @@ public actor HelperChargingBackend: ChargingBackend {
             throw BackendError.operationFailed(error)
         }
         guard let mode = Self.mode(for: active) else {
-            throw BackendError.operationFailed("CellKeeper's helper reports both charging inhibited and the adapter disabled")
+            throw BackendError.operationFailed("CellKeeper's helper reports both charging inhibited and external power input disabled")
         }
         if let lastRelease {
             origin = .releasedByBackend(lastRelease)
@@ -502,7 +502,7 @@ public actor HelperChargingBackend: ChargingBackend {
         defer { updateActivity() }
         guard let control = Self.control(for: mode) else { return }
         guard let hold = holds[control], !hold.isReleaseRequested else {
-            throw BackendError.operationFailed("CellKeeper holds no \(Self.describe([control])) on its helper to renew")
+            throw BackendError.operationFailed("CellKeeper has no lease on its helper to renew for \(Self.describe([control]))")
         }
         if let deadline = leaseDeadlines[control], uptime() >= deadline {
             return
@@ -1229,7 +1229,7 @@ public actor HelperChargingBackend: ChargingBackend {
         HelperControl.allCases.filter(controls.contains).map { control -> String in
             switch control {
             case .chargingInhibited: "charging inhibited"
-            case .adapterDisabled: "the adapter disabled"
+            case .adapterDisabled: "the external power input restriction"
             }
         }.joined(separator: " and ")
     }
@@ -1239,8 +1239,8 @@ public actor HelperChargingBackend: ChargingBackend {
             (.belowBatteryFloor, "the battery is at or below the helper's \(HelperEngine.batteryFloor)% floor"),
             (.notOnExternalPower, "the Mac is not on external power"),
             (.belowAdapterFloor, "the battery is at or below the \(HelperEngine.adapterFloor)% floor for running from it"),
-            (.adapterAbsent, "no power adapter is connected"),
-            (.adapterPresenceUnknown, "the helper cannot tell whether a power adapter is connected"),
+            (.adapterAbsent, "no external power is connected"),
+            (.adapterPresenceUnknown, "the helper cannot tell whether external power is connected"),
             (.thermalPressure, "macOS reports high thermal pressure"),
             (.powerStateUnavailable, "the helper's own power reading is missing or out of date"),
             (.sleepImminent, "the Mac is about to sleep"),

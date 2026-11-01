@@ -16,11 +16,11 @@ public enum PowerFlowWording {
     /// The section's note for the sample on screen, from its provenance
     /// (research note 13 §6.5); `registrySource` is the registry track's.
     /// From the registry: as ``footnote(sourceName:updateInterval:)``. From
-    /// the SMC: "Adapter and Mac from the SMC, averaged over 3 seconds;
+    /// the SMC: "Power in and Mac from the SMC, averaged over 3 seconds;
     /// battery from macOS's battery data, updated about once a minute.", or
-    /// "Adapter, Mac and battery from the SMC, averaged over 3 seconds."
-    /// once the battery's power comes from it too. Off external power the
-    /// adapter has no value, so only the Mac (and the battery) are named.
+    /// "Power in, Mac and battery from the SMC, averaged over 3 seconds."
+    /// once the battery's power comes from it too. Off external power there
+    /// is no power in, so only the Mac (and the battery) are named.
     public static func footnote(
         _ provenance: PowerFlowProvenance,
         isOnExternalPower: Bool,
@@ -33,21 +33,21 @@ public enum PowerFlowWording {
         let averaged = "averaged over \(seconds(span))"
         switch provenance.battery {
         case .smc:
-            return "\(isOnExternalPower ? "Adapter, Mac and battery" : "Mac and battery") from the SMC, \(averaged)."
+            return "\(isOnExternalPower ? "Power in, Mac and battery" : "Mac and battery") from the SMC, \(averaged)."
         case .registry:
-            return "\(isOnExternalPower ? "Adapter and Mac" : "Mac") from the SMC, \(averaged); battery from \(registrySourceName), updated \(cadence(registryUpdateInterval))."
+            return "\(isOnExternalPower ? "Power in and Mac" : "Mac") from the SMC, \(averaged); battery from \(registrySourceName), updated \(cadence(registryUpdateInterval))."
         }
     }
 
     /// Where the sample on screen came from, for the diagnostics report:
-    /// "macOS's battery data", "the SMC, averaged over 3 seconds (adapter
+    /// "macOS's battery data", "the SMC, averaged over 3 seconds (power in
     /// and Mac); macOS's battery data (battery)", or "none" without one.
     public static func diagnosticsSource(_ provenance: PowerFlowProvenance?, registrySourceName: String) -> String {
         guard let provenance else { return "none" }
         guard case .smc(let span) = provenance.system else { return registrySourceName }
         switch provenance.battery {
         case .smc: return "the SMC, averaged over \(seconds(span))"
-        case .registry: return "the SMC, averaged over \(seconds(span)) (adapter and Mac); \(registrySourceName) (battery)"
+        case .registry: return "the SMC, averaged over \(seconds(span)) (power in and Mac); \(registrySourceName) (battery)"
         }
     }
 
@@ -80,13 +80,13 @@ public enum PowerFlowWording {
     public static func title(of series: PowerFlowHistory.Series) -> String {
         switch series {
         case .macUse: "Mac use"
-        case .adapterInput: "Adapter input"
+        case .adapterInput: "Power in"
         case .battery: "Battery"
         }
     }
 
     /// The chart's accessibility label.
-    public static let chartLabel = "Power over the last hour, in watts: the Mac's use, the adapter's input, and the battery, positive while charging and negative while supplying the Mac"
+    public static let chartLabel = "Power over the last hour, in watts: the Mac's use, the power coming in, and the battery, positive while charging and negative while supplying the Mac"
 
     /// Says how to read the battery's line.
     public static let chartBatteryNote = "Battery above 0 W is charging, below is supplying the Mac."
@@ -108,7 +108,8 @@ public enum PowerFlowWording {
 
     // MARK: - Nodes
 
-    /// The adapter node's value: its input, or why there is none.
+    /// The "Power in" node's value: the power coming in, or why there is
+    /// none.
     public static func adapterValue(_ flow: PowerFlow, locale: Locale = .current) -> String {
         switch flow.powerSource {
         case .externalPower: flow.adapterInputWatts.map { watts($0, locale: locale) } ?? "Not available"
@@ -117,14 +118,16 @@ public enum PowerFlowWording {
         }
     }
 
-    /// The adapter node's subtitle: "68 W adapter", the negotiated power.
+    /// The "Power in" node's subtitle: "Up to 68 W", the power negotiated
+    /// with whatever supplies it (a charger, a display or a dock: macOS
+    /// reports them alike).
     public static func adapterSubtitle(_ flow: PowerFlow) -> String? {
-        flow.adapterRatingWatts.map { "\($0) W adapter" }
+        flow.adapterRatingWatts.map { "Up to \($0) W" }
     }
 
-    /// What VoiceOver reads for the adapter node, after "Adapter".
+    /// What VoiceOver reads for the "Power in" node, after its name.
     public static func adapterSpoken(_ flow: PowerFlow, locale: Locale = .current) -> String {
-        let rating = flow.adapterRatingWatts.map { ", \($0.formatted(.number.locale(locale)))-watt adapter" } ?? ""
+        let rating = flow.adapterRatingWatts.map { ", up to \(spokenWatts(Double($0), locale: locale))" } ?? ""
         switch flow.powerSource {
         case .externalPower:
             guard let input = flow.adapterInputWatts else { return "Input not available\(rating)" }
@@ -175,14 +178,14 @@ public enum PowerFlowWording {
     // MARK: - Summary
 
     /// The diagram as one sentence or a few, for VoiceOver: where the power
-    /// comes from and where it goes, each value as reported ("The adapter
-    /// supplies 45 watts: the Mac uses 30 watts and 15 watts charges the
-    /// battery."), then what is idle or not known.
+    /// comes from and where it goes, each value as reported ("External
+    /// power supplies 45 watts: the Mac uses 30 watts and 15 watts charges
+    /// the battery."), then what is idle or not known.
     public static func summary(_ flow: PowerFlow, locale: Locale = .current) -> String {
         func spoken(_ value: Double) -> String { spokenWatts(value, locale: locale) }
         var sources: [String] = []
         if let input = flow.adapterInputWatts {
-            sources.append("the adapter supplies \(spoken(input))")
+            sources.append("external power supplies \(spoken(input))")
         }
         if case .supplying(let value) = flow.battery {
             sources.append("the battery supplies \(spoken(value))")
@@ -198,9 +201,9 @@ public enum PowerFlowWording {
         case .charging, .supplying: break
         }
         switch flow.powerSource {
-        case .externalPower where flow.adapterInputWatts == nil: sentences.append("the adapter's input is not available")
+        case .externalPower where flow.adapterInputWatts == nil: sentences.append("the power coming in is not available")
         case .externalPower: break
-        case .battery: sentences.append("no adapter is connected")
+        case .battery: sentences.append("no external power is connected")
         case .unknown: sentences.append("the power source is unknown")
         }
         return sentences.map { $0.prefix(1).uppercased() + $0.dropFirst() + "." }.joined(separator: " ")

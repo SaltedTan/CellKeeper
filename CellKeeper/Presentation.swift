@@ -207,7 +207,7 @@ extension ProcessInfo.ThermalState {
 extension PowerSource {
     var title: String {
         switch self {
-        case .externalPower: "Power adapter"
+        case .externalPower: "External power"
         case .battery: "Battery"
         case .unknown: "Unknown"
         }

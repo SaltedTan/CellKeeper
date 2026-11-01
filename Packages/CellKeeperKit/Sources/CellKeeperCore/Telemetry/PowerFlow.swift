@@ -45,7 +45,7 @@ public struct PowerFlowSample: Sendable, Equatable {
     /// shown follows this, not the order of arrival (``PowerFlowState``).
     public var readBegan: ContinuousClock.Instant?
     public var powerSource: PowerSource
-    /// The adapter's negotiated power ("68 W adapter").
+    /// The adapter's negotiated power (shown as "Up to 68 W").
     public var adapterRatingWatts: Int?
     public var chargePercent: Int?
     /// The power into the Mac from the adapter.
@@ -127,7 +127,7 @@ public struct PowerFlow: Sendable, Equatable {
     public static let idleThresholdWatts = 0.3
 
     public let powerSource: PowerSource
-    /// The adapter's negotiated power ("68 W adapter"), while on external
+    /// The adapter's negotiated power (shown as "Up to 68 W"), while on external
     /// power.
     public let adapterRatingWatts: Int?
     /// The power into the Mac from the adapter: nil unless the Mac is on

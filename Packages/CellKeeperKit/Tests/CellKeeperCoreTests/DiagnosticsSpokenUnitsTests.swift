@@ -270,7 +270,7 @@ struct DiagnosticsSpokenUnitsTests {
             "Temperature": "31 degrees Celsius",
             "Voltage": "12,427 millivolts",
             "Current": "-12 milliamps",
-            "Adapter": "70 watts",
+            "Negotiated power in": "70 watts",
             "System power in": "36.25 watts",
             "Mac use": "34.848 watts",
             "Full-charge capacity": "6,131 milliamp-hours",

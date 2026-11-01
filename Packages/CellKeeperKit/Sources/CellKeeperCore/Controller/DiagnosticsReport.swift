@@ -555,7 +555,7 @@ public enum DiagnosticsReport {
         field("Temperature", optional(snapshot.temperatureCelsius) { "\($0, unit: .degreesCelsius)" })
         field("Voltage", optional(snapshot.voltageMillivolts) { "\($0, unit: .millivolts)" })
         field("Current", optional(snapshot.amperageMilliamps) { "\($0, unit: .milliamps)" })
-        field("Adapter", optional(snapshot.adapterWatts) { "\($0, unit: .watts)" })
+        field("Negotiated power in", optional(snapshot.adapterWatts) { "\($0, unit: .watts)" })
         // macOS's own figures (undocumented, in mW), as the menu's power
         // flow shows them; display only (D114).
         field("System power in", optional(snapshot.systemPowerInMilliwatts) { "\(Double($0) / 1000, unit: .watts)" })
