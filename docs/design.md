@@ -178,7 +178,9 @@ never by hiding a fact rule 1 or 2 needs.
   and faster; a link with no power is a thin line in the secondary label
   colour, dashed when its power is not known. With Reduce Motion the blob
   stays still, three quarters of the way towards where the power goes.
-  The animation runs only while the menu shows a flowing link.
+  The animation runs only while the menu's window is on screen and shows
+  a flowing link: a closed menu's view lives on, so anything that reads or
+  animates follows the window's visibility, never the view's lifetime.
 
 ## Words
 

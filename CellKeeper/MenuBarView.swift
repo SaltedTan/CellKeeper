@@ -58,6 +58,10 @@ struct MenuBarView: View {
         }
         .padding(MenuLayout.inset)
         .frame(width: MenuLayout.width)
+        // The power flow reads and animates only while this window is on
+        // screen (``AppModel/isMenuVisible``).
+        .background(WindowVisibilityObserver { model.setMenuVisible($0) })
+        .environment(\.isMenuVisible, model.isMenuVisible)
     }
 
     /// Opens the Settings window at the pane `model.settingsTab` names.
@@ -523,13 +527,25 @@ private struct ChargeLimitSlider: View {
         .onChange(of: model.settingsRevision) {
             send(.settingsChanged(revision: model.settingsRevision, limit: model.settings.chargeLimit))
         }
-        .onDisappear {
-            // Applies the current edit once, at once; the timer then does
-            // nothing.
-            send(.closed)
-            timer?.cancel()
-            timer = nil
+        .onDisappear(perform: close)
+        // The view lives on while the menu is closed (``AppModel/isMenuVisible``):
+        // every close, and every reopen, closes the edit as disappearing
+        // would (a closed edit ignores a second close), and a reopen starts
+        // a new one. Keyed on ``AppModel/menuShowing``, so a close and
+        // reopen that SwiftUI sees as one update still closes the edit.
+        .onChange(of: model.menuShowing) {
+            close()
+            if model.isMenuVisible {
+                edit = ChargeLimitSliderEdit(limit: model.settings.chargeLimit, revision: model.settingsRevision)
+            }
         }
+    }
+
+    /// Applies the current edit once, at once; the timer then does nothing.
+    private func close() {
+        send(.closed)
+        timer?.cancel()
+        timer = nil
     }
 
     private func send(_ event: ChargeLimitSliderEdit.Event) {
