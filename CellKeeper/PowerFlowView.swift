@@ -3,12 +3,58 @@ import CellKeeperCore
 import Charts
 import SwiftUI
 
-/// The menu's "Power flow" section (D114): where the Mac's power comes from
-/// and goes, as a diagram of the adapter, the battery and the Mac, and a
-/// chart of the last hour. Display only: it changes nothing, and the policy
-/// and the controller never see what it shows. While the menu is open and
-/// the section expanded, its source is read every few seconds; the wording
-/// is `PowerFlowWording`'s.
+/// The power flow at the top of the menu (D121, on by default in
+/// Settings › General): the diagram alone, under the header, whenever the
+/// menu is open. The chart and the source's note are under Details › Power
+/// history. Display only (D114). While it is shown, its source is read every
+/// few seconds; SwiftUI cancels the task when the menu closes.
+struct PowerFlowGlance: View {
+    let model: AppModel
+
+    var body: some View {
+        Group {
+            if let flow = model.powerFlow.flow {
+                PowerFlowDiagram(flow: flow)
+            } else {
+                PowerFlowUnavailable(state: model.powerFlow)
+            }
+        }
+        .task(id: model.showsPowerFlowInMenu) {
+            await model.refreshPowerFlowWhileShown()
+        }
+    }
+}
+
+/// Details › Power history, while the diagram is at the top of the menu:
+/// the last hour's chart and where the values come from. It reads nothing
+/// itself; the diagram's reads fill it.
+struct PowerHistorySection: View {
+    let model: AppModel
+
+    var body: some View {
+        DisclosureGroup("Power history") {
+            VStack(alignment: .leading, spacing: 10) {
+                if model.powerFlow.flow != nil {
+                    PowerFlowChart(history: model.powerFlow.history, lineBreakGap: model.powerFlowLineBreakGap)
+                }
+                Text(model.powerFlowFootnote)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.top, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+/// The menu's "Power flow" section under Details (D114), while the diagram
+/// is not at the top of the menu: where the Mac's power comes from and
+/// goes, as a diagram of the adapter, the Mac and the battery, and a chart
+/// of the last hour. Display only: it changes nothing, and the policy and
+/// the controller never see what it shows. While the menu is open and the
+/// section expanded, its source is read every few seconds; the wording is
+/// `PowerFlowWording`'s.
 struct PowerFlowSection: View {
     let model: AppModel
 
@@ -46,76 +92,68 @@ private struct PowerFlowContent: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         } else {
-            // A reading without the Mac's power use, or none at all (the
-            // header then says why).
-            Text(state.hasSample ? PowerFlowWording.unavailable : Format.unavailable)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            PowerFlowUnavailable(state: state)
         }
+    }
+}
+
+/// A reading without the Mac's power use, or none at all (the header then
+/// says why).
+private struct PowerFlowUnavailable: View {
+    let state: PowerFlowState
+
+    var body: some View {
+        Text(state.hasSample ? PowerFlowWording.unavailable : Format.unavailable)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
 // MARK: - Diagram
 
-private enum FlowNodeID: Hashable {
-    case adapter
-    case battery
-    case mac
-}
-
-/// The bounds of the diagram's nodes, for drawing the arrows between them.
-private struct FlowNodeBounds: PreferenceKey {
-    static var defaultValue: [FlowNodeID: Anchor<CGRect>] { [:] }
-
-    static func reduce(value: inout [FlowNodeID: Anchor<CGRect>], nextValue: () -> [FlowNodeID: Anchor<CGRect>]) {
-        value.merge(nextValue()) { $1 }
-    }
-}
-
-/// The adapter above the battery on the left, the Mac on the right, and an
-/// arrow for each active flow. One element for VoiceOver, named by the
-/// flow's summary, containing the three nodes.
+/// The adapter, the Mac and the battery in a row, each a symbol in a soft
+/// circle with its name and value beneath, joined by two links: the
+/// adapter's input into the Mac, and the battery's power between the Mac
+/// and the battery, which runs either way. Each link is one reported value,
+/// never a sum or a difference (D114): a solid line in its series' colour,
+/// wider for more watts, with a blob gliding along it towards where the
+/// power goes, longer and faster for more. A link with no power is a thin
+/// grey line with no blob, dashed when its power is not known. With Reduce
+/// Motion the blob stays still, three quarters of the way towards where
+/// the power goes. One element for
+/// VoiceOver, named by the flow's summary, containing the three nodes.
 private struct PowerFlowDiagram: View {
     let flow: PowerFlow
 
     var body: some View {
-        HStack(alignment: .center, spacing: 0) {
-            VStack(alignment: .leading, spacing: 28) {
-                FlowNode(
-                    symbol: "powerplug",
-                    title: "Adapter",
-                    value: PowerFlowWording.adapterValue(flow),
-                    subtitle: PowerFlowWording.adapterSubtitle(flow),
-                    isDimmed: flow.powerSource != .externalPower,
-                    spokenValue: PowerFlowWording.adapterSpoken(flow)
-                )
-                .anchorPreference(key: FlowNodeBounds.self, value: .bounds) { [.adapter: $0] }
-                FlowNode(
-                    symbol: Self.batterySymbol(flow.chargePercent),
-                    title: "Battery",
-                    value: PowerFlowWording.batteryValue(flow),
-                    subtitle: PowerFlowWording.batterySubtitle(flow),
-                    spokenValue: PowerFlowWording.batterySpoken(flow)
-                )
-                .anchorPreference(key: FlowNodeBounds.self, value: .bounds) { [.battery: $0] }
-            }
-            Spacer(minLength: 64)
+        HStack(alignment: .top, spacing: 0) {
+            FlowNode(
+                symbol: "powerplug",
+                title: "Adapter",
+                value: PowerFlowWording.adapterValue(flow),
+                subtitle: PowerFlowWording.adapterSubtitle(flow),
+                isDimmed: flow.powerSource != .externalPower,
+                spokenValue: PowerFlowWording.adapterSpoken(flow)
+            )
             FlowNode(
                 symbol: "laptopcomputer",
                 title: "Mac",
                 value: PowerFlowWording.macValue(flow),
                 spokenValue: PowerFlowWording.macSpoken(flow)
             )
-            .anchorPreference(key: FlowNodeBounds.self, value: .bounds) { [.mac: $0] }
+            FlowNode(
+                symbol: Self.batterySymbol(flow.chargePercent),
+                title: "Battery",
+                value: PowerFlowWording.batteryValue(flow),
+                subtitle: PowerFlowWording.batterySubtitle(flow),
+                spokenValue: PowerFlowWording.batterySpoken(flow)
+            )
         }
-        .backgroundPreferenceValue(FlowNodeBounds.self) { anchors in
-            GeometryReader { proxy in
-                if let adapter = anchors[.adapter], let battery = anchors[.battery], let mac = anchors[.mac] {
-                    FlowArrows(flow: flow, adapter: proxy[adapter], battery: proxy[battery], mac: proxy[mac])
-                }
-            }
+        .background(alignment: .top) {
+            FlowLinks(links: FlowLink.links(of: flow))
+                .frame(height: FlowNode.circleSize)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(PowerFlowWording.summary(flow))
@@ -135,9 +173,9 @@ private struct PowerFlowDiagram: View {
     }
 }
 
-/// A node: its symbol, a short label, its value and an optional line
-/// beneath. One element for VoiceOver: the label, and the value with its
-/// units in words.
+/// A node: its symbol in a soft circle, its name, its value and an optional
+/// line beneath, centred in a third of the row. One element for VoiceOver:
+/// the name, and the value with its units in words.
 private struct FlowNode: View {
     let symbol: String
     let title: String
@@ -147,34 +185,33 @@ private struct FlowNode: View {
     var isDimmed = false
     let spokenValue: String
 
-    /// The symbols' column; the arrow from the adapter to the battery runs
-    /// down its middle.
-    static let iconWidth: CGFloat = 28
+    /// The circles' diameter; the links run between them at mid-height.
+    static let circleSize: CGFloat = 36
 
     var body: some View {
-        HStack(alignment: .top, spacing: 5) {
+        VStack(spacing: 1) {
             Image(systemName: symbol)
-                .font(.title3)
-                // Wide enough for the battery symbol: in a narrower frame
-                // macOS drew it white (seen offscreen).
-                .frame(width: FlowNode.iconWidth)
-            VStack(alignment: .leading, spacing: 0) {
-                Text(title)
+                .font(.system(size: 15, weight: .medium))
+                .frame(width: FlowNode.circleSize, height: FlowNode.circleSize)
+                .background(Circle().fill(.quaternary))
+                .padding(.bottom, 4)
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.callout.weight(.semibold))
+                .monospacedDigit()
+            if let subtitle {
+                Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text(value)
-                    .font(.callout.weight(.semibold))
                     .monospacedDigit()
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
             }
         }
+        .multilineTextAlignment(.center)
+        .fixedSize(horizontal: false, vertical: true)
         .foregroundStyle(isDimmed ? .secondary : .primary)
-        .fixedSize()
+        .frame(maxWidth: .infinity)
         .accessibilityElement(children: .ignore)
         // Otherwise its role is unknown (seen in the accessibility tree).
         .accessibilityAddTraits(.isStaticText)
@@ -183,95 +220,120 @@ private struct FlowNode: View {
     }
 }
 
-/// The arrows of the active flows, each labelled with its watts, thicker
-/// for more power up to a cap. Hidden from VoiceOver: the diagram's summary
-/// says the same.
-private struct FlowArrows: View {
-    let flow: PowerFlow
-    let adapter: CGRect
-    let battery: CGRect
-    let mac: CGRect
-
-    private enum Route: Hashable {
-        case adapterToMac
-        case adapterToBattery
-        case batteryToMac
+/// One of the diagram's two links and what it carries
+/// (``PowerFlow/adapterLink``, ``PowerFlow/batteryLink``).
+private struct FlowLink: Equatable {
+    enum Side {
+        /// Between the adapter and the Mac.
+        case adapter
+        /// Between the Mac and the battery.
+        case battery
     }
 
-    private struct Arrow: Identifiable {
-        let id: Route
-        let start: CGPoint
-        let end: CGPoint
-        let watts: Double
-        /// Where its label's centre goes, and whether it starts there
-        /// instead (to the right of a vertical arrow).
-        let label: CGPoint
-        let isLabelLeading: Bool
+    let side: Side
+    let state: PowerFlow.Link
 
-        var width: CGFloat { 1.5 + CGFloat(min(watts, 100) / 100) * 3 }
+    static func links(of flow: PowerFlow) -> [FlowLink] {
+        [FlowLink(side: .adapter, state: flow.adapterLink), FlowLink(side: .battery, state: flow.batteryLink)]
     }
+
+    var color: Color {
+        switch side {
+        case .adapter: PowerFlowHistory.Series.adapterInput.color
+        case .battery: PowerFlowHistory.Series.battery.color
+        }
+    }
+
+    var isFlowing: Bool {
+        if case .flowing = state { return true }
+        return false
+    }
+}
+
+/// The links, drawn behind the nodes. A flowing link's blob moves only
+/// while the menu shows it and Reduce Motion is off. Hidden from VoiceOver:
+/// the diagram's summary says the same.
+private struct FlowLinks: View {
+    let links: [FlowLink]
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        let arrows = self.arrows
-        ZStack(alignment: .topLeading) {
-            Canvas { context, _ in
-                for arrow in arrows {
-                    draw(arrow, in: context)
+        let animates = !reduceMotion && links.contains(where: \.isFlowing)
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animates)) { timeline in
+            Canvas { context, size in
+                let time = timeline.date.timeIntervalSinceReferenceDate
+                for link in links {
+                    draw(link, in: &context, size: size, time: animates ? time : nil)
                 }
-            }
-            ForEach(arrows) { arrow in
-                Text(PowerFlowWording.watts(arrow.watts))
-                    .font(.caption)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .fixedSize()
-                    .frame(width: 70, alignment: arrow.isLabelLeading ? .leading : .center)
-                    .position(x: arrow.label.x + (arrow.isLabelLeading ? 35 : 0), y: arrow.label.y)
             }
         }
         .accessibilityHidden(true)
     }
 
-    private var arrows: [Arrow] {
-        var arrows: [Arrow] = []
-        if PowerFlow.isActive(flow.adapterToMacWatts), let watts = flow.adapterToMacWatts {
-            let start = CGPoint(x: adapter.maxX + 6, y: adapter.midY)
-            let end = CGPoint(x: mac.minX - 6, y: mac.midY - 5)
-            arrows.append(Arrow(id: .adapterToMac, start: start, end: end, watts: watts, label: CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 - 10), isLabelLeading: false))
-        }
-        if PowerFlow.isActive(flow.adapterToBatteryWatts), let watts = flow.adapterToBatteryWatts {
-            let x = adapter.minX + FlowNode.iconWidth / 2
-            let start = CGPoint(x: x, y: adapter.maxY + 3)
-            let end = CGPoint(x: x, y: battery.minY - 3)
-            arrows.append(Arrow(id: .adapterToBattery, start: start, end: end, watts: watts, label: CGPoint(x: x + 8, y: (start.y + end.y) / 2), isLabelLeading: true))
-        }
-        if PowerFlow.isActive(flow.batteryToMacWatts), let watts = flow.batteryToMacWatts {
-            let start = CGPoint(x: battery.maxX + 6, y: battery.midY)
-            let end = CGPoint(x: mac.minX - 6, y: mac.midY + 5)
-            arrows.append(Arrow(id: .batteryToMac, start: start, end: end, watts: watts, label: CGPoint(x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 + 10), isLabelLeading: false))
-        }
-        return arrows
+    /// The share of the full width and speed that `watts` earns: 0 at
+    /// nothing, 1 at 100 W or more.
+    private static func strength(_ watts: Double) -> CGFloat {
+        CGFloat(min(max(watts, 0), 100) / 100)
     }
 
-    /// A line and a filled head pointing at `end`.
-    private func draw(_ arrow: Arrow, in context: GraphicsContext) {
-        let dx = arrow.end.x - arrow.start.x
-        let dy = arrow.end.y - arrow.start.y
-        let length = max(sqrt(dx * dx + dy * dy), 1)
-        let unit = CGPoint(x: dx / length, y: dy / length)
-        let headLength = min(5 + arrow.width * 1.5, length / 2)
-        let headHalfWidth = 2.5 + arrow.width
-        let base = CGPoint(x: arrow.end.x - unit.x * headLength, y: arrow.end.y - unit.y * headLength)
-        var line = Path()
-        line.move(to: arrow.start)
-        line.addLine(to: base)
-        context.stroke(line, with: .style(.secondary), style: StrokeStyle(lineWidth: arrow.width, lineCap: .round))
-        var head = Path()
-        head.move(to: arrow.end)
-        head.addLine(to: CGPoint(x: base.x - unit.y * headHalfWidth, y: base.y + unit.x * headHalfWidth))
-        head.addLine(to: CGPoint(x: base.x + unit.y * headHalfWidth, y: base.y - unit.x * headHalfWidth))
-        head.closeSubpath()
-        context.fill(head, with: .style(.secondary))
+    /// `time` is nil when the blob stays still.
+    private func draw(_ link: FlowLink, in context: inout GraphicsContext, size: CGSize, time: TimeInterval?) {
+        // The nodes are three equal columns; each circle is centred in its
+        // own. The link runs between two circles, a little clear of each.
+        let column = size.width / 3
+        let radius = FlowNode.circleSize / 2
+        let gap: CGFloat = 5
+        let (left, right): (CGFloat, CGFloat) = switch link.side {
+        case .adapter: (column / 2, column * 1.5)
+        case .battery: (column * 1.5, column * 2.5)
+        }
+        let y = size.height / 2
+        let start = left + radius + gap
+        let end = right - radius - gap
+        guard end - start > 8 else { return }
+        var track = Path()
+        track.move(to: CGPoint(x: start, y: y))
+        track.addLine(to: CGPoint(x: end, y: y))
+
+        guard case .flowing(let watts, let isTowardsMac) = link.state else {
+            // Idle: a thin grey line; not known: a thin grey dashed one. The
+            // secondary label colour reaches about 3.8:1 on the light
+            // backgrounds and 4.6:1 on the dark ones.
+            let dash: [CGFloat] = link.state == .unknown ? [2, 4] : []
+            context.stroke(track, with: .style(.secondary), style: StrokeStyle(lineWidth: 1.5, lineCap: .round, dash: dash))
+            return
+        }
+        // A flowing link: a solid line in its series' colour, which reaches
+        // 3:1 on every background (never made transparent), and a wider
+        // blob of the same colour on it.
+        let strength = Self.strength(watts)
+        let width = 2 + strength * 2
+        context.stroke(track, with: .color(link.color), style: StrokeStyle(lineWidth: width, lineCap: .round))
+        // Towards the Mac is rightwards on the adapter's side and leftwards
+        // on the battery's.
+        let isRightwards = (link.side == .adapter) == isTowardsMac
+        let from = isRightwards ? start : end
+        let to = isRightwards ? end : start
+        // Moving, the blob is longer and quicker for more power and fades in
+        // and out at the ends so it never pops; still (`time` nil), it
+        // stays three quarters of the way towards where the power goes.
+        let phase: CGFloat
+        if let time {
+            let period = 2.4 - Double(strength) * 1.5
+            phase = CGFloat((time / period).truncatingRemainder(dividingBy: 1))
+        } else {
+            phase = 0.75
+        }
+        let length = 12 + strength * 14
+        let height = width + 5
+        let centre = from + (to - from) * phase
+        let blob = CGRect(x: centre - length / 2, y: y - height / 2, width: length, height: height)
+        var blobContext = context
+        if time != nil {
+            blobContext.opacity = Double(sin(phase * .pi))
+        }
+        blobContext.clip(to: Path(CGRect(x: start - height, y: 0, width: end - start + 2 * height, height: size.height)))
+        blobContext.fill(Path(roundedRect: blob, cornerRadius: height / 2), with: .color(link.color))
     }
 }
 

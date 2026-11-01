@@ -179,6 +179,24 @@ reading order through Details and the General pane, rows inside
 disclosures, the Show percentage row, the limit picker and the date
 pickers as spoken, and keyboard focus through Details.
 
+### Follow-up: the power flow at the top of the menu (2026-11-01, D121)
+
+The power flow's diagram moved to the top of the menu, under the header,
+with a switch in Settings › General (on by default); its chart and note
+are under Details › Power history. Off, everything is under Details ›
+Power flow, as before. The diagram keeps its accessibility: one element
+named by the flow's summary, holding the adapter, the Mac and the battery,
+each one static-text element with its value in words. Its links are
+hidden from VoiceOver, as the arrows were. They animate: a blob glides
+along each flowing link. With Reduce Motion the blob stays still, three
+quarters of the way towards where the power goes, and the battery's line
+says "Charging" or "Supplying" in words (X2). A flowing link is a solid
+line in its chart colour, which reaches 3:1, never made transparent; an
+idle or unknown one is the secondary label colour (about 3.8:1 light,
+4.6:1 dark), dashed when unknown. Checked by eye
+offscreen in light and dark, with and without Reduce Motion; VoiceOver
+and Reduce Motion on a real Mac are pending (issue #89).
+
 ### For the owner's Mac
 
 With VoiceOver: the slider's value and its 1% steps (M1, M2), the
@@ -244,7 +262,7 @@ the arrow keys (M2). With Increase Contrast: the warning and error text
 | ID | Topic | Finding | Class |
 |---|---|---|---|
 | X1 | Colour-only signals | None: every orange or red line says what it warns of, the badge has text, and the scheduled line's colour repeats its words | pass |
-| X2 | Reduce Motion, Reduce Transparency | No custom animation, transition or symbol effect; only system materials | pass |
+| X2 | Reduce Motion, Reduce Transparency | One custom animation since D121: the power-flow diagram's blobs, which stay still with Reduce Motion, three quarters of the way towards where the power goes. No transition or symbol effect; only system materials | pass |
 | X3 | Gestures | No tap or drag gestures; every action is a button, toggle, picker, slider or stepper | pass |
 | X4 | Live updates | Telemetry and status changes are not announced, by design: they arrive every minute. Only the user's own refused change (G2) and the copy (G4) need one | pass |
 | X5 | Text selection | Diagnostics values and activity messages can be selected and copied | pass |

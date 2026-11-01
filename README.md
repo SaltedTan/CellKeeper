@@ -24,7 +24,7 @@ Limit** (80–100%) through a shortcut you create, and macOS enforces it.
 | Cycle count, voltage, current, mAh capacities | **Real** — read-only IORegistry properties (some undocumented) |
 | Adapter wattage | **Real** — public API |
 | Mac thermal state and Low Power Mode | **Real** — public `ProcessInfo` API; system-wide, not battery temperature; shown only |
-| Power flow: adapter, battery and Mac power, with the last hour | **Implemented** — undocumented macOS data, updated about once a minute; shown only, never used to control charging; in the menu under **Details › Power flow**. Not yet tried in the menu on a Mac. A faster SMC source (about once a second, averaged over 3 s) is designed and built, with the owner's reader, off by default; not yet tried on a Mac |
+| Power flow: adapter, battery and Mac power, with the last hour | **Implemented** — undocumented macOS data, updated about once a minute; shown only, never used to control charging; at the top of the menu (Settings › General › Show power flow; off, under **Details › Power flow**). Not yet tried in the menu on a Mac. A faster SMC source (about once a second, averaged over 3 s) is designed and built, with the owner's reader, off by default; not yet tried on a Mac |
 | Battery temperature | **Not available** on macOS 27 through any public interface; shown as unavailable |
 | Battery health / condition as shown by macOS | **Not available** to third-party apps; CellKeeper shows its own computed capacity ratio, labelled as such |
 | Charge limit 80/85/90/95/100% via macOS's Charge Limit | **Real, experimental, opt-in** (macOS 26.4+, Apple silicon); enforced by macOS; verified on one Mac |

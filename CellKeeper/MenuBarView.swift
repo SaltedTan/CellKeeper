@@ -29,6 +29,10 @@ struct MenuBarView: View {
         VStack(alignment: .leading, spacing: MenuLayout.groupSpacing) {
             if let status = model.status {
                 StatusGroup(model: model, status: status, openSettingsWindow: openSettingsWindow)
+                if model.showsPowerFlowInMenu {
+                    Divider()
+                    PowerFlowGlance(model: model)
+                }
                 Divider()
                 VStack(alignment: .leading, spacing: MenuLayout.rowSpacing) {
                     ChargeLimitControl(model: model)
@@ -820,7 +824,8 @@ private struct WeeklyFullChargeLines: View {
 
 // MARK: - Details
 
-/// Everything one click away (design guide): the power flow, the battery's
+/// Everything one click away (design guide): the power flow (its history
+/// while the diagram is at the top of the menu, D121), the battery's
 /// details, the backend's mechanics and the configured schedules, each
 /// under its own disclosure. Closed when the menu's view is made. Closing
 /// it closes Power flow with it, through the existing collapse path, so
@@ -842,7 +847,11 @@ private struct DetailsDisclosure: View {
             }
         )) {
             VStack(alignment: .leading, spacing: MenuLayout.rowSpacing) {
-                PowerFlowSection(model: model)
+                if model.showsPowerFlowInMenu {
+                    PowerHistorySection(model: model)
+                } else {
+                    PowerFlowSection(model: model)
+                }
                 TelemetryDetails(snapshot: status.snapshot, thermalState: model.thermalState, isLowPowerModeEnabled: model.isLowPowerModeEnabled)
                 ChargingControlDetails(status: status)
                 SchedulesDetails(status: status)

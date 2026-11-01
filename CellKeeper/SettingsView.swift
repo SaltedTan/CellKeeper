@@ -45,7 +45,8 @@ struct SettingsView: View {
 // MARK: - General
 
 /// Settings › General: how the menu bar icon looks (``MenuBarIcon``, D113),
-/// notifications, and About. Nothing here changes charging, and nothing
+/// whether the menu shows the power flow at the top (D121), notifications,
+/// and About. Nothing here changes charging, and nothing
 /// here needs Manage charging.
 private struct GeneralSettingsTab: View {
     let model: AppModel
@@ -82,6 +83,18 @@ private struct GeneralSettingsTab: View {
                 Text("Menu bar")
             } footer: {
                 Text("Choose what CellKeeper shows in the menu bar.")
+                    .footerParagraph()
+            }
+
+            Section {
+                Toggle("Show power flow", isOn: Binding(
+                    get: { model.showsPowerFlowInMenu },
+                    set: { model.setShowsPowerFlowInMenu($0) }
+                ))
+            } header: {
+                Text("Menu")
+            } footer: {
+                Text("Shows where your Mac's power comes from and goes at the top of the menu, read every few seconds while the menu is open. Off, it is under Details › Power flow.")
                     .footerParagraph()
             }
 

@@ -129,9 +129,14 @@ final class AppModel {
     /// hours, from every status and from the menu's display-only reads. In
     /// memory only; the policy and the controller never see it (D114).
     private(set) var powerFlow = PowerFlowState()
-    /// Whether the menu's Power flow section is expanded, remembered across
-    /// launches. Only then does the menu read the flow every few seconds.
+    /// Whether the menu's Power flow section under Details is expanded,
+    /// remembered across launches. Used only while the flow is not shown at
+    /// the top of the menu.
     private(set) var isPowerFlowExpanded: Bool
+    /// Whether the menu shows the power flow's diagram under its header
+    /// (Settings › General, on by default; D121), remembered across
+    /// launches. Off, the flow is under Details › Power flow, as before.
+    private(set) var showsPowerFlowInMenu: Bool
     /// Where the menu reads the power flow while it is open: macOS's
     /// battery data, read through the telemetry provider, the registry
     /// track's source. Display only.
@@ -205,6 +210,9 @@ final class AppModel {
     /// "on" while the menu's Power flow section is expanded; anything else
     /// is collapsed, the default.
     static let powerFlowExpandedKey = "menu.powerFlowExpanded"
+    /// "off" when the user turned off the power flow at the top of the
+    /// menu; anything else, absent included, is on.
+    static let powerFlowInMenuKey = "menu.powerFlowAtTop"
     static let periodicInterval: Duration = .seconds(60)
     /// macOS reports battery estimates as invalid for 30 s after wake
     /// (`BatteryInvalidWakeSeconds`), so re-read once that has passed.
@@ -283,6 +291,7 @@ final class AppModel {
         self.smcPowerSource = smcPowerSource
         self.powerFlowRefresher = PowerFlowRefresher(source: powerFlowSource, smc: smcPowerSource)
         self.isPowerFlowExpanded = store.string(forKey: Self.powerFlowExpandedKey) == "on"
+        self.showsPowerFlowInMenu = store.string(forKey: Self.powerFlowInMenuKey) != "off"
         // Recovery must not depend on which backend is selected: if a record
         // of the user's own Charge Limit exists, start with the backend that
         // can restore it and switch once it has.
@@ -891,16 +900,39 @@ final class AppModel {
 
     // MARK: Power flow
 
+    /// Whether the menu reads the power flow while it is open: its diagram
+    /// is at the top, or its section under Details is expanded. The view
+    /// that shows it runs the reads, so nothing is read while the menu is
+    /// closed or the section hidden.
+    var isPowerFlowShown: Bool {
+        showsPowerFlowInMenu || isPowerFlowExpanded
+    }
+
     /// Collapsing ends the section's reads at once, a display read in
     /// flight included, so the SMC source stops sampling without waiting
-    /// for SwiftUI to cancel the section's task.
+    /// for SwiftUI to cancel the section's task; not while the diagram at
+    /// the top of the menu still shows the flow.
     func setPowerFlowExpanded(_ expanded: Bool) {
         isPowerFlowExpanded = expanded
         store.set(expanded ? "on" : "off", forKey: Self.powerFlowExpandedKey)
-        if !expanded {
+        if !isPowerFlowShown {
             // The hide event itself: the runs end and the SMC source is told
             // now, and the SMC track is cleared from now, whenever the runs'
             // callers resume.
+            notePowerFlow { powerFlowRefresher.collapse(&$0) }
+        }
+    }
+
+    /// Shows or hides the power flow's diagram at the top of the menu
+    /// (Settings › General). Hiding it is always a hide event, as
+    /// collapsing the section is: while the diagram is on, the section
+    /// under Details is not in the menu, so no run of its own can be
+    /// reading, whatever its saved state; once shown, it starts its own.
+    func setShowsPowerFlowInMenu(_ shows: Bool) {
+        guard shows != showsPowerFlowInMenu else { return }
+        showsPowerFlowInMenu = shows
+        store.set(shows ? "on" : "off", forKey: Self.powerFlowInMenuKey)
+        if !shows {
             notePowerFlow { powerFlowRefresher.collapse(&$0) }
         }
     }
@@ -959,15 +991,15 @@ final class AppModel {
         PowerFlowHistory.lineBreakGap(sourceInterval: powerFlowSource.updateInterval, checkInterval: Self.periodicInterval)
     }
 
-    /// Refreshes the power flow every few seconds while the Power flow
-    /// section is expanded, until the calling task is cancelled or quitting
-    /// starts: the menu runs it while it is open (the lead's decision,
-    /// 2026-10-21). Each tick is the SMC source's window or a read of the
-    /// registry track's source (D115). Nothing is read while the section is
-    /// collapsed. Display only (``PowerFlowRefresher``): no evaluation, no
+    /// Refreshes the power flow every few seconds while it is shown
+    /// (``isPowerFlowShown``), until the calling task is cancelled or
+    /// quitting starts: the menu runs it while it is open (the lead's
+    /// decision, 2026-10-21). Each tick is the SMC source's window or a read
+    /// of the registry track's source (D115). Nothing is read while the
+    /// flow is hidden. Display only (``PowerFlowRefresher``): no evaluation, no
     /// log line, nothing for the controller.
     func refreshPowerFlowWhileShown() async {
-        let outcome = await powerFlowRefresher.run(while: { [weak self] in self?.isPowerFlowExpanded == true }) { [weak self] tick in
+        let outcome = await powerFlowRefresher.run(while: { [weak self] in self?.isPowerFlowShown == true }) { [weak self] tick in
             self?.notePowerFlow { $0.take(tick) }
         }
         // The menu closed and this run's end hid the section, at that
