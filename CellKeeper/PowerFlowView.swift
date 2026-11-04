@@ -6,8 +6,9 @@ import SwiftUI
 /// The power flow at the top of the menu (D121, on by default in
 /// Settings › General): the diagram alone, under the header, whenever the
 /// menu is open. The chart and the source's note are under Details › Power
-/// history. Display only (D114). While it is shown, its source is read every
-/// few seconds; SwiftUI cancels the task when the menu closes.
+/// history. Display only (D114). While it is shown (the menu's window on
+/// screen and the Mac awake), its source is read every few seconds; every
+/// hide event ends the reads (``AppModel/isPowerFlowShown``).
 struct PowerFlowGlance: View {
     let model: AppModel
 
@@ -19,9 +20,10 @@ struct PowerFlowGlance: View {
                 PowerFlowUnavailable(state: model.powerFlow)
             }
         }
-        // Restarted when the menu's window comes back on screen: the view
-        // lives on while the menu is closed (``AppModel/isMenuVisible``).
-        .task(id: model.menuShowing) {
+        // The view lives on while the menu is closed, so the task follows
+        // the flow's visibility, not the view: started again after every
+        // hide event once the flow is shown (``AppModel/powerFlowTaskID``).
+        .task(id: model.powerFlowTaskID) {
             await model.refreshPowerFlowWhileShown()
         }
     }
@@ -54,9 +56,9 @@ struct PowerHistorySection: View {
 /// is not at the top of the menu: where the Mac's power comes from and
 /// goes, as a diagram of the adapter, the Mac and the battery, and a chart
 /// of the last hour. Display only: it changes nothing, and the policy and
-/// the controller never see what it shows. While the menu is open and the
-/// section expanded, its source is read every few seconds; the wording is
-/// `PowerFlowWording`'s.
+/// the controller never see what it shows. While the menu's window is on
+/// screen, the Mac awake and the section expanded, its source is read every
+/// few seconds; the wording is `PowerFlowWording`'s.
 struct PowerFlowSection: View {
     let model: AppModel
 
@@ -68,21 +70,15 @@ struct PowerFlowSection: View {
             PowerFlowContent(state: model.powerFlow, footnote: model.powerFlowFootnote, lineBreakGap: model.powerFlowLineBreakGap)
                 .padding(.top, 4)
         }
-        // Reads while the menu's window is on screen and the section
-        // expanded; started again when either changes, since the view lives
-        // on while the menu is closed. Otherwise it reads nothing and ends
-        // at once.
-        .task(id: SectionTaskID(isExpanded: model.isPowerFlowExpanded, showing: model.menuShowing)) {
+        // Reads while the flow is shown (the menu's window on screen, the
+        // Mac awake and the section expanded); started again after every
+        // hide event once it is shown, since the view lives on while the
+        // menu is closed (``AppModel/powerFlowTaskID``). Otherwise it reads
+        // nothing and ends at once.
+        .task(id: model.powerFlowTaskID) {
             await model.refreshPowerFlowWhileShown()
         }
     }
-}
-
-/// The section's task identity: it restarts when the section is expanded or
-/// collapsed and at every close and reopen of the menu.
-private struct SectionTaskID: Hashable {
-    let isExpanded: Bool
-    let showing: AppModel.MenuShowing
 }
 
 private struct PowerFlowContent: View {
@@ -260,15 +256,15 @@ private struct FlowLink: Equatable {
 }
 
 /// The links, drawn behind the nodes. A flowing link's blob moves only
-/// while the menu's window is on screen and Reduce Motion is off. Hidden from VoiceOver:
-/// the diagram's summary says the same.
+/// while the menu's window is on screen, the Mac awake, and Reduce Motion
+/// off. Hidden from VoiceOver: the diagram's summary says the same.
 private struct FlowLinks: View {
     let links: [FlowLink]
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.isMenuVisible) private var isMenuVisible
+    @Environment(\.isMenuOnScreen) private var isMenuOnScreen
 
     var body: some View {
-        let animates = isMenuVisible && !reduceMotion && links.contains(where: \.isFlowing)
+        let animates = isMenuOnScreen && !reduceMotion && links.contains(where: \.isFlowing)
         TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !animates)) { timeline in
             Canvas { context, size in
                 let time = timeline.date.timeIntervalSinceReferenceDate
@@ -349,16 +345,16 @@ private struct FlowLinks: View {
 
 // MARK: - The menu's visibility
 
-private struct MenuVisibleKey: EnvironmentKey {
+private struct MenuOnScreenKey: EnvironmentKey {
     static let defaultValue = true
 }
 
 extension EnvironmentValues {
-    /// Whether the menu's window is on screen (``AppModel/isMenuVisible``);
-    /// true outside the menu.
-    var isMenuVisible: Bool {
-        get { self[MenuVisibleKey.self] }
-        set { self[MenuVisibleKey.self] = newValue }
+    /// Whether the menu's window is on screen and the Mac awake
+    /// (``PowerFlowVisibility/isMenuOnScreen``); true outside the menu.
+    var isMenuOnScreen: Bool {
+        get { self[MenuOnScreenKey.self] }
+        set { self[MenuOnScreenKey.self] = newValue }
     }
 }
 

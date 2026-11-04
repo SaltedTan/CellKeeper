@@ -13,7 +13,7 @@ extension SMCPowerCoordinator: SMCPowerControlling {}
 /// How a run of the refresher ended.
 public struct PowerFlowRunOutcome: Sendable, Equatable {
     /// Whether this run's end was the one that told the SMC source the
-    /// section is hidden: it was the last run reading.
+    /// flow is hidden: it was the last run reading.
     public let hidSection: Bool
     /// When it ended, on the continuous clock.
     public let endedAt: ContinuousClock.Instant
@@ -24,8 +24,8 @@ public struct PowerFlowRunOutcome: Sendable, Equatable {
     }
 
     /// Clears `state`'s SMC track from when this run ended, if its end hid
-    /// the section (the menu closed): a window from before then is never
-    /// shown after it. A run ended by ``PowerFlowRefresher/collapse(_:at:)``
+    /// the flow (its task was cancelled): a window from before then is
+    /// never shown after it. A run ended by ``PowerFlowRefresher/collapse(_:at:)``
     /// was cleared there.
     public func clearSMCTrackIfHidden(_ state: inout PowerFlowState) {
         if hidSection {
@@ -35,16 +35,22 @@ public struct PowerFlowRunOutcome: Sendable, Equatable {
 }
 
 /// The menu's display-only reads of the power flow as the app runs them
-/// (D114, D115): ``PowerFlowRefresh`` for each time the menu shows the
-/// expanded section, through one source whose reads never overlap and,
-/// when the build has a reader, the SMC source, and a stop for quitting.
+/// (D114, D115, D121): ``PowerFlowRefresh`` for each time the menu shows
+/// the flow (``PowerFlowVisibility``: its window on screen, the Mac awake,
+/// and the diagram at the top or the section expanded), through one source
+/// whose reads never overlap and, when the build has a reader, the SMC
+/// source, and a stop for quitting.
 ///
-/// The section's task can start a run while an earlier one is still
-/// finishing (SwiftUI starts it again when the section is expanded or
-/// collapsed), so two runs may overlap; they share one read at a time, and
-/// the SMC source counts as shown while any run reads. A run ends at the
-/// first of: its caller cancelled (the menu closes), ``collapse(_:at:)`` or
-/// ``endRuns()``, ``stop()`` (quitting), or its own end. It ends then and
+/// The menu's view outlives each opening, so its tasks do not end when the
+/// menu closes: the app ends the runs at every hide event (the window left
+/// the screen, the diagram switched off, the section collapsed, the Mac
+/// going to sleep) through ``collapse(_:at:)``, and its views start a run
+/// again once the flow is shown. A task can start a run while an earlier
+/// one is still finishing, so two runs may overlap; they share one read at
+/// a time, and the SMC source counts as shown while any run reads. A run
+/// ends at the first of: its caller cancelled (its view's task restarted
+/// or went away), ``collapse(_:at:)`` or ``endRuns()`` (a hide event),
+/// ``stop()`` (quitting), or its own end. It ends then and
 /// there, on whatever thread that happens: it is no longer counted, the SMC
 /// source is told the section is hidden if it was the last reading, and a
 /// display read in flight is not waited for (it ends on its own, and its
@@ -86,7 +92,7 @@ public final class PowerFlowRefresher {
         self.now = now
     }
 
-    /// Whether a run is reading: the section is shown in an open menu.
+    /// Whether a run is reading: the menu shows the flow.
     public var isShowing: Bool {
         ledger.readingRuns > 0
     }
@@ -153,7 +159,9 @@ public final class PowerFlowRefresher {
         runs.removeAll()
     }
 
-    /// The section collapsed, the hide event: ends every run
+    /// A hide event (the menu's window left the screen, the diagram was
+    /// switched off, the section collapsed, the Mac is going to sleep): ends
+    /// every run
     /// (``endRuns()``) and clears `state`'s SMC track from `now`, so a run
     /// started right after begins afresh and nothing from before is shown.
     public func collapse(_ state: inout PowerFlowState, at now: ContinuousClock.Instant? = nil) {
