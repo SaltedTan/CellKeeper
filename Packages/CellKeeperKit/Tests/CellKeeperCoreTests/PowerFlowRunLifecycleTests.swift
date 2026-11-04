@@ -416,7 +416,7 @@ struct PowerFlowCollapseReopenTests {
         let coordinator = SMCPowerCoordinator(reader: reader, configuration: SMCPowerSampler.Configuration(), now: { clock.now }, wallNow: { clock.wallNow }, pause: hour)
         let refresher = PowerFlowRefresher(source: FailingSource(), smc: coordinator, pause: hour, now: { clock.now })
         let state = Box(PowerFlowState())
-        state.value.takeStatus(snapshot: powerSnapshot(update: referenceDate), evaluatedAt: referenceDate, readBegan: readInstant(0), now: referenceDate)
+        state.value.takeStatus(snapshot: powerSnapshot(update: referenceDate), evaluatedAt: referenceDate, readBegan: readInstant(0), now: referenceDate, deliveredAt: readInstant(0))
         await coordinator.apply(.powerSource(.externalPower))
         let first = Task { await refresher.run(while: { true }) { state.value.take($0, now: referenceDate) } }
         // The timer's first tick reads at 0 s; the test ticks to 3 s.

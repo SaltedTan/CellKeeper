@@ -16,7 +16,8 @@ extension PowerFlowState {
             snapshot: snapshot,
             evaluatedAt: referenceDate.addingTimeInterval(seconds),
             readBegan: readInstant(seconds),
-            now: referenceDate.addingTimeInterval(seconds)
+            now: referenceDate.addingTimeInterval(seconds),
+            deliveredAt: readInstant(seconds)
         )
     }
 
@@ -239,7 +240,7 @@ struct PowerFlowTracksTests {
         #expect(state.flow?.macUseWatts == 25)
         let shown = state
         // A command that read nothing delivers the same status again.
-        state.takeStatus(snapshot: check, evaluatedAt: time(61), readBegan: readInstant(70), now: time(70))
+        state.takeStatus(snapshot: check, evaluatedAt: time(61), readBegan: readInstant(70), now: time(70), deliveredAt: readInstant(70))
         #expect(state == shown)
         #expect(state.recordedUpdates == before)
     }

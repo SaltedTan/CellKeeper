@@ -162,12 +162,13 @@ public struct PowerFlowHistory: Sendable, Equatable {
     /// A break is a point without values, or, within a point's
     /// ``bucketWidth``, makes that point stand alone. It is never earlier
     /// than the newest update, which it follows; it is no update, so it is
-    /// not deduplicated and averages nothing.
+    /// not deduplicated, averages nothing and never drops an update by its
+    /// age.
     public mutating func recordBreak(at time: Date) {
         let time = max(time, newestUpdateTime ?? time)
         let index = Self.bucketIndex(of: time)
         if let existing = buckets.lastIndex(where: { $0.index <= index }), buckets[existing].index == index {
-            buckets[existing].hasBreak = true
+            buckets[existing].breakTime = max(buckets[existing].breakTime ?? time, time)
         } else {
             let position = buckets.lastIndex { $0.index < index }.map { $0 + 1 } ?? buckets.startIndex
             buckets.insert(Bucket(index: index, breakAt: time), at: position)
@@ -175,11 +176,33 @@ public struct PowerFlowHistory: Sendable, Equatable {
         prune()
     }
 
+    /// Starts the history again if a break is more than ``reorderTolerance``
+    /// after `now`, on the wall clock: the clock was set back past it, as
+    /// the clock rule (``record(_:)``) finds for an update, and the history
+    /// starts again from what comes next. So a break never outlives a
+    /// rollback, never ends the chart at a time that has not come, and the
+    /// updates on either side of the rollback are never joined. An old
+    /// driver update time alone (after a wake) restarts nothing.
+    public mutating func restartIfClockSetBack(now: Date) {
+        let isSetBack = buckets.contains { bucket in
+            bucket.breakTime.map { $0.timeIntervalSince(now) > Self.reorderTolerance } ?? false
+        }
+        guard isSetBack else { return }
+        buckets = []
+        recordedUpdates = []
+    }
+
     /// Drops points more than ``maximumAge`` older than the newest, and
-    /// update times outside deduplication's span or count.
+    /// update times outside deduplication's span or count. Updates are
+    /// judged against the newest update only, so a break never drops one;
+    /// a point holding only a break, against the newest point.
     private mutating func prune() {
+        let newestUpdate = newestUpdateTime
         if let newest = newestTime {
-            buckets.removeAll { newest.timeIntervalSince($0.time) > Self.maximumAge }
+            buckets.removeAll { bucket in
+                guard bucket.updates > 0 else { return newest.timeIntervalSince(bucket.time) > Self.maximumAge }
+                return newestUpdate.map { $0.timeIntervalSince(bucket.time) > Self.maximumAge } ?? false
+            }
         }
         if let newest = newestUpdateTime {
             recordedUpdates = recordedUpdates.filter { newest.timeIntervalSince($0) <= Self.reorderTolerance }
@@ -249,9 +272,13 @@ public struct PowerFlowHistory: Sendable, Equatable {
         var macUse = Mean()
         var battery = Mean()
         var updates = 0
-        /// Whether a break (``PowerFlowHistory/recordBreak(at:)``) fell
-        /// within it.
-        var hasBreak = false
+        /// The newest break (``PowerFlowHistory/recordBreak(at:)``) within
+        /// it, on the wall clock; nil without one.
+        var breakTime: Date?
+
+        var hasBreak: Bool {
+            breakTime != nil
+        }
 
         /// `flow` is nil for an update without a power flow, which adds no
         /// value.
@@ -265,7 +292,7 @@ public struct PowerFlowHistory: Sendable, Equatable {
         init(index: Int, breakAt time: Date) {
             self.index = index
             self.time = time
-            hasBreak = true
+            breakTime = time
         }
 
         mutating func add(_ flow: PowerFlow?, at time: Date) {

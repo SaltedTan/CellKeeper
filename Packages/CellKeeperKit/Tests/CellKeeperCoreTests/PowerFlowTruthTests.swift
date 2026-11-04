@@ -68,22 +68,81 @@ struct PowerFlowTruthTests {
 
     // MARK: - Stale readings
 
-    @Test("The display judges the driver's update time by the policy's own limits")
+    @Test("The display applies both of the policy's checks with its limits: the read's age and the driver's update time, each varied alone")
     func agreesWithPolicy() {
         let now = time(1_000)
-        let maximumAge = ChargingPolicy.maximumSourceAge
-        let maximumSkew = ChargingPolicy.maximumClockSkew
-        let ages: [TimeInterval] = [0, 59, maximumAge, maximumAge + 0.001, maximumAge + 1, 3_600, -1, -maximumSkew, -maximumSkew - 0.001, -3_600]
-        for age in ages {
-            let snapshot = powerSnapshot(update: now.addingTimeInterval(-age), at: now)
-            let policyAccepts = ChargingPolicy.staleness(of: snapshot, now: now) == nil
-            #expect(PowerFlowState.isCurrent(PowerFlowSample(snapshot), at: now) == policyAccepts, "age \(age)")
+        let instant = readInstant(1_000)
+        let telemetryAge = ChargingPolicy.maximumTelemetryAge
+        let maximumSourceAge = ChargingPolicy.maximumSourceAge
+        let skew = ChargingPolicy.maximumClockSkew
+        let readAges: [TimeInterval] = [0, 30, telemetryAge, telemetryAge + 0.001, 120, 3_600, -1, -skew, -skew - 0.001]
+        let sourceAges: [TimeInterval] = [0, 59, maximumSourceAge, maximumSourceAge + 0.001, 3_600, -1, -skew, -skew - 0.001]
+        var rejectedByReadAge = 0
+        for readAge in readAges {
+            for sourceAge in sourceAges {
+                let snapshot = powerSnapshot(update: now.addingTimeInterval(-sourceAge), at: now.addingTimeInterval(-readAge))
+                let policyAccepts = ChargingPolicy.staleness(of: snapshot, now: now) == nil
+                var sample = PowerFlowSample(snapshot)
+                sample.readBegan = instant.advanced(by: .seconds(-readAge))
+                #expect(PowerFlowState.isCurrent(sample, now: now, at: instant) == policyAccepts, "read \(readAge) s, source \(sourceAge) s")
+                if !policyAccepts, ChargingPolicy.staleness(of: powerSnapshot(update: snapshot.sourceTimestamp, at: now), now: now) == nil {
+                    rejectedByReadAge += 1
+                }
+            }
         }
-        #expect(PowerFlowState.isCurrent(PowerFlowSample(powerSnapshot(update: time(0))), at: time(ChargingPolicy.maximumSourceAge)))
-        #expect(!PowerFlowState.isCurrent(PowerFlowSample(powerSnapshot(update: time(0))), at: time(ChargingPolicy.maximumSourceAge + 1)))
-        // Without the driver's update time, the read time is the
-        // controller's to judge.
-        #expect(PowerFlowState.isCurrent(PowerFlowSample(powerSnapshot(update: nil)), at: time(10_000)))
+        // Some readings were rejected by their read's age alone.
+        #expect(rejectedByReadAge > 0)
+        // A check whose time the sample lacks is not made.
+        var bare = PowerFlowSample(powerSnapshot(update: nil))
+        #expect(PowerFlowState.isCurrent(bare, now: time(10_000), at: readInstant(10_000)))
+        bare.readBegan = readInstant(0)
+        #expect(PowerFlowState.isCurrent(bare, now: time(10_000), at: readInstant(telemetryAge)))
+        #expect(!PowerFlowState.isCurrent(bare, now: time(10_000), at: readInstant(telemetryAge + 1)))
+    }
+
+    @Test("Failed display reads keep a cached reading only while its read is under a minute old, also without the driver's update time")
+    func cachedReadAge() {
+        var state = PowerFlowState()
+        var sample = PowerFlowSample(powerSnapshot(update: time(0)))
+        sample.readBegan = readInstant(1)
+        state.tick(.registry(sample), .absent, at: 1)
+        state.tick(.empty, .absent, at: 61)
+        #expect(state.hasSample)
+        state.tick(.empty, .absent, at: 61.5)
+        #expect(!state.hasSample)
+        // Without the driver's update time, the read's age still bounds it.
+        var bare = PowerFlowState()
+        var undated = PowerFlowSample(powerSnapshot(update: nil))
+        undated.readBegan = readInstant(1)
+        bare.tick(.registry(undated), .absent, at: 1)
+        bare.tick(.empty, .absent, at: 61)
+        #expect(bare.flow?.macUseWatts == 30)
+        bare.tick(.empty, .absent, at: 3_600)
+        #expect(bare.flow == nil)
+    }
+
+    @Test("A status delivered again never makes its reading's read look newer")
+    func redeliveredStatus() {
+        var state = PowerFlowState()
+        let reading = powerSnapshot(update: time(0), at: time(1))
+        state.takeStatus(snapshot: reading, evaluatedAt: time(1), readBegan: readInstant(1), now: time(1), deliveredAt: readInstant(1))
+        // A command at 50 s that read nothing returns the same status.
+        state.takeStatus(snapshot: reading, evaluatedAt: time(1), readBegan: readInstant(50), now: time(50), deliveredAt: readInstant(50))
+        #expect(state.hasSample)
+        state.tick(.empty, .absent, at: 62)
+        #expect(!state.hasSample)
+    }
+
+    @Test("Wall-clock changes never make an old read look new: its age is on the continuous clock")
+    func readAgeIgnoresWallClock() {
+        var state = PowerFlowState()
+        state.take(snapshot: powerSnapshot(update: nil, at: time(1)), began: 1, now: time(1))
+        state.take(PowerFlowTick(content: .empty, at: readInstant(41)), now: time(41))
+        #expect(state.hasSample)
+        // 70 s after the read on the continuous clock, the wall clock set
+        // back 30 s meanwhile: by the wall clock the read is 40 s old.
+        state.take(PowerFlowTick(content: .empty, at: readInstant(71)), now: time(41))
+        #expect(!state.hasSample)
     }
 
     @Test("A frozen driver's reading is not shown as current once older than the policy accepts, and a fresh one shows again")
@@ -152,6 +211,44 @@ struct PowerFlowTruthTests {
         state.tick(.empty, at: 213)
         #expect(state.shownTrack == .registry)
         #expect(state.flow == nil)
+    }
+
+    @Test("A battery power an accepted SMC window borrowed is judged again at every tick: it is dropped when its reading goes stale, and the window's own values stay")
+    func borrowedBatteryExpires() {
+        var state = PowerFlowState()
+        // The registry's update at 0 s, read freshly at 178 s.
+        state.status(powerSnapshot(update: time(0), at: time(178)), at: 178)
+        // A window without B0AP, accepted at 180 s: the reading is 180 s old,
+        // still current, so its battery power is borrowed.
+        state.tick(.window(smcWindow(began: 178, span: 2)), at: 180)
+        #expect(state.shownTrack == .smc)
+        #expect(state.flow?.battery == .charging(watts: 15))
+        // At 183 s the window is fresh but the reading is not.
+        state.tick(.empty, at: 183)
+        #expect(state.shownTrack == .smc)
+        #expect(state.flow?.battery == nil)
+        #expect(state.flow?.batteryLink == .unknown)
+        #expect(state.flow?.macUseWatts == 20)
+        #expect(state.flow?.adapterInputWatts == 30)
+        // A window with its own B0AP is not affected by the reading's age.
+        var own = PowerFlowState()
+        own.status(powerSnapshot(update: time(0), at: time(178)), at: 178)
+        own.tick(.window(smcWindow(began: 178, span: 2, battery: -4)), at: 180)
+        own.tick(.empty, at: 183)
+        #expect(own.flow?.battery == .supplying(watts: 4))
+    }
+
+    @Test("A fresh SMC window is shown while the registry track's reading is stale, without the reading's battery power; the registry track then shows nothing")
+    func freshSMCOverStaleRegistry() {
+        var state = PowerFlowState()
+        state.status(powerSnapshot(update: time(0)), at: 1)
+        state.tick(.window(smcWindow(began: 300, macUse: 21)), at: 303)
+        #expect(state.hasSample)
+        #expect(state.flow?.macUseWatts == 21)
+        #expect(state.flow?.batteryWatts == nil)
+        state.tick(.empty, .failing, at: 304)
+        #expect(state.shownTrack == .registry)
+        #expect(!state.hasSample)
     }
 
     @Test("A reading without the driver's update time is shown whatever the wall clock says")
@@ -228,5 +325,53 @@ struct PowerFlowTruthTests {
         behind.record(fastSample(120, load: 25))
         #expect(behind.points.map(\.updates) == [1, 1, 1])
         #expect(segments(behind, .macUse) == [[0], [60], [120]])
+    }
+
+    @Test("A break never drops an update by its age, and a wall clock set back past a break restarts the history, so the chart recovers")
+    func rollbackAfterBreak() {
+        var state = PowerFlowState()
+        state.status(powerSnapshot(update: time(0)), at: 1)
+        // A failed read at 8,000 s on the wall clock: the break is the
+        // newest point, more than two hours after the only update, which
+        // stays.
+        state.takeStatus(snapshot: nil, evaluatedAt: time(8_000), readBegan: readInstant(8_000), now: time(8_000), deliveredAt: readInstant(8_000))
+        #expect(state.history.points.map(\.updates) == [1, 0])
+        // The wall clock is set back; the continuous clock goes on. A fresh
+        // update at 60 s arrives.
+        state.takeStatus(
+            snapshot: powerSnapshot(load: 20_000, update: time(60), at: time(60)),
+            evaluatedAt: time(60),
+            readBegan: readInstant(8_010),
+            now: time(61),
+            deliveredAt: readInstant(8_011)
+        )
+        #expect(state.flow?.macUseWatts == 20)
+        #expect(state.history.newestTime == time(60))
+        #expect(state.history.points.map(\.updates) == [1])
+        let shown = state.history.chartPoints(maximumGap: 180).filter { $0.series == .macUse }.map(\.watts)
+        #expect(shown == [20])
+        // The chart fills in again.
+        state.takeStatus(
+            snapshot: powerSnapshot(load: 25_000, update: time(120), at: time(120)),
+            evaluatedAt: time(120),
+            readBegan: readInstant(8_070),
+            now: time(121),
+            deliveredAt: readInstant(8_071)
+        )
+        #expect(state.flow?.macUseWatts == 25)
+        #expect(segments(state.history, .macUse) == [[60, 120]])
+    }
+
+    @Test("After a wake, an old driver update following a break restarts nothing")
+    func wakeKeepsHistory() {
+        var history = PowerFlowHistory()
+        history.record(fastSample(0))
+        history.record(fastSample(60, load: 20))
+        // A failed read on waking two hours later, then the driver's update
+        // from before the sleep, not yet refreshed.
+        history.recordBreak(at: time(7_260))
+        history.restartIfClockSetBack(now: time(7_261))
+        history.record(fastSample(70, load: 25))
+        #expect(history.points.map(\.updates) == [1, 1, 1, 0])
     }
 }

@@ -1122,7 +1122,7 @@ final class AppModel {
 
     private func perform(_ command: Command) async {
         // No telemetry read made for this command began earlier
-        // (``PowerFlowState/takeStatus(snapshot:evaluatedAt:readBegan:now:)``).
+        // (``PowerFlowState/takeStatus(snapshot:evaluatedAt:readBegan:now:deliveredAt:)``).
         let readBegan = ContinuousClock.now
         switch command {
         case .evaluate(let trigger):
@@ -1236,7 +1236,7 @@ final class AppModel {
             noteChargeLimitSettle(status, trigger: command.trigger)
             firstStatus.provide(true)
             notePowerFlow {
-                $0.takeStatus(snapshot: status.snapshot, evaluatedAt: status.lastEvaluation, readBegan: readBegan, now: Date())
+                $0.takeStatus(snapshot: status.snapshot, evaluatedAt: status.lastEvaluation, readBegan: readBegan, now: Date(), deliveredAt: .now)
             }
         }
         noteAdoptedChanges()
