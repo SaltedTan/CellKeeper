@@ -66,8 +66,8 @@ never by hiding a fact rule 1 or 2 needs.
   1. **Header:** the charge percentage (the only large type), power source
      and charging state.
   2. **Attention:** any warning or request that rule 2 keeps visible.
-  3. **Power flow**, when Settings › General › Show power flow is on (the
-     default): the diagram only, never above a warning.
+  3. **Power flow**, when Settings › General › Menu › Show power flow is on
+     (the default): the diagram only, never above a warning.
   4. **Charge limit:** its control and the Manage charging switch.
   5. **One contextual action** (for example Charge to 100% once, or the
      running session's Cancel).
@@ -95,8 +95,9 @@ never by hiding a fact rule 1 or 2 needs.
 - One `Settings` scene with a `TabView` of panes, each a
   `Form { … }.formStyle(.grouped)` (macOS 13+). Keep the set of panes small;
   merge a pane that holds one or two controls into a related one. The panes
-  are General (menu bar icon, notifications, about), Charging, Control,
-  Activity and Diagnostics (owner's minimalism request, 2026-10-31).
+  are General (menu bar icon, the menu's power flow switch, notifications,
+  about), Charging, Control, Activity and Diagnostics (owner's minimalism
+  request, 2026-10-31).
 - Rows are `LabeledContent`, `Toggle`, `Picker`, `Slider` or `Stepper`
   inside `Section`s. Let the Form align and separate rows; don't add colons,
   manual padding or custom row backgrounds.

@@ -174,7 +174,7 @@ final class AppModel {
     var powerFlowTaskID: PowerFlowVisibility.TaskID {
         powerFlowVisibility.taskID
     }
-    /// Where the menu reads the power flow while it is open: macOS's
+    /// Where the menu reads the power flow while it is shown: macOS's
     /// battery data, read through the telemetry provider, the registry
     /// track's source. Display only.
     @ObservationIgnored let powerFlowSource: any PowerFlowReading
@@ -1047,7 +1047,7 @@ final class AppModel {
     }
 
     /// Where the power flow chart's lines break: the history fills from the
-    /// source while the section is shown and from the statuses otherwise.
+    /// source while the flow is shown and from the statuses otherwise.
     var powerFlowLineBreakGap: TimeInterval {
         PowerFlowHistory.lineBreakGap(sourceInterval: powerFlowSource.updateInterval, checkInterval: Self.periodicInterval)
     }
