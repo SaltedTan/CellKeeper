@@ -44,6 +44,11 @@ public struct PowerFlowSample: Sendable, Equatable {
     /// work, behind a later display read of the same update), so the flow
     /// shown follows this, not the order of arrival (``PowerFlowState``).
     public var readBegan: ContinuousClock.Instant?
+    /// When the read was made, on the wall clock, as the reading says
+    /// (``BatterySnapshot/timestamp``); nil if unknown. The policy judges a
+    /// reading's age by it, and so does the display, beside ``readBegan``
+    /// (``PowerFlowState``).
+    public var readAt: Date?
     public var powerSource: PowerSource
     /// The adapter's negotiated power (shown as "Up to 68 W").
     public var adapterRatingWatts: Int?
@@ -61,6 +66,7 @@ public struct PowerFlowSample: Sendable, Equatable {
     public init(
         updatedAt: Date?,
         readBegan: ContinuousClock.Instant? = nil,
+        readAt: Date? = nil,
         powerSource: PowerSource,
         adapterRatingWatts: Int? = nil,
         chargePercent: Int? = nil,
@@ -71,6 +77,7 @@ public struct PowerFlowSample: Sendable, Equatable {
     ) {
         self.updatedAt = updatedAt
         self.readBegan = readBegan
+        self.readAt = readAt
         self.powerSource = powerSource
         self.adapterRatingWatts = adapterRatingWatts
         self.chargePercent = chargePercent
@@ -83,10 +90,12 @@ public struct PowerFlowSample: Sendable, Equatable {
     /// The values of a battery reading, from macOS's undocumented registry
     /// data (research note 01): `SystemPowerIn` and `SystemLoad` (mW), and
     /// the battery's `Voltage` × `Amperage`, negative while it supplies the
-    /// Mac. The driver's update time dedupes them; when the read began is
-    /// left for the reader to set.
+    /// Mac. The driver's update time dedupes them; the read's wall-clock
+    /// time is the snapshot's, and when the read began on the continuous
+    /// clock is left for the reader to set.
     public init(_ snapshot: BatterySnapshot) {
         updatedAt = snapshot.sourceTimestamp
+        readAt = snapshot.timestamp
         powerSource = snapshot.powerSource
         adapterRatingWatts = snapshot.adapterWatts
         chargePercent = snapshot.isBatteryPresent ? snapshot.chargePercent : nil
@@ -135,7 +144,11 @@ public struct PowerFlow: Sendable, Equatable {
     public let adapterInputWatts: Double?
     public let chargePercent: Int?
     /// The battery's power, signed: positive while it charges, negative
-    /// while it supplies the Mac. Nil without both its voltage and current.
+    /// while it supplies the Mac. Nil without both its voltage and current,
+    /// and when it would say the battery charges on battery power: a
+    /// battery cannot, so that reading (the driver's cached value, not yet
+    /// refreshed after an unplug) contradicts the power source and is not
+    /// known.
     public let batteryWatts: Double?
     /// The power the Mac uses.
     public let macUseWatts: Double
@@ -151,7 +164,11 @@ public struct PowerFlow: Sendable, Equatable {
         adapterRatingWatts = isOnExternalPower ? sample.adapterRatingWatts : nil
         adapterInputWatts = isOnExternalPower ? sample.systemPowerInWatts : nil
         chargePercent = sample.chargePercent
-        batteryWatts = sample.batteryWatts
+        if sample.powerSource == .battery, let watts = sample.batteryWatts, watts >= Self.idleThresholdWatts {
+            batteryWatts = nil
+        } else {
+            batteryWatts = sample.batteryWatts
+        }
         macUseWatts = load
     }
 
@@ -160,7 +177,8 @@ public struct PowerFlow: Sendable, Equatable {
         self.init(PowerFlowSample(snapshot))
     }
 
-    /// What the battery is doing, or nil without its power.
+    /// What the battery is doing, or nil without its power (also when its
+    /// reading contradicts the power source; see ``batteryWatts``).
     public var battery: Battery? {
         guard let batteryWatts else { return nil }
         if batteryWatts >= Self.idleThresholdWatts { return .charging(watts: batteryWatts) }
@@ -215,7 +233,7 @@ public struct PowerFlow: Sendable, Equatable {
 
     /// The link between the Mac and the battery: the battery's power, as
     /// reported, away from the Mac while it charges and towards it while it
-    /// supplies the Mac.
+    /// supplies the Mac; not known without it.
     public var batteryLink: Link {
         switch battery {
         case .charging(let watts): .flowing(watts: watts, isTowardsMac: false)

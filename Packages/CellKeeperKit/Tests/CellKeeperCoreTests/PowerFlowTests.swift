@@ -3,7 +3,8 @@ import Foundation
 import Testing
 
 /// A reading with the power flow's inputs. Watts are given in mW, as macOS
-/// reports them; the battery's power is `voltage` × `current`.
+/// reports them; the battery's power is `voltage` × `current`. Read when
+/// the driver updated it unless `timestamp` says otherwise.
 func powerSnapshot(
     source: PowerSource = .externalPower,
     powerIn: Int? = 45_000,
@@ -14,10 +15,10 @@ func powerSnapshot(
     percent: Int? = 81,
     present: Bool = true,
     update: Date? = referenceDate,
-    at timestamp: Date = referenceDate
+    at timestamp: Date? = nil
 ) -> BatterySnapshot {
     BatterySnapshot(
-        timestamp: timestamp,
+        timestamp: timestamp ?? update ?? referenceDate,
         sourceTimestamp: update,
         isBatteryPresent: present,
         chargePercent: percent,
@@ -162,11 +163,23 @@ struct PowerFlowTests {
         #expect(odd.batteryToMacWatts == 6)
     }
 
-    @Test("A charge reported on battery power gives no adapter flow")
+    @Test("A charge reported on battery power contradicts the power source: the battery's power is not known, and there is no adapter flow")
     func chargingOnBattery() throws {
         let flow = try #require(PowerFlow(powerSnapshot(source: .battery)))
-        #expect(flow.battery == .charging(watts: 15))
+        #expect(flow.batteryWatts == nil)
+        #expect(flow.battery == nil)
+        #expect(flow.batteryLink == .unknown)
+        #expect(flow.adapterLink == .idle)
         #expect(flow.adapterToBatteryWatts == nil)
+        #expect(flow.batteryToMacWatts == nil)
+        // Below the idle threshold it is idle, as before; supplying is kept.
+        let idle = try #require(PowerFlow(powerSnapshot(source: .battery, current: 20)))
+        #expect(idle.battery == .idle)
+        let supplying = try #require(PowerFlow(powerSnapshot(source: .battery, current: -1_000)))
+        #expect(supplying.battery == .supplying(watts: 12))
+        // On external power, or with the source unknown, a charge is shown.
+        #expect(PowerFlow(powerSnapshot(source: .externalPower))?.battery == .charging(watts: 15))
+        #expect(PowerFlow(powerSnapshot(source: .unknown))?.battery == .charging(watts: 15))
     }
 
     @Test("Without a battery there is no charge")
@@ -185,7 +198,7 @@ struct PowerFlowTests {
         #expect(sample.adapterRatingWatts == 68)
         #expect(sample.chargePercent == 81)
         let bare = PowerFlowSample(powerSnapshot(powerIn: nil, load: nil, voltage: nil, present: false, update: nil))
-        #expect(bare == PowerFlowSample(updatedAt: nil, powerSource: .externalPower, adapterRatingWatts: 68))
+        #expect(bare == PowerFlowSample(updatedAt: nil, readAt: referenceDate, powerSource: .externalPower, adapterRatingWatts: 68))
     }
 
     @Test("A sample from another source gives the same flow, whatever its precision")

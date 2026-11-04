@@ -5,7 +5,8 @@ import Foundation
 /// within one averaged. macOS's battery data, updated once a minute, gives
 /// a point per update; a source updating every second would give one per
 /// 10 s. An update without a power flow (macOS reported no power use) is a
-/// point without values, which breaks the chart's lines. Everything kept is
+/// point without values, which breaks the chart's lines, and so is a break
+/// (``recordBreak(at:)``): readings that disappeared. Everything kept is
 /// bounded: at most 721 points, and the update times of the last
 /// ``reorderTolerance`` for deduplication, at most
 /// ``maximumRecordedUpdates``. In memory only: never written to disk, so it
@@ -17,15 +18,18 @@ public struct PowerFlowHistory: Sendable, Equatable {
         public let time: Date
         /// The average of the updates that report it; nil if none does.
         public let adapterInputWatts: Double?
-        /// Nil if no update in it had a power flow: a gap in every line.
+        /// Nil if no update in it had a power flow, or it holds only a
+        /// break: a gap in every line.
         public let macUseWatts: Double?
         /// Signed: positive while charging, negative while supplying.
         public let batteryWatts: Double?
-        /// How many updates it averages, with and without a power flow.
+        /// How many updates it averages, with and without a power flow; 0
+        /// for a point that holds only a break.
         public let updates: Int
         /// The series that have a value here although an update averaged in
-        /// had none: the average hides a gap, so the chart's line breaks
-        /// on both sides of this point.
+        /// had none, or a break fell within its ``bucketWidth``: the average
+        /// hides a gap, so the chart's line breaks on both sides of this
+        /// point.
         public let brokenSeries: Set<Series>
 
         public init(
@@ -91,6 +95,11 @@ public struct PowerFlowHistory: Sendable, Equatable {
 
     /// Oldest first, one per bucket.
     private var buckets: [Bucket] = []
+    /// The wall clock's time when the last break was recorded, as it was,
+    /// whatever its placement: a later delivery earlier than this means the
+    /// clock was set back past that failed read. Nil once no break is kept
+    /// (dropped by its age, or the history started again).
+    private var lastBreakAt: Date?
     /// The updates already averaged in, so that a second read of one counts
     /// once: only those of the last ``reorderTolerance`` (an older update
     /// restarts the history, so it needs none), at most
@@ -109,9 +118,17 @@ public struct PowerFlowHistory: Sendable, Equatable {
         buckets.map(\.point)
     }
 
-    /// The time the chart ends at: the newest point's.
+    /// The time the chart ends at: the newest point's, a break's included.
     public var newestTime: Date? {
         buckets.last?.time
+    }
+
+    /// The newest update's time. The clock rule judges updates against it,
+    /// not against a break, whose time is the wall clock's at a failed
+    /// read: an update the driver had not yet refreshed (after a wake) is
+    /// not taken for a clock set back.
+    private var newestUpdateTime: Date? {
+        buckets.last { $0.updates > 0 }?.time
     }
 
     /// Averages `sample` into its bucket if it carries an update that is not
@@ -125,7 +142,7 @@ public struct PowerFlowHistory: Sendable, Equatable {
     @discardableResult
     public mutating func record(_ sample: PowerFlowSample) -> Bool {
         guard let time = sample.updatedAt else { return false }
-        if let newest = newestTime, newest.timeIntervalSince(time) > Self.reorderTolerance {
+        if let newest = newestUpdateTime, newest.timeIntervalSince(time) > Self.reorderTolerance {
             buckets = []
             recordedUpdates = []
         }
@@ -140,14 +157,73 @@ public struct PowerFlowHistory: Sendable, Equatable {
             buckets.insert(Bucket(index: index, flow: flow, time: time), at: position)
         }
         recordedUpdates.insert(time)
+        prune()
+        return true
+    }
+
+    /// Records that usable readings disappeared at `time`, the wall clock's
+    /// when a read failed, so that the chart never draws a line across the
+    /// missing data: the lines break between the updates before it and
+    /// those after. `time` itself is kept (``lastBreakAt``), apart from
+    /// where the break is placed.
+    /// A break is a point without values, or, within a point's
+    /// ``bucketWidth``, makes that point stand alone. It is never earlier
+    /// than the newest update, which it follows; it is no update, so it is
+    /// not deduplicated and averages nothing. It is a point like any other
+    /// for ``maximumAge``: the history spans two hours, whatever its newest
+    /// point is.
+    public mutating func recordBreak(at time: Date) {
+        lastBreakAt = time
+        let time = max(time, newestUpdateTime ?? time)
+        let index = Self.bucketIndex(of: time)
+        if let existing = buckets.lastIndex(where: { $0.index <= index }), buckets[existing].index == index {
+            buckets[existing].hasBreak = true
+        } else {
+            let position = buckets.lastIndex { $0.index < index }.map { $0 + 1 } ?? buckets.startIndex
+            buckets.insert(Bucket(index: index, breakAt: time), at: position)
+        }
+        prune()
+    }
+
+    /// Starts the history again if `now`, the wall clock's as something is
+    /// delivered, is earlier than the last break was recorded
+    /// (``lastBreakAt``): the clock was set back past that failed read, so
+    /// the times on either side of it no longer say which updates came
+    /// before it. The history starts from a break at `now`, so an update
+    /// read afterwards (a cached one from before the failure, reread) is
+    /// never joined to a later one across the failure. Only the wall clock
+    /// is that evidence: a driver update stamped before a failure and read
+    /// after it, or an old one after a wake, restarts nothing; updates are
+    /// reordered within ``reorderTolerance`` as before.
+    public mutating func restartIfClockSetBack(now: Date) {
+        guard let lastBreakAt, now < lastBreakAt else { return }
+        buckets = []
+        recordedUpdates = []
+        recordBreak(at: now)
+    }
+
+    /// Drops points more than ``maximumAge`` older than the newest, of
+    /// either kind, so at most 721 points are kept, one per ``bucketWidth``
+    /// over two hours; and update times outside deduplication's span or
+    /// count. A newest break drops the updates more than two hours before
+    /// it, as a newer update would; they are outside the chart's hour. Once
+    /// the wall clock is found set back past a break, the history starts
+    /// again before anything else is recorded
+    /// (``restartIfClockSetBack(now:)``), so a break never outlives a
+    /// rollback, nor drops an update recorded after one.
+    private mutating func prune() {
         if let newest = newestTime {
             buckets.removeAll { newest.timeIntervalSince($0.time) > Self.maximumAge }
             recordedUpdates = recordedUpdates.filter { newest.timeIntervalSince($0) <= Self.reorderTolerance }
-            if recordedUpdates.count > Self.maximumRecordedUpdates {
-                recordedUpdates = Set(recordedUpdates.sorted().suffix(Self.maximumRecordedUpdates))
-            }
         }
-        return true
+        // Without a break kept (dropped by its age, or the clock rule started
+        // the history again), the last one's instant says nothing more.
+        if !buckets.contains(where: \.hasBreak) {
+            lastBreakAt = nil
+        }
+        if recordedUpdates.count > Self.maximumRecordedUpdates {
+            recordedUpdates = Set(recordedUpdates.sorted().suffix(Self.maximumRecordedUpdates))
+        }
     }
 
     /// Where the chart's lines break: three times the slowest way points
@@ -204,11 +280,15 @@ public struct PowerFlowHistory: Sendable, Equatable {
     /// The running averages of one bucket.
     private struct Bucket: Sendable, Equatable {
         let index: Int
+        /// The newest update's time; a break's while it holds no update.
         var time: Date
         var adapterInput = Mean()
         var macUse = Mean()
         var battery = Mean()
         var updates = 0
+        /// Whether a break (``PowerFlowHistory/recordBreak(at:)``) fell
+        /// within it.
+        var hasBreak = false
 
         /// `flow` is nil for an update without a power flow, which adds no
         /// value.
@@ -218,8 +298,15 @@ public struct PowerFlowHistory: Sendable, Equatable {
             add(flow, at: time)
         }
 
+        /// A bucket that holds only a break, at `time`.
+        init(index: Int, breakAt time: Date) {
+            self.index = index
+            self.time = time
+            hasBreak = true
+        }
+
         mutating func add(_ flow: PowerFlow?, at time: Date) {
-            self.time = max(self.time, time)
+            self.time = updates == 0 ? time : max(self.time, time)
             adapterInput.add(flow?.adapterInputWatts)
             macUse.add(flow?.macUseWatts)
             battery.add(flow?.batteryWatts)
@@ -228,9 +315,9 @@ public struct PowerFlowHistory: Sendable, Equatable {
 
         var point: Point {
             var broken: Set<Series> = []
-            if adapterInput.isBroken { broken.insert(.adapterInput) }
-            if macUse.isBroken { broken.insert(.macUse) }
-            if battery.isBroken { broken.insert(.battery) }
+            if adapterInput.isBroken(by: hasBreak) { broken.insert(.adapterInput) }
+            if macUse.isBroken(by: hasBreak) { broken.insert(.macUse) }
+            if battery.isBroken(by: hasBreak) { broken.insert(.battery) }
             return Point(
                 time: time,
                 adapterInputWatts: adapterInput.value,
@@ -262,9 +349,10 @@ public struct PowerFlowHistory: Sendable, Equatable {
             count > 0 ? sum / Double(count) : nil
         }
 
-        /// A value averaged together with an update that had none.
-        var isBroken: Bool {
-            count > 0 && missing > 0
+        /// A value averaged together with an update that had none, or with
+        /// a break in its bucket.
+        func isBroken(by hasBreak: Bool) -> Bool {
+            count > 0 && (missing > 0 || hasBreak)
         }
     }
 }

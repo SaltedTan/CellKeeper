@@ -3,15 +3,22 @@ import Foundation
 import Testing
 
 extension PowerFlowState {
-    /// A tick at `seconds` after ``readClockOrigin``.
+    /// A tick at `seconds` after ``readClockOrigin``, delivered `seconds`
+    /// after the reference date on the wall clock.
     mutating func tick(_ content: PowerFlowTick.Content, _ state: SMCSourceState = .available, at seconds: Double) {
-        take(PowerFlowTick(content: content, smcState: state, at: readInstant(seconds)))
+        take(PowerFlowTick(content: content, smcState: state, at: readInstant(seconds)), now: referenceDate.addingTimeInterval(seconds), deliveredAt: readInstant(seconds))
     }
 
-    /// A controller status whose work began, and was evaluated, at
-    /// `seconds`.
+    /// A controller status whose work began, and was evaluated and
+    /// delivered, at `seconds`.
     mutating func status(_ snapshot: BatterySnapshot?, at seconds: Double) {
-        takeStatus(snapshot: snapshot, evaluatedAt: referenceDate.addingTimeInterval(seconds), readBegan: readInstant(seconds))
+        takeStatus(
+            snapshot: snapshot,
+            evaluatedAt: referenceDate.addingTimeInterval(seconds),
+            readBegan: readInstant(seconds),
+            now: referenceDate.addingTimeInterval(seconds),
+            deliveredAt: readInstant(seconds)
+        )
     }
 
     /// The updates the history holds.
@@ -138,7 +145,9 @@ struct PowerFlowTracksTests {
         state.clearSMCTrack(at: readInstant(600))
         state.tick(.window(smcWindow(began: 5, macUse: 99)), at: 600.1)
         #expect(state.shownTrack == .registry)
-        #expect(state.flow?.macUseWatts == 30)
+        // The registry track's reading, updated before the sleep, is no
+        // longer current: nothing is shown as current.
+        #expect(state.flow == nil)
         #expect(state.recordedUpdates == recorded)
         // So is a window whose batches straddle the wake.
         state.tick(.window(smcWindow(began: 599.5, macUse: 98)), at: 603)
@@ -231,7 +240,7 @@ struct PowerFlowTracksTests {
         #expect(state.flow?.macUseWatts == 25)
         let shown = state
         // A command that read nothing delivers the same status again.
-        state.takeStatus(snapshot: check, evaluatedAt: time(61), readBegan: readInstant(70))
+        state.takeStatus(snapshot: check, evaluatedAt: time(61), readBegan: readInstant(70), now: time(70), deliveredAt: readInstant(70))
         #expect(state == shown)
         #expect(state.recordedUpdates == before)
     }
@@ -375,7 +384,14 @@ struct PowerFlowTracksTests {
         state.tick(.empty, .failing, at: 8)
         // More than 5 minutes later, the wall clock was set back ten
         // minutes: the history starts again from the reading.
-        state.status(powerSnapshot(update: time(-600)), at: 400)
+        // The delivery's wall clock is set back too, as the story says.
+        state.takeStatus(
+            snapshot: powerSnapshot(update: time(-600)),
+            evaluatedAt: time(-595),
+            readBegan: readInstant(400),
+            now: time(-595),
+            deliveredAt: readInstant(400)
+        )
         #expect(state.history.points.map(\.time) == [time(-600)])
     }
 
