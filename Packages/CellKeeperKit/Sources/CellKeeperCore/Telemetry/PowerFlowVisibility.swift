@@ -101,6 +101,28 @@ public struct PowerFlowVisibility: Sendable, Equatable {
         isAsleep = false
     }
 
+    /// Applies `change` (one of the changes above) and, if it makes the
+    /// flow shown, judges `state` again at `now` on the wall clock and
+    /// `instant` on the continuous clock in the same call
+    /// (``PowerFlowState/rejudge(now:at:)``): a reading that went stale
+    /// while the flow was hidden (asleep, the menu closed) is never shown
+    /// until the first tick or status, however slow those reads are.
+    /// Returns whether the change was a hide event.
+    @discardableResult
+    public mutating func apply(
+        _ change: (inout PowerFlowVisibility) -> Bool,
+        judging state: inout PowerFlowState,
+        now: Date,
+        at instant: ContinuousClock.Instant
+    ) -> Bool {
+        let wasShown = isShown
+        let isHide = change(&self)
+        if isShown, !wasShown {
+            state.rejudge(now: now, at: instant)
+        }
+        return isHide
+    }
+
     private mutating func hide() -> Bool {
         generation += 1
         return true

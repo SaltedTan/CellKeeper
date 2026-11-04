@@ -19,7 +19,9 @@ public struct PowerFlowTick: Sendable, Equatable {
     /// The SMC source's state at this tick; ``SMCSourceState/absent``
     /// without a reader.
     public var smcState: SMCSourceState
-    /// When the tick was delivered, on the continuous clock.
+    /// When the tick was made, on the continuous clock, before its
+    /// delivery; it stamps an accepted window. Freshness is judged at the
+    /// delivery instant instead (``PowerFlowState/take(_:now:deliveredAt:)``).
     public var at: ContinuousClock.Instant
 
     public init(content: Content, smcState: SMCSourceState = .absent, at: ContinuousClock.Instant) {
@@ -159,33 +161,56 @@ public struct PowerFlowState: Sendable, Equatable {
 
     // MARK: - Freshness
 
-    /// Whether `sample`'s values may be shown as current when delivered at
-    /// `now` on the wall clock and `instant` on the continuous clock, by
-    /// both of the charging policy's checks (``ChargingPolicy/staleness(of:now:)``)
-    /// with its own limits, so that the display never shows as current a
-    /// value the policy would not act on:
-    /// - **The read's age**, from when it began (``PowerFlowSample/readBegan``)
-    ///   to `instant`: at most ``ChargingPolicy/maximumTelemetryAge``, and
-    ///   no more than ``ChargingPolicy/maximumClockSkew`` ahead. On the
-    ///   continuous clock, which the track already orders reads by, so that
-    ///   a change of the wall clock never makes an old read look new; and
-    ///   from when the read began, never from a redelivery.
+    /// Whether `sample`'s values may be shown as current at `now` on the
+    /// wall clock and `instant` on the continuous clock. Every check the
+    /// charging policy makes (``ChargingPolicy/staleness(of:now:)``) must
+    /// pass, with its own limits, and the read's age must also pass on the
+    /// continuous clock; the stricter judgment wins, so the display never
+    /// shows as current a value the policy would not act on, whichever way
+    /// either clock moved:
+    /// - **The read's age on the wall clock**, from when it was made
+    ///   (``PowerFlowSample/readAt``) to `now`: at most
+    ///   ``ChargingPolicy/maximumTelemetryAge``, and no more than
+    ///   ``ChargingPolicy/maximumClockSkew`` ahead, as the policy judges it.
+    /// - **The read's age on the continuous clock**, from when it began
+    ///   (``PowerFlowSample/readBegan``) to `instant`, by the same limits: a
+    ///   wall clock set back never makes an old read look new, and a
+    ///   redelivery never makes it look newer.
     /// - **The driver's update time** (``PowerFlowSample/updatedAt``) to
     ///   `now`: at most ``ChargingPolicy/maximumSourceAge`` old and
     ///   ``ChargingPolicy/maximumClockSkew`` ahead.
     ///
     /// A check whose time the sample lacks is not made.
     static func isCurrent(_ sample: PowerFlowSample, now: Date, at instant: ContinuousClock.Instant) -> Bool {
+        func isWithin(_ age: TimeInterval, _ maximum: TimeInterval) -> Bool {
+            age <= maximum && age >= -ChargingPolicy.maximumClockSkew
+        }
+        if let readAt = sample.readAt, !isWithin(now.timeIntervalSince(readAt), ChargingPolicy.maximumTelemetryAge) {
+            return false
+        }
         if let began = sample.readBegan {
             let parts = (instant - began).components
             let readAge = Double(parts.seconds) + Double(parts.attoseconds) / 1e18
-            if readAge > ChargingPolicy.maximumTelemetryAge || readAge < -ChargingPolicy.maximumClockSkew { return false }
+            if !isWithin(readAge, ChargingPolicy.maximumTelemetryAge) { return false }
         }
-        if let updated = sample.updatedAt {
-            let sourceAge = now.timeIntervalSince(updated)
-            if sourceAge > ChargingPolicy.maximumSourceAge || sourceAge < -ChargingPolicy.maximumClockSkew { return false }
+        if let updated = sample.updatedAt, !isWithin(now.timeIntervalSince(updated), ChargingPolicy.maximumSourceAge) {
+            return false
         }
         return true
+    }
+
+    /// Judges everything shown again at `now` on the wall clock and
+    /// `instant` on the continuous clock, with no reading: the registry
+    /// track's reading, a battery power the SMC track borrowed, the SMC
+    /// track's own freshness, and the history against a wall clock set
+    /// back. For the moment the flow could be seen again (a wake, the menu
+    /// reopened, the diagram switched on, the section expanded), before the
+    /// first tick or status: until then, only what is current at that
+    /// moment is shown (``PowerFlowVisibility/apply(_:judging:now:at:)``).
+    public mutating func rejudge(now: Date, at instant: ContinuousClock.Instant) {
+        history.restartIfClockSetBack(now: now)
+        judge(now: now, at: instant)
+        decideDisplay(at: instant)
     }
 
     /// Judges the registry track's reading, and the battery power the SMC
@@ -202,20 +227,21 @@ public struct PowerFlowState: Sendable, Equatable {
     // MARK: - Ticks
 
     /// Takes the refresher's tick, delivered at `now` on the wall clock and
-    /// at its instant on the continuous clock: judges what is shown then,
-    /// decides the display, takes its content (a window into the SMC track,
-    /// a display read into the registry track), and decides again.
-    public mutating func take(_ tick: PowerFlowTick, now: Date) {
+    /// `instant` on the continuous clock, both read where it is delivered
+    /// (on the main actor, after any wait for it), never when it was made
+    /// (``PowerFlowTick/at``): judges what is shown then, decides the
+    /// display, takes its content (a window into the SMC track, a display
+    /// read into the registry track), and decides again. The tick's own
+    /// instant only stamps an accepted window, for ordering.
+    public mutating func take(_ tick: PowerFlowTick, now: Date, deliveredAt instant: ContinuousClock.Instant) {
         smcState = tick.smcState
-        history.restartIfClockSetBack(now: now)
-        judge(now: now, at: tick.at)
-        decideDisplay(at: tick.at)
+        rejudge(now: now, at: instant)
         switch tick.content {
         case .window(let window): accept(window, at: tick.at)
-        case .registry(let sample): take(sample, now: now, deliveredAt: tick.at)
+        case .registry(let sample): take(sample, now: now, deliveredAt: instant)
         case .empty: break
         }
-        decideDisplay(at: tick.at)
+        decideDisplay(at: instant)
     }
 
     /// The one rule: the SMC track while the source is available and its

@@ -162,8 +162,9 @@ public struct PowerFlowHistory: Sendable, Equatable {
     /// A break is a point without values, or, within a point's
     /// ``bucketWidth``, makes that point stand alone. It is never earlier
     /// than the newest update, which it follows; it is no update, so it is
-    /// not deduplicated, averages nothing and never drops an update by its
-    /// age.
+    /// not deduplicated and averages nothing. It is a point like any other
+    /// for ``maximumAge``: the history spans two hours, whatever its newest
+    /// point is.
     public mutating func recordBreak(at time: Date) {
         let time = max(time, newestUpdateTime ?? time)
         let index = Self.bucketIndex(of: time)
@@ -192,17 +193,18 @@ public struct PowerFlowHistory: Sendable, Equatable {
         recordedUpdates = []
     }
 
-    /// Drops points more than ``maximumAge`` older than the newest, and
-    /// update times outside deduplication's span or count. Updates are
-    /// judged against the newest update only, so a break never drops one;
-    /// a point holding only a break, against the newest point.
+    /// Drops points more than ``maximumAge`` older than the newest, of
+    /// either kind, so at most 721 points are kept, one per ``bucketWidth``
+    /// over two hours; and update times outside deduplication's span or
+    /// count. A newest break drops the updates more than two hours before
+    /// it, as a newer update would; they are outside the chart's hour. Once
+    /// the wall clock is set back past a break, the history starts again
+    /// before anything else is recorded (``restartIfClockSetBack(now:)``),
+    /// so a break never outlives a rollback, nor drops an update recorded
+    /// after one.
     private mutating func prune() {
-        let newestUpdate = newestUpdateTime
         if let newest = newestTime {
-            buckets.removeAll { bucket in
-                guard bucket.updates > 0 else { return newest.timeIntervalSince(bucket.time) > Self.maximumAge }
-                return newestUpdate.map { $0.timeIntervalSince(bucket.time) > Self.maximumAge } ?? false
-            }
+            buckets.removeAll { newest.timeIntervalSince($0.time) > Self.maximumAge }
         }
         if let newest = newestUpdateTime {
             recordedUpdates = recordedUpdates.filter { newest.timeIntervalSince($0) <= Self.reorderTolerance }

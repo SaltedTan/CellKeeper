@@ -3,7 +3,8 @@ import Foundation
 import Testing
 
 /// A reading with the power flow's inputs. Watts are given in mW, as macOS
-/// reports them; the battery's power is `voltage` × `current`.
+/// reports them; the battery's power is `voltage` × `current`. Read when
+/// the driver updated it unless `timestamp` says otherwise.
 func powerSnapshot(
     source: PowerSource = .externalPower,
     powerIn: Int? = 45_000,
@@ -14,10 +15,10 @@ func powerSnapshot(
     percent: Int? = 81,
     present: Bool = true,
     update: Date? = referenceDate,
-    at timestamp: Date = referenceDate
+    at timestamp: Date? = nil
 ) -> BatterySnapshot {
     BatterySnapshot(
-        timestamp: timestamp,
+        timestamp: timestamp ?? update ?? referenceDate,
         sourceTimestamp: update,
         isBatteryPresent: present,
         chargePercent: percent,
@@ -197,7 +198,7 @@ struct PowerFlowTests {
         #expect(sample.adapterRatingWatts == 68)
         #expect(sample.chargePercent == 81)
         let bare = PowerFlowSample(powerSnapshot(powerIn: nil, load: nil, voltage: nil, present: false, update: nil))
-        #expect(bare == PowerFlowSample(updatedAt: nil, powerSource: .externalPower, adapterRatingWatts: 68))
+        #expect(bare == PowerFlowSample(updatedAt: nil, readAt: referenceDate, powerSource: .externalPower, adapterRatingWatts: 68))
     }
 
     @Test("A sample from another source gives the same flow, whatever its precision")

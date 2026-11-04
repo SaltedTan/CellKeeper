@@ -316,7 +316,7 @@ struct PowerFlowCollapseReopenTests {
         let smc = RecordingSMC()
         let refresher = PowerFlowRefresher(source: source, smc: smc, pause: { _ in try? await Task.sleep(for: .milliseconds(10)) })
         let state = Box(PowerFlowState())
-        let first = Task { await refresher.run(while: { true }) { state.value.take($0, now: referenceDate) } }
+        let first = Task { await refresher.run(while: { true }) { state.value.take($0, now: referenceDate, deliveredAt: $0.at) } }
         await eventually { await source.reads >= 1 }
         // The collapse, the hide event: before its run's caller resumes.
         refresher.collapse(&state.value, at: readInstant(100))
@@ -327,7 +327,7 @@ struct PowerFlowCollapseReopenTests {
         let reopened = Box(true)
         let counted = Box<[Int]>([])
         let outcome = await refresher.run(while: { reopened.value }) { tick in
-            state.value.take(tick, now: referenceDate)
+            state.value.take(tick, now: referenceDate, deliveredAt: tick.at)
             counted.value.append(refresher.readingRuns)
             reopened.value = false
         }
@@ -418,7 +418,7 @@ struct PowerFlowCollapseReopenTests {
         let state = Box(PowerFlowState())
         state.value.takeStatus(snapshot: powerSnapshot(update: referenceDate), evaluatedAt: referenceDate, readBegan: readInstant(0), now: referenceDate, deliveredAt: readInstant(0))
         await coordinator.apply(.powerSource(.externalPower))
-        let first = Task { await refresher.run(while: { true }) { state.value.take($0, now: referenceDate) } }
+        let first = Task { await refresher.run(while: { true }) { state.value.take($0, now: referenceDate, deliveredAt: $0.at) } }
         // The timer's first tick reads at 0 s; the test ticks to 3 s.
         for second in 1...3 {
             await eventually { await coordinator.isIdle(afterCalls: second, of: reader) }
@@ -439,7 +439,7 @@ struct PowerFlowCollapseReopenTests {
         refresher.collapse(&state.value)
         await eventually { await coordinator.current.isShown == false }
         // The window on its way arrives after the collapse: refused.
-        state.value.take(PowerFlowTick(content: .window(inTransit), smcState: .available, at: readInstant(5.2)), now: referenceDate)
+        state.value.take(PowerFlowTick(content: .window(inTransit), smcState: .available, at: readInstant(5.2)), now: referenceDate, deliveredAt: readInstant(5.2))
         #expect(state.value.shownTrack == .registry)
         // The batch in flight returns, within its deadline: dropped.
         clock.set(5.5)
@@ -448,7 +448,7 @@ struct PowerFlowCollapseReopenTests {
         #expect(await coordinator.current.window.isEmpty)
         // Reopened at 6 s: the timer's first tick reads at once.
         clock.set(6)
-        let second = Task { await refresher.run(while: { true }) { state.value.take($0, now: referenceDate) } }
+        let second = Task { await refresher.run(while: { true }) { state.value.take($0, now: referenceDate, deliveredAt: $0.at) } }
         await eventually { await coordinator.isIdle(afterCalls: 6, of: reader) }
         for time in 7...8 {
             clock.set(Double(time))
@@ -460,7 +460,7 @@ struct PowerFlowCollapseReopenTests {
         let fresh = try #require(await coordinator.publish().window)
         #expect(fresh.firstBatchBegan >= readInstant(6))
         #expect(fresh.batches >= 2)
-        state.value.take(PowerFlowTick(content: .window(fresh), smcState: .available, at: readInstant(9)), now: referenceDate)
+        state.value.take(PowerFlowTick(content: .window(fresh), smcState: .available, at: readInstant(9)), now: referenceDate, deliveredAt: readInstant(9))
         #expect(state.value.shownTrack == .smc)
         first.cancel()
         second.cancel()

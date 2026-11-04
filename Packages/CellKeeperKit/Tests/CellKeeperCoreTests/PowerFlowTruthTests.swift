@@ -68,7 +68,7 @@ struct PowerFlowTruthTests {
 
     // MARK: - Stale readings
 
-    @Test("The display applies both of the policy's checks with its limits: the read's age and the driver's update time, each varied alone")
+    @Test("Every check the policy makes, on both clocks: the wall-clock read age, the continuous read age and the driver's update time, each varied alone; the stricter wins")
     func agreesWithPolicy() {
         let now = time(1_000)
         let instant = readInstant(1_000)
@@ -77,33 +77,89 @@ struct PowerFlowTruthTests {
         let skew = ChargingPolicy.maximumClockSkew
         let readAges: [TimeInterval] = [0, 30, telemetryAge, telemetryAge + 0.001, 120, 3_600, -1, -skew, -skew - 0.001]
         let sourceAges: [TimeInterval] = [0, 59, maximumSourceAge, maximumSourceAge + 0.001, 3_600, -1, -skew, -skew - 0.001]
-        var rejectedByReadAge = 0
-        for readAge in readAges {
-            for sourceAge in sourceAges {
-                let snapshot = powerSnapshot(update: now.addingTimeInterval(-sourceAge), at: now.addingTimeInterval(-readAge))
-                let policyAccepts = ChargingPolicy.staleness(of: snapshot, now: now) == nil
-                var sample = PowerFlowSample(snapshot)
-                sample.readBegan = instant.advanced(by: .seconds(-readAge))
-                #expect(PowerFlowState.isCurrent(sample, now: now, at: instant) == policyAccepts, "read \(readAge) s, source \(sourceAge) s")
-                if !policyAccepts, ChargingPolicy.staleness(of: powerSnapshot(update: snapshot.sourceTimestamp, at: now), now: now) == nil {
-                    rejectedByReadAge += 1
+        var rejectedByWallReadAge = 0
+        var rejectedByContinuousReadAge = 0
+        for wallReadAge in readAges {
+            for continuousReadAge in readAges {
+                for sourceAge in sourceAges {
+                    let snapshot = powerSnapshot(update: now.addingTimeInterval(-sourceAge), at: now.addingTimeInterval(-wallReadAge))
+                    let policyAccepts = ChargingPolicy.staleness(of: snapshot, now: now) == nil
+                    let continuousAccepts = continuousReadAge <= telemetryAge && continuousReadAge >= -skew
+                    var sample = PowerFlowSample(snapshot)
+                    sample.readBegan = instant.advanced(by: .seconds(-continuousReadAge))
+                    let label = "wall read \(wallReadAge) s, continuous read \(continuousReadAge) s, source \(sourceAge) s"
+                    #expect(PowerFlowState.isCurrent(sample, now: now, at: instant) == (policyAccepts && continuousAccepts), "\(label)")
+                    let sourceAccepted = ChargingPolicy.staleness(of: powerSnapshot(update: snapshot.sourceTimestamp, at: now), now: now) == nil
+                    if !policyAccepts, sourceAccepted, continuousAccepts { rejectedByWallReadAge += 1 }
+                    if policyAccepts, !continuousAccepts { rejectedByContinuousReadAge += 1 }
                 }
             }
         }
-        // Some readings were rejected by their read's age alone.
-        #expect(rejectedByReadAge > 0)
+        // Each read-age check rejected some readings that every other check
+        // accepted.
+        #expect(rejectedByWallReadAge > 0)
+        #expect(rejectedByContinuousReadAge > 0)
         // A check whose time the sample lacks is not made.
         var bare = PowerFlowSample(powerSnapshot(update: nil))
+        bare.readAt = nil
         #expect(PowerFlowState.isCurrent(bare, now: time(10_000), at: readInstant(10_000)))
         bare.readBegan = readInstant(0)
         #expect(PowerFlowState.isCurrent(bare, now: time(10_000), at: readInstant(telemetryAge)))
         #expect(!PowerFlowState.isCurrent(bare, now: time(10_000), at: readInstant(telemetryAge + 1)))
     }
 
+    /// A state showing a reading made and updated at wall-clock 0 s, whose
+    /// read began at 0 s on the continuous clock.
+    private func freshState() -> PowerFlowState {
+        var state = PowerFlowState()
+        state.take(snapshot: powerSnapshot(update: time(0), at: time(0)), began: 0, now: time(0))
+        return state
+    }
+
+    @Test("The wall clock jumps forward: the policy calls the reading old, and so does the display, though little time passed on the continuous clock")
+    func wallClockForward() {
+        var state = freshState()
+        #expect(state.flow?.macUseWatts == 30)
+        // At 10 s on the continuous clock the wall clock jumps to 100 s.
+        state.take(PowerFlowTick(content: .empty, at: readInstant(10)), now: time(100), deliveredAt: readInstant(10))
+        #expect(ChargingPolicy.staleness(of: powerSnapshot(update: time(0), at: time(0)), now: time(100)) != nil)
+        #expect(!state.hasSample)
+    }
+
+    @Test("The wall clock is set back: a small change keeps the reading until a minute passes on the continuous clock; a large one makes it from the future")
+    func wallClockBack() {
+        var small = freshState()
+        // Set back 30 s at 10 s: 20 s ahead on the wall clock, within the
+        // skew; 10 s old on the continuous clock.
+        small.take(PowerFlowTick(content: .empty, at: readInstant(10)), now: time(-20), deliveredAt: readInstant(10))
+        #expect(small.hasSample)
+        // 61 s on the continuous clock: only 31 s on the wall clock.
+        small.take(PowerFlowTick(content: .empty, at: readInstant(61)), now: time(31), deliveredAt: readInstant(61))
+        #expect(!small.hasSample)
+        // Set back 100 s at 10 s: 90 s ahead on the wall clock.
+        var large = freshState()
+        large.take(PowerFlowTick(content: .empty, at: readInstant(10)), now: time(-90), deliveredAt: readInstant(10))
+        #expect(!large.hasSample)
+    }
+
+    @Test("A sleep moves both clocks on: the reading from before it is old by both")
+    func sleepMovesBothClocks() {
+        var state = freshState()
+        state.take(PowerFlowTick(content: .empty, at: readInstant(3_600)), now: time(3_600), deliveredAt: readInstant(3_600))
+        #expect(!state.hasSample)
+        // Either clock alone would say so.
+        var wallOnly = freshState()
+        wallOnly.rejudge(now: time(3_600), at: readInstant(0))
+        #expect(!wallOnly.hasSample)
+        var continuousOnly = freshState()
+        continuousOnly.rejudge(now: time(0), at: readInstant(3_600))
+        #expect(!continuousOnly.hasSample)
+    }
+
     @Test("Failed display reads keep a cached reading only while its read is under a minute old, also without the driver's update time")
     func cachedReadAge() {
         var state = PowerFlowState()
-        var sample = PowerFlowSample(powerSnapshot(update: time(0)))
+        var sample = PowerFlowSample(powerSnapshot(update: time(0), at: time(1)))
         sample.readBegan = readInstant(1)
         state.tick(.registry(sample), .absent, at: 1)
         state.tick(.empty, .absent, at: 61)
@@ -112,7 +168,7 @@ struct PowerFlowTruthTests {
         #expect(!state.hasSample)
         // Without the driver's update time, the read's age still bounds it.
         var bare = PowerFlowState()
-        var undated = PowerFlowSample(powerSnapshot(update: nil))
+        var undated = PowerFlowSample(powerSnapshot(update: nil, at: time(1)))
         undated.readBegan = readInstant(1)
         bare.tick(.registry(undated), .absent, at: 1)
         bare.tick(.empty, .absent, at: 61)
@@ -137,11 +193,11 @@ struct PowerFlowTruthTests {
     func readAgeIgnoresWallClock() {
         var state = PowerFlowState()
         state.take(snapshot: powerSnapshot(update: nil, at: time(1)), began: 1, now: time(1))
-        state.take(PowerFlowTick(content: .empty, at: readInstant(41)), now: time(41))
+        state.take(PowerFlowTick(content: .empty, at: readInstant(41)), now: time(41), deliveredAt: readInstant(41))
         #expect(state.hasSample)
         // 70 s after the read on the continuous clock, the wall clock set
         // back 30 s meanwhile: by the wall clock the read is 40 s old.
-        state.take(PowerFlowTick(content: .empty, at: readInstant(71)), now: time(41))
+        state.take(PowerFlowTick(content: .empty, at: readInstant(71)), now: time(41), deliveredAt: readInstant(71))
         #expect(!state.hasSample)
     }
 
@@ -164,10 +220,12 @@ struct PowerFlowTruthTests {
         #expect(state.flow?.macUseWatts == 20)
     }
 
-    @Test("Failed display reads keep the cached reading only while it is current")
+    @Test("Failed display reads keep a cached reading only while the driver's update is current, for a source that gives no read time")
     func cachedAfterFailedReads() {
         var state = PowerFlowState()
-        state.tick(.registry(PowerFlowSample(powerSnapshot(update: time(0)))), .absent, at: 1)
+        var sample = PowerFlowSample(powerSnapshot(update: time(0)))
+        sample.readAt = nil
+        state.tick(.registry(sample), .absent, at: 1)
         state.tick(.empty, .absent, at: 120)
         #expect(state.flow?.macUseWatts == 30)
         state.tick(.empty, .absent, at: 180)
@@ -251,11 +309,13 @@ struct PowerFlowTruthTests {
         #expect(!state.hasSample)
     }
 
-    @Test("A reading without the driver's update time is shown whatever the wall clock says")
+    @Test("A reading without the driver's update time is judged by its read's age alone")
     func withoutUpdateTime() {
         var state = PowerFlowState()
-        state.take(snapshot: powerSnapshot(update: nil), now: time(10_000))
+        state.take(snapshot: powerSnapshot(update: nil, at: time(0)), now: time(60))
         #expect(state.flow?.macUseWatts == 30)
+        state.rejudge(now: time(61), at: readClockOrigin)
+        #expect(state.flow == nil)
     }
 
     // MARK: - Failed reads in the chart
@@ -327,15 +387,15 @@ struct PowerFlowTruthTests {
         #expect(segments(behind, .macUse) == [[0], [60], [120]])
     }
 
-    @Test("A break never drops an update by its age, and a wall clock set back past a break restarts the history, so the chart recovers")
+    @Test("A wall clock set back past a newest break restarts the history, so the chart recovers")
     func rollbackAfterBreak() {
         var state = PowerFlowState()
         state.status(powerSnapshot(update: time(0)), at: 1)
         // A failed read at 8,000 s on the wall clock: the break is the
-        // newest point, more than two hours after the only update, which
-        // stays.
+        // newest point, more than two hours after the only update, which it
+        // drops as a newer update would.
         state.takeStatus(snapshot: nil, evaluatedAt: time(8_000), readBegan: readInstant(8_000), now: time(8_000), deliveredAt: readInstant(8_000))
-        #expect(state.history.points.map(\.updates) == [1, 0])
+        #expect(state.history.points.map(\.updates) == [0])
         // The wall clock is set back; the continuous clock goes on. A fresh
         // update at 60 s arrives.
         state.takeStatus(
@@ -372,6 +432,92 @@ struct PowerFlowTruthTests {
         history.recordBreak(at: time(7_260))
         history.restartIfClockSetBack(now: time(7_261))
         history.record(fastSample(70, load: 25))
-        #expect(history.points.map(\.updates) == [1, 1, 1, 0])
+        // The update at 0 s is more than two hours before the break; the
+        // rest stays, and the late update joins it.
+        #expect(history.points.map(\.updates) == [1, 1, 0])
+    }
+
+    // MARK: - Judged when it could be seen
+
+    @Test("A wake judges the flow again at once, with every read suspended: a reading from before the sleep is never shown")
+    func wakeRejudges() {
+        var state = freshState()
+        var visibility = PowerFlowVisibility(showsDiagramAtTop: true, isSectionExpanded: false)
+        visibility.apply({ $0.setMenuVisible(true) }, judging: &state, now: time(0), at: readInstant(0))
+        #expect(visibility.isShown)
+        #expect(state.hasSample)
+        visibility.apply({ $0.willSleep() }, judging: &state, now: time(5), at: readInstant(5))
+        // An hour later, no tick and no status yet.
+        visibility.apply({ $0.didWake(); return false }, judging: &state, now: time(3_605), at: readInstant(3_605))
+        #expect(visibility.isShown)
+        #expect(!state.hasSample)
+    }
+
+    @Test("Every change that shows the flow judges it again: the menu reopened, the diagram switched on, the section expanded")
+    func showingRejudges() {
+        let shows: [(PowerFlowVisibility, (inout PowerFlowVisibility) -> Bool)] = [
+            (PowerFlowVisibility(showsDiagramAtTop: true, isSectionExpanded: false), { $0.setMenuVisible(true) }),
+            (PowerFlowVisibility(showsDiagramAtTop: false, isSectionExpanded: false), { $0.setShowsDiagramAtTop(true) }),
+            (PowerFlowVisibility(showsDiagramAtTop: false, isSectionExpanded: false), { $0.setSectionExpanded(true) }),
+        ]
+        for (index, (initial, show)) in shows.enumerated() {
+            var visibility = initial
+            var state = freshState()
+            if !visibility.isMenuVisible, index > 0 {
+                _ = visibility.setMenuVisible(true)
+            }
+            #expect(!visibility.isShown)
+            visibility.apply(show, judging: &state, now: time(120), at: readInstant(120))
+            #expect(visibility.isShown, "change \(index)")
+            #expect(!state.hasSample, "change \(index)")
+        }
+        // A change that leaves the flow hidden judges nothing.
+        var hidden = PowerFlowVisibility(showsDiagramAtTop: true, isSectionExpanded: false)
+        var state = freshState()
+        hidden.apply({ $0.setSectionExpanded(true) }, judging: &state, now: time(120), at: readInstant(120))
+        #expect(!hidden.isShown)
+        #expect(state.hasSample)
+    }
+
+    @Test("A tick waiting for its delivery is judged when delivered, not when it was made")
+    func queuedDelivery() {
+        // A source with no wall-clock read or update time, so that only the
+        // continuous clock judges it.
+        var sample = PowerFlowSample(powerSnapshot(update: nil))
+        sample.readAt = nil
+        sample.readBegan = readInstant(1)
+        var state = PowerFlowState()
+        state.take(sample, now: time(1), deliveredAt: readInstant(1))
+        // Made at 60.951 s, its read then 59.951 s old; delivered after a
+        // 210 ms wait for the main actor, 60.161 s old.
+        state.take(PowerFlowTick(content: .empty, at: readInstant(60.951)), now: time(61.161), deliveredAt: readInstant(61.161))
+        #expect(!state.hasSample)
+        // A display read delivered late is judged from its delivery too.
+        var late = PowerFlowState()
+        var slow = sample
+        slow.readBegan = readInstant(0)
+        late.take(PowerFlowTick(content: .registry(slow), at: readInstant(59.9)), now: time(60.2), deliveredAt: readInstant(60.2))
+        #expect(!late.hasSample)
+        // Delivered in time, it is shown.
+        var prompt = PowerFlowState()
+        prompt.take(PowerFlowTick(content: .registry(slow), at: readInstant(59.9)), now: time(59.95), deliveredAt: readInstant(59.95))
+        #expect(prompt.hasSample)
+    }
+
+    // MARK: - The history's bound
+
+    @Test("At most 721 points, updates and breaks together: two hours of updates, then two hours of breaks")
+    func boundedPoints() {
+        var history = PowerFlowHistory()
+        for index in 0...720 {
+            history.record(fastSample(TimeInterval(index * 10)))
+        }
+        #expect(history.points.count == 721)
+        for index in 1...720 {
+            history.recordBreak(at: time(TimeInterval(7_200 + index * 10)))
+        }
+        #expect(history.points.count == 721)
+        let oldest = history.points.first?.time.timeIntervalSince(referenceDate)
+        #expect(oldest == 7_200)
     }
 }

@@ -435,7 +435,9 @@ final class AppModel {
         // menu's window is on screen and shows it.
         smcPowerSource?.send(.wake)
         notePowerFlow { $0.clearSMCTrack(at: .now) }
-        powerFlowVisibility.didWake()
+        // Judged again now, in this turn, if the flow is shown again: a
+        // reading from before the sleep is not shown until the first read.
+        changePowerFlowVisibility { $0.didWake(); return false }
         forwardToInProcessHelpers { await $0.systemDidWake() }
         send(.evaluate(.didWake))
         postWakeReread?.cancel()
@@ -450,7 +452,7 @@ final class AppModel {
         // A hide event for the power flow, whatever the menu's window
         // reports: its visibility may stay true through the sleep or a dark
         // wake, or change only late. Nothing is read until the wake.
-        if powerFlowVisibility.willSleep() {
+        if changePowerFlowVisibility({ $0.willSleep() }) {
             notePowerFlow { powerFlowRefresher.collapse(&$0) }
         }
         postWakeReread?.cancel()
@@ -966,7 +968,7 @@ final class AppModel {
     func setMenuVisible(_ visible: Bool) {
         guard visible != isMenuVisible else { return }
         if !visible { menuHideCount += 1 }
-        if powerFlowVisibility.setMenuVisible(visible) {
+        if changePowerFlowVisibility({ $0.setMenuVisible(visible) }) {
             notePowerFlow { powerFlowRefresher.collapse(&$0) }
         }
     }
@@ -977,7 +979,7 @@ final class AppModel {
     /// diagram at the top of the menu still shows the flow.
     func setPowerFlowExpanded(_ expanded: Bool) {
         store.set(expanded ? "on" : "off", forKey: Self.powerFlowExpandedKey)
-        if powerFlowVisibility.setSectionExpanded(expanded) {
+        if changePowerFlowVisibility({ $0.setSectionExpanded(expanded) }) {
             // The hide event itself: the runs end and the SMC source is told
             // now, and the SMC track is cleared from now, whenever the runs'
             // callers resume.
@@ -993,9 +995,24 @@ final class AppModel {
     func setShowsPowerFlowInMenu(_ shows: Bool) {
         guard shows != showsPowerFlowInMenu else { return }
         store.set(shows ? "on" : "off", forKey: Self.powerFlowInMenuKey)
-        if powerFlowVisibility.setShowsDiagramAtTop(shows) {
+        if changePowerFlowVisibility({ $0.setShowsDiagramAtTop(shows) }) {
             notePowerFlow { powerFlowRefresher.collapse(&$0) }
         }
+    }
+
+    /// Changes the power flow's visibility. When the change shows the flow,
+    /// what it shows is judged again at this moment, in the same turn
+    /// (``PowerFlowVisibility/apply(_:judging:now:at:)``), so nothing that
+    /// went stale while it was hidden is drawn before the first read.
+    /// Returns whether the change was a hide event.
+    @discardableResult
+    private func changePowerFlowVisibility(_ change: (inout PowerFlowVisibility) -> Bool) -> Bool {
+        var visibility = powerFlowVisibility
+        var state = powerFlow
+        let isHide = visibility.apply(change, judging: &state, now: Date(), at: .now)
+        notePowerFlow { $0 = state }
+        powerFlowVisibility = visibility
+        return isHide
     }
 
     /// The power flow's note, from the sample on screen: where its values
@@ -1062,9 +1079,10 @@ final class AppModel {
     /// log line, nothing for the controller.
     func refreshPowerFlowWhileShown() async {
         let outcome = await powerFlowRefresher.run(while: { [weak self] in self?.isPowerFlowShown == true }) { [weak self] tick in
-            // Judged against the wall clock as it is delivered: the flow
-            // never shows as current a reading the policy would call stale.
-            self?.notePowerFlow { $0.take(tick, now: Date()) }
+            // Judged on both clocks as it is delivered, here on the main
+            // actor, not when the tick was made: the flow never shows as
+            // current a reading the policy would call stale.
+            self?.notePowerFlow { $0.take(tick, now: Date(), deliveredAt: .now) }
         }
         // This run was ended by its task's cancellation and its end hid the
         // flow, at that moment: the SMC track is cleared from then, so a

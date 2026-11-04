@@ -6,7 +6,7 @@ extension PowerFlowState {
     /// A tick at `seconds` after ``readClockOrigin``, delivered `seconds`
     /// after the reference date on the wall clock.
     mutating func tick(_ content: PowerFlowTick.Content, _ state: SMCSourceState = .available, at seconds: Double) {
-        take(PowerFlowTick(content: content, smcState: state, at: readInstant(seconds)), now: referenceDate.addingTimeInterval(seconds))
+        take(PowerFlowTick(content: content, smcState: state, at: readInstant(seconds)), now: referenceDate.addingTimeInterval(seconds), deliveredAt: readInstant(seconds))
     }
 
     /// A controller status whose work began, and was evaluated and
