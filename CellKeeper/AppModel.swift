@@ -129,28 +129,33 @@ final class AppModel {
     /// hours, from every status and from the menu's display-only reads. In
     /// memory only; the policy and the controller never see it (D114).
     private(set) var powerFlow = PowerFlowState()
+    /// When the menu shows the power flow, and so reads and animates it:
+    /// the menu's window on screen, the Mac awake, and the diagram at the
+    /// top or the section under Details expanded; and the count of hide
+    /// events that the reading tasks' identities include (D121).
+    private(set) var powerFlowVisibility: PowerFlowVisibility
     /// Whether the menu's Power flow section under Details is expanded,
     /// remembered across launches. Used only while the flow is not shown at
     /// the top of the menu.
-    private(set) var isPowerFlowExpanded: Bool
+    var isPowerFlowExpanded: Bool { powerFlowVisibility.isSectionExpanded }
     /// Whether the menu shows the power flow's diagram under its header
     /// (Settings › General, on by default; D121), remembered across
     /// launches. Off, the flow is under Details › Power flow, as before.
-    private(set) var showsPowerFlowInMenu: Bool
+    var showsPowerFlowInMenu: Bool { powerFlowVisibility.showsDiagramAtTop }
     /// Whether the menu's window is on screen, as AppKit reports it. The
     /// menu's view outlives each opening: closing the menu orders its
     /// window out without ending the view's tasks, so the power flow's
     /// reads and animation follow this instead (D121, the owner's trial).
-    private(set) var isMenuVisible = false
-    /// How many times the menu's window has left the screen. The reading
-    /// tasks' identities include it, so a close and reopen that SwiftUI
-    /// sees only as "visible" again still restarts the reads that the close
-    /// ended (review r1 of #126).
+    var isMenuVisible: Bool { powerFlowVisibility.isMenuVisible }
+    /// How many times the menu's window has left the screen, for the charge
+    /// limit slider's edit, which closes at every close and reopen and not
+    /// at the power flow's other hide events. The power flow's tasks follow
+    /// ``powerFlowTaskID`` instead.
     private(set) var menuHideCount = 0
 
-    /// The menu's showing, for the identity of a task that reads while it
-    /// is on screen: changes at every close and every reopen, however
-    /// quickly one follows the other.
+    /// The menu's showing, for the charge limit slider's edit: changes at
+    /// every close and every reopen, however quickly one follows the other
+    /// (review r1 of #126).
     struct MenuShowing: Hashable {
         let isVisible: Bool
         let hideCount: Int
@@ -159,13 +164,24 @@ final class AppModel {
     var menuShowing: MenuShowing {
         MenuShowing(isVisible: isMenuVisible, hideCount: menuHideCount)
     }
+
+    /// The identity of a task that reads the power flow while it is shown:
+    /// it changes at every hide event (the menu closed, the diagram
+    /// switched off, the section collapsed, the Mac going to sleep) and
+    /// whenever the flow starts or stops being shown, so a task a hide
+    /// ended is started again once the flow is shown, even when the hide
+    /// and the show reach SwiftUI as one update.
+    var powerFlowTaskID: PowerFlowVisibility.TaskID {
+        powerFlowVisibility.taskID
+    }
     /// Where the menu reads the power flow while it is open: macOS's
     /// battery data, read through the telemetry provider, the registry
     /// track's source. Display only.
     @ObservationIgnored let powerFlowSource: any PowerFlowReading
     /// The power flow's SMC source (D115): the owner's reader, read about
-    /// once a second while the section is shown. Nil in a build without the
-    /// reader, the default: the source is then absent and nothing is read.
+    /// once a second while the flow is shown (``isPowerFlowShown``). Nil in
+    /// a build without the reader, the default: the source is then absent
+    /// and nothing is read.
     @ObservationIgnored private let smcPowerSource: SMCPowerCoordinator?
     /// Runs the menu's reads of the power flow, one at a time, and stops
     /// them when quitting starts.
@@ -312,8 +328,10 @@ final class AppModel {
         let smcPowerSource = smcPowerReader.map { SMCPowerCoordinator(reader: $0) }
         self.smcPowerSource = smcPowerSource
         self.powerFlowRefresher = PowerFlowRefresher(source: powerFlowSource, smc: smcPowerSource)
-        self.isPowerFlowExpanded = store.string(forKey: Self.powerFlowExpandedKey) == "on"
-        self.showsPowerFlowInMenu = store.string(forKey: Self.powerFlowInMenuKey) != "off"
+        self.powerFlowVisibility = PowerFlowVisibility(
+            showsDiagramAtTop: store.string(forKey: Self.powerFlowInMenuKey) != "off",
+            isSectionExpanded: store.string(forKey: Self.powerFlowExpandedKey) == "on"
+        )
         // Recovery must not depend on which backend is selected: if a record
         // of the user's own Charge Limit exists, start with the backend that
         // can restore it and switch once it has.
@@ -412,9 +430,12 @@ final class AppModel {
     }
 
     private func didWake() {
-        // The SMC source's window resets, and the SMC track with it.
+        // The SMC source's window resets, and the SMC track with it. The
+        // power flow is shown again, and its tasks start again, only if the
+        // menu's window is on screen and shows it.
         smcPowerSource?.send(.wake)
         notePowerFlow { $0.clearSMCTrack(at: .now) }
+        powerFlowVisibility.didWake()
         forwardToInProcessHelpers { await $0.systemDidWake() }
         send(.evaluate(.didWake))
         postWakeReread?.cancel()
@@ -426,6 +447,12 @@ final class AppModel {
     }
 
     private func willSleep() {
+        // A hide event for the power flow, whatever the menu's window
+        // reports: its visibility may stay true through the sleep or a dark
+        // wake, or change only late. Nothing is read until the wake.
+        if powerFlowVisibility.willSleep() {
+            notePowerFlow { powerFlowRefresher.collapse(&$0) }
+        }
         postWakeReread?.cancel()
         postWakeReread = nil
         settleWatch.stop()
@@ -922,36 +949,35 @@ final class AppModel {
 
     // MARK: Power flow
 
-    /// Whether the menu reads the power flow: its window is on screen, and
-    /// its diagram is at the top or its section under Details is expanded.
-    /// The view that shows it runs the reads, so nothing is read while the
-    /// menu is closed or the section hidden.
+    /// Whether the menu reads the power flow (``PowerFlowVisibility``): its
+    /// window is on screen, the Mac is awake, and its diagram is at the top
+    /// or its section under Details is expanded. Every reading run asks it
+    /// before each read, so nothing is read, or starts again, while the
+    /// menu is closed, the Mac asleep or the flow hidden.
     var isPowerFlowShown: Bool {
-        isMenuVisible && (showsPowerFlowInMenu || isPowerFlowExpanded)
+        powerFlowVisibility.isShown
     }
 
     /// The menu's window came on screen or left it. Leaving it is a hide
     /// event, as collapsing the section is: the runs end and the SMC source
     /// is told at once, since SwiftUI does not cancel the view's tasks when
     /// the window is only ordered out. Coming back restarts the reads
-    /// through the views' tasks, whose identity includes ``menuShowing``.
+    /// through the views' tasks, whose identity is ``powerFlowTaskID``.
     func setMenuVisible(_ visible: Bool) {
         guard visible != isMenuVisible else { return }
-        isMenuVisible = visible
-        if !visible {
-            menuHideCount += 1
+        if !visible { menuHideCount += 1 }
+        if powerFlowVisibility.setMenuVisible(visible) {
             notePowerFlow { powerFlowRefresher.collapse(&$0) }
         }
     }
 
     /// Collapsing ends the section's reads at once, a display read in
-    /// flight included, so the SMC source stops sampling without waiting
-    /// for SwiftUI to cancel the section's task; not while the diagram at
-    /// the top of the menu still shows the flow.
+    /// flight included, so the SMC source stops sampling then and there,
+    /// not whenever SwiftUI next updates the section's task; not while the
+    /// diagram at the top of the menu still shows the flow.
     func setPowerFlowExpanded(_ expanded: Bool) {
-        isPowerFlowExpanded = expanded
         store.set(expanded ? "on" : "off", forKey: Self.powerFlowExpandedKey)
-        if !isPowerFlowShown {
+        if powerFlowVisibility.setSectionExpanded(expanded) {
             // The hide event itself: the runs end and the SMC source is told
             // now, and the SMC track is cleared from now, whenever the runs'
             // callers resume.
@@ -966,9 +992,8 @@ final class AppModel {
     /// reading, whatever its saved state; once shown, it starts its own.
     func setShowsPowerFlowInMenu(_ shows: Bool) {
         guard shows != showsPowerFlowInMenu else { return }
-        showsPowerFlowInMenu = shows
         store.set(shows ? "on" : "off", forKey: Self.powerFlowInMenuKey)
-        if !shows {
+        if powerFlowVisibility.setShowsDiagramAtTop(shows) {
             notePowerFlow { powerFlowRefresher.collapse(&$0) }
         }
     }
@@ -1028,8 +1053,9 @@ final class AppModel {
     }
 
     /// Refreshes the power flow every few seconds while it is shown
-    /// (``isPowerFlowShown``), until the calling task is cancelled or
-    /// quitting starts: the menu runs it while it is open (the lead's
+    /// (``isPowerFlowShown``), until a hide event ends the run, the calling
+    /// task is cancelled or quitting starts: the menu's views run it, and
+    /// start it again when ``powerFlowTaskID`` changes (the lead's
     /// decision, 2026-10-21). Each tick is the SMC source's window or a read
     /// of the registry track's source (D115). Nothing is read while the
     /// flow is hidden. Display only (``PowerFlowRefresher``): no evaluation, no
@@ -1040,9 +1066,10 @@ final class AppModel {
             // never shows as current a reading the policy would call stale.
             self?.notePowerFlow { $0.take(tick, now: Date()) }
         }
-        // The menu closed and this run's end hid the section, at that
-        // moment: the SMC track is cleared from then, so a menu reopened
-        // since keeps its new windows and never shows an old one.
+        // This run was ended by its task's cancellation and its end hid the
+        // flow, at that moment: the SMC track is cleared from then, so a
+        // flow shown since keeps its new windows and never shows an old
+        // one. A run a hide event ended was cleared there.
         notePowerFlow { outcome.clearSMCTrackIfHidden(&$0) }
     }
 

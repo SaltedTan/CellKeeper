@@ -59,9 +59,9 @@ struct MenuBarView: View {
         .padding(MenuLayout.inset)
         .frame(width: MenuLayout.width)
         // The power flow reads and animates only while this window is on
-        // screen (``AppModel/isMenuVisible``).
+        // screen and the Mac awake (``AppModel/isPowerFlowShown``).
         .background(WindowVisibilityObserver { model.setMenuVisible($0) })
-        .environment(\.isMenuVisible, model.isMenuVisible)
+        .environment(\.isMenuOnScreen, model.powerFlowVisibility.isMenuOnScreen)
     }
 
     /// Opens the Settings window at the pane `model.settingsTab` names.
