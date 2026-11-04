@@ -10,8 +10,10 @@ public protocol SMCPowerPublishing: Sendable {
 }
 
 /// The power flow's SMC source (research note 13 §6.2, D115): reads the
-/// owner's reader about once a second while the menu shows the expanded
-/// Power flow section, and hands the refresher a window every 3 s.
+/// owner's reader about once a second while the menu shows the power flow
+/// (``PowerFlowVisibility``: its window on screen, the Mac awake, and the
+/// diagram at the top or the section expanded), and hands the refresher a
+/// window every 3 s.
 ///
 /// Two places, so that a blocked read cannot stall the rest:
 /// - **the reader's thread** (``SMCReaderThread``): the reader runs on one
@@ -31,9 +33,10 @@ public protocol SMCPowerPublishing: Sendable {
 public actor SMCPowerCoordinator: SMCPowerPublishing {
     /// What the app tells the source, in order (``send(_:)``).
     public enum Input: Sendable, Equatable {
-        /// The menu shows the expanded Power flow section, or no longer does
-        /// (collapsed, or the menu closed): the timer runs only while shown,
-        /// and hiding resets the window.
+        /// The menu shows the power flow, or no longer does (a hide event:
+        /// the menu closed, the diagram switched off, the section collapsed,
+        /// or the Mac going to sleep): the timer runs only while shown, and
+        /// hiding resets the window.
         case shown(Bool)
         /// The Mac woke: the window resets.
         case wake
@@ -47,7 +50,7 @@ public actor SMCPowerCoordinator: SMCPowerPublishing {
         case stop
     }
 
-    /// How often a batch is asked for while the section is shown.
+    /// How often a batch is asked for while the flow is shown.
     public static let batchInterval: Duration = .seconds(1)
 
     private var sampler: SMCPowerSampler

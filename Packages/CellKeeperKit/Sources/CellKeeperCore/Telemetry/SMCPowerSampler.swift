@@ -159,7 +159,9 @@ struct SMCPowerSampler: Sendable, Equatable {
     /// independent of the windows.
     private(set) var consecutiveValid = 0
     private(set) var consecutiveInvalid = 0
-    /// Whether the menu is open with the Power flow section expanded.
+    /// Whether the menu shows the power flow (``PowerFlowVisibility``): its
+    /// window on screen, the Mac awake, and the diagram at the top or the
+    /// section expanded.
     private(set) var isShown = false
     /// The registry track's power source: on external power a batch needs a
     /// valid `PDTR`.
@@ -185,13 +187,14 @@ struct SMCPowerSampler: Sendable, Equatable {
 
     // MARK: - Lifecycle
 
-    /// The section is shown: batches may begin.
+    /// The flow is shown: batches may begin.
     mutating func show() {
         isShown = true
     }
 
-    /// The section collapsed or the menu closed: no batch begins, and the
-    /// window resets.
+    /// A hide event (the menu closed, the diagram switched off, the section
+    /// collapsed, the Mac going to sleep): no batch begins, and the window
+    /// resets.
     mutating func hide() {
         isShown = false
         reset()
