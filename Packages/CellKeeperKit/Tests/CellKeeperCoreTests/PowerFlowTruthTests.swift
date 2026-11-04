@@ -581,4 +581,64 @@ struct PowerFlowTruthTests {
         let oldest = history.points.first?.time.timeIntervalSince(referenceDate)
         #expect(oldest == 7_200)
     }
+
+    // MARK: - Only what is current is recorded
+
+    @Test("An update cached while the clock was fast and reread after it was corrected is from the future: it is neither recorded nor drawn across the failure")
+    func futureCachedUpdate() {
+        var state = PowerFlowState()
+        status(powerSnapshot(update: time(0), at: time(0)), into: &state, wall: 0, continuous: 0)
+        // The wall clock jumps 4 minutes ahead; at 61 s on the continuous
+        // clock an update stamped 300 s is read at 301 s.
+        status(powerSnapshot(update: time(300), at: time(301)), into: &state, wall: 301, continuous: 61)
+        // A read fails at 70 s, 310 s by the wall clock.
+        status(nil, into: &state, wall: 310, continuous: 70)
+        // Corrected: at 80 s the cached update from 300 s is read again,
+        // 220 s in the future, then a fresh update at 120 s.
+        status(powerSnapshot(update: time(300), at: time(80)), into: &state, wall: 80, continuous: 80)
+        #expect(!state.hasSample)
+        status(powerSnapshot(load: 20_000, update: time(120), at: time(120)), into: &state, wall: 120, continuous: 120)
+        #expect(state.flow?.macUseWatts == 20)
+        let times = state.history.points.map { $0.time.timeIntervalSince(referenceDate) }
+        let expected: [TimeInterval] = [80, 120]
+        #expect(times == expected)
+        #expect(state.history.newestTime == time(120))
+        #expect(segments(state.history, .macUse) == [[120]])
+    }
+
+    @Test("After a long sleep the driver's old update is not recorded; a fresh one records and draws as usual")
+    func wakeRecordsOnlyCurrent() {
+        var state = PowerFlowState()
+        status(powerSnapshot(update: time(0), at: time(0)), into: &state, wall: 0, continuous: 0)
+        status(powerSnapshot(update: time(60), at: time(60)), into: &state, wall: 60, continuous: 60)
+        // Asleep for two hours; on waking the driver still reports an
+        // update from just before the sleep, never read.
+        status(powerSnapshot(update: time(90), at: time(7_260)), into: &state, wall: 7_260, continuous: 7_260)
+        #expect(!state.hasSample)
+        #expect(!state.history.points.contains { $0.time == time(90) })
+        status(powerSnapshot(load: 20_000, update: time(7_300), at: time(7_301)), into: &state, wall: 7_301, continuous: 7_301)
+        status(powerSnapshot(load: 25_000, update: time(7_360), at: time(7_361)), into: &state, wall: 7_361, continuous: 7_361)
+        #expect(state.flow?.macUseWatts == 25)
+        #expect(segments(state.history, .macUse).last == [7_300, 7_360])
+    }
+
+    @Test("The last break's instant is forgotten when the break is dropped by its age, or when the history starts again")
+    func lastBreakForgotten() {
+        // Dropped by its age: a later delivery behind it restarts nothing.
+        var pruned = PowerFlowHistory()
+        pruned.record(fastSample(0))
+        pruned.recordBreak(at: time(60))
+        pruned.record(fastSample(7_300))
+        #expect(pruned.points.map(\.updates) == [1])
+        pruned.restartIfClockSetBack(now: time(30))
+        #expect(pruned.points.map(\.updates) == [1])
+        // The clock rule started the history again from an older update.
+        var reset = PowerFlowHistory()
+        reset.record(fastSample(0))
+        reset.recordBreak(at: time(400))
+        reset.record(fastSample(-400))
+        #expect(reset.points.map(\.updates) == [1])
+        reset.restartIfClockSetBack(now: time(-390))
+        #expect(reset.points.map(\.updates) == [1])
+    }
 }

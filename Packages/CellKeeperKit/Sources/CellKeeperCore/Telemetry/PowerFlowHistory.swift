@@ -97,7 +97,8 @@ public struct PowerFlowHistory: Sendable, Equatable {
     private var buckets: [Bucket] = []
     /// The wall clock's time when the last break was recorded, as it was,
     /// whatever its placement: a later delivery earlier than this means the
-    /// clock was set back past that failed read.
+    /// clock was set back past that failed read. Nil once no break is kept
+    /// (dropped by its age, or the history started again).
     private var lastBreakAt: Date?
     /// The updates already averaged in, so that a second read of one counts
     /// once: only those of the last ``reorderTolerance`` (an older update
@@ -122,10 +123,10 @@ public struct PowerFlowHistory: Sendable, Equatable {
         buckets.last?.time
     }
 
-    /// The newest update's time. Deduplication and the clock rule judge
-    /// updates against it, not against a break, whose time is the wall
-    /// clock's at a failed read: an update the driver had not yet refreshed
-    /// (after a wake) is not taken for a clock set back.
+    /// The newest update's time. The clock rule judges updates against it,
+    /// not against a break, whose time is the wall clock's at a failed
+    /// read: an update the driver had not yet refreshed (after a wake) is
+    /// not taken for a clock set back.
     private var newestUpdateTime: Date? {
         buckets.last { $0.updates > 0 }?.time
     }
@@ -213,9 +214,12 @@ public struct PowerFlowHistory: Sendable, Equatable {
     private mutating func prune() {
         if let newest = newestTime {
             buckets.removeAll { newest.timeIntervalSince($0.time) > Self.maximumAge }
-        }
-        if let newest = newestUpdateTime {
             recordedUpdates = recordedUpdates.filter { newest.timeIntervalSince($0) <= Self.reorderTolerance }
+        }
+        // Without a break kept (dropped by its age, or the clock rule started
+        // the history again), the last one's instant says nothing more.
+        if !buckets.contains(where: \.hasBreak) {
+            lastBreakAt = nil
         }
         if recordedUpdates.count > Self.maximumRecordedUpdates {
             recordedUpdates = Set(recordedUpdates.sorted().suffix(Self.maximumRecordedUpdates))

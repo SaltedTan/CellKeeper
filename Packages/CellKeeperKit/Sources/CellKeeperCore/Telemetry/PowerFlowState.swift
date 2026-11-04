@@ -237,7 +237,7 @@ public struct PowerFlowState: Sendable, Equatable {
         smcState = tick.smcState
         rejudge(now: now, at: instant)
         switch tick.content {
-        case .window(let window): accept(window, at: tick.at)
+        case .window(let window): accept(window, at: tick.at, now: now, deliveredAt: instant)
         case .registry(let sample): take(sample, now: now, deliveredAt: instant)
         case .empty: break
         }
@@ -264,8 +264,14 @@ public struct PowerFlowState: Sendable, Equatable {
     /// without a known power source in the registry track, when it began no
     /// later than the last window, or before the last reset of the SMC
     /// track, which includes the read that showed the current power source.
-    /// Recorded in the history once, here.
-    private mutating func accept(_ window: SMCPowerWindow, at now: ContinuousClock.Instant) {
+    /// Recorded in the history once, here, if current as delivered
+    /// (``record(_:now:at:)``).
+    private mutating func accept(
+        _ window: SMCPowerWindow,
+        at now: ContinuousClock.Instant,
+        now wallNow: Date,
+        deliveredAt instant: ContinuousClock.Instant
+    ) {
         guard smcState == .available,
               let reading = registry.sample,
               reading.powerSource == .externalPower || reading.powerSource == .battery
@@ -289,8 +295,25 @@ public struct PowerFlowState: Sendable, Equatable {
             )
         )
         smc = SMCTrack(sample: sample, acceptedAt: now, batterySource: borrowsBattery ? reading : nil)
+        if record(sample, now: wallNow, at: instant) {
+            lastRecordedWindow = RecordedWindow(collectedAt: window.collectedAt, acceptedAt: now)
+        }
+    }
+
+    /// The one way a sample reaches the history: only one the display would
+    /// accept as current as it is delivered, at `now` on the wall clock and
+    /// `instant` on the continuous clock (``isCurrent(_:now:at:)``). A stale
+    /// reading, or one from the future (cached while the clock was fast and
+    /// read after it was corrected), is neither recorded nor deduplicated
+    /// against; a later current one is recorded as usual. An SMC window's
+    /// sample carries its battery power only while borrowing it was current
+    /// (``accept(_:at:now:deliveredAt:)``). Returns whether it was taken to
+    /// the history.
+    @discardableResult
+    private mutating func record(_ sample: PowerFlowSample, now: Date, at instant: ContinuousClock.Instant) -> Bool {
+        guard Self.isCurrent(sample, now: now, at: instant) else { return false }
         history.record(sample)
-        lastRecordedWindow = RecordedWindow(collectedAt: window.collectedAt, acceptedAt: now)
+        return true
     }
 
     /// Clears the SMC track at `now`, on the continuous clock, so that the
@@ -322,7 +345,8 @@ public struct PowerFlowState: Sendable, Equatable {
     /// shows only joins the history, even when both carry the same update.
     /// One whose start is unknown is taken. Recorded in the history only
     /// while the registry track is on screen (a power-source change it
-    /// shows puts it there at once). What is shown is then judged as
+    /// shows puts it there at once), and only if current as delivered
+    /// (``record(_:now:at:)``). What is shown is then judged as
     /// delivered at `now` on the wall clock and `instant` on the continuous
     /// clock (``isCurrent(_:now:at:)``).
     public mutating func take(_ sample: PowerFlowSample, now: Date, deliveredAt instant: ContinuousClock.Instant) {
@@ -336,7 +360,7 @@ public struct PowerFlowState: Sendable, Equatable {
             notePowerSource(sample.powerSource, since: sample.readBegan)
         }
         if shownTrack == .registry, !predatesRecordedWindow(sample) {
-            history.record(sample)
+            record(sample, now: now, at: instant)
         }
         guard isNewest else { return }
         if let began = sample.readBegan {

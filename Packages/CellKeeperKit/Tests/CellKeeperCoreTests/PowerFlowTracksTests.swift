@@ -384,7 +384,14 @@ struct PowerFlowTracksTests {
         state.tick(.empty, .failing, at: 8)
         // More than 5 minutes later, the wall clock was set back ten
         // minutes: the history starts again from the reading.
-        state.status(powerSnapshot(update: time(-600)), at: 400)
+        // The delivery's wall clock is set back too, as the story says.
+        state.takeStatus(
+            snapshot: powerSnapshot(update: time(-600)),
+            evaluatedAt: time(-595),
+            readBegan: readInstant(400),
+            now: time(-595),
+            deliveredAt: readInstant(400)
+        )
         #expect(state.history.points.map(\.time) == [time(-600)])
     }
 
