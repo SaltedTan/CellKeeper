@@ -52,13 +52,14 @@ struct PowerHistorySection: View {
     }
 }
 
-/// The menu's "Power flow" section under Details (D114), while the diagram
-/// is not at the top of the menu: where the Mac's power comes from and
-/// goes, as a diagram of the adapter, the Mac and the battery, and a chart
-/// of the last hour. Display only: it changes nothing, and the policy and
-/// the controller never see what it shows. While the menu's window is on
-/// screen, the Mac awake and the section expanded, its source is read every
-/// few seconds; the wording is `PowerFlowWording`'s.
+/// The menu's "Power flow" section under Details (D114, D121), shown only
+/// while the diagram is not at the top of the menu: where the Mac's power
+/// comes from and goes, as a diagram of power in, the Mac and the battery,
+/// the last hour's chart and the source's note. Display only: it changes
+/// nothing, and the policy and the controller never see what it shows.
+/// While the flow is shown (the menu's window on screen, the Mac awake and
+/// the section expanded), its source is read every few seconds; the wording
+/// is `PowerFlowWording`'s.
 struct PowerFlowSection: View {
     let model: AppModel
 
@@ -399,7 +400,7 @@ struct WindowVisibilityObserver: NSViewRepresentable {
 
 // MARK: - Chart
 
-/// The last hour: the Mac's use, the adapter's input and the battery
+/// The last hour: the Mac's use, power in and the battery
 /// (charging above 0 W, supplying below), each line in its own colour and
 /// dash, named in the legend beneath. Swift Charts' audio graph is kept.
 private struct PowerFlowChart: View {
@@ -569,7 +570,7 @@ extension PowerFlowHistory.Series {
         })
     }
 
-    /// A circle for the Mac's use, a square for the adapter's input and a
+    /// A circle for the Mac's use, a square for power in and a
     /// triangle for the battery: an isolated point's mark, and in the legend.
     fileprivate var symbol: BasicChartSymbolShape {
         switch self {
@@ -579,7 +580,7 @@ extension PowerFlowHistory.Series {
         }
     }
 
-    /// Solid for the Mac's use, dashed for the adapter's input, dotted for
+    /// Solid for the Mac's use, dashed for power in, dotted for
     /// the battery.
     fileprivate var stroke: StrokeStyle {
         switch self {

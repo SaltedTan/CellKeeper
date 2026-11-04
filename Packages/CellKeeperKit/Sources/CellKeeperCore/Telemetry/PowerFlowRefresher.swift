@@ -1,6 +1,6 @@
 import Foundation
 
-/// What the refresher needs of the SMC source: its windows, the section's
+/// What the refresher needs of the SMC source: its windows, the flow's
 /// visibility told in order, and a stop for quitting
 /// (``SMCPowerCoordinator``; a test fake in tests).
 public protocol SMCPowerControlling: SMCPowerPublishing {
@@ -105,7 +105,7 @@ public final class PowerFlowRefresher {
     /// Reads while `isWanted` holds, until the run ends (see the type),
     /// handing each tick to `deliver`
     /// (``PowerFlowRefresh/run(source:smc:interval:while:pause:now:deliver:)``).
-    /// The SMC source is told the section is shown when the first such run
+    /// The SMC source is told the flow is shown when the first such run
     /// begins and hidden when the last ends. Returns as soon as the run
     /// ends, with how it ended; at once once stopped.
     @discardableResult
