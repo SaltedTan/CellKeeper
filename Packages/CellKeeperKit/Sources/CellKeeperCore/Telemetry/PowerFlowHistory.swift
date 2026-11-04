@@ -216,7 +216,7 @@ public struct PowerFlowHistory: Sendable, Equatable {
 
     /// Where the chart's lines break: three times the slowest way points
     /// arrive, the source's cadence or CellKeeper's own check (the history
-    /// fills from the statuses unless the section is shown), and never less
+    /// fills from the statuses unless the flow is shown), and never less
     /// than three buckets.
     public static func lineBreakGap(sourceInterval: Duration, checkInterval: Duration) -> TimeInterval {
         let slowest = max(sourceInterval, checkInterval)

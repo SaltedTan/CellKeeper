@@ -36,7 +36,7 @@ public enum AccessibilityWording {
         QuantityUnit.milliamps.spoken(value, locale: locale)
     }
 
-    /// The adapter's power: "70 watts".
+    /// Power in, for VoiceOver: "70 watts".
     public static func watts(_ value: Int, locale: Locale = .current) -> String {
         QuantityUnit.watts.spoken(value, locale: locale)
     }
