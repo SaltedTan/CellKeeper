@@ -382,6 +382,9 @@ struct PowerFlowTruthTests {
         behind.record(fastSample(0))
         behind.record(fastSample(60, load: 20))
         behind.recordBreak(at: time(30))
+        // Placed after the update at 60 s, but recorded at 30 s: a delivery
+        // at 45 s is not behind it, and restarts nothing.
+        behind.restartIfClockSetBack(now: time(45))
         behind.record(fastSample(120, load: 25))
         #expect(behind.points.map(\.updates) == [1, 1, 1])
         #expect(segments(behind, .macUse) == [[0], [60], [120]])
@@ -419,7 +422,65 @@ struct PowerFlowTruthTests {
             deliveredAt: readInstant(8_071)
         )
         #expect(state.flow?.macUseWatts == 25)
-        #expect(segments(state.history, .macUse) == [[60, 120]])
+        // The history starts from a break where the rollback was found
+        // (61 s): the update stamped 60 s and read then cannot be told from
+        // one cached before the failure, so it stands alone; the line goes
+        // on from 120 s.
+        #expect(segments(state.history, .macUse) == [[60], [120]])
+        state.takeStatus(
+            snapshot: powerSnapshot(load: 25_000, update: time(180), at: time(180)),
+            evaluatedAt: time(180),
+            readBegan: readInstant(8_130),
+            now: time(181),
+            deliveredAt: readInstant(8_131)
+        )
+        #expect(segments(state.history, .macUse) == [[60], [120, 180]])
+    }
+
+    /// A controller status read and delivered at `wall` on the wall clock
+    /// and `continuous` on the continuous clock.
+    private func status(_ snapshot: BatterySnapshot?, into state: inout PowerFlowState, wall: TimeInterval, continuous: Double) {
+        state.takeStatus(
+            snapshot: snapshot,
+            evaluatedAt: time(wall),
+            readBegan: readInstant(continuous),
+            now: time(wall),
+            deliveredAt: readInstant(continuous)
+        )
+    }
+
+    @Test("A small rollback past a failed read restarts the history, and no line joins across the failure")
+    func smallRollbackPastBreak() {
+        var state = PowerFlowState()
+        status(powerSnapshot(update: time(0), at: time(0)), into: &state, wall: 0, continuous: 0)
+        // At 10 s the wall clock is 4 minutes fast, and the controller's
+        // read fails at 250 s by it.
+        status(nil, into: &state, wall: 250, continuous: 10)
+        // Time sync corrects it: a clock-change evaluation at 20 s rereads
+        // the cached update from 0 s, then a fresh update comes at 60 s.
+        status(powerSnapshot(update: time(0), at: time(20)), into: &state, wall: 20, continuous: 20)
+        status(powerSnapshot(load: 20_000, update: time(60), at: time(60)), into: &state, wall: 60, continuous: 60)
+        #expect(state.flow?.macUseWatts == 20)
+        #expect(state.history.newestTime == time(60))
+        #expect(state.history.points.map(\.updates) == [1, 0, 1])
+        for series in PowerFlowHistory.Series.allCases {
+            #expect(segments(state.history, series) == [[0], [60]], "\(series)")
+        }
+    }
+
+    @Test("A driver update stamped before a failure and read after it restarts nothing: the history and the gap stay")
+    func updateStampedBeforeFailure() {
+        var state = PowerFlowState()
+        status(powerSnapshot(update: time(200), at: time(200)), into: &state, wall: 200, continuous: 200)
+        status(nil, into: &state, wall: 250, continuous: 250)
+        // The driver updated at 240 s; it is read at 255 s.
+        status(powerSnapshot(load: 20_000, update: time(240), at: time(255)), into: &state, wall: 255, continuous: 255)
+        status(powerSnapshot(load: 25_000, update: time(300), at: time(300)), into: &state, wall: 300, continuous: 300)
+        let times = state.history.points.map { $0.time.timeIntervalSince(referenceDate) }
+        let expected: [TimeInterval] = [200, 240, 250, 300]
+        #expect(times == expected)
+        #expect(state.history.points.map(\.updates) == [1, 1, 0, 1])
+        #expect(segments(state.history, .macUse) == [[200, 240], [300]])
     }
 
     @Test("After a wake, an old driver update following a break restarts nothing")
