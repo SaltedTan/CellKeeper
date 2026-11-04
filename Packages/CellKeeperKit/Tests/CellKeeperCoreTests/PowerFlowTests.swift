@@ -162,11 +162,23 @@ struct PowerFlowTests {
         #expect(odd.batteryToMacWatts == 6)
     }
 
-    @Test("A charge reported on battery power gives no adapter flow")
+    @Test("A charge reported on battery power contradicts the power source: the battery's power is not known, and there is no adapter flow")
     func chargingOnBattery() throws {
         let flow = try #require(PowerFlow(powerSnapshot(source: .battery)))
-        #expect(flow.battery == .charging(watts: 15))
+        #expect(flow.batteryWatts == nil)
+        #expect(flow.battery == nil)
+        #expect(flow.batteryLink == .unknown)
+        #expect(flow.adapterLink == .idle)
         #expect(flow.adapterToBatteryWatts == nil)
+        #expect(flow.batteryToMacWatts == nil)
+        // Below the idle threshold it is idle, as before; supplying is kept.
+        let idle = try #require(PowerFlow(powerSnapshot(source: .battery, current: 20)))
+        #expect(idle.battery == .idle)
+        let supplying = try #require(PowerFlow(powerSnapshot(source: .battery, current: -1_000)))
+        #expect(supplying.battery == .supplying(watts: 12))
+        // On external power, or with the source unknown, a charge is shown.
+        #expect(PowerFlow(powerSnapshot(source: .externalPower))?.battery == .charging(watts: 15))
+        #expect(PowerFlow(powerSnapshot(source: .unknown))?.battery == .charging(watts: 15))
     }
 
     @Test("Without a battery there is no charge")

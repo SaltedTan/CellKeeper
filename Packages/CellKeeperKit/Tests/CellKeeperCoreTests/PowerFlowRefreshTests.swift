@@ -196,7 +196,7 @@ struct PowerFlowRefreshTests {
         let telemetry = ScriptedTelemetry([reading(0), reading(0), reading(60)])
         let pauses = Pauses(cancellingAfter: 3)
         let deliveries = Deliveries()
-        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), pauses: pauses) { deliveries.state.take($0) }
+        await refresh(BatteryDataPowerFlowReading(telemetry: telemetry), pauses: pauses) { deliveries.state.take($0, now: referenceDate.addingTimeInterval(60)) }
         #expect(deliveries.state.history.points.count == 2)
         #expect(deliveries.state.flow?.macUseWatts == 30)
     }
@@ -206,7 +206,7 @@ struct PowerFlowRefreshTests {
         let source = FastSource()
         let pauses = Pauses(cancellingAfter: 25)
         let deliveries = Deliveries()
-        await refresh(source, pauses: pauses) { deliveries.state.take($0) }
+        await refresh(source, pauses: pauses) { deliveries.state.take($0, now: referenceDate.addingTimeInterval(24)) }
         // 25 updates, a second apart (0 to 24 s): three buckets.
         #expect(deliveries.state.history.points.map(\.updates) == [10, 10, 5])
         #expect(deliveries.state.flow?.macUseWatts == 44)

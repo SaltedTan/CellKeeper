@@ -45,6 +45,12 @@ public struct PowerFlowTick: Sendable, Equatable {
 /// otherwise the registry track. It is decided again at every tick, an
 /// empty one included, so a stalled or failing SMC cannot keep an old
 /// average on screen.
+///
+/// The registry track's reading is judged too, at the wall-clock time each
+/// tick or status is taken with: one the charging policy would not accept
+/// as current (``isCurrent(_:at:)``), a frozen driver's or a cached one
+/// after failed reads, is not shown, and an SMC window does not carry that
+/// reading's battery power.
 public struct PowerFlowState: Sendable, Equatable {
     /// Which track is on screen.
     public enum Track: Sendable, Equatable {
@@ -99,6 +105,12 @@ public struct PowerFlowState: Sendable, Equatable {
     /// it.
     private var smcCutoff: ContinuousClock.Instant?
     private var lastRecordedWindow: RecordedWindow?
+    /// Whether the registry track's reading was current
+    /// (``isCurrent(_:at:)``) when last judged, at the wall-clock time the
+    /// last tick or status was taken with; true without a reading. Kept
+    /// rather than that time, so that the menu redraws only when the
+    /// judgment changes.
+    private var isRegistryCurrent = true
     /// The registry track's power source, kept after a failed read.
     public private(set) var registryPowerSource: PowerSource?
     /// The SMC source's state at the last tick; nil before the first.
@@ -108,23 +120,25 @@ public struct PowerFlowState: Sendable, Equatable {
 
     public init() {}
 
-    /// The sample on screen, from the track shown.
+    /// The sample on screen, from the track shown; nil on the registry
+    /// track while its reading is not current (``isCurrent(_:at:)``).
     public var shownSample: PowerFlowSample? {
         switch shownTrack {
-        case .registry: registry.sample
+        case .registry: isRegistryCurrent ? registry.sample : nil
         case .smc: smc?.sample
         }
     }
 
     /// The flow on screen; nil before the first sample, after the
-    /// controller's read failed, or when the sample has no power use for the
-    /// Mac.
+    /// controller's read failed, while the registry track's reading is not
+    /// current, or when the sample has no power use for the Mac.
     public var flow: PowerFlow? {
         shownSample.flatMap(PowerFlow.init)
     }
 
-    /// Whether a sample is on screen: false before the first, and after the
-    /// controller's read failed until the next one.
+    /// Whether a sample is on screen: false before the first, after the
+    /// controller's read failed until the next one, and while the registry
+    /// track's reading is not current.
     public var hasSample: Bool {
         shownSample != nil
     }
@@ -134,17 +148,39 @@ public struct PowerFlowState: Sendable, Equatable {
         shownSample?.provenance
     }
 
+    // MARK: - Freshness
+
+    /// Whether `sample`'s values may be shown as current at `now`, on the
+    /// wall clock: by the charging policy's own rule for the driver's update
+    /// time (``ChargingPolicy/maximumSourceAge``,
+    /// ``ChargingPolicy/maximumClockSkew``), so that the display never shows
+    /// as current a value the policy would not act on. A sample without an
+    /// update time is current here; its read time is the controller's to
+    /// judge.
+    static func isCurrent(_ sample: PowerFlowSample, at now: Date) -> Bool {
+        guard let updated = sample.updatedAt else { return true }
+        let age = now.timeIntervalSince(updated)
+        return age <= ChargingPolicy.maximumSourceAge && age >= -ChargingPolicy.maximumClockSkew
+    }
+
+    /// Judges the registry track's reading at `now`.
+    private mutating func judgeRegistry(at now: Date) {
+        isRegistryCurrent = registry.sample.map { Self.isCurrent($0, at: now) } ?? true
+    }
+
     // MARK: - Ticks
 
-    /// Takes the refresher's tick: decides the display at its instant, takes
-    /// its content (a window into the SMC track, a display read into the
-    /// registry track), and decides again.
-    public mutating func take(_ tick: PowerFlowTick) {
+    /// Takes the refresher's tick, delivered at `now` on the wall clock:
+    /// judges the registry track's reading then, decides the display at the
+    /// tick's instant, takes its content (a window into the SMC track, a
+    /// display read into the registry track), and decides again.
+    public mutating func take(_ tick: PowerFlowTick, now: Date) {
         smcState = tick.smcState
+        judgeRegistry(at: now)
         decideDisplay(at: tick.at)
         switch tick.content {
         case .window(let window): accept(window, at: tick.at)
-        case .registry(let sample): take(sample)
+        case .registry(let sample): take(sample, now: now)
         case .empty: break
         }
         decideDisplay(at: tick.at)
@@ -162,11 +198,13 @@ public struct PowerFlowState: Sendable, Equatable {
 
     /// Takes an SMC window into the SMC track, with the registry track's
     /// power source, adapter rating and charge, and its battery power unless
-    /// every batch had a valid `B0AP`. Not accepted while the source is not
-    /// available, without a known power source in the registry track, when
-    /// it began no later than the last window, or before the last reset of
-    /// the SMC track, which includes the read that showed the current power
-    /// source. Recorded in the history once, here.
+    /// every batch had a valid `B0AP`. While the registry track's reading is
+    /// not current, that battery power is not known instead, so a fresh
+    /// window never makes an old value look current. Not accepted while the
+    /// source is not available, without a known power source in the registry
+    /// track, when it began no later than the last window, or before the
+    /// last reset of the SMC track, which includes the read that showed the
+    /// current power source. Recorded in the history once, here.
     private mutating func accept(_ window: SMCPowerWindow, at now: ContinuousClock.Instant) {
         guard smcState == .available,
               let reading = registry.sample,
@@ -183,7 +221,7 @@ public struct PowerFlowState: Sendable, Equatable {
             chargePercent: reading.chargePercent,
             systemPowerInWatts: window.adapterInputWatts,
             systemLoadWatts: window.macUseWatts,
-            batteryWatts: window.batteryWatts ?? reading.batteryWatts,
+            batteryWatts: window.batteryWatts ?? (isRegistryCurrent ? reading.batteryWatts : nil),
             provenance: PowerFlowProvenance(
                 system: .smc(averagedOver: window.averagedOver),
                 battery: window.batteryWatts == nil ? .registry : .smc
@@ -223,8 +261,10 @@ public struct PowerFlowState: Sendable, Equatable {
     /// shows only joins the history, even when both carry the same update.
     /// One whose start is unknown is taken. Recorded in the history only
     /// while the registry track is on screen (a power-source change it
-    /// shows puts it there at once).
-    public mutating func take(_ sample: PowerFlowSample) {
+    /// shows puts it there at once). The reading shown is then judged at
+    /// `now`, on the wall clock (``isCurrent(_:at:)``).
+    public mutating func take(_ sample: PowerFlowSample, now: Date) {
+        defer { judgeRegistry(at: now) }
         var isNewest = true
         if let began = sample.readBegan, let shownReadBegan = registry.shownReadBegan, began < shownReadBegan {
             isNewest = false
@@ -251,8 +291,12 @@ public struct PowerFlowState: Sendable, Equatable {
     /// command that read nothing returns the last status), and adds nothing,
     /// whichever track is shown, so a failure or a reading never moves
     /// forward in time. Two evaluations stamped alike that read differently
-    /// both count.
-    public mutating func takeStatus(snapshot: BatterySnapshot?, evaluatedAt: Date?, readBegan: ContinuousClock.Instant) {
+    /// both count. A failed read that empties the track records a break in
+    /// the history at `now`, so the chart never draws across it. The
+    /// reading shown is then judged at `now`, on the wall clock
+    /// (``isCurrent(_:at:)``).
+    public mutating func takeStatus(snapshot: BatterySnapshot?, evaluatedAt: Date?, readBegan: ContinuousClock.Instant, now: Date) {
+        defer { judgeRegistry(at: now) }
         if let evaluatedAt {
             guard evaluatedAt != registry.lastStatusEvaluation || snapshot != registry.lastStatusSnapshot else { return }
             registry.lastStatusEvaluation = evaluatedAt
@@ -261,11 +305,14 @@ public struct PowerFlowState: Sendable, Equatable {
         if let snapshot {
             var sample = PowerFlowSample(snapshot)
             sample.readBegan = readBegan
-            take(sample)
+            take(sample, now: now)
             return
         }
         if let shownReadBegan = registry.shownReadBegan, readBegan < shownReadBegan { return }
         registry.shownReadBegan = readBegan
+        if registry.sample != nil {
+            history.recordBreak(at: now)
+        }
         registry.sample = nil
     }
 

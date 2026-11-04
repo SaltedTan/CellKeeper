@@ -1036,7 +1036,9 @@ final class AppModel {
     /// log line, nothing for the controller.
     func refreshPowerFlowWhileShown() async {
         let outcome = await powerFlowRefresher.run(while: { [weak self] in self?.isPowerFlowShown == true }) { [weak self] tick in
-            self?.notePowerFlow { $0.take(tick) }
+            // Judged against the wall clock as it is delivered: the flow
+            // never shows as current a reading the policy would call stale.
+            self?.notePowerFlow { $0.take(tick, now: Date()) }
         }
         // The menu closed and this run's end hid the section, at that
         // moment: the SMC track is cleared from then, so a menu reopened
@@ -1093,7 +1095,7 @@ final class AppModel {
 
     private func perform(_ command: Command) async {
         // No telemetry read made for this command began earlier
-        // (``PowerFlowState/takeStatus(snapshot:evaluatedAt:readBegan:)``).
+        // (``PowerFlowState/takeStatus(snapshot:evaluatedAt:readBegan:now:)``).
         let readBegan = ContinuousClock.now
         switch command {
         case .evaluate(let trigger):
@@ -1207,7 +1209,7 @@ final class AppModel {
             noteChargeLimitSettle(status, trigger: command.trigger)
             firstStatus.provide(true)
             notePowerFlow {
-                $0.takeStatus(snapshot: status.snapshot, evaluatedAt: status.lastEvaluation, readBegan: readBegan)
+                $0.takeStatus(snapshot: status.snapshot, evaluatedAt: status.lastEvaluation, readBegan: readBegan, now: Date())
             }
         }
         noteAdoptedChanges()
